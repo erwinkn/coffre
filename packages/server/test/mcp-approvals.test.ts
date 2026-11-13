@@ -241,7 +241,7 @@ test('a token issued through an approval is shown on the page, once, and never t
   const [{ id: tokenId }] = await db.owner.select({ id: credentials.id }).from(credentials).where(eq(credentials.principal, 'token:ci-deploy'));
   const revoking = idOf(await callRaw(token, 'revoke_service_token', { service: 'ci-deploy', id: tokenId! }));
   assert.equal((await decide(revoking, true)).body.status, 'approved');
-  const listed = (await clientFor(deps, ROOT).audit.list({ actor: `user:${DEV}`, detail: '1', sealed: '1' })).entries;
+  const listed = (await clientFor(deps, ROOT).audit.list({ actor: `user:${DEV}`, detail: '1' })).entries;
   const [issue, revoke] = ['token.create', 'token.revoke'].map((action) => listed.find((entry) => entry.action === action && entry.decision === 'allow')!);
   const [connection] = await db.owner.select({ id: mcpConnections.id, clientId: mcpConnections.clientId, clientName: mcpConnections.clientName }).from(mcpConnections);
   for (const [entry, approval] of [[issue!, id], [revoke!, revoking]] as const) {

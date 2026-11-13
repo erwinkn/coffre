@@ -12,21 +12,7 @@ import { Activity, Clock, ShieldCheck, SlashCircle } from './icons';
  * apart from sealing, so that a projector behind or stopped shows rather
  * than leaves reads missing unsaid. An instance before 0.15 says nothing.
  */
-export function ReadsLag({ reads, omitted }: { reads: { through: string | null; behind: boolean; forged?: true } | undefined; omitted?: 'path' | 'scope' | undefined }) {
-  // 0.15 lists reads on the whole log, by member and by place to whoever reads the whole log, on the page of each place
-  // they read to a reader of some places, and each person's own; this app has no page of a place, and
-  // 0.15.0's servers listed none by place (`path`).
-  if (omitted !== undefined) {
-    return (
-      <div style={{ marginBottom: '1.25rem' }}>
-        <Notice>
-          {omitted === 'path'
-            ? 'Reads are listed on the whole audit log and on each member’s page, not here.'
-            : 'Reads are listed to those who read the whole audit log; your own are on your page.'}
-        </Notice>
-      </div>
-    );
-  }
+export function ReadsLag({ reads }: { reads: { through: string | null; behind: boolean; forged?: true } | undefined }) {
   if (reads?.behind !== true && reads?.forged !== true) return null;
   return (
     <div style={{ marginBottom: '1.25rem' }}>
@@ -46,6 +32,20 @@ export function ReadsLag({ reads, omitted }: { reads: { through: string | null; 
           )}
         </Notice>
       )}
+    </div>
+  );
+}
+
+/**
+ * Whether the log before 0.16 is still being listed (after the upgrade, or
+ * `coffre audit rebuild`): newest first, so the history shown stops early
+ * until it is done, which says so rather than end as if it were all.
+ */
+export function OlderListing({ listingOlder }: { listingOlder: true | undefined }) {
+  if (listingOlder !== true) return null;
+  return (
+    <div style={{ marginBottom: '1.25rem' }}>
+      <Notice tone="warn">Older entries are still being listed: the history below stops early until they are.</Notice>
     </div>
   );
 }
@@ -74,7 +74,8 @@ export function ActionsLog({ member }: { member: string }) {
 
   return (
     <>
-      <ReadsLag reads={first?.ok === true ? first.reads : undefined} omitted={first?.ok === true ? first.readsOmitted : undefined} />
+      <ReadsLag reads={first?.ok === true ? first.reads : undefined} />
+      <OlderListing listingOlder={first?.ok === true ? first.listingOlder : undefined} />
       <section className="card" aria-label="Actions log">
         {shown.length === 0 ? (
           <EmptyState title="Nothing yet" />

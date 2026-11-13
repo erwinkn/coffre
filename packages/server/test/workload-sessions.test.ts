@@ -268,7 +268,7 @@ test("a GitHub run's token, its audience naming the key, buys a session bound to
   assert.equal(signedIn!.record.caller, 'workload');
   assert.deepEqual(await entries('token.exchange'), []);
   // The audit list shows it as a `token.exchange` entry: a workload's, by its proof, key and hard end.
-  const [shown] = (await clientFor(deps, ROOT).audit.list({ sealed: '1' })).entries.filter((entry) => entry.action === 'token.exchange');
+  const [shown] = (await clientFor(deps, ROOT).audit.list({})).entries.filter((entry) => entry.action === 'token.exchange');
   assert.deepEqual(
     [shown!.log, shown!.metadata.kind, shown!.metadata.proof, shown!.metadata.jkt, shown!.metadata.notAfter, shown!.metadata.expiresAt],
     ['0.15', 'workload', 'oidc', row.jkt, row.notAfter!.toISOString(), row.expiresAt.toISOString()],

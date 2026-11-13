@@ -338,14 +338,15 @@ test('T245: the window by number reads its first entries in one step of the inde
   assert.ok(indexed.buffers < 400 && indexed.buffers * 5 < sorted.buffers, said);
 });
 
-test("T245: a pair's reads listed by number read the pair's, not every read in the window's times: 100,000 reads in them, a few pages", async () => {
+test("a pair's entries listed read the pair's own times, not every entry since a stall's floor: 100,000 entries listed, a few pages", async () => {
   const now = Date.now();
-  await run(db.owner, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, mac)
-    SELECT g, ${now}::bigint - 100000 + g, gen_random_uuid(), 1, 'user:ada@acme.example', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), '\\x00000000000000000000000000000000'::bytea
+  await run(db.owner, sql`INSERT INTO audit_events (at, number, log, author, action, shown, allowed, actor, places, detail, mac)
+    SELECT ${now}::bigint - 100000 + g, g, 16, 'vault', 'secret.read', true, true, 'user:ada@acme.example', '{}', '{}', '\\x00000000000000000000000000000000'::bytea
       FROM generate_series(1, 100000) g`);
-  await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) log_reads`);
-  // What `listing` asks of a pair of 1,000 after a stall: the window's times span every read.
-  const listed = sql`SELECT r.number FROM log_reads r WHERE r.at >= ${now - 200_000}::bigint AND r.at <= ${now}::bigint AND r.number > 50000 AND r.number <= 51000`;
+  await run(db.owner, sql`VACUUM (ANALYZE, PARALLEL 0) audit_events`);
+  // What the check (`listed`) asks of a pair of 1,000 after a stall: its own entries' times, by the primary key.
+  const listed = sql`SELECT e.number FROM audit_events e WHERE e.at >= ${now - 100000 + 50001}::bigint AND e.at <= ${now - 100000 + 51000}::bigint
+    AND e.log IN (15, 16) AND e.number > 50000 AND e.number <= 51000`;
   const [plan] = await rows<{ 'QUERY PLAN': [{ Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Actual Rows': number } }] }>(db.vault, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${listed}`);
   const top = plan!['QUERY PLAN'][0].Plan;
   assert.equal(top['Actual Rows'], 1000);

@@ -1,4 +1,4 @@
-// The reads' projection across a rotation of the vault's signing key (keyring.ts; formal/Rotation.tla's
+// The audit projection's reads across a rotation of the vault's signing key (keyring.ts; formal/Rotation.tla's
 // BoundaryChecked; docs/design/audit-tree.md, "A rotation"): the projector, the whole log's check of it (`coffre verify
 // log`) and the vault's `vouch` hold to one rule: the key the log moved on from vouches for a pair, an entry, a
 // read or the cursor only below its rotation's number; the current key for any.
@@ -9,11 +9,13 @@ import { randomBytes } from 'node:crypto';
 import type { VouchedEntry } from '@coffre/core/vault';
 import { sql } from 'drizzle-orm';
 
+import { checkListed } from '../src/audit-check.ts';
+import { cursorMac, cursorVouched, eventMac, type AuditCursor, type AuditEvent } from '../src/audit-rows.ts';
 import { entryVouched, keyringOf } from '../src/keyring.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { entryMac, KEY_OBJECT, logMacKey, useEntry } from '../src/log-entry.ts';
 import { logStore } from '../src/log-store.ts';
-import { checkReads, cursorMac, cursorVouched, projectReads, Projector, readMac, type ReadRow, type ReadsCursor } from '../src/reads.ts';
+import { AuditProjector, projectAudit } from '../src/projection.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
 import { openTestDatabase, rows, run, type TestDatabase } from './database.ts';
@@ -71,7 +73,7 @@ async function rotatedOverReads() {
   for (let i = 0; i < 7; i += 1) keys.push(await w.key());
   await reads(w, keys.slice(0, 2));
   await old.tick();
-  await projectReads(logStore(db.vault), await before_());
+  await projectAudit(logStore(db.vault), await before_(), []);
   // A's reads the projector has not listed yet, sealed under A.
   await reads(w, keys.slice(2, 5));
   await old.tick();
@@ -86,10 +88,12 @@ async function rotatedOverReads() {
 }
 
 const store = () => logStore(db.vault);
-const listed = async () => (await store().listing({ after: 0n, upto: (1n << 62n), from: 0, to: Number.MAX_SAFE_INTEGER })).sort((a, b) => (a.number < b.number ? -1 : 1));
+/** The reads the projection lists, by number. */
+const listed = async () => (await store().listed({ after: 0n, upto: (1n << 62n), from: 0, to: Number.MAX_SAFE_INTEGER }))
+  .filter((row) => row.log === 16).sort((a, b) => (a.number < b.number ? -1 : 1));
 const projectedAll = async () => {
   for (let run = 0; run < 20; run += 1) {
-    const { through, sealed } = await projectReads(store(), await after_());
+    const { through, sealed } = await projectAudit(store(), await after_(), []);
     if (through >= sealed) return;
   }
   assert.fail('the projection did not catch up');
@@ -98,19 +102,23 @@ const projectedAll = async () => {
 async function checked() {
   const problems: string[] = [];
   for (let from: bigint | null = 0n; from !== null;) {
-    const stretch = await checkReads(store(), await after_(), from);
+    const stretch = await checkListed(store(), await after_(), from);
     problems.push(...stretch.problems);
     from = stretch.next;
   }
   return problems;
 }
 
-const asVouched = (row: ReadRow): VouchedEntry => ({
-  tree: 'reads', number: String(row.number), at: row.at, credential: row.credential, purpose: row.purpose, principal: row.principal, secret: row.secret,
-  environment: row.environment, project: row.project, place: row.place, source: row.source, sourceEnvironment: row.sourceEnvironment,
-  sourceProject: row.sourceProject, version: row.version, mac: row.mac.toString('hex'),
+const asVouched = (row: AuditEvent): VouchedEntry => ({
+  tree: 'event', name: String(row.number), at: row.at, number: String(row.number), log: row.log, author: row.author, action: row.action, shown: row.shown,
+  allowed: row.allowed, code: row.code, actor: row.actor, subject: row.subject, credential: row.credential, project: row.project, environment: row.environment,
+  secret: row.secret, version: row.version, places: row.places, requestId: row.requestId, operationId: row.operationId,
+  related: row.related === null ? null : String(row.related), sourceIp: row.sourceIp, detail: row.detail, mac: row.mac.toString('hex'),
 });
-const cursorVouchedAs = (cursor: ReadsCursor): VouchedEntry => ({ tree: 'cursor', number: 'cursor', through: String(cursor.through), pair: String(cursor.pair), at: cursor.at, mac: cursor.mac === null ? null : cursor.mac.toString('hex') });
+const cursorVouchedAs = (cursor: AuditCursor): VouchedEntry => ({
+  tree: 'cursor', name: 'cursor', through: String(cursor.through), pair: String(cursor.pair), at: cursor.at, oldFloor: String(cursor.oldFloor),
+  oldFrom: String(cursor.oldFrom), oldTop: String(cursor.oldTop), oldHash: cursor.oldHash.toString('hex'), mac: cursor.mac === null ? null : cursor.mac.toString('hex'),
+});
 
 test('rotated with A\'s pairs not yet projected: the projector goes on from them, lists them under A\'s MACs as they hold, then B\'s, and moves the cursor under B', async () => {
   const { rotation } = await rotatedOverReads();
@@ -119,10 +127,10 @@ test('rotated with A\'s pairs not yet projected: the projector goes on from them
   const rows_ = await listed();
   assert.equal(rows_.length, 7);
   // What it listed before the rotation keeps A's MAC; what it listed since, B's, whatever key the use was under.
-  for (const row of rows_.slice(0, 2)) assert.ok(row.mac.equals(readMac(A_MAC, row)), `read ${row.number} kept under A`);
-  for (const row of rows_.slice(2)) assert.ok(row.mac.equals(readMac(B_MAC, row)), `read ${row.number} listed under B`);
+  for (const row of rows_.slice(0, 2)) assert.ok(row.mac.equals(eventMac(A_MAC, row)), `read ${row.number} kept under A`);
+  for (const row of rows_.slice(2)) assert.ok(row.mac.equals(eventMac(B_MAC, row)), `read ${row.number} listed under B`);
   assert.ok(rows_.slice(0, 5).every((row) => row.number < rotation) && rows_.slice(5).every((row) => row.number > rotation));
-  const cursor = await store().readsCursor();
+  const cursor = await store().auditCursor();
   assert.ok(cursor.through > rotation && cursor.mac!.equals(cursorMac(B_MAC, cursor)), 'the cursor moved on under B');
 });
 
@@ -139,47 +147,41 @@ test('A\'s MAC at or past the rotation counts for nothing: on a read, on the cur
   const past = rows_.find((row) => row.number > rotation)!;
   const below = rows_.find((row) => row.number < rotation)!;
   // A read past the rotation re-MAC'd under A, by someone who holds it and writes the database.
-  await run(db.owner, sql`UPDATE log_reads SET mac = ${readMac(A_MAC, past)} WHERE number = ${past.number}`);
+  await run(db.owner, sql`UPDATE audit_events SET mac = ${eventMac(A_MAC, past)} WHERE log = 16 AND number = ${past.number}`);
   assert.ok((await checked()).includes(`read ${past.number} is listed otherwise than the log sealed it`));
   const { vault } = await isolate({}, ROTATED);
-  const forged = await vault.vouch({ entries: [asVouched({ ...past, mac: readMac(A_MAC, past) }), asVouched(below)] });
+  const forged = await vault.vouch({ entries: [asVouched({ ...past, mac: eventMac(A_MAC, past) }), asVouched(below)] });
   assert.deepEqual(forged.forged, [String(past.number)]);
   // The cursor, where it stands past the rotation, MAC'd under A: the projector and the check refuse it, and vouch.
-  const cursor = await store().readsCursor();
+  const cursor = await store().auditCursor();
   const underA = { ...cursor, mac: cursorMac(A_MAC, cursor) };
-  await run(db.owner, sql`UPDATE log_reads_cursor SET mac = ${underA.mac}`);
-  await assert.rejects(projectReads(store(), await after_()), /the reads' cursor, at \d+, is not the vault's/);
-  assert.match((await checked()).join('\n'), /the reads' cursor, at \d+, is not the vault's/);
+  await run(db.owner, sql`UPDATE audit_cursor SET mac = ${underA.mac}`);
+  await assert.rejects(projectAudit(store(), await after_(), []), /the audit cursor, at \d+, is not the vault's/);
+  assert.match((await checked()).join('\n'), /the audit cursor, at \d+, is not the vault's/);
   assert.deepEqual((await vault.vouch({ entries: [cursorVouchedAs(underA)] })).forged, ['cursor']);
-  // An entry under A: below the rotation it holds, at or past it it is refused, by the keyring every reader uses and by vouch.
+  // An entry under A: below the rotation it holds, at or past it it is refused, by the keyring every reader uses.
   const ring = await keyringOf(await after_(), store());
   const use = (number: bigint) => {
-    const row = { at: Date.now(), requestId: 7n, credential: past.credential, secret: past.secret, purpose: 1, place: null };
+    const row = { at: Date.now(), requestId: 7n, credential: past.credential!, secret: past.secret!, purpose: 1, place: null };
     return useEntry({ number, ...row, mac: entryMac(A_MAC, { tree: 'uses', row }) });
   };
   assert.equal(entryVouched(ring, use(rotation - 1n)), 'held');
   assert.equal(entryVouched(ring, use(rotation)), 'past');
   assert.equal(entryVouched(ring, use(rotation + 1n)), 'past');
-  const asEntry = (number: bigint): VouchedEntry => {
-    const e = use(number);
-    const [at, requestId, credential, secret, purpose, place, mac] = e.columns as [bigint, bigint, string, string, number, null, Buffer];
-    return { tree: 'uses', number: String(number), at: Number(at), requestId: String(requestId), credential, secret, purpose, place, mac: mac.toString('hex') };
-  };
-  assert.deepEqual((await vault.vouch({ entries: [asEntry(rotation - 1n), asEntry(rotation), asEntry(rotation + 1n)] })).forged, [String(rotation), String(rotation + 1n)]);
 });
 
 test('A cursor under A whose `through` is below the rotation but whose `pair` is past it counts for nothing: it would skip every use between them (review r4 of #444)', async () => {
   const { rotation } = await rotatedOverReads();
   await projectedAll();
-  const stands = await store().readsCursor();
+  const stands = await store().auditCursor();
   assert.ok(stands.pair > rotation, 'the cursor stands in a range past the rotation, under B');
   // Someone who holds A and writes the database: `through` just below the rotation, where A still vouches, and the range
   // to go on from past it, so that the projector would list nothing between them.
-  const moved = { through: rotation - 1n, pair: stands.pair, at: stands.at };
-  const forged: ReadsCursor = { ...moved, mac: cursorMac(A_MAC, moved) };
-  await run(db.owner, sql`UPDATE log_reads_cursor SET through = ${forged.through}, pair = ${forged.pair}, at = ${forged.at}, mac = ${forged.mac}`);
-  await assert.rejects(projectReads(store(), await after_()), /the reads' cursor, at \d+, is not the vault's/);
-  assert.match((await checked()).join('\n'), /the reads' cursor, at \d+, is not the vault's/);
+  const moved = { ...stands, through: rotation - 1n };
+  const forged: AuditCursor = { ...moved, mac: cursorMac(A_MAC, moved) };
+  await run(db.owner, sql`UPDATE audit_cursor SET through = ${forged.through}, pair = ${forged.pair}, at = ${forged.at}, mac = ${forged.mac}`);
+  await assert.rejects(projectAudit(store(), await after_(), []), /the audit cursor, at \d+, is not the vault's/);
+  assert.match((await checked()).join('\n'), /the audit cursor, at \d+, is not the vault's/);
   const { vault } = await isolate({}, ROTATED);
   assert.deepEqual((await vault.vouch({ entries: [cursorVouchedAs(forged)] })).forged, ['cursor']);
   // Retention holds the cursor to the same rule: cursorVouched, which every reader of it calls.
@@ -193,7 +195,7 @@ test('vouch holds a replaced key to its rotation (R41): never any key the vault 
   // A read under A at a number past the rotation: forged, though A is a key this vault holds.
   const planted = { ...below, number: rotation + 100n };
   const { vault } = await isolate({}, ROTATED);
-  assert.deepEqual((await vault.vouch({ entries: [asVouched(below), asVouched({ ...planted, mac: readMac(A_MAC, planted) })] })).forged, [String(planted.number)]);
+  assert.deepEqual((await vault.vouch({ entries: [asVouched(below), asVouched({ ...planted, mac: eventMac(A_MAC, planted) })] })).forged, [String(planted.number)]);
   assert.deepEqual((await vault.vouch({ entries: [asVouched(below)] })).forged, []);
   // The rotation's row gone, with the newest pair under B: A vouches for nothing, its reads from before included (fail
   // closed), in the same isolate, which kept no bound from the call before (SnapshotRead).
@@ -204,16 +206,16 @@ test('vouch holds a replaced key to its rotation (R41): never any key the vault 
 test('a restart mid-projection after the rotation: a new projector goes on from the cursor the last one left, under either key, and the check finds nothing', async () => {
   await rotatedOverReads();
   // One step of one read, then the host stops: the cursor stands inside A's range, still under A's MAC or B's.
-  await projectReads(store(), await after_(), { steps: 1, atOnce: 1 });
-  const stopped = await store().readsCursor();
+  await projectAudit(store(), await after_(), [], { steps: 1, atOnce: 1 });
+  const stopped = await store().auditCursor();
   assert.equal((await listed()).length, 3);
   // The host starts again, its projector new.
   const alarms: string[] = [];
-  const projector = new Projector(store(), await after_(), (message) => alarms.push(message));
+  const projector = new AuditProjector(store(), await after_(), [], (message) => alarms.push(message));
   for (let run = 0; run < 20 && (await projector.run()); run += 1);
   await projector.stop();
   assert.deepEqual(alarms, []);
-  assert.ok((await store().readsCursor()).through > stopped.through);
+  assert.ok((await store().auditCursor()).through > stopped.through);
   assert.equal((await listed()).length, 7);
   assert.deepEqual(await checked(), []);
 });

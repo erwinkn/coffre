@@ -16084,6 +16084,8 @@ async function whoIsToken(origin, api, canary) {
 const COVERED_MS = 9e4;
 /** How long a read may wait to be listed in 0.15's log: sealed at the checkpointer's tick, then listed by the projector. */
 const LISTED_WITHIN_MS = 2e4;
+/** The most pages of the token's own entries a look for its read walks back, empty ones included. */
+const RECENT_PAGES = 20;
 /**
 * Reveal the canary once, and find its `secret.read` in the audit log: by
 * the reveal's operation, in 0.14's log; in 0.15's, where a read is its use
@@ -16105,30 +16107,30 @@ async function tokenReveal(api, canary, token) {
 			return await api.audit.list({
 				...query,
 				actor: token.member,
-				limit: 50,
-				sealed: "1"
+				limit: 50
 			});
 		} catch (error) {
 			if (error instanceof CoffreError && error.status === 403) throw new Skip(`the token holds no audit.read on ${canary.project}, so the reveal's entry cannot be looked for`);
 			throw error;
 		}
 	};
-	const first = await list({ path });
-	let { entries, reads } = first;
+	let { entries, reads } = await list({ path });
 	const read = entries.filter((entry) => entry.operationId === operationId);
-	if (read.length === 0 && (reads !== void 0 || first.readsOmitted !== void 0)) {
+	if (read.length === 0) {
 		expect(token.credentialId !== null, "the server names no credential of the token's, so its read in 0.15's log cannot be told from another's");
 		const ownOf = (listed) => listed.filter((entry) => entry.log === "0.15" && entry.action === "secret.read" && entry.key === canary.key && entry.project === canary.project && entry.environment === canary.environment && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === "reveal" && entry.version === version && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
 		const recent = async () => {
 			const all = [];
-			for (let before;;) {
+			let before;
+			for (let pages = 0; pages < RECENT_PAGES; pages++) {
 				const page = await list(before === void 0 ? {} : { before });
 				all.push(...page.entries);
 				reads = page.reads;
 				const oldest = page.entries.at(-1);
-				if (page.next === null || oldest === void 0 || Date.parse(oldest.occurredAt) < asked - COVERED_MS) return all;
+				if (page.next === null || oldest !== void 0 && Date.parse(oldest.occurredAt) < asked - COVERED_MS) break;
 				before = page.next;
 			}
+			return all;
 		};
 		entries = await recent();
 		for (const deadline = Date.now() + LISTED_WITHIN_MS; ownOf(entries).length === 0 && Date.now() < deadline;) {
@@ -18738,6 +18740,7 @@ async function offboard(args) {
 	});
 	if (report.reads?.forged === true) process.stdout.write("  reads: FORGED: the vault does not vouch for how far they are listed; reads missing here may add to these\n");
 	else if (report.reads?.behind === true) process.stdout.write(`  reads are listed through ${report.reads.through ?? "none yet"}: newer ones wait to be listed and may add to these; ask again in a few seconds\n`);
+	if (report.readsFrom != null) process.stdout.write(`  reads are weighed from ${report.readsFrom.slice(0, 10)}, as far back as retention keeps them; writes however old\n`);
 	if (report.apps.length > 0) {
 		process.stdout.write(`\nConnected apps, which removing them disconnects (${report.apps.length})\n`);
 		const width = Math.max(...report.apps.map((app) => app.name.length));
@@ -18772,6 +18775,8 @@ async function offboard(args) {
 }
 /** A page's `next` as the server writes it (`AUDIT_NEXT` in @coffre/server's api/audit.ts): `<seq>:<at>.<number>`, each part `-` for a log with nothing older. */
 const AUDIT_NEXT = /^(?:-?[0-9]{1,19}|-):(?:[0-9]{1,16}(?:\.-?[0-9]{1,19})?|-)$/;
+/** The most pages one `coffre audit` asks for to fill its --limit. */
+const AUDIT_PAGES = 20;
 async function audit(args) {
 	const { values, positionals } = parseArgs({
 		args,
@@ -18802,22 +18807,34 @@ async function audit(args) {
 	if (positionals.length > 1) fail("usage: coffre audit [<project>[/<environment>[/<KEY>]]] [--limit N] [--actor <id>] [--denied] [--detail] [--before <next>] [--json]");
 	const before = values.before;
 	if (before !== void 0 && !AUDIT_NEXT.test(before) && !/^[1-9][0-9]{0,15}$/.test(before)) fail(`--before takes the "next" an earlier page printed, not "${before}"`);
-	const result = await client().audit.list({
+	const query = {
 		path: positionals[0],
-		limit,
-		...before === void 0 ? {} : { before: /^[0-9]+$/.test(before) ? Number(before) : before },
 		actor: values.actor === void 0 ? void 0 : apiMember(values.actor),
 		decision: values.denied ? "deny" : void 0,
-		detail: values.detail ? "1" : void 0,
-		sealed: "1"
+		detail: values.detail ? "1" : void 0
+	};
+	const api = client();
+	const page = (from, want) => api.audit.list({
+		...query,
+		limit: want,
+		...from === void 0 ? {} : { before: from }
 	});
+	let result = await page(before === void 0 ? void 0 : /^[0-9]+$/.test(before) ? Number(before) : before, limit);
+	const entries = [...result.entries];
+	for (let pages = 1; pages < AUDIT_PAGES && entries.length < limit && typeof result.next === "string"; pages++) {
+		result = await page(result.next, limit - entries.length);
+		entries.push(...result.entries);
+	}
+	result = {
+		...result,
+		entries
+	};
 	const notices = () => {
 		if (result.next !== null && result.next !== void 0) process.stderr.write(`Older entries: the same command with --before=${result.next}\n`);
 		const reads = result.reads;
 		if (reads?.forged === true) process.stderr.write("Reads: FORGED: the vault does not vouch for how far they are listed; newer reads may be missing.\n");
 		else if (reads?.behind === true) process.stderr.write(`Reads are sealed through ${reads.through ?? "none yet"}; newer reads are not listed yet.\n`);
-		if (result.readsOmitted === "path") process.stderr.write("Reads are not listed by place: `coffre audit` and `coffre audit --actor <member>` list them.\n");
-		else if (result.readsOmitted === "scope") process.stderr.write("Reads are listed to whoever reads the whole log, and on the page of each place you read; yours: `coffre audit --actor <you>`.\n");
+		if (result.listingOlder === true) process.stderr.write("Older entries are still being listed: the history stops early until they are.\n");
 	};
 	if (values.json) {
 		process.stdout.write(`${JSON.stringify(result.entries, null, 2)}\n`);

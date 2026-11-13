@@ -62,12 +62,8 @@ const SITES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   'packages/server/src/db/audit.ts#appVerifier': { none: "the first of the app's moves from each previous key, grouped: the moves alone, a few for each change of key" },
   'packages/db/src/log.ts#underHead': { none: 'the newest entry of all: the primary key\'s first step, with nothing to filter' },
   'packages/db/src/log.ts#missingEntry': { none: 'the first entry after a gap, by the primary key, with nothing to filter' },
-  'packages/db/src/log.ts#withinBytes': { none: "a batch's bounds by its caller's condition, read forward from a point (`entriesFrom`, `vaultEntriesAfter`, `talliedWithin`) or the audit page's (`auditPage`)" },
-  'packages/db/src/log.ts#streamsOf': { by: SERVER, as: 'auditPage' },
+  'packages/db/src/log.ts#withinBytes': { none: "a batch's bounds by its caller's condition, read forward from a point (`entriesFrom`, `vaultEntriesAfter`, `talliedWithin`)" },
   'packages/vault/src/store.ts#entriesFrom': { none: 'a batch of the chain from an entry on, by the primary key, with nothing to filter' },
-  // The audit page: by actor a stream of each one's through `audit_log_actor_idx` (`withinBytes`' `by`), held by the
-  // server's test; its other filters a search, a page at a time, not bounded yet.
-  'packages/server/src/db/queries.ts#auditPage': { by: SERVER, as: 'auditPage' },
 };
 
 /**
@@ -87,12 +83,15 @@ const CHANGES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> 
   'packages/vault/src/store.ts#issuingCredential': { by: VAULT, as: 'changesOf' },
   'packages/vault/src/snapshot.postgres.ts#PLACE_CHANGE': { by: VAULT, as: 'changesOf' },
   'packages/vault/src/log-store.ts#postgresStore': { by: VAULT, as: 'changesOf' },
-  'packages/vault/src/log-store.ts#readsStore': { by: VAULT, as: 'changesOf' },
+  'packages/vault/src/log-store.ts#objectsOf': { by: VAULT, as: 'changesOf' },
   'packages/server/src/db/queries.ts#newestChangeColumns': { by: VAULT, as: 'changesOf' },
   // A credential's first change, its sign-in or issue, behind other objects' changes before it.
   'packages/server/src/db/queries.ts#originsOf': { by: SERVER, as: 'originsOf' },
   // Whether a member no row names has a change, beside their access entry.
   'packages/server/src/db/queries.ts#missingMembers': { by: SERVER, as: 'missingMembers' },
+  // The offboarding report's: each member's newest change, their removal for one removed, and retention's newest, which
+  // names the day it dropped.
+  'packages/server/src/db/events.ts#memberKeys': { by: VAULT, as: 'changesOf' },
 };
 
 const LOG_STORE = 'packages/vault/test/log-store.test.ts';
@@ -224,13 +223,12 @@ const NOT_LOGS: Record<string, string> = {
   audit_chain_head: "the audit log's head, one row",
   checkpoint_fence: "the uses' fence, one row",
   log_checkpoints: "0.15's checkpoints, one row each",
-  log_read_days: 'the days a member read on, a row each',
-  '${reads}': 'the reads of members by their days (reads.ts), no log of these',
   principals: 'the members', passkeys: 'the passkeys', environments: 'the environments',
   secret_versions: "the secrets' versions", secret_references: "the secrets' references",
   '${projects}': 'the projects', '${credentials}': 'the credentials', '${mcpConnections}': 'the MCP connections',
   '${serviceBindings}': 'the service bindings', '${secrets}': 'the secrets',
   '${principals}': 'the members',
+  audit_member_keys: "the projection's keys each member read or wrote, by member",
   sealing: "the checkpoint a use's number falls under, one row of `log_checkpoints` (log-store.ts)",
   spent: 'the ID token spent by a sign-in, its one row (queries.ts)',
 };

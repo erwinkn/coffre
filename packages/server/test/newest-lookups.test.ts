@@ -13,7 +13,7 @@ import { indexOf, logObject } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
 import { policySeqAndSettings } from '../src/db/answers.ts';
-import { auditPage, hasTombstone, latestCheckpoint, latestTallied, memberAccess, missingMembers, originsOf, talliedAfter } from '../src/db/queries.ts';
+import { hasTombstone, latestCheckpoint, latestTallied, memberAccess, missingMembers, originsOf, talliedAfter } from '../src/db/queries.ts';
 import { newestAppEntry, newestMove, wroteUnder } from '../src/db/rotation.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { emptyLog, openTestDatabase, withLogUnlocked, withTriggersLifted } from './db/engine.ts';
@@ -102,21 +102,6 @@ const LOOKUPS: Lookup[] = [
       await rowsOf(db.owner, sql`INSERT INTO principals (principal, status, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
         VALUES ('user:u1', 'active', 0, 'system:coffre', 0, 'system:coffre', 0, ${ZERO}) ON CONFLICT DO NOTHING`);
       assert.equal((await memberAccess(app, 'user:u1', new Date())).member?.tampered, false);
-    },
-  },
-  {
-    // A member's page of the log, after a long run of another's: their newest, and the page by seq.
-    name: 'auditPage (actors)',
-    run: { author: 'app', action: 'secret.read', actor: 'user:u1' },
-    tail: [{ author: 'app', action: 'secret.read', actor: 'user:u2' }],
-    indexes: ['audit_log_actor_idx', 'audit_log_pkey'],
-    // A page of 32 entries is 32 steps of the primary key, about three pages each, however long the log.
-    pages: PAGES + 3 * 32,
-    ask: async (app, { newest }) => {
-      const page = await auditPage(app, { actors: ['user:u1', 'token:u1'], limit: 1 });
-      assert.deepEqual([page.rows.map(({ seq }) => seq), page.more], [[newest], true]);
-      const older = await auditPage(app, { actors: ['user:u1', 'token:u1'], limit: 32, beforeSeq: newest });
-      assert.deepEqual(older.rows.map(({ seq }) => seq), Array.from({ length: 32 }, (_, i) => newest - 1n - BigInt(i)));
     },
   },
   {

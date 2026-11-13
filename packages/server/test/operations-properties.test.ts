@@ -6,7 +6,7 @@ import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 import { createClient, CoffreError } from '@coffre/client';
 import { defineSignin, github } from '@coffre/core/identity';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, ne } from 'drizzle-orm';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { clientFor, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, watchUses, type FixtureDeps } from './api-fixture.ts';
@@ -257,7 +257,9 @@ async function scenario(operations: readonly Operation[]) {
       grants: await database.owner.select().from(grants).orderBy(grants.principal, grants.projectId, grants.environmentId),
       credentials: await database.owner.select().from(storedCredentials).orderBy(storedCredentials.id),
       identities: await database.owner.select().from(identities).orderBy(identities.id),
-      allowed: await database.owner.select().from(auditLog).where(eq(auditLog.decision, 'allow')).orderBy(auditLog.seq),
+      // The checkpoints aside: the fixture lists the log before a page or a report, refused or not, and listing it
+      // checkpoints 0.14's log; a checkpoint is the log's, no operation's.
+      allowed: await database.owner.select().from(auditLog).where(and(eq(auditLog.decision, 'allow'), ne(auditLog.action, 'audit.checkpoint'))).orderBy(auditLog.seq),
     };
   }
   async function allowed<T>(work: () => Promise<T>, expected: boolean, unchanged = false, status?: number): Promise<T | undefined> {

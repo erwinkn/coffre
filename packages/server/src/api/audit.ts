@@ -1,42 +1,28 @@
 import { ownsInstance, readsWholeLog, runsInstance } from '@coffre/core/access';
 import { DETAIL_ACTIONS } from '@coffre/core/audit';
-import { describeAccessFault, useOfCode, type LogVerification, type ReadsVerification, type TreeVerification } from '@coffre/core/vault';
+import { describeAccessFault, type LogVerification, type ReadsVerification, type TreeVerification } from '@coffre/core/vault';
 import { SNAPSHOT } from '@coffre/db/dialect';
 import { missingEntry, newestWindow } from '@coffre/db/log';
 
 import { actorParts, appLogKey, CHAIN_START, CHAIN_WALK, walkChain, type ChainPoint } from '../db/audit.ts';
+import { eventsPage, namesOf, type CursorStanding, type EventRow, type PageNames, type Position, type Stream } from '../db/events.ts';
 import {
-  auditActionCounts,
   auditHashAt,
   auditHead,
-  auditPage,
-  environmentIdsOf,
-  isMember,
+  auditTimeAt,
   latestCheckpoint,
   latestTallied,
   originsOf,
   places,
   resolvePath,
-  sealedHidden,
-  sealedPage,
-  sealedReach,
-  secretPlaces,
-  versionsOf,
   talliedAfter,
   talliedAt,
-  type AuditFilter,
-  type ChangePoint,
   type CredentialOrigin,
-  type RecordedChange,
-  type SecretPlaceRow,
   type Signed,
-  type WrittenAt,
 } from '../db/queries.ts';
-import { readsPageStanding, type ListedRead, type ReadPlace, type ReadsStanding } from '../db/reads.ts';
 import { Refusal } from '../watch.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
-import { confirmedFields, traceFields, type ApiContext } from './context.ts';
-import { keeps015 } from './changes.ts';
+import { type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
 import { ownerOf } from './personal.ts';
@@ -52,9 +38,8 @@ export type AuditEntryView = {
    */
   log: '0.14' | '0.15';
   /**
-   * For an entry of 0.15's log: the vault does not vouch for it, its MAC not
-   * holding over what it says. It was written, or edited, around coffre.
-   * Absent for every other, and for 0.14's, which its chain's check covers.
+   * The vault does not vouch for it, its MAC not holding over what it says:
+   * it was written, or edited, around coffre. Absent for every other.
    */
   forged?: true;
   /** Which component wrote it: the app, or the vault, which decides on keys and access. */
@@ -187,585 +172,252 @@ export type AuditQuery = {
   decision?: 'allow' | 'deny';
   /** Include the detail entries, `DETAIL_ACTIONS`. */
   detail?: boolean;
-  /**
-   * Include what 0.15's sealed log alone records, merged by time: the
-   * reads, each a use (T166); the sign-ins through trust bindings, and the
-   * tokens' issues, revokes and sign-outs, which are detail (D147). A
-   * client pages such a list by its `next`. Without it, 0.14's log alone,
-   * as before 0.15, which a client that pages by the last entry's seq
-   * still pages whole.
-   */
-  sealed?: boolean;
-  /**
-   * With `sealed`, count what the page leaves out (`hidden`), which costs a
-   * read of each log's stretch: a page counts no more than `HIDDEN_COUNTED`
-   * of 0.15's records, and stops showing entries where it reaches the last
-   * it counts, so a caller that asks follows `next` though a page show
-   * nothing. Without `sealed`, a page counts, as before 0.15.
-   */
+  /** Count what the page leaves out (`hidden`), over its stretch. */
   hidden?: boolean;
-  /**
-   * Entries older than this, for paging backwards: a page's `next`, which
-   * names where it stopped in both logs and lists both (`sealed`); or a
-   * seq, which pages 0.14's log alone, as before 0.15.
-   */
+  /** Entries older than this, for paging backwards: a page's `next`; or a seq of 0.14's log, as clients before 0.15 page. */
   before?: number | string;
   limit: number;
 };
 
 /**
- * Newest first, both authors. Whoever reads the whole log reads everything:
- * an Auditor, Admin or Owner whose scope narrows nothing (`readsWholeLog`). Anyone else reads the projects and environments where
- * they hold `audit.read`, by a grant or their instance role, and nothing
- * else: an entry about no place, such as a sign-in or a member's removal,
+ * Newest first, every log as one, from the projection
+ * (db/events.ts): each entry of 0.14's chain, each change of 0.15's log and
+ * each read, a use, once the vault's projector has listed it. Whoever reads
+ * the whole log reads everything: an Auditor, Admin or Owner whose scope
+ * narrows nothing (`readsWholeLog`). Anyone else reads the entries at the
+ * projects and environments where they hold `audit.read`, by a grant or
+ * their instance role, and none at an environment their role leaves out
+ * there: an entry about no place, such as a sign-in or a member's removal,
  * is the instance's, and theirs alone.
  *
- * Without `detail`, the page says what it left out, `hidden` (asked for,
- * with `sealed`): the detail entries the same filters match in the page's
- * stretch of the log, by action. A page's
- * stretch runs from its oldest entry, or the log's first on the last page,
- * up to where it started, the head or `before`: pages tile the log, and
- * each hidden entry is counted on exactly one.
+ * A page reads one stream of the projection, newest first: the place its
+ * path names, the members asked for, the places a reader of some places
+ * reads, or everyone's. Its other filters pass over rows of that stream,
+ * `WINDOW` of them at most past a page: a page may then hold fewer than
+ * `limit` entries, and `next`, where it stopped, is where the next one
+ * starts (`<log>:<at>.<number>`). Each page reads as much however long the
+ * log is.
  *
- * With 0.15's log, a sign-in through a trust binding, and a token's issue,
- * revoke or sign-out, is its change alone (D147): asked to (`sealed`), the
- * page lists those too, where 0.14's `token.exchange`, `token.create`,
- * `token.revoke` and `sign_out` would stand, for whoever reads the
- * instance's entries, merged by time; the last three are detail, and
- * counted where hidden, over the page's stretch of that log too. A read is
- * its use alone (R53): asked to, the page lists each where 0.14's
- * `secret.read` would stand, at the places the caller reads and the path
- * names, by the members asked for (T166). Every entry of 0.15's log a page
- * lists, the vault vouches for, or the page marks it `forged`. Each log
- * is paged by its own order, so the page says where it stopped in each:
- * `next`, `<seq>:<at>.<change>`, or `<seq>:<at>` where it stopped at a
- * time, `-` for a log with nothing older, which the next page takes as
- * `before`. A client that does not ask pages 0.14's log by its seqs, as
- * before 0.15: a page that mixed both would leave it nothing consistent to
- * page by.
+ * Without `detail`, a page asked to count (`hidden`) says what it left out: the detail entries the same
+ * filters match in the page's stretch, by action. A page's stretch runs
+ * from where it started down to the last row it read: pages tile the log,
+ * and each hidden entry is counted on exactly one.
  *
- * A page holds `limit` entries, or fewer where they list more secrets than
- * a page holds (`auditPage`): `more` says whether to page back.
+ * Every entry a page shows, the vault vouches for, or the page marks it
+ * `forged`; so for how far the projection is listed (`reads`), which the
+ * page says.
  */
 export async function listAudit(
   ctx: ApiContext,
   query: AuditQuery,
-): Promise<{ entries: AuditEntryView[]; more: boolean; next: string | null; hidden?: HiddenCount[]; reads?: ReadsListed; readsOmitted?: ReadsOmitted }> {
-  const filter: AuditFilter = {
-    decision: query.decision,
-    excludeActions: query.detail === true ? undefined : DETAIL_ACTIONS,
-    limit: query.limit,
-  };
+): Promise<{ entries: AuditEntryView[]; more: boolean; next: string | null; hidden?: HiddenCount[]; reads?: ReadsListed; listingOlder?: true }> {
   const { caller } = ctx;
-  // The projects of which a reader of some places reads some environments only: a page of one is theirs to read in part.
-  const partly = new Set<string>();
+  // What a reader of some places reads: a project's whole log where they read all of it, but for an environment whose
+  // log their role leaves out there, a protected one; else each environment's they read.
+  // `partly`: the projects of which they read some environments only.
+  let within: { places: string[]; except: string[]; partly: Set<string> } | undefined;
   if (!readsWholeLog(caller)) {
-    const projectIds: string[] = [];
-    const environmentIds: string[] = [];
+    const read: string[] = [];
     const except: string[] = [];
-    // A project's whole log where they read all of it, else each environment's they read, as places are now; in a
-    // project they read, but for an environment whose log their role leaves out there, a protected one.
+    const partly = new Set<string>();
     if (canAnywhere(caller, 'audit.read')) {
       for (const project of await places(ctx.db)) {
         const unread = project.environments.filter((environment) => !can(caller, 'audit.read', placeOf(project, environment))).map((environment) => environment.id);
         if (can(caller, 'audit.read', placeOf(project, null))) {
-          projectIds.push(project.id);
+          read.push(project.id);
           except.push(...unread);
         } else {
-          const read = project.environments.filter((environment) => !unread.includes(environment.id)).map((environment) => environment.id);
-          environmentIds.push(...read);
-          if (read.length > 0) partly.add(project.id);
+          const some = project.environments.filter((environment) => !unread.includes(environment.id)).map((environment) => environment.id);
+          read.push(...some);
+          if (some.length > 0) partly.add(project.id);
         }
       }
     }
-    if (projectIds.length === 0 && environmentIds.length === 0) {
-      throw forbidden('you do not hold audit.read on any project');
-    }
-    filter.within = { projectIds, environmentIds, except };
+    if (read.length === 0) throw forbidden('you do not hold audit.read on any project');
+    within = { places: read, except, partly };
   }
+  let place: string | undefined;
   if (query.path !== undefined) {
     // A deleted place's entries stay readable by its tombstone's slug.
     // `market/dev@me`: the caller's own personal config of dev.
-    const place = await resolvePath(ctx.db, query.path, { tombstones: true, owner: ownerOf(ctx) });
-    if (place === null) throw notFound('no such project');
-    filter.projectId = place.project.id;
-    if (query.path.environment !== undefined) {
-      if (place.environment === null) throw notFound('no such environment');
-      filter.environmentId = place.environment.id;
-    }
-    if (query.path.key !== undefined) {
-      if (place.secret === null) throw notFound('no such secret');
-      filter.secretId = place.secret.id;
-    }
+    const resolved = await resolvePath(ctx.db, query.path, { tombstones: true, owner: ownerOf(ctx) });
+    if (resolved === null) throw notFound('no such project');
+    if (query.path.environment !== undefined && resolved.environment === null) throw notFound('no such environment');
+    if (query.path.key !== undefined && resolved.secret === null) throw notFound('no such secret');
+    place = resolved.secret?.id ?? resolved.environment?.id ?? resolved.project.id;
+    // A place its reader reads nothing of lists nothing, not even where a page stopped: no `next` walks its entries,
+    // their times and numbers.
+    const environment = resolved.environment?.id;
+    const readable = within === undefined || (environment === undefined
+      ? within.places.includes(resolved.project.id) || within.partly.has(resolved.project.id)
+      : within.places.includes(environment) || (within.places.includes(resolved.project.id) && !within.except.includes(environment)));
+    if (!readable) return { entries: [], more: false, next: null, ...(query.detail !== true && query.hidden === true ? { hidden: [] } : {}) };
   }
-  if (query.actor !== undefined) {
-    filter.actors = /^(user|token):/.test(query.actor)
+  const actors = query.actor === undefined
+    ? undefined
+    : /^(user|token):/.test(query.actor)
       ? [formatMember(parseMember(query.actor))]
       : ['user', 'token', 'system'].map((prefix) => `${prefix}:${query.actor}`).concat(query.actor);
-  }
-  const before = startOf(query.before);
-  if (before.seq !== undefined && before.seq !== 'done') filter.beforeSeq = before.seq;
-  // What 0.15's log alone records: on the instance's page, of no place, and some member's, its sign-ins, issues, revokes
-  // and first adds, allowed; and the first adds' refusals (T179 PR 6).
-  const sealedAsked = (query.sealed === true || typeof query.before === 'string') && before.change !== 'done';
-  const instance = sealedAsked && filter.within === undefined && query.path === undefined && (filter.actors === undefined || filter.actors.some(isMember));
-  const recorded = instance && query.decision !== 'deny';
-  const start = before.change === 'done' ? undefined : before.change;
   const detail = query.detail === true;
-  // The key writes 0.15's log records alone (T179, 0.16.0), where the page's place and its reader's scope meet; and,
-  // on a page of the instance's, its first adds (`sealedPage`). Their refusals likewise, since PR 6, which the vault
-  // records in place of 0.14's deny entries: listed where those stood, with the deny ones.
-  const loggedAsked = sealedAsked && query.decision !== 'deny';
-  const refusalsAsked = sealedAsked && query.decision !== 'allow';
-  const placed = loggedAsked || refusalsAsked ? await writtenAt(ctx, filter) : null;
-  const written = loggedAsked ? placed : null;
-  const refusals = refusalsAsked ? { instance, at: placed } : null;
-  // What it leaves out, counted: as before 0.15 without `sealed`; with it, when asked. No first-party page shows the
-  // counts, and one that does not ask reads nothing for them, and always fills with what it shows.
-  const counted = !detail && (query.sealed !== true && typeof query.before !== 'string' ? true : query.hidden === true);
-
-  // The reads 0.15's log records, each a use, as the vault's projector lists them (T166), and how far they are listed:
-  // on the whole log and by member, as its other records, to whoever reads the whole log; on the page of a place, a
-  // key's, an environment's or a project's (T175), each read at it that its caller may see (`seen`), by the members
-  // asked for; and to a reader of some places (`audit.read` somewhere, as above: one with none reads no audit page, as
-  // under 0.14), their own, on a page of no place. Never a refusal (one the vault refuses before it writes a use is the
-  // app's entry), nor below its log's end.
-  // Their own however they name themselves (`ada@acme.example` asks for `user:ada@acme.example` among others), and then
-  // only their own (review r6).
-  const self = formatMember(caller.principal);
-  const own = filter.actors?.includes(self) === true;
-  const asked = (query.sealed === true || typeof query.before === 'string') && query.decision !== 'deny' && before.change !== 'done';
-  // At a place only where its caller reads it: one outside their scope lists none of its reads, as 0.14's page of it lists
-  // none of its own; were its reads read and each passed over, `next` would walk them, their times and numbers (Fable).
-  const at = readPlace(filter);
-  const used = asked && (at !== null ? readsAt(filter, partly) : filter.within === undefined || own);
-  const readers = filter.within === undefined ? filter.actors : [self];
-  const readsFilter = at === null ? { actors: readers, before: start, limit: query.limit } : { at, before: start, limit: query.limit };
-  // At a place, each read is read whoever's: it shows where its caller may see it, and is by a member asked for. One
-  // that does not is passed over, and the page goes on past it, short (A1).
-  const seen = at === null ? () => true : seenBy(filter);
-
-  // A page that counts 0.15's records reads how far it may (`sealedReach`) beside the page.
-  const counting = recorded && counted;
-  // The page's reads and how far they are listed in one statement, so as of one moment (review r6).
-  const [old, sealed, listedReads, reach] = await together([
-    () => before.seq === 'done' ? { rows: [], more: false } : auditPage(ctx.db, filter),
-    (stop) => recorded || written !== null || refusals !== null
-      ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit, instance: recorded, written, refusals }, stop)
-      : { rows: [], more: false },
-    () => used ? readsPageStanding(ctx.db, readsFilter) : null,
-    () => counting ? sealedReach(ctx.db, { actors: filter.actors, before: start }) : null,
+  const counted = !detail && query.hidden === true;
+  // The page's stream: the place its path names, the members asked for, the places its reader reads, or everyone's. Each
+  // filter it does not hold, the page holds the stream's rows to, a place's included: each row of a place's stream must
+  // name the place among its event's own (`places`, under its MAC), or it is no entry of that place.
+  const stream: Stream = place !== undefined
+    ? { places: [place] }
+    : actors !== undefined
+      ? { actors }
+      : within !== undefined
+        ? { places: within.places }
+        : { all: true, shownOnly: !detail && !counted };
+  const page = await eventsPage(ctx.db, {
+    stream,
+    match: {
+      allowed: query.decision === undefined ? undefined : query.decision === 'allow',
+      actors: actors !== undefined && 'places' in stream ? actors : undefined,
+      within: place !== undefined ? (within === undefined ? [place] : within.places.includes(place) ? [place] : within.places) : within?.places,
+      except: within?.except,
+    },
+    detail,
+    counted,
+    before: await startOf(ctx, query.before),
+    limit: query.limit,
+  });
+  const details = page.rows.map((row) => JSON.parse(row.detail) as Record<string, unknown>);
+  // Beside each other: whether the vault vouches for each entry the page shows and for how far they are listed; how the
+  // entries' credentials came to be; and the names its reads show that their rows hold by id.
+  const [vouches, origins, names] = await Promise.all([
+    vouched(ctx, page.rows, page.standing),
+    originsOf(ctx.db, credentialsNamed(page.rows, details)),
+    namesOf(ctx.db, namedBy(page.rows, details)),
   ]);
-  const reads = listedReads ?? { rows: [], more: false };
-  // Where the log has no pair (0.14's log alone, or none sealed yet) nothing is listed and no cursor is shown
-  // (`readsListed`), so the vault is asked nothing for it: an app deployed before its vault serves 0.14's pages.
-  const standing = listedReads?.standing.sealed == null ? null : listedReads.standing;
-  const oldRead = old.rows.map((row) => ({ at: Date.parse(row.occurredAt), entry: entryView(row), below: `${row.seq}`, above: `${row.seq + 1n}` }));
-  const keyWrites: KeyWrite[] = [];
-  const changesRead = sealed.rows.map((row) => ({ at: row.at, entry: sealedView(row, keyWrites), below: { at: row.at, number: row.number } }));
-  const readsRead = reads.rows.map((row) => ({ at: row.at, entry: seen(row) ? readView(row) : null, below: { at: row.at, number: row.number } }));
-  // Beside each other: whether the vault vouches for each entry of 0.15's log the page shows, and for how far the reads
-  // are listed; how the entries' credentials came to be; and the keys and versions the key writes name by id.
-  const [vouches, origins, written015, versions] = await Promise.all([
-    vouched(ctx, sealed.rows, reads.rows.filter(seen), standing),
-    originsOf(ctx.db, credentialsNamed([...oldRead, ...changesRead, ...readsRead].map((read) => read.entry))),
-    secretPlaces(ctx.db, keyWrites.map(({ secretId }) => secretId)),
-    versionsOf(ctx.db, keyWrites.map(({ versionId }) => versionId)),
-  ]);
-  for (const { entry, secretId, versionId } of keyWrites) withNames(entry, written015.get(secretId), versions.get(versionId));
-  for (const read of [...changesRead, ...readsRead]) {
-    if (read.entry !== null && vouches.forged.has(read.below.number)) read.entry.forged = true;
-  }
-  const page = merged(
-    { read: oldRead, more: old.more },
-    sealedStream({ read: changesRead, more: sealed.more }, { read: readsRead, more: reads.more }),
-    query.limit,
-    // Those of its own time, so it goes on in that log while 0.14's does; and no more than `HIDDEN_COUNTED` of them, so
-    // it shows nothing older than the last of those, and stops there (reviews r2, r3).
-    counting,
-    reach,
-  );
-  // Where it stopped at that last one, or took everything older than it, the pages after count the rest.
-  const change = reach !== null && (page.reached || page.change === null) ? reach : page.change;
-  const next = page.oldStop === null && change === null ? null : `${page.oldStop ?? '-'}:${change === null ? '-' : pointText(change)}`;
-  const entries = withOrigins(page.entries, origins);
-  const shown = standing === null ? null : readsListed(standing, vouches.cursorForged);
-  // A page that would have listed reads under 0.14's log says where they are under 0.15's: `readsOmitted`, a scoped
-  // reader's page of no place.
-  const omitted = asked && !used && (await keeps015(ctx.vault)) ? { readsOmitted: 'scope' as const } : {};
-  const listed = { ...(shown === null ? {} : { reads: shown }), ...omitted };
-  if (!counted) return { entries, more: next !== null, next, ...listed };
-  // The page's stretch of each log, from where it stopped there to where it started; to the first entry when nothing
-  // older is left; nothing when the page before was the last of it. 0.14's stops at its oldest entry shown, or where
-  // the page before stopped when it shows none; 0.15's at the time the page ended, or at its oldest sign-in when it
-  // ended on one, or past them at the last of its records it counts.
-  const counts = await Promise.all([
-    before.seq === 'done' ? [] : auditActionCounts(ctx.db, filter, DETAIL_ACTIONS, page.oldStop === null ? undefined : BigInt(page.oldStop)),
-    recorded ? sealedHidden(ctx.db, { actors: filter.actors, from: change ?? undefined, before: start }) : [],
-  ]);
-  const hidden = new Map<string, number>();
-  for (const { action, count } of counts.flat()) hidden.set(action, (hidden.get(action) ?? 0) + count);
+  const listed = page.rows.map((row, i) => ({ row, entry: eventView(row, details[i]!, names) }));
+  for (const { row, entry } of listed) if (vouches.forged.has(eventName(row))) entry.forged = true;
+  const entries = withOrigins(listed.map(({ entry }) => entry), origins);
+  const next = page.next === null ? null : `${page.next.log}:${page.next.at}.${page.next.number}`;
+  const shown = readsListed(page.standing, vouches.cursorForged);
+  // Entries of the log before 0.16 still being listed, newest first (after the upgrade, or a rebuild): the history
+  // stops early, and the page says so rather than end as if it were all.
+  const reads = { ...(shown === null ? {} : { reads: shown }), ...(vouches.listingOlder ? { listingOlder: true as const } : {}) };
+  if (!counted) return { entries, more: next !== null, next, ...reads };
   // Most of what is hidden first.
-  return {
-    entries,
-    more: next !== null,
-    next,
-    ...listed,
-    hidden: [...hidden].map(([action, count]) => ({ action, count })).sort((a, b) => b.count - a.count || (a.action < b.action ? -1 : a.action > b.action ? 1 : 0)),
-  };
+  const hidden = [...page.hidden].map(([action, count]) => ({ action, count })).sort((a, b) => b.count - a.count || (a.action < b.action ? -1 : a.action > b.action ? 1 : 0));
+  return { entries, more: next !== null, next, ...reads, hidden };
 }
 
-/**
- * Each of `asks` started together, as `Promise.all` would, sharing one `stop`: the first to fail aborts it with its
- * error, so that a read made of many statements (`sealedPage`) asks no more of them, and once every one has settled
- * fails with that first error, the abort's reason, which a later failure leaves as it is. A page that failed leaves
- * nothing running behind it: on Node, its reads go on connections of their own, and one failed on another left a
- * project's page asking hundreds of statements after it answered (review r7 of #490). A read that fails within
- * (`newest`'s statements) aborts it at once, before waiting for those it asked, so that an error met while it
- * waits does not stand for the first (review r8).
- */
-async function together<T extends readonly unknown[]>(asks: { [K in keyof T]: (stop: AbortController) => T[K] | Promise<T[K]> }): Promise<T> {
-  const stop = new AbortController();
-  const settled = await Promise.allSettled(asks.map(async (ask) => {
-    try {
-      return await ask(stop);
-    } catch (error) {
-      stop.abort(error);
-      throw error;
-    }
-  }));
-  stop.signal.throwIfAborted();
-  return settled.map((outcome) => (outcome as PromiseFulfilledResult<unknown>).value) as unknown as T;
-}
-
-/**
- * Where a page lists the key writes 0.15's log records alone (`WrittenAt`): at its place, a key, an environment, or
- * a project's environments, deleted ones among them, as 0.14's entries stay readable by a tombstone's slug; within
- * what its reader reads, as `within` holds 0.14's (a project's environments but those `except` names, and each
- * environment named); every one where neither narrows it.
- */
-async function writtenAt(ctx: ApiContext, filter: AuditFilter): Promise<WrittenAt> {
-  const { within } = filter;
-  const projects = [...new Set([...(filter.environmentId === undefined && filter.projectId !== undefined ? [filter.projectId] : []), ...(within?.projectIds ?? [])])];
-  const environmentsOf = await environmentIdsOf(ctx.db, projects);
-  const at = filter.environmentId !== undefined ? [filter.environmentId] : filter.projectId !== undefined ? environmentsOf.get(filter.projectId) ?? [] : null;
-  // A set of what is left out, and one environment at a time: a reader's places may be tens of thousands.
-  let readable: Set<string> | null = null;
-  if (within !== undefined) {
-    const except = new Set(within.except ?? []);
-    readable = new Set(within.environmentIds);
-    for (const project of within.projectIds) for (const id of environmentsOf.get(project) ?? []) if (!except.has(id)) readable.add(id);
-  }
-  const environmentIds = at === null ? (readable === null ? null : [...readable]) : readable === null ? at : at.filter((id) => readable.has(id));
-  if (filter.secretId !== undefined) return environmentIds === null || environmentIds.includes(filter.environmentId!) ? { secretId: filter.secretId } : { environmentIds: [] };
-  return environmentIds === null ? { all: true } : { environmentIds };
-}
-
-/** A page's `next`: `<seq>:<at>.<change>`, or `<seq>:<at>` below a time, each `-` for a log with nothing older. */
+/** A page's `next`: `<log>:<at>.<number>`; and, from before 0.16, `<seq>:<at>.<change>` or `<seq>:<at>`, each `-` for nothing older. */
 export const AUDIT_NEXT = /^(?:-?[0-9]{1,19}|-):(?:[0-9]{1,16}(?:\.-?[0-9]{1,19})?|-)$/;
 
-/**
- * Where a page starts in each log, from the newest (undefined), or past the
- * oldest (`done`): below a seq of 0.14's; below a point of 0.15's
- * (`ChangePoint`), as its records are listed.
- */
-type Point = { seq?: bigint | 'done'; change?: ChangePoint | 'done' };
-
-/** `before` as a point: a page's `next`, or a seq of 0.14's log alone, as clients before 0.15 page. */
-function startOf(before: number | string | undefined): Point {
-  if (before === undefined) return {};
-  if (typeof before === 'number') return { seq: BigInt(before), change: 'done' };
-  const [seq, change] = before.split(':') as [string, string];
-  const [at, number] = change.split('.') as [string, string | undefined];
-  return {
-    seq: seq === '-' ? 'done' : BigInt(seq),
-    change: change === '-' ? 'done' : { at: Number(at), ...(number === undefined ? {} : { number: BigInt(number) }) },
-  };
-}
-
-/** Which of two points of 0.15's log is newer, as its records are listed: a time alone is above every change asked at it. */
-function compare(a: ChangePoint, b: ChangePoint): number {
-  if (a.at !== b.at) return a.at < b.at ? -1 : 1;
-  if (a.number === b.number) return 0;
-  if (a.number === undefined || b.number === undefined) return a.number === undefined ? 1 : -1;
-  return a.number < b.number ? -1 : 1;
-}
-
-/** A point of 0.15's log as `next` names it: `<at>.<number>`, or `<at>` for a time. */
-function pointText(point: ChangePoint): string {
-  return point.number === undefined ? `${point.at}` : `${point.at}.${point.number}`;
-}
+/** The logs a `next` names: 0.14's, 0.15's changes, its uses. */
+const LOGS = new Set([14, 15, 16]);
 
 /**
- * An entry as a log's page read it: when, by the clock its log orders by;
- * its view, or null for one no page shows; and where a page goes on from,
- * below it.
+ * Where a page starts: below the entry its `next` names; below a time, for
+ * a `next` of an earlier release, which named where it stopped in each log
+ * apart; nowhere, past the oldest, for one that said nothing older was left
+ * in 0.15's; or below a seq of 0.14's log, as clients before 0.15 page,
+ * where that entry is listed (one read of `audit_log`'s primary key).
  */
-type Read<P> = { at: number; entry: AuditEntryView | null; below: P };
-
-/**
- * The newest `limit` of two logs' entries, each read newest first, up to
- * `limit`, merged by time: none past what either has unread (`more`), which
- * could be newer, and none older than `floor`, a point of 0.15's log
- * (`reached` says it stopped there). A row read that shows nothing is
- * passed over, and the page goes on past it. Where it stopped in each,
- * null when nothing older is left there: `oldStop`, in 0.14's log, the seq
- * as text, below the last taken, or, where it took none, from the first
- * read, as the page before stopped; `change`, in 0.15's, below the last
- * taken when the page ended on one of its, else below the time it ended
- * at, which every one taken is newer than and every one left no newer.
- * That rests on 0.14's entries being in time order as they are in seq
- * order: each takes its time, the database's clock, under the log's head,
- * as it takes its seq (`readUnderHead` in @coffre/db's log.ts). Were their
- * times to come from elsewhere, a time could stand above a 0.15 record a
- * page already took, and `next` would list it again (Fable).
- * With `counting`, 0.15's goes on while 0.14's does, though it shows
- * nothing more: the page after counts the records it hides of its own time.
- */
-function merged(
-  old: { read: (Read<string> & { above: string })[]; more: boolean },
-  sealed: { read: Read<ChangePoint>[]; more: boolean },
-  limit: number,
-  counting: boolean,
-  floor: ChangePoint | null,
-) {
-  const entries: AuditEntryView[] = [];
-  let [i, j] = [0, 0];
-  let last: Read<unknown> | undefined;
-  let reached = false;
-  while (entries.length < limit) {
-    const [a, b] = [old.read[i], sealed.read[j]];
-    if ((a === undefined && old.more) || (b === undefined && sealed.more) || (a === undefined && b === undefined)) break;
-    const fromOld = b === undefined || (a !== undefined && a.at >= b.at);
-    // Where the page would stop, taking it: at its time, for 0.14's; below it, for 0.15's.
-    if (floor !== null && compare(fromOld ? { at: a!.at } : b!.below, floor) < 0) {
-      reached = true;
-      break;
-    }
-    last = fromOld ? old.read[i++]! : sealed.read[j++]!;
-    if (last.entry !== null) entries.push(last.entry);
+async function startOf(ctx: ApiContext, before: number | string | undefined): Promise<Position | undefined> {
+  if (before === undefined) return undefined;
+  if (typeof before === 'number') {
+    const at = await auditTimeAt(ctx.db, BigInt(before));
+    return at === null ? { at: 0, number: 0n, log: 0 } : { at, number: BigInt(before), log: 14 };
   }
-  const oldStop = i < old.read.length || old.more ? (i > 0 ? old.read[i - 1]!.below : old.read[0]!.above) : null;
-  const goesOn = j < sealed.read.length || sealed.more || (counting && oldStop !== null);
-  const change = !goesOn || last === undefined ? null : last === sealed.read[j - 1] ? sealed.read[j - 1]!.below : { at: last.at };
-  return { entries, oldStop, change, reached };
+  const [first, point] = before.split(':') as [string, string];
+  // An earlier release's `<seq>:-`: nothing older in 0.15's, 0.14's going on below that seq.
+  if (point === '-') return first === '-' ? { at: 0, number: 0n, log: 0 } : startOf(ctx, Number(first));
+  const [at, number] = point.split('.') as [string, string | undefined];
+  const log = Number(first);
+  if (LOGS.has(log) && number !== undefined) return { at: Number(at), number: BigInt(number), log };
+  return { at: Number(at), number: 9_223_372_036_854_775_807n, log: 32_767 };
 }
 
-/**
- * 0.15's two streams as one, newest first by `(at, number)`, each read up
- * to its page: its changes (`sealedPage`) and its reads (`readsPage`), which
- * share the log's numbers. None past what either has unread, which could be
- * newer; `more` while either has any left.
- */
-function sealedStream(changes: { read: Read<ChangePoint>[]; more: boolean }, uses: { read: Read<ChangePoint>[]; more: boolean }): { read: Read<ChangePoint>[]; more: boolean } {
-  const read: Read<ChangePoint>[] = [];
-  let [i, j] = [0, 0];
-  for (;;) {
-    const [a, b] = [changes.read[i], uses.read[j]];
-    if ((a === undefined && changes.more) || (b === undefined && uses.more) || (a === undefined && b === undefined)) break;
-    read.push(b === undefined || (a !== undefined && compare(a.below, b.below) > 0) ? changes.read[i++]! : uses.read[j++]!);
-  }
-  return { read, more: changes.more || uses.more || i < changes.read.length || j < uses.read.length };
-}
-
+/** How a page names an entry to the vault, which answers which it does not vouch for. */
+const eventName = (row: EventRow) => `${row.log}:${row.number}`;
 
 /**
- * The entries of 0.15's log a page read that the vault does not vouch for
- * (`Vault.vouch`), by number: every change and read, as read, each with the
- * columns its MAC covers (a read's, its number too); and whether it vouches
- * for the reads' cursor, which says how far they are listed. One call for
- * the page, none for a page without them. A vault that cannot vouch (older
- * than this app) fails the page: nothing of 0.15's is listed unchecked.
+ * The entries a page shows that the vault does not vouch for (`Vault.vouch`),
+ * by `eventName`, each with every column its MAC covers; and whether it
+ * vouches for the cursor, which says how far they are listed. One call for
+ * the page. A vault that cannot vouch for the projection's rows (older than
+ * this app: 0.14's has no `vouch`, 0.15.0's answers no `listingOlder`) fails
+ * the page: nothing is listed unchecked.
  */
-async function vouched(
-  ctx: ApiContext, changes: readonly RecordedChange[], reads: readonly ListedRead[], standing: ReadsStanding | null,
-): Promise<{ forged: Set<bigint>; cursorForged: boolean }> {
-  if (changes.length === 0 && reads.length === 0 && standing === null) return { forged: new Set(), cursorForged: false };
-  if (ctx.vault.vouch === undefined) throw new ApiError('unavailable', "the vault cannot vouch for 0.15's log: it is older than this app, so deploy it first", 'vault_outdated');
+async function vouched(ctx: ApiContext, rows: readonly EventRow[], standing: CursorStanding): Promise<{ forged: Set<string>; cursorForged: boolean; listingOlder: boolean }> {
+  if (ctx.vault.vouch === undefined) throw new ApiError('unavailable', 'the vault cannot vouch for the audit log: it is older than this app, so deploy it first', 'vault_outdated');
   const hex = (bytes: Buffer | null) => (bytes === null ? null : bytes.toString('hex'));
-  const { forged } = await ctx.vault.vouch({
+  const { forged, listingOlder } = await ctx.vault.vouch({
     entries: [
-      ...changes.map((row) => ({
-        tree: 'changes' as const, number: String(row.number), at: row.at, requestId: row.requestId, object: row.object, actor: row.actor, payload: row.payload, seal: hex(row.seal), mac: hex(row.mac)!,
+      ...rows.map((row) => ({
+        tree: 'event' as const, name: eventName(row), at: row.at, number: String(row.number), log: row.log, author: row.author, action: row.action, shown: row.shown,
+        allowed: row.allowed, code: row.code, actor: row.actor, subject: row.subject, credential: row.credential, project: row.project,
+        environment: row.environment, secret: row.secret, version: row.version, places: row.places, requestId: row.requestId, operationId: row.operationId,
+        related: row.related === null ? null : String(row.related), sourceIp: row.sourceIp, detail: row.detail, mac: hex(row.mac)!,
       })),
-      ...reads.map((row) => ({
-        tree: 'reads' as const, number: String(row.number), at: row.at, credential: row.credential, purpose: row.purpose, principal: row.principal, secret: row.secret,
-        environment: row.environment, project: row.project, place: row.place, source: row.source, sourceEnvironment: row.sourceEnvironment, sourceProject: row.sourceProject,
-        version: row.version, mac: hex(row.mac)!,
-      })),
-      ...(standing === null ? [] : [{ tree: 'cursor' as const, number: 'cursor' as const, through: String(standing.through), pair: String(standing.pair), at: standing.at, mac: hex(standing.mac) }]),
+      ...(standing.missing ? [] : [{
+        tree: 'cursor' as const, name: 'cursor' as const, through: String(standing.through), pair: String(standing.pair), at: standing.at,
+        oldFloor: String(standing.oldFloor), oldFrom: String(standing.oldFrom), oldTop: String(standing.oldTop), oldHash: hex(standing.oldHash)!, mac: hex(standing.mac),
+      }]),
     ],
   });
-  const cursorForged = forged.includes('cursor');
-  return { forged: new Set(forged.flatMap((number) => (/^[0-9]{1,19}$/.test(number) ? [BigInt(number)] : []))), cursorForged };
+  if (typeof listingOlder !== 'boolean') throw new ApiError('unavailable', 'the vault cannot vouch for the audit log: it is older than this app, so deploy it first', 'vault_outdated');
+  return { forged: new Set(forged), cursorForged: forged.includes('cursor'), listingOlder };
 }
 
 /**
  * How far a report's reads are listed (an offboarding report, the removed
- * members' counts), strictly, with the vault's word on the cursor: a cursor
- * moved on around the projector would otherwise have a report say none of
- * its member's reads wait (review r7). Outside any transaction, as every
- * vault call; nothing asked where the log has no signed pair.
+ * members' counts), strictly: through `upTo` when given, the change that
+ * removed its member, else through the newest pair; and behind while the
+ * walk down the log before 0.16 is open, whose reads it weighs too. The
+ * report is whole once listed that far, which only the cursor says: the
+ * vault vouches for it, one call, as for a page. A cursor gone says
+ * `forged` without one.
  */
-export async function readsReported(ctx: ApiContext, standing: ReadsStanding): Promise<ReadsListed | null> {
-  if (standing.sealed === null) return null;
-  const { cursorForged } = await vouched(ctx, [], [], standing);
-  return readsListed(standing, cursorForged, { strict: true });
+export async function readsReported(ctx: ApiContext, standing: CursorStanding, upTo?: bigint): Promise<ReadsListed | null> {
+  if (standing.sealed === null || standing.sealedAt === null) return null;
+  const { cursorForged, listingOlder } = standing.missing ? { cursorForged: true, listingOlder: false } : await vouched(ctx, [], standing);
+  const reads = readsListed(standing, cursorForged, { strict: true, ...(upTo === undefined ? {} : { upTo }) });
+  return reads === null || !listingOlder ? reads : { ...reads, behind: true };
 }
 
 /**
- * How far a page's reads are listed (`reads`): the reads 0.15's log seals are
- * listed once the vault's projector has written them, which runs apart from
- * sealing (T166). A page says how far, so that a projector behind, or
- * stopped, shows rather than leaves reads missing unsaid.
+ * How far a page's entries are listed (`reads`): the vault's projector lists
+ * what the checkpointer has signed, apart from sealing. A page says how far,
+ * so that a projector behind, or stopped, shows rather than leaves entries
+ * missing unsaid.
  */
 export type ReadsListed = {
-  /** Every read the log sealed up to this time is listed; null before any. */
+  /** Every entry the log sealed up to this time is listed; null before any. */
   through: string | null;
   /**
-   * Whether sealed reads newer than that wait to be listed: the newest pair's
-   * not all listed, it signed more than `READS_BEHIND_MS` after the listing's
-   * or that long ago. Strict (a report's): any of its reads not listed.
+   * Whether sealed entries newer than that wait to be listed: the newest
+   * pair's not all listed, it signed more than `READS_BEHIND_MS` after the
+   * listing's or that long ago. Strict (a report's): any it weighs not listed.
    */
   behind: boolean;
-  /** The vault does not vouch for where the reads' listing stands: its cursor was moved around the projector. */
+  /** The vault does not vouch for where the listing stands: its cursor was moved around the projector. */
   forged?: true;
 };
 
-/**
- * Why a page lists no reads of 0.15's log (T166, D160), where 0.14's would
- * have listed its reads' entries: `scope`, its reader reads some places
- * only, and on a page of no place sees their own reads alone; the page of
- * each place they read lists its reads (T175). `path`, a project's,
- * environment's or key's page, is 0.15.0's answer, which listed reads by
- * place nowhere; no server since gives it.
- */
-export type ReadsOmitted = 'path' | 'scope';
-
-/** How far behind the newest pair the reads' listing is said to be behind: a few ticks, so that the one a seal takes says nothing. */
+/** How far behind the newest pair the listing is said to be behind: a few ticks, so that the one a seal takes says nothing. */
 export const READS_BEHIND_MS = 5_000;
 
 /**
- * How far the reads are listed, as a page or a report says it: null where
- * the log has no signed pair, which 0.14's alone has not. A projector
- * stopped after the newest pair shows too, by the clock (review r4): no
- * later pair need come to show it.
+ * How far the entries are listed, as a page or a report says it: null where
+ * the log has no signed pair. A projector stopped after the newest pair
+ * shows too, by the clock: no later pair need come to show it. A report's
+ * (`strict`) is behind until the cursor has passed `upTo`, the change that
+ * removed its member, every read of theirs numbered below it; or, for a
+ * member not removed, the newest pair.
  */
-export function readsListed(standing: ReadsStanding, unvouched: boolean, options: { strict?: boolean } = {}): ReadsListed | null {
+export function readsListed(standing: CursorStanding, unvouched: boolean, options: { strict?: boolean; upTo?: bigint } = {}): ReadsListed | null {
   if (standing.sealed === null || standing.sealedAt === null) return null;
-  // A cursor gone is one the vault vouches for no more than one moved: only a database writer deletes it (review r6).
+  // A cursor gone is one the vault vouches for no more than one moved: only a database writer deletes it.
   const forged = unvouched || standing.missing;
-  const waiting = standing.through < standing.sealed;
+  const waiting = standing.through < (options.upTo ?? standing.sealed);
   const late = options.strict === true || standing.sealedAt - standing.at > READS_BEHIND_MS || Date.now() - standing.sealedAt > READS_BEHIND_MS;
   return { through: standing.at === 0 ? null : new Date(standing.at).toISOString(), behind: (waiting && late) || forged, ...(forged ? { forged: true as const } : {}) };
-}
-
-/** The place a page's reads are listed at (T175): the most precise its path names, a key, an environment or a project; null for a page of no place. */
-function readPlace(filter: AuditFilter): ReadPlace | null {
-  if (filter.secretId !== undefined) return { kind: 'secret', id: filter.secretId };
-  if (filter.environmentId !== undefined) return { kind: 'environment', id: filter.environmentId };
-  if (filter.projectId !== undefined) return { kind: 'project', id: filter.projectId };
-  return null;
-}
-
-/**
- * Whether its caller reads the place a page is of (T175): whoever reads the
- * whole log; a reader of some places, a key's or an environment's page where
- * they read the environment, by a grant on it, or on its project but for an
- * environment their role leaves out there; a project's where they read it,
- * or some of its environments (`partly`).
- */
-function readsAt(filter: AuditFilter, partly: ReadonlySet<string>): boolean {
-  const { within, projectId, environmentId } = filter;
-  if (within === undefined) return true;
-  if (environmentId !== undefined) {
-    return within.environmentIds.includes(environmentId) || (projectId !== undefined && within.projectIds.includes(projectId) && !(within.except ?? []).includes(environmentId));
-  }
-  return projectId !== undefined && (within.projectIds.includes(projectId) || partly.has(projectId));
-}
-
-/**
- * Whether a read a place's page read shows (T175): it is by a member asked
- * for, and its caller may see it, as 0.14's entries are held to the same
- * places (`auditWhere`): one of the places it is at is among those they read,
- * and none is an environment their role leaves out there. Decided from the
- * row's own columns, which its MAC covers: one a writer moved to another
- * place shows forged, wherever it shows (R64).
- */
-function seenBy(filter: AuditFilter): (row: ListedRead) => boolean {
-  const actors = filter.actors === undefined ? null : new Set(filter.actors);
-  const within = filter.within === undefined
-    ? null
-    : { projects: new Set(filter.within.projectIds), environments: new Set(filter.within.environmentIds), except: new Set(filter.within.except ?? []) };
-  return (row) => {
-    if (actors !== null && !actors.has(row.principal)) return false;
-    if (within === null) return true;
-    const environments = [row.environment, row.place, row.sourceEnvironment].filter((id) => id !== null);
-    if (environments.some((id) => within.except.has(id))) return false;
-    return [row.project, row.sourceProject].some((id) => id !== null && within.projects.has(id)) || environments.some((id) => within.environments.has(id));
-  };
-}
-
-/**
- * A read of 0.15's log (R53, T166), as the vault's projector wrote it,
- * shown as 0.14's `secret.read` showed a read of one key: by the vault,
- * which logged it, numbered by its use, by the account its way in acts as,
- * for its purpose, of the version it read. Filed as 0.14 filed a read:
- * through a reference, at its source, the reference's holder beside it
- * (`via`, `also`); otherwise at its key, the fork it was read in beside it
- * (`through`, `also`). Each from the sealed objects at the use's number.
- * What the slim row leaves out stays out: the app's request and operation,
- * and the proxy's upstream. A use is the request (R53): one the vault
- * refused after it was written, the bulk cap's say, shows as this read too,
- * the log's record of what was asked, never less than happened.
- *
- *   Ada's `coffre run` of market/dev        a `secret.read` for each key, `run`
- *   the proxy's use of STRIPE_KEY          a `secret.read` of it, `use`, via its credential
- */
-function readView(row: ListedRead): AuditEntryView {
-  const code = useOfCode(row.purpose);
-  const way = code?.way ?? 'credential';
-  const through = row.source !== null;
-  const holder = row.key === null || row.projectSlug === null || row.environmentSlug === null ? null : `${row.projectSlug}/${row.environmentSlug}/${row.key}`;
-  const via = {
-    ...(through ? { path: holder } : {}),
-    ...(way === 'connection' ? { connectionId: row.credential, ...(row.client === null ? {} : { clientId: row.client.id, clientName: row.client.name }) } : {}),
-  };
-  const also = through
-    ? { projectId: row.project, environmentId: row.environment, secretId: row.secret }
-    : row.place !== null ? { projectId: row.project, environmentId: row.place } : null;
-  return {
-    seq: Number(row.number),
-    log: '0.15',
-    author: 'vault',
-    occurredAt: new Date(row.at).toISOString(),
-    ...actorParts(row.principal),
-    action: 'secret.read',
-    decision: 'allow',
-    reason: null,
-    detail: false,
-    subject: null,
-    project: through ? row.sourceProjectSlug : row.projectSlug,
-    environment: through ? row.sourceEnvironmentSlug : row.environmentSlug,
-    key: through ? row.sourceKey : row.key,
-    version: row.versionNumber,
-    secrets: null,
-    operationId: null,
-    relatedSeq: null,
-    requestId: null,
-    run: null,
-    token: null,
-    metadata: {
-      purpose: code?.purpose ?? `unknown (${row.purpose})`,
-      ...(code?.keepsSensitive ? { keepsSensitive: true } : {}),
-      secretId: through ? row.source : row.secret,
-      ...(row.versionNumber === null ? {} : { version: row.versionNumber }),
-      ...(Object.keys(via).length === 0 ? {} : { via }),
-      ...(row.place === null ? {} : { through: { environmentId: row.place, ...(row.forkSlug === null ? {} : { slug: row.forkSlug }) } }),
-      ...(also === null ? {} : { also }),
-      ...(way === 'credential' ? { credentialId: row.credential } : way === 'binding' ? { bindingId: row.credential } : way === 'access' ? { access: true } : {}),
-    },
-  };
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -775,10 +427,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  * to be (`originsOf`, one read for the page): each entry's that names one, a
  * read's through a credential included.
  */
-function credentialsNamed(entries: readonly (AuditEntryView | null)[]): string[] {
-  return [...new Set(entries.flatMap((entry) => {
-    const id = entry?.metadata.credentialId;
-    return entry !== null && entry.action !== 'token.exchange' && typeof id === 'string' && UUID.test(id) ? [id] : [];
+function credentialsNamed(rows: readonly EventRow[], details: readonly Record<string, unknown>[]): string[] {
+  return [...new Set(details.flatMap((metadata, i) => {
+    const id = metadata.credentialId;
+    return rows[i]!.action !== 'token.exchange' && typeof id === 'string' && UUID.test(id) ? [id] : [];
   }))];
 }
 
@@ -804,7 +456,7 @@ function withOrigins(entries: AuditEntryView[], origins: Map<string, CredentialO
   });
 }
 
-/** The actions `twoTripView` makes of 0.15's changes. */
+/** The actions 0.15's two-trip changes record: a key write, a member's first add. */
 const TWO_TRIP = new Set(['secret.write', 'member.add']);
 
 function runClaims(run: unknown): Record<string, string | number> {
@@ -812,31 +464,51 @@ function runClaims(run: unknown): Record<string, string | number> {
   return Object.fromEntries(Object.entries(run).filter((pair): pair is [string, string | number] => typeof pair[1] === 'string' || typeof pair[1] === 'number'));
 }
 
-const DETAIL = new Set<string>(DETAIL_ACTIONS);
+/** The ids a page's reads and key writes name whose names the page shows (`namesOf`): holders, forks, MCP connections. */
+function namedBy(rows: readonly EventRow[], details: readonly Record<string, unknown>[]): { secrets: string[]; environments: string[]; connections: string[] } {
+  const [secrets, environments, connections] = [new Set<string>(), new Set<string>(), new Set<string>()];
+  const id = (value: unknown) => (typeof value === 'string' && UUID.test(value) ? value : null);
+  rows.forEach((row, i) => {
+    if (row.log !== 16) return;
+    const { also, through, via } = details[i] as { also?: { secretId?: unknown }; through?: { environmentId?: unknown }; via?: { connectionId?: unknown } };
+    for (const [set, value] of [[secrets, also?.secretId], [environments, through?.environmentId], [connections, via?.connectionId]] as const) {
+      const found = id(value);
+      if (found !== null) set.add(found);
+    }
+  });
+  return { secrets: [...secrets], environments: [...environments], connections: [...connections] };
+}
 
-function entryView(row: Awaited<ReturnType<typeof auditPage>>['rows'][number]): AuditEntryView {
-  const metadata = JSON.parse(row.metadata) as Record<string, unknown>;
-  // The vault names a secret by its path, the app by its key.
+/**
+ * An entry as the projector listed it, as the API shows it: its place's and
+ * key's names as their rows say now (a deleted place's, its tombstone's),
+ * else as it named them; its version's number, as it named it, else as its
+ * row says; its `metadata` the projector's `detail`, with the names the page
+ * adds to a read and to a key write (`withNames`).
+ */
+function eventView(row: EventRow, logged: Record<string, unknown>, names: PageNames): AuditEntryView {
+  const metadata = row.log === 16 ? readMetadata(row, logged, names) : row.log === 15 && row.action === 'secret.write' && row.allowed ? writeMetadata(row, logged) : logged;
+  // The vault named a secret by its path in 0.14's log, the app by its key; a refused write, the place it was asked at.
   const path = typeof metadata.subject === 'string' ? metadata.subject : null;
-  const key = row.key ?? (typeof metadata.key === 'string' ? metadata.key : path?.split('/').at(-1) ?? null);
+  const asked = row.log === 15 && !row.allowed && typeof metadata.path === 'string' ? metadata.path.split('/') : null;
   return {
-    seq: Number(row.seq),
-    log: '0.14',
-    author: row.author as 'app' | 'vault',
-    occurredAt: row.occurredAt,
+    seq: Number(row.number),
+    log: row.log === 14 ? '0.14' : '0.15',
+    author: row.author,
+    occurredAt: new Date(row.at).toISOString(),
     ...actorParts(row.actor),
     action: row.action,
-    decision: row.decision as 'allow' | 'deny',
+    decision: row.allowed ? 'allow' : 'deny',
     reason: row.code ?? (typeof metadata.reason === 'string' ? metadata.reason : null),
-    detail: DETAIL.has(row.action),
-    subject: row.subjectPrincipal,
-    project: row.project,
-    environment: row.environment,
-    key,
+    detail: !row.shown,
+    subject: row.subject,
+    project: asked === null ? row.projectSlug : asked[0] ?? null,
+    environment: asked === null ? row.environmentSlug : asked[1] ?? null,
+    key: row.key ?? (typeof metadata.key === 'string' ? metadata.key : path?.split('/').at(-1) ?? null),
     version: typeof metadata.version === 'number' ? metadata.version : null,
     secrets: readSecrets(row.action, metadata),
     operationId: row.operationId,
-    relatedSeq: row.relatedSeq === null ? null : Number(row.relatedSeq),
+    relatedSeq: row.related === null ? null : Number(row.related),
     requestId: row.requestId,
     run: null,
     token: null,
@@ -845,231 +517,40 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>['rows'][number]): 
 }
 
 /**
- * A change 0.15's log records in place of 0.14's entry (D147), shown as that
- * entry showed it, of the vault, which made it, and numbered by its change:
- *
- * - a sign-in, `token.exchange`, by the service: the credential, the
- *   binding, the account's generation, the issuer and the proof, the
- *   credential's end, a workload's key and hard end, and the run (`run`);
- * - a token's issue, `token.create`, by its issuer: its kind, the account
- *   it acts as, its label, the credential, its end and its scope;
- * - a revoke by request, `token.revoke`, by whoever asked: the credential,
- *   its kind and its account;
- * - a sign-out, `sign_out`, by the credential's own account: the
- *   credential and its kind.
- *
- * The last three name whose act it was, as 0.14's entries did, from the
- * record's trace (`traceOf`): `credentialId`, a run's credential, a
- * personal token or an MCP connection, and through MCP its `via`. None for a change whose payload is none of these, which only a database
- * writer could leave under the indexes' conditions. No request: the
- * change's id is the vault's own, which names none.
+ * A use's metadata as the page shows it (0.15's `readView`): the projector's, with the version's number after the key's
+ * id, and the names it holds by id: through a reference its holder's path, an MCP app's id and name, the fork's slug.
  */
-function sealedView(row: RecordedChange, keyWrites: KeyWrite[]): AuditEntryView | null {
-  type Fields = Record<string, unknown>;
-  const payload = JSON.parse(row.payload) as Fields & { ref?: { kind?: unknown; id?: unknown }; signIn?: unknown; issue?: unknown; revoke?: unknown };
-  const { ref } = payload;
-  if (ref?.kind === 'secret' || ref?.kind === 'principal') return twoTripView(row, payload, keyWrites);
-  if (ref?.kind === 'request') return refusalView(row, payload);
-  if (ref?.kind !== 'credential' || typeof ref.id !== 'string' || !isMember(row.actor)) return null;
-  const record = (value: unknown): Fields | null => (typeof value === 'object' && value !== null ? (value as Fields) : null);
-  const time = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) ? new Date(value).toISOString() : null);
-  const view = (action: string, metadata: Fields): AuditEntryView => ({
-    seq: Number(row.number),
-    log: '0.15',
-    author: 'vault',
-    occurredAt: new Date(row.at).toISOString(),
-    ...actorParts(row.actor),
-    action,
-    decision: 'allow',
-    reason: null,
-    detail: DETAIL.has(action),
-    subject: null,
-    project: null,
-    environment: null,
-    key: null,
-    version: null,
-    secrets: null,
-    operationId: null,
-    relatedSeq: null,
-    requestId: null,
-    run: null,
-    token: null,
-    metadata,
-  });
-  // Whose credential, as 0.14's entries named the account; and the credential the request came in on.
-  const account = (member: unknown): Fields => {
-    if (typeof member !== 'string' || !isMember(member)) return {};
-    const { actorType, actorId } = actorParts(member);
-    return { principalType: actorType, principalId: actorId };
+function readMetadata(row: EventRow, logged: Record<string, unknown>, names: PageNames): Record<string, unknown> {
+  const { purpose, keepsSensitive, secretId, via, through, also, ...rest } = logged as Record<string, unknown> & {
+    via?: { connectionId?: string }; through?: { environmentId?: string }; also?: { secretId?: string };
   };
-  // As 0.14's entry would, from the trace the record keeps (`traceFields`): one of another shape says nothing.
-  const traced = (trace: unknown): Fields => {
-    const { credentialId, mcp } = (record(trace) ?? {}) as { credentialId?: unknown; mcp?: unknown };
-    if (typeof credentialId !== 'string') return {};
-    const app = record(mcp);
-    const text = (value: unknown) => (typeof value === 'string' ? value : null);
-    const [connectionId, clientId, clientName] = [text(app?.connectionId), text(app?.clientId), text(app?.clientName)];
-    if (app === null || connectionId === null || clientId === null || clientName === null) return traceFields({ credentialId, mcp: null });
-    return traceFields({ credentialId, mcp: { connectionId, clientId, clientName, approvalId: text(app.approvalId) } });
+  const holder = typeof also?.secretId === 'string' ? also.secretId : null;
+  const connection = typeof via?.connectionId === 'string' ? via.connectionId : null;
+  const client = connection === null ? undefined : names.clients.get(connection);
+  const named = {
+    ...(holder === null ? {} : { path: names.paths.get(holder) ?? null }),
+    ...(connection === null ? {} : { connectionId: connection, ...(client === undefined ? {} : { clientId: client.id, clientName: client.name }) }),
   };
-
-  const [signIn, issue, revoke] = [record(payload.signIn), record(payload.issue), record(payload.revoke)];
-  if (signIn !== null) {
-    if (!row.actor.startsWith('token:')) return null;
-    const workload = typeof signIn.jkt === 'string';
-    return view('token.exchange', {
-      ...(workload ? { kind: 'workload' } : {}),
-      credentialId: ref.id,
-      bindingId: signIn.binding,
-      generation: payload.generation,
-      issuer: signIn.issuer,
-      proof: signIn.proof,
-      expiresAt: time(payload.expiresAt),
-      ...(workload ? { jkt: signIn.jkt, notAfter: time(signIn.notAfter) } : {}),
-      run: signIn.run,
-    });
-  }
-  if (issue !== null) {
-    return view('token.create', {
-      kind: issue.kind,
-      ...account(payload.principal),
-      label: issue.label ?? null,
-      targetCredentialId: ref.id,
-      expiresAt: time(payload.expiresAt),
-      scope: payload.scope,
-      ...confirmedBy(issue.confirmed),
-      ...traced(issue.trace),
-    });
-  }
-  if (revoke?.reason === 'revoke') return view('token.revoke', { targetCredentialId: ref.id, kind: revoke.kind, ...account(revoke.principal), ...traced(revoke.trace) });
-  if (revoke?.reason === 'sign_out') return view('sign_out', { targetCredentialId: ref.id, kind: revoke.kind, ...traced(revoke.trace) });
-  return null;
+  const fork = typeof through?.environmentId === 'string' ? through.environmentId : null;
+  const slug = fork === null ? undefined : names.slugs.get(fork);
+  return {
+    purpose,
+    ...(keepsSensitive === undefined ? {} : { keepsSensitive }),
+    secretId,
+    ...(row.versionNumber === null ? {} : { version: row.versionNumber }),
+    ...(Object.keys(named).length === 0 ? {} : { via: named }),
+    ...(fork === null ? {} : { through: { environmentId: fork, ...(slug === undefined ? {} : { slug }) } }),
+    ...(also === undefined ? {} : { also }),
+    ...rest,
+  };
 }
 
-/** A key write the page lists from 0.15's log, by the ids its change names, for its key's and version's names (`withNames`). */
-type KeyWrite = { entry: AuditEntryView; secretId: string; versionId: string };
-
-/**
- * A change of 0.15's log that is the only record of a key write or a
- * member's first add down the two-trip path (T179, 0.16.0), as 0.14's entry
- * showed it: `secret.write` by the writer, its key and version, or
- * `member.add` by the adder, of the member, their role and scope. Each with
- * the request's operation and id and the credential it came in on, which
- * the change's payload carries under the vault's MAC: an entry of either
- * on a credential a trust binding issued shows its run, and one on a
- * personal token the token (`withOrigins`). A key write's names (its key,
- * its place, its version) are its rows', read after it (`withNames`); a key
- * deleted since keeps its id alone. None for a payload of another shape,
- * which only a database writer could leave under the indexes' conditions.
- */
-/**
- * What confirmed an act a fresh check guards, as a change's payload records it (`Confirmation`) and an entry names it
- * (`confirmedFields`): one of another shape says nothing.
- */
-function confirmedBy(confirmed: unknown): Record<string, string> {
-  const { by, at } = (typeof confirmed === 'object' && confirmed !== null ? confirmed : {}) as { by?: unknown; at?: unknown };
-  return typeof by === 'string' && typeof at === 'string' ? confirmedFields({ by, at })! : {};
-}
-
-function twoTripView(
-  row: RecordedChange,
-  payload: Record<string, unknown> & { ref?: { kind?: unknown; id?: unknown } },
-  keyWrites: KeyWrite[],
-): AuditEntryView | null {
-  const { ref, op } = payload;
-  const request = typeof payload.request === 'object' && payload.request !== null ? payload.request as Record<string, unknown> : null;
-  const text = (value: unknown) => (typeof value === 'string' ? value : null);
-  if (request === null || typeof ref?.id !== 'string' || !isMember(row.actor) || typeof payload.inputs !== 'string') return null;
-  const credentialId = text(request.credential);
-  const view = (action: string, fields: Partial<AuditEntryView>, metadata: Record<string, unknown>): AuditEntryView => ({
-    seq: Number(row.number),
-    log: '0.15',
-    author: 'vault',
-    occurredAt: new Date(row.at).toISOString(),
-    ...actorParts(row.actor),
-    action,
-    decision: 'allow',
-    reason: null,
-    detail: false,
-    subject: null,
-    project: null,
-    environment: null,
-    key: null,
-    version: null,
-    secrets: null,
-    operationId: text(request.operationId),
-    relatedSeq: null,
-    requestId: text(request.requestId),
-    run: null,
-    token: null,
-    ...fields,
-    metadata: { ...metadata, ...confirmedBy(request.confirmed), ...(credentialId === null ? {} : { credentialId }) },
-  });
-  if (ref.kind === 'secret' && op === 'secret.write' && typeof payload.version === 'string') {
-    const entry = view('secret.write', {}, payload.nature === 'sensitive' ? { sensitive: true } : {});
-    // Ids of a payload's own, unchecked till the vault vouches for it: looked up only as ids, else shown without names.
-    if (UUID.test(ref.id) && UUID.test(payload.version)) keyWrites.push({ entry, secretId: ref.id, versionId: payload.version });
-    return entry;
-  }
-  if (ref.kind === 'principal' && op === 'member.add') return view('member.add', { subject: ref.id }, { role: payload.role ?? null, scope: payload.scope ?? null });
-  return null;
-}
-
-/**
- * A refusal the vault recorded (T179 PR 6; refusal.ts), where 0.14's deny entry stood: a key write's, at the place its
- * path names, as asked, with its keys; an add's, of the member asked for, with the role and scope asked. Its reason the
- * vault's code, as 0.14's vault entries name theirs.
- */
-function refusalView(row: RecordedChange, payload: Record<string, unknown>): AuditEntryView | null {
-  const request = typeof payload.request === 'object' && payload.request !== null ? payload.request as Record<string, unknown> : null;
-  const text = (value: unknown) => (typeof value === 'string' ? value : null);
-  const code = text(payload.code);
-  if (request === null || code === null || !isMember(row.actor)) return null;
-  const credentialId = text(payload.credential);
-  const view = (action: string, fields: Partial<AuditEntryView>, metadata: Record<string, unknown>): AuditEntryView => ({
-    seq: Number(row.number),
-    log: '0.15',
-    author: 'vault',
-    occurredAt: new Date(row.at).toISOString(),
-    ...actorParts(row.actor),
-    action,
-    decision: 'deny',
-    reason: code,
-    detail: false,
-    subject: null,
-    project: null,
-    environment: null,
-    key: null,
-    version: null,
-    secrets: null,
-    operationId: text(request.operationId),
-    relatedSeq: null,
-    requestId: text(request.requestId),
-    run: null,
-    token: null,
-    ...fields,
-    metadata: { ...metadata, reason: code, ...(credentialId === null ? {} : { credentialId }) },
-  });
-  if (payload.op === 'write.refused') {
-    const path = text(payload.path);
-    const [project, environment] = path === null ? [null, null] : path.split('/');
-    const keys = Array.isArray(payload.keys) ? payload.keys.filter((key): key is string => typeof key === 'string') : [];
-    return view('secret.write', { project: project ?? null, environment: environment ?? null }, { path, keys });
-  }
-  if (payload.op === 'add.refused' && typeof payload.principal === 'string') {
-    return view('member.add', { subject: payload.principal }, { role: payload.role ?? null, scope: payload.scope ?? null });
-  }
-  return null;
-}
-
-/** A key write's names as its rows give them now: its key, its place's slugs, its version's number and recipe. */
-function withNames(entry: AuditEntryView, place: SecretPlaceRow | undefined, version: { version: number; recipe: string | null } | undefined): void {
-  if (place !== undefined) Object.assign(entry, { project: place.project, environment: place.environment, key: place.key });
-  if (version !== undefined) entry.version = version.version;
-  entry.metadata = {
-    ...(place === undefined ? {} : { key: place.key }),
-    ...(version === undefined ? {} : { version: version.version, ...(version.recipe === null ? {} : { recipe: version.recipe }) }),
-    ...entry.metadata,
+/** A key write's metadata as the page shows it (0.15's `withNames`): its key's name, its version's number and recipe first, as their rows say now. */
+function writeMetadata(row: EventRow, logged: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...(row.key === null ? {} : { key: row.key }),
+    ...(row.versionNumber === null ? {} : { version: row.versionNumber, ...(row.recipe === null ? {} : { recipe: row.recipe }) }),
+    ...logged,
   };
 }
 

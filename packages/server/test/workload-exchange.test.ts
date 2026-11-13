@@ -959,8 +959,8 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
 
   // Whoever owns the database deletes the credential's row: the log still leads from the read to its run.
   await db.owner.delete(credentials).where(eq(credentials.id, credentialId));
-  await deps.vault.listReads();
-  const { entries } = await root.audit.list({ detail: '1', sealed: '1' });
+  await deps.vault.listAudit();
+  const { entries } = await root.audit.list({ detail: '1' });
   // Its sign-in, the vault's change, which the page lists as a `token.exchange` entry; and every read it shows, the refused one included, with the run.
   const signedIn = entries.find((entry) => entry.action === 'token.exchange')!;
   assert.equal(signedIn.log, '0.15');
@@ -995,7 +995,7 @@ test("a run's sign-in is on the audit list as a `token.exchange` entry; a refuse
     credentialId: logged!.credentialId, bindingId: bound, generation: logged!.record.generation, issuer: ISSUER, expiresAt: body.expiresAt, run: logged!.run,
   };
   for (const query of [{}, { detail: '1' as const }, { actor: MEMBER }, { actor: SERVICE }]) {
-    const shown = (await root.audit.list({ ...query, sealed: '1' })).entries.filter((entry) => entry.action === 'token.exchange');
+    const shown = (await root.audit.list({ ...query })).entries.filter((entry) => entry.action === 'token.exchange');
     assert.equal(shown.length, 1, `${JSON.stringify(query)} lists the one sign-in`);
     const [entry] = shown;
     assert.deepEqual(
@@ -1009,7 +1009,7 @@ test("a run's sign-in is on the audit list as a `token.exchange` entry; a refuse
   }
   assert.equal(logged!.run.repository, 'acme/api');
   for (const query of [{ decision: 'deny' as const }, { path: 'market' }, { actor: DEV }]) {
-    assert.deepEqual((await root.audit.list({ ...query, detail: '1', sealed: '1' })).entries.filter((entry) => entry.action === 'token.exchange'), [], JSON.stringify(query));
+    assert.deepEqual((await root.audit.list({ ...query, detail: '1' })).entries.filter((entry) => entry.action === 'token.exchange'), [], JSON.stringify(query));
   }
 });
 
@@ -1029,7 +1029,7 @@ test('pages of the audit list tile both logs: every entry once, newest first, an
   const named = (entries: { log: string; seq: number }[]) => entries.map((entry) => `${entry.log}:${entry.seq}`);
   for (const query of [{}, { detail: '1' as const }, { actor: SERVICE }]) {
     // Counted too (`hidden`), as a caller that asks for it pages.
-    const whole = await root.audit.list({ ...query, sealed: '1', hidden: '1', limit: 500 });
+    const whole = await root.audit.list({ ...query, hidden: '1', limit: 500 });
     assert.deepEqual([whole.more, whole.next], [false, null]);
     assert.equal(whole.entries.filter((entry) => entry.action === 'token.exchange').length, 6);
     for (const [i, entry] of whole.entries.entries()) {
@@ -1040,7 +1040,7 @@ test('pages of the audit list tile both logs: every entry once, newest first, an
       const hidden = new Map<string, number>();
       let before: string | undefined;
       do {
-        const page = await root.audit.list({ ...query, sealed: '1', hidden: '1', limit, ...(before === undefined ? {} : { before }) });
+        const page = await root.audit.list({ ...query, hidden: '1', limit, ...(before === undefined ? {} : { before }) });
         assert.ok(page.entries.length <= limit);
         assert.equal(page.more, page.next !== null);
         paged.push(...page.entries);
@@ -1051,39 +1051,34 @@ test('pages of the audit list tile both logs: every entry once, newest first, an
       assert.deepEqual(hidden, new Map((whole.hidden ?? []).map(({ action, count }) => [action, count])), `${JSON.stringify(query)}, ${limit} a page: hidden`);
     }
   }
-  // A client that does not ask for 0.15's sealed log, as one before 0.15, pages 0.14's log alone, by the last seq it
-  // read: whole, each entry once; and a seq alone pages 0.14's log, whatever it asks.
-  const legacy: number[] = [];
-  for (let before: number | undefined; ;) {
-    const page = await root.audit.list({ limit: 1, ...(before === undefined ? {} : { before }) });
-    assert.ok(page.entries.every((entry) => entry.log === '0.14'));
-    legacy.push(...page.entries.map((entry) => entry.seq));
-    // A full page says there may be more: below the first entry, 0, there is none to ask for.
-    if (!page.more || page.entries.at(-1)!.seq === 0) break;
-    before = page.entries.at(-1)!.seq;
-  }
-  const whole = (await root.audit.list({ limit: 500, sealed: '1' })).entries.filter((entry) => entry.log === '0.14');
-  assert.deepEqual(legacy, whole.map((entry) => entry.seq));
-  const newest = whole.at(0)!;
-  assert.ok((await root.audit.list({ before: newest.seq, sealed: '1', limit: 500 })).entries.every((entry) => entry.log === '0.14' && entry.seq < newest.seq));
+  // A seq of 0.14's log, as clients before 0.15 page by, starts below that entry where every log lists it: what is
+  // older than it, of both logs, each once.
+  const whole = (await root.audit.list({ limit: 500 })).entries;
+  const newest = whole.findIndex((entry) => entry.log === '0.14');
+  assert.ok(newest >= 0 && whole.some((entry) => entry.log === '0.15'));
+  assert.deepEqual(named((await root.audit.list({ before: whole[newest]!.seq, limit: 500 })).entries), named(whole.slice(newest + 1)));
 });
 
 /**
  * A sign-in takes its number when it commits, after any wait for a lock, but is listed by when the vault asked (its
  * `at`), as everything else on the page is by when it happened: one that asked later but waited less is the newer,
- * on the first page. Here the first, numbered first, says it asked after the second.
+ * on the first page. Here the first, numbered first, asked after the second by the vault's clock.
  */
 test("sign-ins are listed newest first by when they were asked, not by the number a wait gave them", async () => {
-  for (let i = 0; i < 2; i++) assert.equal((await trade(token(rsa))).status, 200);
+  // The first asks a minute ahead of the second, by the vault's clock: as one that asked later but waited less.
+  deps.vault.advance(60_000);
+  assert.equal((await trade(token(rsa))).status, 200);
+  deps.vault.advance(-60_000);
+  assert.equal((await trade(token(rsa))).status, 200);
   const [first, second] = await db.owner.select({ number: logChanges.number, at: logChanges.at }).from(logChanges)
     .where(sql`${logChanges.payload} LIKE '%"signIn":{%'`).orderBy(asc(logChanges.number));
-  await db.owner.update(logChanges).set({ at: second!.at + 50 }).where(eq(logChanges.number, first!.number));
+  assert.ok(first!.at > second!.at);
   const root = clientFor(deps, ROOT);
-  const one = await root.audit.list({ actor: SERVICE, sealed: '1', limit: 1 });
+  const one = await root.audit.list({ actor: SERVICE, limit: 1 });
   assert.deepEqual(one.entries.map((entry) => BigInt(entry.seq)), [first!.number]);
   const two = await root.audit.list({ actor: SERVICE, limit: 1, before: one.next! });
   assert.deepEqual(two.entries.map((entry) => BigInt(entry.seq)), [second!.number]);
-  assert.deepEqual((await root.audit.list({ actor: SERVICE, sealed: '1', limit: 500 })).entries.filter((entry) => entry.log === '0.15').map((entry) => BigInt(entry.seq)), [first!.number, second!.number]);
+  assert.deepEqual((await root.audit.list({ actor: SERVICE, limit: 500 })).entries.filter((entry) => entry.log === '0.15').map((entry) => BigInt(entry.seq)), [first!.number, second!.number]);
 });
 
 /**
@@ -1103,7 +1098,7 @@ test("a change the sign-ins' index holds that is no sign-in is passed over, and 
   let before: string | undefined;
   let pages = 0;
   do {
-    const page = await root.audit.list({ actor: SERVICE, sealed: '1', limit: 1, ...(before === undefined ? {} : { before }) });
+    const page = await root.audit.list({ actor: SERVICE, limit: 1, ...(before === undefined ? {} : { before }) });
     seen.push(...page.entries.map((entry) => `${entry.log} ${entry.action}`));
     before = page.next ?? undefined;
     pages++;

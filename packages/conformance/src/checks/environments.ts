@@ -182,10 +182,10 @@ export async function references(deployment: Deployment, { admin, reader, leaver
     // and on the source's environment's page and the holder's.
     const through = (entries: AuditEntryView[]) => entries.filter((entry) => entry.action === 'secret.read' && entry.actorId === reader.email
       && `${entry.project}/${entry.environment}/${entry.key}` === source && (entry.metadata.via as { path?: unknown } | undefined)?.path === `${DEV}/${HELD}`);
-    expect(await listed(async () => through((await admin.api.audit.list({ limit: 200, sealed: '1' })).entries).length >= 1),
+    expect(await listed(async () => through((await admin.api.audit.list({ limit: 200 })).entries).length >= 1),
       "the read through the reference is not on the whole log, filed at its source with the holder beside it");
     for (const path of [PROD, DEV]) {
-      const page = await admin.api.audit.list({ path, limit: 200, sealed: '1' });
+      const page = await admin.api.audit.list({ path, limit: 200 });
       expect(through(page.entries).length >= 1, `${path}'s log does not list the read through the reference`, page.entries.slice(0, 5));
     }
 

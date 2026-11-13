@@ -52,7 +52,6 @@ import {
 import { daysAround, openLogCheckpointer, reasonOf, RETAIN_EVERY_MS, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { vaultLogKey } from './log.ts';
 import { AuditProjector } from './projection.ts';
-import { Projector } from './reads.ts';
 import { verifierKeys } from './verifier.ts';
 import { logStore } from './log-store.ts';
 import { dayOf } from './retention.ts';
@@ -124,10 +123,9 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     #pool: HyperdrivePool | null = null;
     /** The log's upkeep after each tick (log-checkpointer.ts), with the checkpointer it was opened with. */
     #upkeep: (() => Promise<void>) | null = null;
-    /** Whether this object is the reads' projector, as its storage says (`startProjector`); asked once. */
+    /** Whether this object is the audit projector, as its storage says (`startProjector`); asked once. */
     #projects: boolean | null = null;
-    /** The projector, on a connection of its own for as long as the object lives, as the checkpointer's. */
-    #projector: Projector | null = null;
+    /** The audit projector, on a connection of its own for as long as the object lives, as the checkpointer's. */
     #audit: AuditProjector | null = null;
     /** The day the next days of uses were last made for without the checkpointer (`#makeDays`), when it last tried, and its failure. */
     #daysFor: string | null = null;
@@ -271,14 +269,14 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
     }
 
     /**
-     * The projectors' run: some steps of `projectReads`, then some batches of `projectAudit`, then the next
-     * alarm, a tick later, or at once while either leaves something to list. A failure is an alarm, said once while it stands (`Projector`), and the next
+     * The projector's run: some batches of `projectAudit`, then the next alarm, a tick later, or at once while
+     * it leaves something to list. A failure is an alarm, said once while it stands (`AuditProjector`), and the next
      * tick tries again, on the same connection, which postgres.js opens again when it is lost.
      */
     async #project(): Promise<void> {
       let more = false;
       try {
-        if (this.#projector === null) {
+        if (this.#audit === null) {
           const s = await settings(this.#env);
           const pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
           const store = logStore(createDatabase(pool));
@@ -287,14 +285,12 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
             void this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
           };
           const keys = await verifierKeys(s.signingKeys);
-          this.#projector = new Projector(store, keys, said);
           this.#audit = new AuditProjector(store, keys, s.signingKeys.map(vaultLogKey), said);
         }
-        more = await this.#projector.run();
-        if (await this.#audit!.run()) more = true;
+        more = await this.#audit.run();
       } catch (error) {
-        this.#projector = null;
-        await this.#failure(`the reads' projection cannot open: ${reasonOf(error)}`);
+        this.#audit = null;
+        await this.#failure(`the audit projection cannot open: ${reasonOf(error)}`);
       } finally {
         await this.#state.storage.setAlarm(Date.now() + (more ? 0 : TICK_MS));
       }
@@ -451,7 +447,7 @@ export async function startCheckpointer(namespace: ObjectNamespace, name = 'chec
 }
 
 /**
- * Starts the reads' projector (reads.ts, T166): the object of the same class named `name`, which projects from then
+ * Starts the audit projector (projection.ts): the object of the same class named `name`, which projects from then
  * on, on its own alarm. Again is harmless.
  */
 export async function startProjector(namespace: ObjectNamespace, name = 'reads'): Promise<void> {

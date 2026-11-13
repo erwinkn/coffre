@@ -1,6 +1,6 @@
 import { type AuditEntryView } from '@coffre/client';
 import { useState, type ReactNode } from 'react';
-import { useSuspenseQuery } from '@tanstack/react-query';
+import { useSuspenseInfiniteQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
 import { chainUnknown, queries, shownChain, wholeTrees, withTrees, type AuditSearch, type ChainResult } from '../lib/queries';
@@ -15,7 +15,7 @@ import {
 } from '../lib/audit-sentences';
 import { absolute, EmptyState, Notice, Spinner, Timestamp, Toggletip } from '../components/ui';
 import { memberName, Sentence } from '../components/audit-sentence';
-import { ReadsLag } from '../components/actions-log';
+import { OlderListing, ReadsLag } from '../components/actions-log';
 import { ClosedDoor, PageHeader } from '../components/page';
 import {
   Activity,
@@ -37,7 +37,8 @@ const Route = pageRoute<typeof audit>();
 export function AuditPage() {
   const search = Route.useSearch();
   const client = useCoffre();
-  const { data: result } = useSuspenseQuery(queries.auditEntries(client, search));
+  const log = useSuspenseInfiniteQuery(queries.auditEntries(client, search));
+  const result = log.data.pages[0]!;
   // Loaded with the entries: the page arrives with its badge.
   const verification = useSuspenseQuery(queries.auditChain(client));
   // The walk from the first entry, once someone ran it, beside the check from the newest checkpoint, which
@@ -83,7 +84,10 @@ export function AuditPage() {
 
   const broken = chain?.integrity === 'broken' ? chain : null;
   const breakAt = broken?.failedAtSeq ?? null;
-  const shown = lines(result.entries);
+  // Every page loaded, the first's notices for all: an older page that failed says so below the entries.
+  const entries = log.data.pages.flatMap((page) => (page.ok ? page.entries : []));
+  const failed = log.data.pages.find((page) => !page.ok);
+  const shown = lines(entries);
   const filters = { decision, actorId };
 
   return (
@@ -116,7 +120,7 @@ export function AuditPage() {
             Something with direct access to the database has changed what it records
             {broken.failedAtSeq === null ? '' : `, and nothing from entry ${broken.failedAtSeq} on can be relied on`} until
             that is explained.
-            {breakAt !== null && !result.entries.some((entry) => breaksAt(entry, breakAt)) && (
+            {breakAt !== null && !entries.some((entry) => breaksAt(entry, breakAt)) && (
               <>
                 {' '}Entry {breakAt} is not among the entries below
                 {detail ? (
@@ -161,10 +165,16 @@ export function AuditPage() {
         )}
       </div>
 
-      <ReadsLag reads={result.reads} omitted={result.readsOmitted} />
+      <ReadsLag reads={result.reads} />
+      <OlderListing listingOlder={result.listingOlder} />
 
       <section className="card card-wide" aria-label="Audit entries">
-        {shown.length === 0 ? (
+        {shown.length === 0 && log.hasNextPage ? (
+          // A filter's stretch of the newest entries held none: older ones may still match.
+          <EmptyState title={deniedOnly ? 'No denials among the newest entries' : 'Nothing among the newest entries'}>
+            Show older to read further back.
+          </EmptyState>
+        ) : shown.length === 0 ? (
           <EmptyState title={deniedOnly ? 'No denials recorded' : 'Nothing recorded yet'}>
             {deniedOnly
               ? 'Nobody has been turned away.'
@@ -213,7 +223,15 @@ export function AuditPage() {
           </div>
         )}
       </section>
-
+      {failed !== undefined && !failed.ok && <Notice tone="bad">{failed.error}</Notice>}
+      {log.hasNextPage && (
+        <div className="table-actions">
+          <button type="button" className="btn" disabled={log.isFetchingNextPage} onClick={() => void log.fetchNextPage()}>
+            {log.isFetchingNextPage && <Spinner />}
+            Show older
+          </button>
+        </div>
+      )}
     </>
   );
 }

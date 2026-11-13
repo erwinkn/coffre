@@ -1,5 +1,6 @@
-// The reads' projection (reads.ts): what the projector derives each read from, two projectors at once, and the
-// whole log's check of what it listed, against a database writer and a projector stopped part way.
+// The reads as the audit projection lists them (reads.ts, projection.ts): what the projector derives each
+// read from, two projectors at once, and the whole log's check of what it listed (audit-check.ts), against a database
+// writer and a projector stopped part way.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -9,8 +10,9 @@ import { sql } from 'drizzle-orm';
 
 import type { Input } from '../src/inputs.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
+import { checkListed } from '../src/audit-check.ts';
 import { logStore } from '../src/log-store.ts';
-import { checkReads, cursorHolds, projectReads } from '../src/reads.ts';
+import { projectAudit } from '../src/projection.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
 import { openTestDatabase, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
@@ -55,7 +57,7 @@ async function reads(count: number) {
 async function checked(store = logStore(db.vault)) {
   const problems: string[] = [];
   for (let from: bigint | null = 0n; from !== null;) {
-    const stretch = await checkReads(store, await keys(), from);
+    const stretch = await checkListed(store, await keys(), from);
     problems.push(...stretch.problems);
     from = stretch.next;
   }
@@ -64,12 +66,18 @@ async function checked(store = logStore(db.vault)) {
 
 const count = async (table: string) => Number((await rows<{ n: string | number }>(db.owner, sql.raw(`SELECT count(*) AS n FROM ${table}`)))[0]!.n);
 
+/** The projector over the chains (no 0.14 log key: its walk of `audit_log` is projection.test.ts's). */
+const project = (store = logStore(db.vault), options: { steps?: number; atOnce?: number } = {}) => keys().then((k) => projectAudit(store, k, [], options));
+
+/** The reads the projection lists. */
+const READS = 'audit_events WHERE log = 16';
+
 test("a change a read is derived from, edited since its seal, stops the projection: no read derived from it, and the whole log's check says so", async () => {
   const tick = await signer();
   const w = await reads(1);
   await tick();
-  await projectReads(logStore(db.vault), await keys());
-  assert.equal(await count('log_reads'), 1);
+  await project();
+  assert.equal(await count(READS), 1);
   // The credential reads again, then whoever owns the database says it was issued to someone else.
   const { use } = await isolate();
   const key = await w.key();
@@ -79,8 +87,8 @@ test("a change a read is derived from, edited since its seal, stops the projecti
       WHERE number = (SELECT min(number) FROM log_changes WHERE payload LIKE ${`%${w.credentialId}%`})`);
   });
   await tick();
-  await assert.rejects(projectReads(logStore(db.vault), await keys()), /does not hold to its MAC: edited since its seal/);
-  assert.deepEqual((await rows<{ principal: string }>(db.owner, sql`SELECT principal FROM log_reads`)).map((row) => row.principal), [w.principal]);
+  await assert.rejects(project(), /does not hold to its MAC: edited since its seal/);
+  assert.deepEqual((await rows<{ actor: string }>(db.owner, sql`SELECT actor FROM audit_events WHERE log = 16`)).map((row) => row.actor), [w.principal]);
   // The check walks that change's range again, and its tree says the same.
   assert.match((await checked()).join('\n'), /does not hold to the pair that sealed it|does not hold to its MAC/);
   // A use from now on reads that change as the credential's newest, and refuses it: its MAC fails.
@@ -93,47 +101,17 @@ test("two projectors at once write each read once, and the whole log's check fin
   await tick();
   // A store each, over a connection each: the vault's login and the owner's.
   const other: Database = db.owner;
-  await Promise.all([projectReads(logStore(db.vault), await keys(), { atOnce: 2 }), projectReads(logStore(other), await keys(), { atOnce: 3 })]);
-  assert.equal(await count('log_reads'), 6);
+  // Small batches, as many steps as the world's changes and the reads take: the two overtake each other all along.
+  await Promise.all([project(logStore(db.vault), { atOnce: 2, steps: 100 }), project(logStore(other), { atOnce: 3, steps: 100 })]);
+  assert.equal(await count(READS), 6);
   assert.deepEqual(await checked(), []);
-});
-
-test("a projector another overtook writes nothing: never the reads retention has since dropped with their day, nor their day again (FromChecked, review r11)", async () => {
-  const tick = await signer();
-  await reads(4);
-  await tick();
-  let wrote: boolean | null = null;
-  const real = logStore(db.vault);
-  // A derives its chunk and stops before its write; meanwhile B lists every read, and retention drops their day.
-  const paused = Object.assign(Object.create(real) as typeof real, {
-    writeReads: async (...args: Parameters<typeof real.writeReads>) => {
-      await projectReads(logStore(db.owner), await keys());
-      assert.equal(await count('log_reads'), 4);
-      const days = await rows<{ at: string | number }>(db.owner, sql`SELECT DISTINCT at FROM log_reads`);
-      const named = [...new Set(days.map((row) => new Date(Number(row.at)).toISOString().slice(0, 10).replaceAll('-', '')))];
-      for (const day of named) await run(db.owner, sql.raw(`DROP TABLE log_reads_${day}`));
-      await run(db.owner, sql`DELETE FROM log_read_days`);
-      wrote = await real.writeReads(...args);
-      return wrote;
-    },
-  });
-  try {
-    await projectReads(paused, await keys());
-    assert.equal(wrote, false);
-    assert.equal(await count('log_reads'), 0);
-    assert.equal(await count('log_read_days'), 0);
-    const today = new Date().toISOString().slice(0, 10).replaceAll('-', '');
-    assert.equal((await rows<{ found: boolean }>(db.owner, sql`SELECT to_regclass(${`public.log_reads_${today}`}) IS NOT NULL AS found`))[0]!.found, false, 'made again');
-  } finally {
-    await run(db.owner, sql`SELECT make_reads_day((now() AT TIME ZONE 'UTC')::date + d) FROM generate_series(-1, 3) AS d`);
-  }
 });
 
 test("a newest pair whose signatures fail, none under a cursor moved on, or one below the cursor: the check names it, the projector stops (review r12)", async () => {
   const tick = await signer();
   await reads(3);
   await tick();
-  await projectReads(logStore(db.vault), await keys());
+  await project();
   assert.deepEqual(await checked(), []);
   const [newest] = await rows<{ upto: string | number; size: string | number }>(db.owner, sql`SELECT upto, uses_size AS size FROM log_checkpoints ORDER BY upto DESC LIMIT 1`);
   const upto = BigInt(newest!.upto);
@@ -141,25 +119,25 @@ test("a newest pair whose signatures fail, none under a cursor moved on, or one 
   const nl = sql.raw('chr(10)');
   await run(db.owner, sql`UPDATE log_checkpoints SET uses_note = replace(uses_note, ${nl} || ${String(newest!.size)} || ${nl}, ${nl} || '999999' || ${nl}) WHERE upto = ${upto}`);
   assert.deepEqual(await checked(), [`the newest pair, through ${upto}, does not hold to the vault's signatures`]);
-  await assert.rejects(projectReads(logStore(db.vault), await keys()), /does not hold to the vault's signatures/);
+  await assert.rejects(project(), /does not hold to the vault's signatures/);
   // Or deletes every pair, under a cursor moved on.
-  const cursor = (await rows<{ through: string | number }>(db.owner, sql`SELECT through FROM log_reads_cursor`))[0]!.through;
+  const cursor = (await rows<{ through: string | number }>(db.owner, sql`SELECT through FROM audit_cursor`))[0]!.through;
   await run(db.owner, sql`DELETE FROM log_checkpoints`);
   assert.deepEqual(await checked(), [`the reads are listed through ${cursor}, but the log holds no signed pair`]);
-  await assert.rejects(projectReads(logStore(db.vault), await keys()), /holds no signed pair/);
+  await assert.rejects(project(), /holds no signed pair/);
 });
 
 test("the whole log's check holds the range the projector stopped in, as far as it went: a read deleted there is named", async () => {
   const tick = await signer();
   await reads(3);
   await tick();
-  // Two of the range's three reads, and the projector stops.
-  await projectReads(logStore(db.vault), await keys(), { steps: 1, atOnce: 2 });
-  const listed = await rows<{ number: string | number }>(db.owner, sql`SELECT number FROM log_reads ORDER BY number`);
+  // Two of the range's three reads, and the projector stops: an event a run, until it has listed two.
+  while (await count(READS) < 2) await project(logStore(db.vault), { steps: 1, atOnce: 1 });
+  const listed = await rows<{ number: string | number }>(db.owner, sql`SELECT number FROM audit_events WHERE log = 16 ORDER BY number`);
   assert.equal(listed.length, 2);
   assert.deepEqual(await checked(), []);
   const deleted = BigInt(listed[0]!.number);
-  await run(db.owner, sql`DELETE FROM log_reads WHERE number = ${deleted}`);
+  await run(db.owner, sql`DELETE FROM audit_events WHERE log = 16 AND number = ${deleted}`);
   assert.deepEqual(await checked(), [`read ${deleted} is sealed but not listed`]);
 });
 
@@ -181,26 +159,8 @@ test("a read through a Cloudflare binding is its service's, as the binding's obj
   const outcome = await (await isolate()).use({ ...ask(w, id, { purpose: 'use' }), credential: binding, way: 'binding' });
   assert.ok(outcome.ok, JSON.stringify(outcome));
   await tick();
-  await projectReads(logStore(db.vault), await keys());
-  assert.deepEqual((await rows<{ principal: string }>(db.owner, sql`SELECT principal FROM log_reads`)).map((row) => row.principal), [w.principal]);
-});
-
-test("a read of a day with no reads' partition yet makes it: a log older than the days made ahead does not stop the projector (review r4)", async () => {
-  const tick = await signer();
-  await reads(2);
-  await tick();
-  const day = new Date().toISOString().slice(0, 10).replaceAll('-', '');
-  await run(db.owner, sql.raw(`DROP TABLE log_reads_${day}`));
-  await projectReads(logStore(db.vault), await keys());
-  assert.equal(await count('log_reads'), 2);
-  assert.deepEqual(await checked(), []);
-});
-
-test('an unsigned cursor is the start only: anywhere else, or at another time, it is not the vault\'s', async () => {
-  const { mac } = (await keys()).current;
-  assert.equal(cursorHolds(mac, { through: 0n, pair: 0n, at: 0, mac: null }), true);
-  assert.equal(cursorHolds(mac, { through: 0n, pair: 0n, at: Date.now() + 86_400_000, mac: null }), false);
-  assert.equal(cursorHolds(mac, { through: 4n, pair: 0n, at: 0, mac: null }), false);
+  await project();
+  assert.deepEqual((await rows<{ actor: string }>(db.owner, sql`SELECT actor FROM audit_events WHERE log = 16`)).map((row) => row.actor), [w.principal]);
 });
 
 test("the objects of 300 reads are read, a batch of them a statement", async () => {

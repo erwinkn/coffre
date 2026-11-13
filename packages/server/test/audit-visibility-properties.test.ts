@@ -25,9 +25,12 @@
  *   side, and for a secret, the reads of several that list it, read there
  *   or through it as a holder (`readsByPlace` in the vault).
  *
- * Entries go into the real log through the app's writer, so the chain
- * stays valid; their places are rows of their own, which the log names by
- * id. Callers are built as the vault would answer for them (`callerFrom`):
+ * Entries go into the real log through the app's writer, and into the
+ * projection the pages read as its projector lists an entry of
+ * 0.14's (`oldPlaces` in the vault): at each place either side names, and
+ * for a read of several, at each key it lists and its holder. Their places
+ * are rows of their own, which the log names by id; the vault vouches for
+ * every row, which is the vault's test (projection.test.ts). Callers are built as the vault would answer for them (`callerFrom`):
  * people with instance roles, scopes and grants, a person's personal
  * token, and a service account's credential.
  */
@@ -51,7 +54,8 @@ import { ApiError } from '../src/api/errors.ts';
 import { appendAudit, type AuditEntry } from '../src/db/audit.ts';
 import { resetDatabase } from './api-fixture.ts';
 import { emptyLog, openTestDatabase } from './db/engine.ts';
-import { environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets } from '@coffre/db/schema';
+import { auditEventPlaces, auditEvents, auditLog, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets } from '@coffre/db/schema';
+import { asc, gte, sql } from 'drizzle-orm';
 
 const settings = propertySettings(150, 10);
 let database: Awaited<ReturnType<typeof openTestDatabase>>;
@@ -308,6 +312,7 @@ function byActor(entry: Entry, asked: string): boolean {
 async function store({ world, archived }: Instance, log: readonly Entry[]): Promise<number[]> {
   const { owner, runtime } = database;
   await emptyLog(owner);
+  await owner.execute(sql`TRUNCATE audit_events, audit_event_places`);
   await owner.delete(storedSecrets);
   await owner.delete(storedEnvironments);
   await owner.delete(storedProjects);
@@ -345,7 +350,23 @@ async function store({ world, archived }: Instance, log: readonly Entry[]): Prom
     };
   });
   const appended = await runtime.transaction((tx) => appendAudit(tx, CHAIN_KEY, written));
-  return log.map((_, i) => Number(appended.seqStart) + i);
+  const rows = await owner.select().from(auditLog).where(gte(auditLog.seq, appended.seqStart)).orderBy(asc(auditLog.seq));
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const events = rows.map((row, i) => {
+    const item = log[i]!;
+    const listed = item.action === 'secret.read' && item.main?.secretId === null ? (item.secrets ?? []).flatMap((each) => [each.secretId, each.also?.secretId]) : [];
+    const named = [item.main?.projectId, item.main?.environmentId, item.main?.secretId, item.also?.projectId, item.also?.environmentId, item.also?.secretId, ...listed];
+    const places = [...new Set(named.filter((id): id is string => typeof id === 'string' && uuid.test(id)))];
+    return {
+      at: row.occurredAt, number: row.seq, log: 14, author: row.author, action: row.action, shown: !DETAIL.has(row.action), allowed: row.decision === 'allow',
+      code: null, actor: row.actor, subject: null, credential: null, project: row.projectId, environment: row.environmentId, secret: row.secretId,
+      version: null, places, requestId: null, operationId: null, related: null, sourceIp: null, detail: row.metadata, mac: Buffer.alloc(16),
+    };
+  });
+  await owner.insert(auditEvents).values(events);
+  const placed = events.flatMap(({ at, number, places }) => places.map((place) => ({ place, at, number, log: 14 })));
+  if (placed.length > 0) await owner.insert(auditEventPlaces).values(placed);
+  return rows.map((row) => Number(row.seq));
 }
 
 const CHAIN_KEY = Buffer.alloc(32, 41);
@@ -384,9 +405,11 @@ function callerOf({ policy, world }: Instance, asker: Who): Caller {
 }
 
 function contextOf(caller: Caller): ApiContext {
-  const refuse = () => { throw new Error('listAudit asks the vault nothing'); };
+  const refuse = () => { throw new Error('listAudit asks the vault nothing but to vouch for its rows'); };
+  // It vouches for every row: what a forged one shows is the vault's test, and the pages' (audit-uses.test.ts).
+  const vault = new Proxy({ vouch: async () => ({ forged: [], listingOlder: false }) }, { get: (target, name) => (name === 'vouch' ? target.vouch : name === 'then' ? undefined : refuse()) });
   return {
-    db: database.runtime, chainKey: CHAIN_KEY, previousChainKeys: [], vault: new Proxy({}, { get: refuse }) as never, waitUntil: refuse,
+    db: database.runtime, chainKey: CHAIN_KEY, previousChainKeys: [], vault: vault as never, waitUntil: refuse,
     signin: null, workloads: null, mcp: null, caller, requestId: randomUUID(), sourceIp: null, credentialId: null, passkeyId: null,
     provenance: null, via: null, personalToken: null, credentialExpiresAt: null, rotateAfterDays: null,
   };
@@ -400,6 +423,8 @@ async function pages(instance: Instance, asker: Who, q: Query, log: readonly Ent
     ...(q.actor === null ? {} : { actor: q.actor }),
     ...(q.decision === null ? {} : { decision: q.decision }),
     detail: q.detail,
+    // Count what each page leaves out: a page with `detail` leaves nothing out, and counts nothing.
+    hidden: true,
     limit: q.limit,
   };
   const forbidden = !readsWhole(instance, asker) && !instance.world.projects.some((project) =>
@@ -419,7 +444,9 @@ async function pages(instance: Instance, asker: Who, q: Query, log: readonly Ent
   let rest = shown;
   for (let n = 0; ; n++) {
     assert.ok(n <= shown.length, 'paging ends');
-    const page = await listAudit(ctx, { ...asked, ...(before === undefined ? {} : { before }) });
+    // A seq of 0.14's log, as clients before 0.15 page, or an earlier release's `next` that names it with nothing older in
+    // 0.15's (`<seq>:-`): the same page.
+    const page = await listAudit(ctx, { ...asked, ...(before === undefined ? {} : { before: n % 2 === 0 ? before : `${before}:-` }) });
     const expected = rest.slice(0, q.limit);
     assert.deepEqual(page.entries.map((each) => each.seq), expected.map(({ seq }) => seq), `page ${n} before ${before ?? 'the head'}`);
     assert.equal(page.more, expected.length === q.limit, `page ${n}: more`);

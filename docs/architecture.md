@@ -920,18 +920,20 @@ One operation id ties together everything one action did. Sign-ins, tokens,
 the vault's key operations and the heartbeat are detail: in the log and its
 chain, but left out of `GET /api/audit` unless `detail=1`.
 
-With `sealed=1`, which every client of 0.15 sends, a page lists what 0.15's
-log alone records too (reads, each a use; sign-ins through trust bindings,
-and the tokens' issues, revokes and sign-outs), merged by time, and pages
-by `next`, which it sends back as `before`. The vault vouches for each
-entry of 0.15's log a page lists, by its MAC, or the page marks it
-`forged`. Such a page counts what it leaves out only when
-asked, `hidden=1`: each detail action, over the page's stretch of each
-log, every one on exactly one page. It counts no more than 1,000 of 0.15's
-records, and where more lie above the next entry it would show, it stops
-there: a page may then show nothing, its `next` still set. A caller that
-asks for counts follows `next` until it is null. Without `sealed`, a page
-is 0.14's log alone and says what it left out, as before 0.15.
+A page reads the audit projection, which the vault's
+projector writes from every log (`audit_events`, `audit_event_places`):
+0.14's entries, 0.15's changes and its
+reads, each a use, as one list, newest first, once listed. A page reads one
+stream (a place's, a member's, everyone's) and pages by `next`, opaque,
+which it sends back as `before`. Its other filters look at no more than
+1,000 entries past the page (`WINDOW` in `db/events.ts`): a filtered page
+may hold fewer than `limit` entries, or none, with `next` still set. A
+reader of some places sees an entry when one of its places is a place they
+read and none is an environment their role leaves out, on every page. The
+vault vouches for each entry a page lists, and for how far the projection
+has gone, by their MACs, or the page marks it `forged`. A page counts what
+it leaves out only when asked, `hidden=1`: each detail action, over the
+stretch the page read, every one on exactly one page.
 
 ### What the vault stops
 

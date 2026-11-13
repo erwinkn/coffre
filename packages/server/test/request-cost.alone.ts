@@ -28,9 +28,9 @@ import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import {
   distinctSecretCounts, environmentSecrets, liveKeysIn, lock, originsOf, places, resolvePath, secretFolderOf, secretHeads, secretsInFolder,
-  HIDDEN_COUNTED, sealedHidden, sealedPage, sealedReach, secretObjects, holdingSensitive, type ChangePoint,
+  secretObjects, holdingSensitive,
 } from '../src/db/queries.ts';
-import { readsByStanding, readsPage, readsStanding } from '../src/db/reads.ts';
+import { eventsPage, memberKeys } from '../src/db/events.ts';
 import { fetchApi, pageClient } from '../src/fetch-api.ts';
 import { sessionCookieName } from '../src/auth.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
@@ -268,7 +268,7 @@ before(async () => {
   // The vault's answers kept between requests, as a configuration keeps them (`Accesses`).
   const accesses = new Accesses();
   const signinService = new SigninService({ ...base, signin: auth.signin, accesses });
-  const deps: FixtureDeps = { ...base, signin: signinService };
+  const deps: FixtureDeps = { ...base, signin: signinService, settleAudit: false };
   const runtime: CoffreRuntime = {
     db: deps.db, vault, chainKey: deps.chainKey, previousChainKeys: [], signin: signinService, workloads: null, mcp: null, auth, publicUrl: ORIGIN,
     verifier: signinService, waitUntil, schema: { migrated: true }, appKey: { settled: true }, accesses, rotateAfterDays: 365, deployment: defineDeployment(), plugins: [],
@@ -1266,7 +1266,7 @@ test("a read of an environment's keys reads as many pages however many keys the 
  * with every key the project holds.
  */
 test("a project's audit page reads as many pages however many keys the project holds", async () => {
-  const asked = () => root.audit.list({ path: 'market', sealed: '1', limit: 50 });
+  const asked = () => root.audit.list({ path: 'market', limit: 50 });
   const pages = async () => {
     await asked();
     app.recorded = [];
@@ -1551,80 +1551,52 @@ test("the project list and a render's shell count no deleted place's keys in thi
   }
 });
 
-/**
- * What the audit pages read of what 0.15's log alone records: the
- * sign-ins through trust bindings, and the token issues, revokes and
- * sign-outs. A page of them, every member's and one's, with the
- * detail and without; what a page hides, counted over its stretch; and how
- * the credentials a page's entries name came to be. Each reads as many
- * pages however many other changes, and other members' records, the log
- * holds: members' changes, renewals, the revokes a binding's end makes,
- * all around them in time. Planted as rows, as only their reads are
- * measured, and gone again after.
- */
-/** Where the changes planted below are numbered from: past those the fixture's requests made, and below the missing members' test's (`changes`). */
-const PLANTED = 10_000_000n;
 
-test("the audit pages' records of 0.15's log read as many pages however many other changes the log holds", async () => {
+/**
+ * The audit pages and the offboarding report read the projection: a page of everyone's, a member's, a
+ * place's, a reader of some places', with each filter that passes over rows, and a member's report, read as many pages
+ * however many entries the projection holds. Planted as rows, as only their reads are measured, a tenth of them first,
+ * then all, and gone again after.
+ */
+test("the audit pages and the offboarding report read as many pages however many entries the projection holds", async () => {
   const counted = createDatabase(app.client);
-  // Numbered past the changes the fixture's own requests made, which are newer than any planted here: `n` is the
-  // number a planted change takes.
-  const n = (number: number) => PLANTED + BigInt(number);
-  const ADA = 'user:ada@acme.example';
-  // A page of the instance's: its sign-ins, and with the detail its token records, and its first adds.
-  const page = (filter: Omit<Parameters<typeof sealedPage>[1], 'instance' | 'written'>) => sealedPage(counted, { instance: true, written: null, ...filter });
-  // The key writes 0.15's log records alone: one environment's, another of the project's, one key's.
-  const [envA, envC, key] = [randomUUID(), randomUUID(), randomUUID()];
-  const THIRD = 'user:third@acme.example';
-  const writes = (written: Parameters<typeof sealedPage>[1]['written'], actors?: string[]) => sealedPage(counted, { ...(actors === undefined ? {} : { actors }), detail: false, limit: 100, instance: false, written });
-  // Their refusals, as the vault records them: a key write's where its writes are listed, an add's on the instance's pages.
-  const refusals = (at: Parameters<typeof sealedPage>[1]['written'], actors?: string[], instance = false) =>
-    sealedPage(counted, { ...(actors === undefined ? {} : { actors }), detail: false, limit: 100, instance: false, written: null, refusals: { instance, at } });
-  const credentials = Array.from({ length: 20 }, () => randomUUID());
-  /** How far a page below Ada's stretch counts, read before each measure. */
-  let reached: ChangePoint | null = null;
-  const tokens = Array.from({ length: 20 }, () => randomUUID());
-  // A stretch of Ada's time, 100 of her records, which a page that hides them counts; and a point in it, an older page's.
-  const stretch = { from: { at: 150_100 }, before: { at: 150_200, number: n(150_201) } };
+  const u = (kind: number, n: number) => `00000000-0000-4000-${8000 + kind}-${String(n).padStart(12, '0')}`;
+  const ADA = 'user:u3@x';
+  // Entries of ten members at sixty keys of six environments of two projects: a third sign-ins, a tenth refused.
+  const plant = async (from: number, count: number) => {
+    await db.owner.execute(sql`
+      INSERT INTO audit_events (at, number, log, author, action, shown, allowed, code, actor, subject, credential, project, environment, secret, version, places,
+                                request_id, operation_id, related, source_ip, detail, mac)
+      SELECT 1700000000000 + i * 10, i, CASE WHEN i % 10 = 0 THEN 14 WHEN i % 10 = 1 THEN 15 ELSE 16 END, 'vault',
+        CASE WHEN i % 3 = 0 THEN 'sign_in' ELSE 'secret.read' END, i % 3 <> 0, i % 10 <> 7, CASE WHEN i % 10 = 7 THEN 'no_grant' END, 'user:u' || (i % 10) || '@x',
+        NULL, NULL, p.id, e.id, s.id, s.id, ARRAY[p.id, e.id, s.id], NULL, NULL, NULL, NULL, '{}', ${Buffer.alloc(16)}
+      FROM generate_series(${from}::bigint, ${from + count - 1}::bigint) i,
+        LATERAL (SELECT CAST(format('00000000-0000-4000-8002-%s', lpad((1 + i % 60)::text, 12, '0')) AS uuid) AS id) s,
+        LATERAL (SELECT CAST(format('00000000-0000-4000-8001-%s', lpad((1 + (1 + i % 60) % 6)::text, 12, '0')) AS uuid) AS id) e,
+        LATERAL (SELECT CAST(format('00000000-0000-4000-8000-%s', lpad((1 + (1 + (1 + i % 60) % 6) % 2)::text, 12, '0')) AS uuid) AS id) p`);
+    await db.owner.execute(sql`INSERT INTO audit_event_places (place, at, number, log) SELECT unnest(places), at, number, log FROM audit_events
+      WHERE number BETWEEN ${from} AND ${from + count - 1} ON CONFLICT DO NOTHING`);
+    await db.owner.execute(sql`INSERT INTO audit_member_keys (principal, secret, version, wrote, at, number)
+      SELECT actor, secret, version, false, max(at), max(number) FROM audit_events WHERE shown AND allowed GROUP BY actor, secret, version
+      ON CONFLICT (principal, secret, version, wrote) DO UPDATE SET at = excluded.at, number = excluded.number`);
+    await db.owner.execute(sql`VACUUM (ANALYZE) audit_events, audit_event_places, audit_member_keys`);
+  };
   const reads: Record<string, () => Promise<unknown>> = {
-    "every service's sign-ins": () => page({ detail: false, limit: 100 }),
-    "a service's sign-ins": () => page({ actors: ['token:planted'], detail: false, limit: 100 }),
-    "an older page of a service's": () => page({ actors: ['token:planted'], detail: false, before: { at: 100_150, number: n(100_150) }, limit: 100 }),
-    "every member's records": () => page({ detail: true, limit: 100 }),
-    "a person's records": () => page({ actors: [ADA], detail: true, limit: 100 }),
-    "a person's older page, below a time": () => page({ actors: [ADA], detail: true, before: stretch.before, limit: 100 }),
-    "a name's records, a person's or a service's": () => page({ actors: ['user:planted', 'token:planted', 'system:planted', 'planted'], detail: true, limit: 100 }),
-    "what a page hides of a person's": () => sealedHidden(counted, { actors: [ADA], ...stretch }),
-    "what a page hides of everyone's": () => sealedHidden(counted, stretch),
-    // A page past the last entry it shows counts no further than `sealedReach`, however long the history below it.
-    "how far a page counts of a person's": () => sealedReach(counted, { actors: [ADA], before: stretch.before }),
-    "how far a page counts of everyone's": () => sealedReach(counted, { before: stretch.before }),
-    "what a page counts of a person's, as far as it reaches": () => sealedHidden(counted, { actors: [ADA], from: reached!, before: stretch.before }),
-    // Whole pages through the API, every statement each makes, as coffre's own pages ask them and counted (`hidden`): a
-    // service's, its runs' sign-outs above its sign-ins, and a person's, nothing but their records.
-    "through the API, a service's page": () => root.audit.list({ actor: 'token:planted', sealed: '1', limit: 50 }),
-    "through the API, a person's page": () => root.audit.list({ actor: ADA, sealed: '1', limit: 50 }),
-    "through the API, a service's page, counted": () => root.audit.list({ actor: 'token:planted', sealed: '1', hidden: '1', limit: 50 }),
-    "through the API, a person's page, counted": () => root.audit.list({ actor: ADA, sealed: '1', hidden: '1', limit: 50 }),
-    "how a page's credentials came to be": () => originsOf(counted, [...credentials, ...tokens]),
-    'every key write': () => writes({ all: true }),
-    "a person's key writes": () => writes({ all: true }, [ADA]),
-    "an environment's key writes": () => writes({ environmentIds: [envA] }),
-    "a project's key writes, two environments": () => writes({ environmentIds: [envA, envC] }),
-    "a key's writes": () => writes({ secretId: key }),
-    "an environment's key writes by a person": () => writes({ environmentIds: [envA] }, [ADA]),
-    "a project's key writes by a person, two environments": () => writes({ environmentIds: [envA, envC] }, [ADA]),
-    "a key's writes by a person": () => writes({ secretId: key }, [ADA]),
-    // Of two members, as an actor's page names a person (`user:` and the bare name): each one's read on its own, never
-    // one read of both sorted, which would grow with either's history there, nor the place's with others' passed over.
-    "an environment's key writes by two people": () => writes({ environmentIds: [envA] }, [ADA, THIRD]),
-    'every refused key write': () => refusals({ all: true }),
-    "a person's refused key writes": () => refusals({ all: true }, [ADA]),
-    "an environment's refused key writes": () => refusals({ environmentIds: [envA] }),
-    "an environment's refused key writes by a person": () => refusals({ environmentIds: [envA] }, [ADA]),
-    'every refused add': () => refusals(null, undefined, true),
-    "a person's refused adds": () => refusals(null, [ADA], true),
-    "through the API, a person's refusals": () => root.audit.list({ actor: ADA, sealed: '1', decision: 'deny', limit: 50 }),
+    "everyone's page": () => eventsPage(counted, { stream: { all: true, shownOnly: true }, match: {}, detail: false, counted: false, limit: 100 }),
+    'with the detail': () => eventsPage(counted, { stream: { all: true, shownOnly: false }, match: {}, detail: true, counted: false, limit: 100 }),
+    'counting what it hides': () => eventsPage(counted, { stream: { all: true, shownOnly: false }, match: {}, detail: false, counted: true, limit: 100 }),
+    'refusals': () => eventsPage(counted, { stream: { all: true, shownOnly: true }, match: { allowed: false }, detail: false, counted: false, limit: 100 }),
+    "a member's page": () => eventsPage(counted, { stream: { actors: [ADA] }, match: {}, detail: false, counted: false, limit: 50 }),
+    "a name's page, a person's or a service's": () => eventsPage(counted, { stream: { actors: [ADA, 'token:u3@x', 'system:u3@x', 'u3@x'] }, match: {}, detail: false, counted: false, limit: 50 }),
+    "an environment's page": () => eventsPage(counted, { stream: { places: [u(1, 3)] }, match: { within: [u(1, 3)] }, detail: false, counted: false, limit: 100 }),
+    "a key's page": () => eventsPage(counted, { stream: { places: [u(2, 8)] }, match: { within: [u(2, 8)] }, detail: false, counted: false, limit: 100 }),
+    "a reader of a project but for an environment": () => eventsPage(counted, { stream: { places: [u(0, 1)] }, match: { except: [u(1, 2)] }, detail: false, counted: false, limit: 100 }),
+    'a reader of three environments': () => eventsPage(counted, { stream: { places: [u(1, 1), u(1, 3), u(1, 5)] }, match: {}, detail: false, counted: false, limit: 100 }),
+    // More places than a page reads apart (`PLACES_APART`): everyone's stream, held to them, one window in all.
+    'a reader of twenty keys': () => eventsPage(counted, { stream: { places: Array.from({ length: 20 }, (_, i) => u(2, 1 + i)) }, match: {}, detail: false, counted: false, limit: 100 }),
+    'an older page': () => eventsPage(counted, { stream: { all: true, shownOnly: true }, match: {}, detail: false, counted: false, limit: 100, before: { at: 1700000000000 + 10 * 1000, number: 1000n, log: 16 } }),
+    "a member's report": () => memberKeys(counted, [ADA]),
+    "ten removed members' counts": () => memberKeys(counted, Array.from({ length: 10 }, (_, i) => `user:u${i}@x`)),
   };
   const pages = async () => {
     const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
@@ -1632,8 +1604,7 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
       await run();
       app.recorded = [];
       await run();
-      // A page's reads go side by side, in no set order: each is matched to itself by its text.
-      const statements = [...app.recorded].sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+      const statements = [...app.recorded];
       app.recorded = null;
       read[name] = [];
       for (const statement of statements) {
@@ -1643,499 +1614,25 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     }
     return read;
   };
-  // A key write down the two-trip path, at an environment: its payload starts with its `digest` and names its read.
-  const writtenAt = (environment: string) => sql`${`{"digest":null,"environmentId":"${environment}","inputs":"00","key":null,"nature":"secret","op":"secret.write","projectId":"p","ref":{"id":"`} || gen_random_uuid() || '","kind":"secret"},"reference":null,"request":{"credential":"c","identity":null,"number":"1","operationId":null,"requestId":null},"source":null,"version":"v"}'`;
-  // A key write's refusal at an environment, and an add's, as the vault records them: their payloads start with their code.
-  const refusedAt = (environment: string) => sql`${`{"code":"no_grant","credential":"c","environmentId":"${environment}","identity":null,"keys":["K"],"op":"write.refused","path":"market/dev","projectId":"p","read":"00","ref":{"id":"`} || gen_random_uuid() || '","kind":"request"},"request":{"number":"1","operationId":null,"requestId":null}}'`;
-  const credential = (record: string) => sql.raw(`'{"op":"credential.${record}","ref":{"id":"' || gen_random_uuid() || '","kind":"credential"}'`);
-  // Each kind of change as the vault writes its payload, canonical (keys in order): `g` its row's place in the batch.
-  const payloads: Record<'signIn' | 'member' | 'issue' | 'revoke' | 'signOut' | 'unbound' | 'renew' | 'written' | 'writtenC' | 'admitted' | 'refused' | 'refusedC' | 'refusedAdd', (actor: string) => SQL> = {
-    signIn: () => sql`${credential('issue')} || ',"signIn":{"binding":"b","issuer":"i","proof":"oidc","run":{"run_id":"' || g || '"}}}'`,
-    member: () => sql`'{"op":"member.add","ref":{"id":"token:x","kind":"principal"}}'`,
-    issue: (actor: string) => sql.raw(`'{"caller":"person","expiresAt":1,"generation":1,"issue":{"by":"${actor}","kind":"personal","label":"l' || g || '","via":null},"op":"credential.issue","principal":"${actor}","ref":{"id":"' || gen_random_uuid() || '","kind":"credential"},"scope":[]}'`),
-    revoke: (actor: string) => sql`${credential('revoke')} || ${`,"revoke":{"kind":"cli","principal":"${actor}","reason":"revoke","via":null}}`}`,
-    signOut: (actor: string) => sql`${credential('revoke')} || ${`,"revoke":{"kind":"browser","principal":"${actor}","reason":"sign_out","via":null}}`}`,
-    unbound: (actor: string) => sql`${credential('revoke')} || ${`,"revoke":{"binding":"b","kind":"service","principal":"${actor}","reason":"unbound","via":null}}`}`,
-    renew: () => sql`'{"expiresAt":' || g || ',"op":"credential.renew","ref":{"id":"r","kind":"credential"}}'`,
-    written: () => writtenAt(envA),
-    writtenC: () => writtenAt(envC),
-    admitted: () => sql`'{"inputs":"00","op":"member.add","ref":{"id":"token:x' || g || '","kind":"principal"},"request":{"credential":"c","identity":null,"operationId":null,"requestId":null},"role":"member","scope":null}'`,
-    refused: () => refusedAt(envA),
-    refusedC: () => refusedAt(envC),
-    refusedAdd: () => sql`'{"code":"not_allowed","credential":"c","identity":null,"op":"add.refused","principal":"user:x' || g || '","read":"00","ref":{"id":"' || gen_random_uuid() || '","kind":"request"},"request":{"operationId":null,"requestId":null},"role":"owner"}'`,
-  };
-  /**
-   * `count` changes numbered from `from`, each asked at the millisecond `at` + its place (`from`'s by default), long
-   * before any checkpoint's floor: of `actor`, one kind's, each its own object or `object`'s.
-   */
-  const plant = (from: number, count: number, actor: string, kind: keyof typeof payloads, options: { object?: SQL; at?: number } = {}) => db.owner.execute(sql`
-    INSERT INTO log_changes (number, at, request_id, object, actor, payload, mac)
-    SELECT ${PLANTED} + ${from} + g, ${options.at ?? from} + g, 'planted-' || (${from} + g), ${options.object ?? sql`gen_random_uuid()`}, ${actor}, ${payloads[kind](actor)},
-      decode(repeat('00', 16), 'hex')
-    FROM generate_series(1, ${count}) g`);
-  /**
-   * The log as autovacuum leaves it once its rounds have caught up: every page all-visible, so that an index-only scan
-   * reads no heap, and its statistics fresh. VACUUM marks a page all-visible only once no snapshot in the database may
-   * still see its rows in progress, and a snapshot's horizon is the oldest transaction running anywhere in the cluster:
-   * one taken here while the last rows were planted (an autovacuum's ANALYZE, a request's work left to the background)
-   * left the newest of them to the heap on CI, the service's counted page reading 52 pages, not 14. So it
-   * vacuums again until no page is left, as autovacuum's next round would, and names what held them past a minute.
-   */
-  const settle = async () => {
-    for (const until = Date.now() + 60_000; ; await sleep(100)) {
-      // Not in parallel, as autovacuum never does: a parallel one's shared memory outgrows a container's 64 MB /dev/shm
-      // with the log's indexes (53100 on CI).
-      await db.owner.execute(sql`VACUUM (PARALLEL 0) log_changes`);
-      const [{ pages, visible }] = await db.owner.execute<{ pages: number; visible: number }>(sql`
-        SELECT relpages AS pages, relallvisible AS visible FROM pg_class WHERE oid = 'log_changes'::regclass`);
-      if (visible === pages) break;
-      if (Date.now() > until) {
-        const held = await db.owner.execute(sql`
-          SELECT pid, backend_type, state, backend_xmin::text AS xmin, left(query, 80) AS query FROM pg_stat_activity
-          WHERE datname = current_database() AND pid <> pg_backend_pid() AND (backend_xmin IS NOT NULL OR backend_xid IS NOT NULL)`);
-        assert.fail(`${pages - visible} of the log's ${pages} pages not all-visible after a minute of vacuums; snapshots here: ${JSON.stringify(held)}`);
-      }
-    }
-    await db.owner.execute(sql`ANALYZE log_changes`);
-  };
   try {
-    // No autovacuum on the log while it is planted. A VACUUM tells the free space map of the room each page kept,
-    // too little for the rows that filled it but enough for a smaller kind's (a page of key writes keeps a refused
-    // add's), and the batch planted next fills that room first, a row a page. So where an autovacuum landed decided
-    // which rows lay scattered: one late in the 50,000 newer refused adds left the newest 100 a page each, and their
-    // first page read 103 pages, where it read 8 before. The only VACUUMs are then this one, of the room the file's
-    // earlier cases left, and `settle`'s, so every run clusters each kind's rows the same way.
-    await db.owner.execute(sql`ALTER TABLE log_changes SET (autovacuum_enabled = off)`);
-    await db.owner.execute(sql`VACUUM (PARALLEL 0) log_changes`);
-    // A log whose indexes are as deep as they get for long (a probe of each is its depth's pages): 60,000 changes of
-    // members, 20,000 sign-ins of another service, 20,000 records of another person's, and the service's and Ada's own.
-    await plant(0, 60_000, 'user:admin@acme.example', 'member');
-    await plant(200_000, 20_000, 'token:other', 'signIn');
-    for (const [i, kind] of (['issue', 'revoke', 'signOut'] as const).entries()) await plant(220_000 + 7_000 * i, 7_000, 'user:other@acme.example', kind);
-    await plant(100_000, 200, 'token:planted', 'signIn');
-    for (const [i, kind] of (['issue', 'revoke', 'signOut', 'issue'] as const).entries()) await plant(150_000 + 100 * i, 100, ADA, kind);
-    for (const [i, id] of credentials.entries()) await plant(100_200 + i, 1, 'token:planted', 'signIn', { object: sql`log_object('credential', ${id})` });
-    for (const [i, id] of tokens.entries()) await plant(150_400 + i, 1, ADA, 'issue', { object: sql`log_object('credential', ${id})` });
-    // Ada's history below her stretch: more issues than a page counts. And the service's runs signing out, more than a
-    // page counts, after its sign-ins.
-    await plant(800_000, 1_500, ADA, 'issue', { at: 140_000 });
-    await plant(1_100_000, 1_500, 'token:planted', 'signOut', { at: 560_000 });
-    // Key writes: Ada's at envA, 100 of them, 100 more of one key; others' at envC; first adds by an admin.
-    await plant(1_200_000, 100, ADA, 'written');
-    await plant(1_200_100, 100, ADA, 'written', { object: sql`log_object('secret', ${key})` });
-    await plant(1_201_000, 20_000, 'user:other@acme.example', 'writtenC');
-    await plant(1_230_000, 1_000, 'user:admin@acme.example', 'admitted');
-    // Refusals: Ada's at envA, others' at envC, an admin's adds.
-    await plant(1_240_000, 100, ADA, 'refused');
-    await plant(1_241_000, 20_000, 'user:other@acme.example', 'refusedC');
-    await plant(1_262_000, 1_000, 'user:admin@acme.example', 'refusedAdd');
-    await settle();
-    reached = await sealedReach(counted, { actors: [ADA], before: stretch.before });
+    // A page's stream holds more than a page and its window (`WINDOW`) at the smaller size too: a member's 2,000 rows, a
+    // key's 330, so that the larger compares like with like.
+    await plant(1, 20_000);
     const small = await pages();
-    // 100,000 changes of members more; 50,000 sign-ins of the other service, and 50,000 of its own since; 50,000
-    // records of the other person's, and 50,000 of Ada's since; and, asked in her stretch's time, 50,000 renewals of
-    // one of the page's tokens (a session's history, its own object's), and 50,000 revokes a binding's end made.
-    await plant(300_000, 100_000, 'user:admin@acme.example', 'member');
-    await plant(400_000, 50_000, 'token:other', 'signIn');
-    await plant(500_000, 50_000, 'token:planted', 'signIn');
-    for (const [i, kind] of (['issue', 'revoke'] as const).entries()) await plant(550_000 + 25_000 * i, 25_000, 'user:other@acme.example', kind);
-    for (const [i, kind] of (['issue', 'signOut'] as const).entries()) await plant(600_000 + 25_000 * i, 25_000, ADA, kind);
-    await plant(700_000, 50_000, ADA, 'renew', { object: sql`log_object('credential', ${tokens[0]!})`, at: 150_100 });
-    await plant(750_000, 50_000, ADA, 'unbound', { at: 150_100 });
-    // And 50,000 more of Ada's own, older still: what a page past her last shown entry would count but for its reach.
-    await plant(850_000, 50_000, ADA, 'issue', { at: 90_000 });
-    // And 50,000 more of the service's runs signing out, after every sign-in of its own.
-    await plant(950_000, 50_000, 'token:planted', 'signOut');
-    // 50,000 key writes more by someone else at another environment, and 50,000 first adds, all since.
-    await plant(1_300_000, 50_000, 'user:other@acme.example', 'writtenC');
-    await plant(1_350_000, 50_000, 'user:admin@acme.example', 'admitted');
-    // Crossed: another's key writes at Ada's environment and at her key, and hers elsewhere, all
-    // newer than hers there: a page of hers at a place reads past none of them.
-    await plant(1_410_000, 50_000, 'user:other@acme.example', 'written');
-    await plant(1_460_000, 50_000, ADA, 'writtenC');
-    await plant(1_510_000, 50_000, 'user:other@acme.example', 'written', { object: sql`log_object('secret', ${key})` });
-    // And a third person's, older than all of Ada's there.
-    await plant(1_560_000, 50_000, THIRD, 'written', { at: 1_000 });
-    // 50,000 refusals more of others at envC and at Ada's environment, 50,000 of hers elsewhere, 50,000 refused adds.
-    await plant(1_610_000, 50_000, 'user:other@acme.example', 'refusedC');
-    await plant(1_660_000, 50_000, 'user:other@acme.example', 'refused');
-    await plant(1_710_000, 50_000, ADA, 'refusedC');
-    await plant(1_760_000, 50_000, 'user:admin@acme.example', 'refusedAdd');
-    await settle();
-    reached = await sealedReach(counted, { actors: [ADA], before: stretch.before });
+    await plant(20_001, 180_000);
     const grown = await pages();
     for (const [name, statements] of Object.entries(small)) {
-      assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
-      if (!name.startsWith('through the API')) assert.equal(statements.length, 1, `${name} is one statement`);
-      for (const [i, { text, pages: before }] of statements.entries()) {
-        const { pages: after, plan } = grown[name]![i]!;
-        assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with the log grown, ${before} before:\n${plan}`);
-      }
+      assert.equal(statements.length, 1, `${name} is one statement`);
+      const [{ text, pages: before }] = statements as [{ text: string; pages: number | null }];
+      const { pages: after, plan } = grown[name]![0]!;
+      assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with the projection grown tenfold, ${before} before:\n${plan}`);
     }
-    // And they read what was planted: a page of the service's, the older page below it; Ada's newest, and those
-    // below her stretch, passing over renewals and a binding's revokes; her stretch's count; each credential's origin.
-    assert.deepEqual((await page({ actors: ['token:planted'], detail: false, limit: 100 })).rows.length, 100);
-    assert.deepEqual((await page({ actors: ['token:planted'], detail: false, before: { at: 100_150, number: n(100_150) }, limit: 100 })).rows.map(({ number }) => number).slice(0, 2), [n(100_149), n(100_148)]);
-    assert.deepEqual((await page({ actors: [ADA], detail: true, limit: 2 })).rows.map(({ number }) => number), [n(650_000), n(649_999)]);
-    assert.deepEqual((await page({ actors: [ADA], detail: true, before: stretch.before, limit: 2 })).rows.map(({ number }) => number), [n(150_200), n(150_199)]);
-    // The newest of the instance's records: the newest first add planted; of its token records, the
-    // service's runs' newest sign-out. Below the fixture's own, made at this run's time, long after any planted.
-    assert.deepEqual((await page({ detail: true, before: { at: 1_000_000_000 }, limit: 1 })).rows.map(({ number }) => number), [n(1_400_000)]);
-    assert.deepEqual((await page({ actors: ['token:planted'], detail: true, limit: 1 })).rows.map(({ number }) => number), [n(1_000_000)]);
-    // The service's first page, counted: its runs' newest sign-outs, as many as a page counts, and none of its sign-ins
-    // below them. Not counted: its sign-ins at once.
-    const first = await root.audit.list({ actor: 'token:planted', sealed: '1', hidden: '1', limit: 50 });
-    assert.deepEqual([first.entries.length, first.hidden], [0, [{ action: 'sign_out', count: HIDDEN_COUNTED }]]);
-    const shown = await root.audit.list({ actor: 'token:planted', sealed: '1', limit: 50 });
-    assert.deepEqual([shown.entries.length, shown.entries[0]?.action, shown.hidden], [50, 'token.exchange', undefined]);
-    assert.deepEqual(await sealedHidden(counted, { actors: [ADA], ...stretch }), [{ action: 'token.revoke', count: 100 }]);
-    // Below her stretch's time alone, every one of hers: 100 issues, the 100 revokes the stretch holds but its end, and
-    // the older history planted.
-    assert.deepEqual(
-      (await sealedHidden(counted, { actors: [ADA], before: { at: 150_200 } })).sort((a, b) => (a.action < b.action ? -1 : 1)),
-      [{ action: 'token.create', count: 100 + 1_500 + 50_000 }, { action: 'token.revoke', count: 100 }],
-    );
-    // A page counts as far as it reaches: the newest `HIDDEN_COUNTED` below her stretch, the 200 there and 800 older.
-    assert.deepEqual(reached, { at: 140_701, number: n(800_701) });
-    assert.deepEqual(
-      (await sealedHidden(counted, { actors: [ADA], from: reached!, before: stretch.before })).sort((a, b) => (a.action < b.action ? -1 : 1)),
-      [{ action: 'token.create', count: 900 }, { action: 'token.revoke', count: 100 }],
-    );
-    // The key writes: Ada's newest at envA, of the key among them, past the other's since; the key's own, the other's
-    // newest, and hers alone; hers at envC, planted last, the newest of hers on the project's page.
-    assert.deepEqual((await writes({ environmentIds: [envA] }, [ADA])).rows.map(({ number }) => number).slice(0, 2), [n(1_200_200), n(1_200_199)]);
-    assert.deepEqual((await writes({ secretId: key })).rows.map(({ number }) => number).slice(0, 2), [n(1_560_000), n(1_559_999)]);
-    assert.equal((await writes({ secretId: key })).rows.length, 100);
-    assert.deepEqual((await writes({ secretId: key }, [ADA])).rows.map(({ number }) => number).slice(0, 2), [n(1_200_200), n(1_200_199)]);
-    assert.equal((await writes({ secretId: key }, [ADA])).rows.length, 100);
-    const both = (await writes({ environmentIds: [envA] }, [ADA, THIRD])).rows;
-    assert.deepEqual([both.length, both[0]?.number, both.at(-1)?.number], [100, n(1_200_200), n(1_200_101)]);
-    assert.deepEqual((await writes({ environmentIds: [envC] }, [ADA])).rows.map(({ number }) => number).slice(0, 1), [n(1_510_000)]);
-    assert.deepEqual((await writes({ environmentIds: [envA, envC] }, [ADA])).rows.map(({ number }) => number).slice(0, 1), [n(1_510_000)]);
-    assert.deepEqual((await writes({ environmentIds: [envA, envC] })).rows.map(({ number }) => number).slice(0, 1), [n(1_560_000)]);
-    // The refusals: Ada's newest at envA, past others' there since; every one's newest, hers at envC; the adds'.
-    assert.deepEqual((await refusals({ environmentIds: [envA] }, [ADA])).rows.map(({ number }) => number).slice(0, 2), [n(1_240_100), n(1_240_099)]);
-    assert.equal((await refusals({ environmentIds: [envA] }, [ADA])).rows.length, 100);
-    assert.deepEqual((await refusals({ environmentIds: [envA] })).rows.map(({ number }) => number).slice(0, 1), [n(1_710_000)]);
-    assert.deepEqual((await refusals({ all: true })).rows.map(({ number }) => number).slice(0, 1), [n(1_760_000)]);
-    assert.deepEqual((await refusals(null, undefined, true)).rows.map(({ number }) => number).slice(0, 1), [n(1_810_000)]);
-    assert.deepEqual((await refusals(null, [ADA], true)).rows, []);
-    const origins = await originsOf(counted, [...credentials, ...tokens]);
-    assert.deepEqual(credentials.map((id) => origins.get(id)?.kind), credentials.map(() => 'signIn'));
-    assert.deepEqual(tokens.map((id) => origins.get(id)), tokens.map(() => ({ kind: 'personal', label: 'l1', principal: ADA })));
+    // And they read what was planted: a full page of each, the newest first.
+    const newest = await eventsPage(counted, { stream: { all: true, shownOnly: true }, match: {}, detail: false, counted: false, limit: 2 });
+    assert.deepEqual(newest.rows.map(({ number }) => number), [200_000n, 199_999n]);
+    const member = await eventsPage(counted, { stream: { actors: [ADA] }, match: {}, detail: false, counted: false, limit: 2 });
+    assert.deepEqual(member.rows.map(({ actor, shown }) => [actor, shown]), [[ADA, true], [ADA, true]]);
   } finally {
-    try {
-      await db.owner.execute(sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
-    } finally {
-      await db.owner.execute(sql`ALTER TABLE log_changes RESET (autovacuum_enabled)`);
-    }
-  }
-});
-
-/**
- * `count` CI runs' sign-ins and as many personal tokens made, as 0.14's log records them, each of a credential of its
- * own: the history an audit page's `originsOf` asks about each credential the page shows. With a handful of them the
- * planner may walk them all by `audit_log_action_idx` (23 pages) rather than probe `audit_log_exchange_idx` and
- * `audit_log_token_create_idx` once a credential (100, for 50), and which it picks follows ANALYZE's sample of a long log
- * holding a few: a page measured once each way read as if the reads had grown it. Thousands of them, as an
- * instance holds, and it probes, at every step.
- */
-const signIns = (count: number) => append(2 * count, (i): NewEntry => i % 2 === 0
-  ? { actor: 'token:ci-deploy', action: 'token.exchange', decision: 'allow', metadata: JSON.stringify({ credentialId: randomUUID(), run: { repository: 'acme/app', ref: 'refs/heads/main' } }) }
-  : { actor: 'user:other@acme.example', action: 'token.create', decision: 'allow', metadata: JSON.stringify({ targetCredentialId: randomUUID(), kind: 'personal', label: `laptop-${i}` }) });
-
-test("the audit pages' reads, each a use of 0.15's log as the vault's projector lists it, read as many pages however many other reads the log holds (T166)", async () => {
-  const counted = createDatabase(app.client);
-  const ADA = 'user:ada@acme.example';
-  const OTHER = 'user:other@acme.example';
-  const AHEAD = 100;
-  const ids = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT CAST(id AS text) AS id FROM ${where}`)).map((row) => row.id);
-  // Ada's reads are of market's keys, of their current versions, as the offboarding report weighs them; everyone else's
-  // are of keys anywhere, in forks and through references whose source moves on: none is on her pages.
-  await root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`READS_COST_${i}`, `value-${i}`])));
-  // A member, whose report the page reads.
-  await root.members.add(ADA).catch(() => {});
-  const [market] = await ids(sql`projects WHERE slug = 'market'`);
-  const [dev] = await ids(sql`environments WHERE slug = 'dev' AND project_id = ${market}`);
-  const keys = (await db.owner.execute<{ id: string; version: string }>(sql`
-    SELECT CAST(id AS text) AS id, CAST(current_version_id AS text) AS version FROM secrets WHERE environment_id = ${dev} AND key LIKE 'READS_COST_%' ORDER BY key`));
-  const now = Date.now();
-  const day = (at: number) => new Date(at).toISOString().slice(0, 10);
-  await db.owner.execute(sql`SELECT make_reads_day(${day(now - 86_400_000)}::date), make_reads_day(${day(now)}::date)`);
-  const array = (values: readonly string[]) => sql.raw(`ARRAY[${values.map((value) => `'${value}'`).join(',')}]::uuid[]`);
-  let next = 5_000_000;
-  /**
-   * `count` reads numbered on from the last, asked from `from` ms ago, one every `every` ms, by `principal`: of Ada's
-   * keys, at their versions, or of keys of nowhere in particular, each read in a fork of its own of `forks`, and
-   * through a reference to one of `sources`, whichever are given.
-   */
-  const plant = async (count: number, principal: string, from: number, every: number, options: { own?: boolean; forks?: number; sources?: number } = {}) => {
-    const first = next;
-    next += count;
-    const pick = (n: number | undefined) => (n === undefined ? sql`NULL::uuid` : sql`md5(${String(first)} || '-' || (g % ${n}))::uuid`);
-    // 50,000 a statement: each places its reads too (migration 0050's trigger), under the owner's statement timeout.
-    for (let low = 1; low <= count; low += 50_000) await db.owner.execute(sql`
-      INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
-      SELECT CAST(${first} AS bigint) + g, CAST(${now - from} AS bigint) + g * CAST(${every} AS bigint), gen_random_uuid(), 1, ${principal},
-             ${options.own === true ? sql`(${array(keys.map((key) => key.id))})[1 + g % ${keys.length}]` : sql`gen_random_uuid()`},
-             ${options.own === true ? sql`${dev}::uuid` : sql`gen_random_uuid()`}, ${market}::uuid, ${pick(options.forks)},
-             ${pick(options.sources)}, ${options.sources === undefined ? sql`NULL::uuid` : sql`gen_random_uuid()`}, ${options.sources === undefined ? sql`NULL::uuid` : sql`${market}::uuid`},
-             ${options.own === true ? sql`(${array(keys.map((key) => key.version))})[1 + g % ${keys.length}]` : sql`NULL::uuid`}, decode(repeat('00', 16), 'hex')
-        FROM generate_series(CAST(${low} AS integer), CAST(${Math.min(count, low + 49_999)} AS integer)) g`);
-    // And the days each member's reads are on, as the projector writes them beside the reads.
-    await db.owner.execute(sql`
-      INSERT INTO log_read_days (principal, day) SELECT DISTINCT principal, CAST(at / 86400000 AS integer) FROM log_reads
-       WHERE number > ${first} AND number <= ${first + count} ON CONFLICT DO NOTHING`);
-  };
-  const reads: Record<string, () => Promise<unknown>> = {
-    'every read': () => readsPage(counted, { limit: 100 }),
-    "a member's reads": () => readsPage(counted, { actors: [ADA], limit: 100 }),
-    "a member's older page": () => readsPage(counted, { actors: [ADA], before: { at: now - 2 * 3_600_000 }, limit: 100 }),
-    'how far the reads are listed': () => readsStanding(counted),
-    "an offboarding report's reads, and how far they are listed": () => readsByStanding(counted, [ADA]),
-    // Whole pages and the report through the API, every statement each makes, the vault's vouching aside.
-    'through the API, the whole log': () => root.audit.list({ sealed: '1', limit: 50 }),
-    "through the API, a member's page": () => root.audit.list({ actor: ADA, sealed: '1', limit: 50 }),
-    "through the API, a member's report": () => root.members.get(ADA),
-  };
-  const pages = async () => {
-    const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
-    for (const [name, run] of Object.entries(reads)) {
-      await run();
-      app.recorded = [];
-      await run();
-      const statements = [...app.recorded].sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
-      app.recorded = null;
-      read[name] = [];
-      for (const statement of statements) {
-        // A report's transaction's own statements read nothing to measure.
-        if (!/^\s*(select|with)\b/i.test(statement.text)) continue;
-        const work = await app.work(statement);
-        read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
-      }
-    }
-    return read;
-  };
-  const flat = (small: Awaited<ReturnType<typeof pages>>, grown: Awaited<ReturnType<typeof pages>>, names: readonly string[]) => {
-    for (const name of names) {
-      const statements = small[name]!;
-      assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
-      for (const [i, { text, pages: before }] of statements.entries()) {
-        const { pages: after, plan } = grown[name]![i]!;
-        assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with the log grown, ${before} before:\n${plan}`);
-      }
-    }
-  };
-  // Every table's statistics fresh before each measure, so that none flips a plan between two (autovacuum's analyze of
-  // audit_log, landing mid-test on CI's slower runner, tipped the directory's walk of it from 159 pages to 380).
-  const settle = async () => {
-    await db.owner.execute(sql`VACUUM (ANALYZE) log_reads`);
-    await db.owner.execute(sql`ANALYZE`);
-  };
-  // A day of reads made past the last, each time: what a connection's plans are made again for.
-  let made = AHEAD + 1;
-  const makeDay = async () => {
-    made += 1;
-    await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + CAST(${made} AS integer))`);
-  };
-  try {
-    // The credentials' history the pages ask about: 5,000 sign-ins and as many tokens made, none Ada's.
-    await signIns(5_000);
-    // Today's: 20,000 reads by another member, a tenth in forks and a twentieth through references; and Ada's 2,000 of
-    // her keys through the day.
-    await plant(18_000, OTHER, 12 * 3_600_000, 2_000);
-    await plant(1_000, OTHER, 11 * 3_600_000, 20_000, { forks: 50 });
-    await plant(1_000, OTHER, 11 * 3_600_000, 20_000, { sources: 50 });
-    await plant(2_000, ADA, 10 * 3_600_000, 15_000, { own: true });
-    await settle();
-    const small = await pages();
-    // A hundred days of others' reads after all of Ada's, each of its own partition, alone first (else her
-    // page read a probe of each, then her report each whole, whichever plan the others' other reads tipped it to).
-    await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d`);
-    await plant(20_000, OTHER, -86_400_000, (AHEAD * 86_400_000) / 20_000);
-    await settle();
-    flat(small, await pages(), Object.keys(reads));
-    // Then twenty times the others' since, all newer than what the pages show: reads anywhere, in 5,000 forks, and
-    // through references repointed to 20,000 sources between them.
-    await plant(300_000, OTHER, 6 * 3_600_000, 50);
-    await plant(50_000, OTHER, 5 * 3_600_000, 200, { forks: 5_000 });
-    await plant(50_000, OTHER, 5 * 3_600_000, 200, { sources: 20_000 });
-    await settle();
-    flat(small, await pages(), Object.keys(reads));
-    // And Ada's own, older than her page: her pages read as many, her report all of hers, as 0.14's did.
-    await plant(100_000, ADA, 20 * 3_600_000, 300, { own: true });
-    await settle();
-    flat(small, await pages(), ['every read', "a member's reads", 'how far the reads are listed', 'through the API, the whole log', "through the API, a member's page"]);
-    // And as many on a connection's sixth call and after, and once a day is made.
-    for (const name of ["a member's reads", "through the API, a member's page"]) await callAfterCall(name, reads[name]!, small[name]!, makeDay);
-    // And they read what was planted: full pages, Ada's hers alone, her report each of her keys once.
-    const page = (filter: Parameters<typeof readsPage>[1]) => readsPage(counted, filter).then(({ rows }) => rows);
-    assert.equal((await page({ limit: 100 })).length, 100);
-    const hers = await page({ actors: [ADA], limit: 100 });
-    assert.ok(hers.length === 100 && hers.every((read) => read.principal === ADA));
-    const report = await readsByStanding(counted, [ADA]);
-    assert.deepEqual(new Set(report.reads.map((read) => read.secret)), new Set(keys.map((key) => key.id)));
-  } finally {
-    await db.owner.execute(sql`DELETE FROM log_reads WHERE number > 5000000`);
-    await db.owner.execute(sql`DELETE FROM log_read_days`);
-    // The days made ahead, but those the migration made the uses of, which `drop_reads_day` keeps while the log does.
-    await db.owner.execute(sql`SELECT drop_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${made}) d`);
-  }
-});
-
-test("a place's page of reads, a key's, an environment's or a project's, reads as many pages however large the place's history grows: its forks, references repointed into it and out of it, others' reads anywhere (T175, R48)", async () => {
-  const counted = createDatabase(app.client);
-  const ADA = 'user:ada@acme.example';
-  const OTHER = 'user:other@acme.example';
-  const AHEAD = 100;
-  const PAST = 30;
-  const ids = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT CAST(id AS text) AS id FROM ${where}`)).map((row) => row.id);
-  // A place of its own: market/reads, twenty keys read, one read once a day, one never.
-  await root.environments.create('market/reads', { name: 'reads' });
-  await root.secrets.set('market/reads', { ...Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`PLACE_COST_${i}`, `value-${i}`])), PLACE_COST_SPARSE: 's', PLACE_COST_EMPTY: 'e' });
-  const [market] = await ids(sql`projects WHERE slug = 'market'`);
-  const [place] = await ids(sql`environments WHERE slug = 'reads' AND project_id = ${market}`);
-  const keyId = async (key: string) => (await ids(sql`secrets WHERE environment_id = ${place} AND key = ${key}`))[0]!;
-  const keys = await Promise.all(Array.from({ length: 20 }, (_, i) => keyId(`PLACE_COST_${i}`)));
-  const [sparse, empty] = [await keyId('PLACE_COST_SPARSE'), await keyId('PLACE_COST_EMPTY')];
-  const fork = randomUUID();
-  const now = Date.now();
-  const day = (at: number) => new Date(at).toISOString().slice(0, 10);
-  await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(CAST(${-PAST - 1} AS integer), 0) d`);
-  const array = (values: readonly string[]) => sql.raw(`ARRAY[${values.map((value) => `'${value}'`).join(',')}]::uuid[]`);
-  const id = (value: string) => sql`CAST(${value} AS uuid)`;
-  /** One of `values`, by the read's place in its run. */
-  const cycle = (values: readonly string[]) => sql`(${array(values)})[1 + g % ${values.length}]`;
-  /** One of `n` ids of nowhere in particular, the same `n` for the same `salt`. */
-  const among = (n: number, salt: string) => sql`CAST(md5(${salt} || '-' || (g % ${n})) AS uuid)`;
-  const anywhere = sql`gen_random_uuid()`;
-  let next = 20_000_000;
-  type Columns = { secret: SQL; environment: SQL; project: SQL; place?: SQL; source?: SQL; sourceEnvironment?: SQL; sourceProject?: SQL };
-  /** `count` reads numbered on from the last, from `from` ms ago, one every `every` ms, by `principal`, at the places `at` names: the trigger places them. */
-  const plant = async (count: number, principal: string, from: number, every: number, at: Columns) => {
-    const first = next;
-    next += count;
-    const none = sql`CAST(NULL AS uuid)`;
-    // 50,000 a statement: each places its reads too (the trigger), under the owner's statement timeout.
-    for (let low = 1; low <= count; low += 50_000) await db.owner.execute(sql`
-      INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
-      SELECT CAST(${first} AS bigint) + g, CAST(${now - from} AS bigint) + g * CAST(${every} AS bigint), gen_random_uuid(), 1, ${principal},
-             ${at.secret}, ${at.environment}, ${at.project}, ${at.place ?? none}, ${at.source ?? none}, ${at.sourceEnvironment ?? none}, ${at.sourceProject ?? none},
-             NULL, decode(repeat('00', 16), 'hex')
-        FROM generate_series(CAST(${low} AS integer), CAST(${Math.min(count, low + 49_999)} AS integer)) g`);
-  };
-  const elsewhere: Columns = { secret: anywhere, environment: anywhere, project: anywhere };
-  const pages: Record<string, () => Promise<unknown>> = {
-    "a key's reads": () => readsPage(counted, { at: { kind: 'secret', id: keys[0]! }, limit: 100 }),
-    'a key no one read': () => readsPage(counted, { at: { kind: 'secret', id: empty }, limit: 100 }),
-    'a key read once a day': () => readsPage(counted, { at: { kind: 'secret', id: sparse }, limit: 100 }),
-    "an environment's reads": () => readsPage(counted, { at: { kind: 'environment', id: place }, limit: 100 }),
-    "an environment's older page": () => readsPage(counted, { at: { kind: 'environment', id: place }, before: { at: now - 2 * 3_600_000 }, limit: 100 }),
-    "a fork's reads": () => readsPage(counted, { at: { kind: 'environment', id: fork }, limit: 100 }),
-    "a project's reads": () => readsPage(counted, { at: { kind: 'project', id: market }, limit: 100 }),
-    // Whole pages through the API, every statement each makes, 0.14's log's included, the vault's vouching aside.
-    "through the API, a key's page": () => root.audit.list({ path: 'market/reads/PLACE_COST_0', sealed: '1', limit: 50 }),
-    "through the API, an environment's page": () => root.audit.list({ path: 'market/reads', sealed: '1', limit: 50 }),
-    "through the API, a project's page": () => root.audit.list({ path: 'market', sealed: '1', limit: 50 }),
-  };
-  const measure = async () => {
-    const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
-    for (const [name, run] of Object.entries(pages)) {
-      await run();
-      app.recorded = [];
-      await run();
-      const statements = [...app.recorded].sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
-      app.recorded = null;
-      read[name] = [];
-      for (const statement of statements) {
-        if (!/^\s*(select|with)\b/i.test(statement.text)) continue;
-        const work = await app.work(statement);
-        read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
-      }
-    }
-    return read;
-  };
-  const flat = (small: Awaited<ReturnType<typeof measure>>, grown: Awaited<ReturnType<typeof measure>>, step: string) => {
-    for (const name of Object.keys(pages)) {
-      const statements = small[name]!;
-      assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${step}: ${name} ran other statements`);
-      for (const [i, { text, pages: before }] of statements.entries()) {
-        const { pages: after, plan } = grown[name]![i]!;
-        assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${step}: ${name}: ${text} read ${after} pages with the history grown, ${before} before:\n${plan}`);
-      }
-    }
-  };
-  const settle = async () => {
-    await db.owner.execute(sql`VACUUM (ANALYZE) log_reads`);
-    await db.owner.execute(sql`ANALYZE`);
-  };
-  // Each page's buffers, every statement of it summed, at each step: the numbers docs/design/0.15-plan.md quotes.
-  const steps: Record<string, Record<string, number>> = {};
-  const record = (step: string, read: Awaited<ReturnType<typeof measure>>) => {
-    steps[step] = Object.fromEntries(Object.entries(read).map(([name, statements]) => [name, statements.reduce((sum, { pages }) => sum + (pages ?? 0), 0)]));
-    return read;
-  };
-  const shown = async (at: { kind: 'secret' | 'environment' | 'project'; id: string }, limit = 100) => (await readsPage(counted, { at, limit })).rows;
-  // A day of reads made past the last, each time: what a connection's plans are made again for.
-  let made = AHEAD + 1;
-  const makeDay = async () => {
-    made += 1;
-    await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + CAST(${made} AS integer))`);
-  };
-  try {
-    // The credentials' history the pages ask about: 5,000 sign-ins and as many tokens made, none at the place.
-    await signIns(5_000);
-    // Today's: 18,000 reads of others anywhere; Ada's 2,000 of the place's keys over ten hours, a quarter in the fork and
-    // a quarter through references held anywhere in market; and its one key, read once a day for a month.
-    await plant(18_000, OTHER, 12 * 3_600_000, 2_000, elsewhere);
-    await plant(1_000, ADA, 10 * 3_600_000, 36_000, { secret: cycle(keys), environment: id(place), project: id(market) });
-    await plant(500, ADA, 10 * 3_600_000 - 7, 72_000, { secret: cycle(keys), environment: id(place), project: id(market), place: id(fork) });
-    await plant(500, ADA, 10 * 3_600_000 - 13, 72_000, {
-      secret: anywhere, environment: anywhere, project: id(market), source: cycle(keys), sourceEnvironment: id(place), sourceProject: id(market),
-    });
-    await plant(PAST, ADA, PAST * 86_400_000, 86_400_000, { secret: id(sparse), environment: id(place), project: id(market) });
-    await settle();
-    const small = record('small', await measure());
-    // A hundred days of others' reads after all of these, each of its own partition: a place's page reads its own days.
-    await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d`);
-    await plant(20_000, OTHER, -86_400_000, (AHEAD * 86_400_000) / 20_000, elsewhere);
-    await settle();
-    flat(small, record('a hundred newer days', await measure()), 'a hundred newer days');
-    // The place's own history, older than its pages: 50,000 reads in 5,000 forks of it; 50,000 through references held
-    // in 20,000 places, repointed between its keys; 50,000 through its keys, references repointed to 20,000 sources
-    // elsewhere; and others' 300,000 anywhere, newer than all of it.
-    const older = (count: number) => [40 * 3_600_000, Math.floor((20 * 3_600_000) / count)] as const;
-    await plant(50_000, ADA, ...older(50_000), { secret: cycle(keys.slice(1)), environment: id(place), project: id(market), place: among(5_000, 'fork') });
-    await plant(50_000, OTHER, ...older(50_000), {
-      secret: among(20_000, 'holder'), environment: among(20_000, 'holder-place'), project: id(market), source: cycle(keys.slice(1)), sourceEnvironment: id(place), sourceProject: id(market),
-    });
-    await plant(50_000, OTHER, ...older(50_000), {
-      secret: cycle(keys.slice(1)), environment: id(place), project: id(market), source: among(20_000, 'source'), sourceEnvironment: among(20_000, 'source-place'), sourceProject: anywhere,
-    });
-    await plant(300_000, OTHER, 6 * 3_600_000, 50, elsewhere);
-    await settle();
-    flat(small, record("the place's own history", await measure()), "the place's own history");
-    // And its first key's own, older than its page: 100,000 reads of it.
-    await plant(100_000, ADA, 20 * 3_600_000, 300, { secret: id(keys[0]!), environment: id(place), project: id(market) });
-    await settle();
-    flat(small, record("a key's own history", await measure()), "a key's own history");
-    console.log(JSON.stringify(steps));
-    // And as many on a connection's sixth call and after, and once a day is made.
-    for (const name of ["a key's reads", "an environment's reads", "a project's reads", "through the API, a key's page"]) await callAfterCall(name, pages[name]!, small[name]!, makeDay);
-    // And they read what was planted: each page its place's reads alone, full where it has a page of them.
-    const first = await shown({ kind: 'secret', id: keys[0]! });
-    assert.ok(first.length === 100 && first.every((read) => read.secret === keys[0] || read.source === keys[0]));
-    assert.deepEqual(await shown({ kind: 'secret', id: empty }), []);
-    assert.deepEqual((await shown({ kind: 'secret', id: sparse })).length, PAST);
-    const environment = await shown({ kind: 'environment', id: place });
-    assert.ok(environment.length === 100 && environment.every((read) => [read.environment, read.place, read.sourceEnvironment].includes(place)));
-    const forked = await shown({ kind: 'environment', id: fork });
-    assert.ok(forked.length === 100 && forked.every((read) => read.place === fork));
-    const project = await shown({ kind: 'project', id: market });
-    assert.ok(project.length === 100 && project.every((read) => read.project === market || read.sourceProject === market));
-  } finally {
-    await db.owner.execute(sql`DELETE FROM log_reads WHERE number > 20000000`);
-    await db.owner.execute(sql`DELETE FROM log_read_place_days`);
-    await db.owner.execute(sql`SELECT drop_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(CAST(${-PAST - 1} AS integer), CAST(${made} AS integer)) d`);
+    await db.owner.execute(sql`TRUNCATE audit_events, audit_event_places, audit_member_keys`);
   }
 });

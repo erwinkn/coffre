@@ -49,18 +49,16 @@ BEGIN
 END
 $$;
 
--- The app reads none of it but the projection of reads (T166), through its read functions, which it may not write;
--- nobody but the vault runs the writing functions.
+-- The app reads none of it but the audit projection, which it may not write; nobody but the vault runs
+-- the projector's writing function, and the vault only through it.
 DO $$
 BEGIN
-    IF NOT has_table_privilege('coffre_app', 'log_reads', 'SELECT') OR has_table_privilege('coffre_app', 'log_reads', 'INSERT')
-       OR NOT has_function_privilege('coffre_app', 'log_reads_by(text, bigint, bigint, integer)', 'EXECUTE')
-       OR NOT has_function_privilege('coffre_app', 'log_reads_at(uuid, text, bigint, bigint, integer)', 'EXECUTE')
-       OR NOT has_table_privilege('coffre_app', 'log_read_place_days', 'SELECT') OR has_table_privilege('coffre_app', 'log_read_place_days', 'INSERT')
-       OR has_table_privilege('coffre_vault', 'log_read_place_days', 'INSERT') OR NOT has_table_privilege('coffre_backup', 'log_read_place_days', 'SELECT')
-       OR has_function_privilege('coffre_app', 'log_reads_placed()', 'EXECUTE')
-       OR has_function_privilege('coffre_app', 'project_reads(jsonb, bigint, bigint, bigint, bigint, bytea)', 'EXECUTE')
-       OR has_function_privilege('coffre_backup', 'project_reads(jsonb, bigint, bigint, bigint, bigint, bytea)', 'EXECUTE')
+    IF NOT has_table_privilege('coffre_app', 'audit_events', 'SELECT') OR has_table_privilege('coffre_app', 'audit_events', 'INSERT')
+       OR NOT has_table_privilege('coffre_app', 'audit_event_places', 'SELECT') OR has_table_privilege('coffre_app', 'audit_event_places', 'INSERT')
+       OR has_table_privilege('coffre_vault', 'audit_events', 'INSERT') OR has_table_privilege('coffre_vault', 'audit_event_places', 'INSERT')
+       OR NOT has_table_privilege('coffre_backup', 'audit_event_places', 'SELECT')
+       OR has_function_privilege('coffre_app', 'project_audit(jsonb, jsonb, jsonb, jsonb)', 'EXECUTE')
+       OR has_function_privilege('coffre_backup', 'project_audit(jsonb, jsonb, jsonb, jsonb)', 'EXECUTE')
        OR has_table_privilege('coffre_app', 'log_uses', 'SELECT') OR has_table_privilege('coffre_app', 'log_config', 'SELECT')
        OR has_table_privilege('coffre_app', 'policy', 'SELECT')
        OR has_table_privilege('coffre_app', 'roles', 'SELECT')

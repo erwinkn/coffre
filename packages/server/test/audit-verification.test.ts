@@ -133,12 +133,12 @@ test('a page of the log holds no more than BATCH_BYTES of what its entries list,
   }
   const seen: number[] = [];
   const sizes: number[] = [];
-  for (let before: number | undefined; ;) {
-    const page = await root.audit.list({ before, limit: 100 });
+  for (let before: string | undefined; ;) {
+    const page = await root.audit.list({ ...(before === undefined ? {} : { before }), limit: 100 });
     seen.push(...page.entries.filter((found) => found.action === 'large' || found.action === 'test').map((found) => found.seq));
     sizes.push(page.entries.length);
     if (!page.more) break;
-    before = page.entries.at(-1)!.seq;
+    before = page.next!;
   }
   // Two large entries a page at most, every entry once, newest first.
   assert.ok(sizes.length >= 2 && sizes[0]! < 100, JSON.stringify(sizes));

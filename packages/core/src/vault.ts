@@ -500,14 +500,17 @@ export interface Vault {
    */
   verifyReads?(input: { from: string }): Promise<ReadsVerification>;
   /**
-   * Which of these entries of 0.15's log, as a page of the audit log read
-   * them, the vault does not vouch for: its MAC, under any of the vault's
-   * signing keys, as its seals are checked, does not hold over the columns
-   * shown (T166). The audit pages list 0.15's changes and uses only with
-   * this check, and mark one it names as forged: written or edited around
-   * coffre. Pure CPU, no read; at most `VOUCHED_AT_ONCE` entries a call.
+   * Which of these entries of the audit projection, as a page read them, and
+   * its cursor, the vault does not vouch for: its MAC, under any of the
+   * vault's signing keys that vouches at its number, does not hold over the
+   * columns shown. The audit pages list entries only with this check,
+   * and mark one it names as forged: written or edited around coffre. Pure
+   * CPU, no read; at most `VOUCHED_AT_ONCE` entries a call. `listingOlder`:
+   * the cursor asked about says the log before 0.16 is still being listed,
+   * newest first, so a page's history stops early (the vault's reading of
+   * the cursor, which the app makes none of; false with no cursor asked).
    */
-  vouch?(input: VouchInput): Promise<{ forged: string[] }>;
+  vouch?(input: VouchInput): Promise<{ forged: string[]; listingOlder: boolean }>;
   /**
    * With 0.15's log, whether its checkpointer seals (T169): open, its last
    * tick ended well, and within the last few seconds. What `/readyz` asks,
@@ -712,22 +715,22 @@ export function isStackOverflow(error: unknown): boolean {
   return false;
 }
 
-/** The most entries one `vouch` call checks: a page of the audit log lists a few hundred at most. */
+/** The most entries one `vouch` call checks: a page of the audit log lists 500 at most. */
 export const VOUCHED_AT_ONCE = 2000;
 
-/** Entries of 0.15's log to vouch for, each with every column its MAC covers, bytes in hex, its number as text. */
+/** What a page of the audit log shows, to vouch for, each with every column its MAC covers, bytes in hex, numbers as text. */
 export type VouchInput = { entries: VouchedEntry[] };
 
 export type VouchedEntry =
-  | { tree: 'changes'; number: string; at: number; requestId: string; object: string; actor: string; payload: string; seal: string | null; mac: string }
-  | { tree: 'uses'; number: string; at: number; requestId: string; credential: string; secret: string; purpose: number; place: string | null; route?: string | null; mac: string }
-  /** A read as the projector wrote it (`log_reads`, T166): its MAC covers its number too. */
+  /** An entry as the projector listed it (`audit_events`), named `name` in the answer. */
   | {
-    tree: 'reads'; number: string; at: number; credential: string; purpose: number; principal: string; secret: string; environment: string; project: string;
-    place: string | null; source: string | null; sourceEnvironment: string | null; sourceProject: string | null; version: string | null; mac: string;
+    tree: 'event'; name: string; at: number; number: string; log: number; author: string; action: string; shown: boolean; allowed: boolean; code: string | null;
+    actor: string; subject: string | null; credential: string | null; project: string | null; environment: string | null; secret: string | null;
+    version: string | null; places: string[]; requestId: string | null; operationId: string | null; related: string | null; sourceIp: string | null;
+    detail: string; mac: string;
   }
-  /** The projection's cursor (`log_reads_cursor`, T166), named `cursor` in the answer: whether the pages may say reads are whole up to it. */
-  | { tree: 'cursor'; number: 'cursor'; through: string; pair: string; at: number; mac: string | null };
+  /** The projection's cursor (`audit_cursor`), named `cursor` in the answer: whether the pages may say entries are listed up to it. */
+  | { tree: 'cursor'; name: 'cursor'; through: string; pair: string; at: number; oldFloor: string; oldFrom: string; oldTop: string; oldHash: string; mac: string | null };
 
 /**
  * 0.15's log as its check found it. `problems` names what does not hold,

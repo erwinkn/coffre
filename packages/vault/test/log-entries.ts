@@ -27,11 +27,9 @@ export function logWriter(owner: Database, macKey: LogMacKey) {
     /** Every entry, pair and tile gone, the floor at now less the deadline, as a new log. */
     async empty(): Promise<void> {
       for (const table of ['log_checkpoints', 'log_tiles', 'log_changes', 'log_uses']) await run(owner, sql.raw(`DELETE FROM ${table}`));
-      // The reads' projection of that log (T166), its cursor back at the start.
-      await run(owner, sql`DELETE FROM log_reads`);
-      await run(owner, sql`DELETE FROM log_read_days`);
-      await run(owner, sql`DELETE FROM log_read_place_days`);
-      await run(owner, sql`INSERT INTO log_reads_cursor (only_row, through, pair, at, mac) VALUES (true, 0, 0, 0, NULL) ON CONFLICT (only_row) DO UPDATE SET through = 0, pair = 0, at = 0, mac = NULL`);
+      // The audit projection of that log, its cursor back at the start.
+      await run(owner, sql`TRUNCATE audit_events, audit_event_places, audit_member_keys`);
+      await run(owner, sql`UPDATE audit_cursor SET through = 0, pair = 0, at = 0, old_floor = 0, old_from = 0, old_top = 0, old_hash = ${Buffer.alloc(32)}, mac = NULL, reads_from = 0`);
       await run(owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 3000}, retired = '{}'`);
     },
     /** Today's and tomorrow's uses (Postgres partitions them by day). */

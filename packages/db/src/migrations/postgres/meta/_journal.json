@@ -596,6 +596,13 @@
       "when": 1794530497446,
       "tag": "0087_audit_projection",
       "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1794530497447,
+      "tag": "0088_pages_read_projection",
+      "breakpoints": true
     }
   ]
 }

@@ -170,12 +170,27 @@ test('a tab sends nobody away on a stale no: a service account added back opens 
   assert.equal(await tabOpens(shows), true);
 });
 
-test("the audit page asks for 0.15's sealed log too, and never for the counts of what it hides, so it shows what it holds (T164)", async () => {
-  const asked: unknown[] = [];
-  const client = { audit: { list: async (query: unknown) => (asked.push(query), { entries: [] }) } } as unknown as CoffreClient;
-  for (const search of [{}, { detail: '1' as const }, { actorId: 'ada@acme.example' }]) await queries.auditEntries(client, search).queryFn!({} as never);
+test('the audit page never asks for the counts of what it hides, so it shows what it holds; and it pages on by `next`, a filtered page possibly empty with more below it', async () => {
+  const asked: Record<string, unknown>[] = [];
+  const client = {
+    audit: { list: async (query: Record<string, unknown>) => (asked.push(query), { entries: [], next: query.before === undefined ? '16:5.9' : null }) },
+  } as unknown as CoffreClient;
+  for (const search of [{}, { detail: '1' as const }, { actorId: 'ada@acme.example' }]) {
+    const options = queries.auditEntries(client, search);
+    const page = await options.queryFn!({ pageParam: undefined } as never);
+    assert.equal(options.getNextPageParam(page as never, [page] as never, undefined, [undefined]), '16:5.9');
+  }
   assert.equal(asked.length, 3);
-  for (const query of asked as Record<string, unknown>[]) assert.deepEqual([query.sealed, 'hidden' in query], ['1', false]);
+  for (const query of asked) assert.deepEqual(['sealed' in query, 'hidden' in query, query.before], [false, false, undefined]);
+  // A denials view whose newest stretch held none follows `next`, and stops where the log ends.
+  const queryClient = createQueryClient();
+  const options = queries.auditEntries(client, { decision: 'deny', detail: '1' });
+  await queryClient.fetchInfiniteQuery(options);
+  const observer = new InfiniteQueryObserver(queryClient, options as never);
+  const stop = observer.subscribe(() => {});
+  const more = await observer.fetchNextPage();
+  stop();
+  assert.deepEqual([asked.at(-1)!.before, more.hasNextPage], ['16:5.9', false]);
 });
 
 test('the audit log is read on every visit, and its verification once with the page', () => {

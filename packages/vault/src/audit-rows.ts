@@ -129,6 +129,13 @@ export const eventVouched = (ring: Keyring, row: AuditEvent): boolean =>
   keysAt(ring, row.log === 14 ? 0n : row.number).some((key) => holds(eventMac(key.mac, row), row.mac));
 
 /**
+ * Whether a walk down `audit_log` is under way: entries of the log before
+ * 0.16 are still being listed, newest first, so its history stops early
+ * (`oldBatch` starts a new walk only when it is not; the pages say so).
+ */
+export const oldWalkOpen = (cursor: Pick<AuditCursor, 'oldFloor' | 'oldFrom'>): boolean => cursor.oldFrom > cursor.oldFloor;
+
+/**
  * Whether the cursor is the projector's: at the start, with no MAC; else
  * under a key that vouches where it stands in the chains, `pair` at or
  * below `through` as the projector moves it, and the old log's positions

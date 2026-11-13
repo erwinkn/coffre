@@ -476,33 +476,24 @@ export function entryColumns() {
 export const BATCH_BYTES = 8 * 1024 * 1024;
 
 /**
- * Of the entries `where` matches, in `order` of seq, the first `limit` or
+ * Of the entries `where` matches, in order of seq, the first `limit` or
  * fewer that hold no more than `BATCH_BYTES` of metadata between them, but
  * always the first: the seqs they run from and to, each of them (`seqs`),
  * and whether the bytes cut the run short of `limit`. Null when none
  * matches. A reader asks this first, then reads `where` between the two, or
- * the entries `seqs` names. `by`, the entries whose column is one of these
- * values too: a stream of each value's, through the index keyed
- * `(column, seq)` (`keyedBy`), merged; asked as one condition, Postgres
- * walked the primary key back past every other value's entries, 613 pages
- * for an actor's newest behind 20,000 of another's (T245, R48).
+ * the entries `seqs` names.
  */
 export async function withinBytes(
   db: Queryable,
   where: SQL | undefined,
   limit: number,
-  order: 'asc' | 'desc' = 'asc',
-  by?: { column: AnyColumn; values: readonly string[] },
 ): Promise<{ from: bigint; to: bigint; cut: boolean; count: number; seqs: bigint[] } | null> {
-  if (by !== undefined && by.values.length === 0) return null;
-  const sizes = by !== undefined
-    ? (await rowsOf<{ seq: string | number | bigint; bytes: number | string }>(db, streamsOf(where, limit, order, by))).map((row) => ({ seq: BigInt(row.seq), bytes: row.bytes }))
-    : await db
-      .select({ seq: auditLog.seq, bytes: sql<number | string>`length(${auditLog.metadata})` })
-      .from(auditLog)
-      .where(where)
-      .orderBy(order === 'asc' ? asc(auditLog.seq) : desc(auditLog.seq))
-      .limit(limit);
+  const sizes = await db
+    .select({ seq: auditLog.seq, bytes: sql<number | string>`length(${auditLog.metadata})` })
+    .from(auditLog)
+    .where(where)
+    .orderBy(asc(auditLog.seq))
+    .limit(limit);
   let held = 0;
   let count = 0;
   for (const { bytes } of sizes) {
@@ -512,17 +503,6 @@ export async function withinBytes(
   }
   if (count === 0) return null;
   return { from: sizes[0]!.seq, to: sizes[count - 1]!.seq, cut: count < sizes.length, count, seqs: sizes.slice(0, count).map(({ seq }) => seq) };
-}
-
-/** `withinBytes`' sizes of the entries whose `by.column` is one of `by.values`: each value's first `limit` by its index, then the first `limit` of them all. */
-function streamsOf(where: SQL | undefined, limit: number, order: 'asc' | 'desc', by: { column: AnyColumn; values: readonly string[] }): SQL {
-  const way = sql.raw(order === 'asc' ? 'ASC' : 'DESC');
-  const streams = [...new Set(by.values)].map((value) => {
-    const keyed = keyedBy(by.column, auditLog.seq, order, sql.param([value]));
-    return sql`SELECT * FROM (SELECT ${auditLog.seq} AS seq, length(${auditLog.metadata}) AS bytes FROM ${auditLog}
-      WHERE ${and(keyed.where, where)} ORDER BY ${sql.join(keyed.orderBy, sql`, `)} LIMIT ${limit}) AS ${sql.raw('v')}`;
-  });
-  return sql`SELECT s.seq, s.bytes FROM (${sql.join(streams, sql` UNION ALL `)}) s ORDER BY s.seq ${way} LIMIT ${limit}`;
 }
 
 /**

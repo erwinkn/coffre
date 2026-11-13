@@ -171,7 +171,7 @@ const READ_TOOLS: readonly Tool[] = [
     output: object({ entries: list, next: { type: ['string', 'null'] } }, ['entries']),
     names: ({ path, actor }) => [...(path === undefined ? [] : [path]), ...(actor === undefined ? [] : [apiMember(actor)])],
     run: async ({ api }, { actor, limit, ...rest }) => ({
-      structured: await api.audit.list({ ...rest, ...(actor === undefined ? {} : { actor: apiMember(actor) }), sealed: '1', limit: limit ?? 50 }),
+      structured: await api.audit.list({ ...rest, ...(actor === undefined ? {} : { actor: apiMember(actor) }), limit: limit ?? 50 }),
     }),
   }),
 ];

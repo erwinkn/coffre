@@ -44,7 +44,7 @@ beforeEach(async () => {
   const kek = randomBytes(32);
   signer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [derivedSigningKey(kek)], memory: join(scratch, `memory-${Date.now()}`), intervalMs: 3_600_000 });
   const vault = testVault([ROOT], {}, { kek }, {}, { sealThrough: signer.sealThrough, heldOutside: signer.heldOutside });
-  deps = testDeps(db.runtime, [ROOT], { vault });
+  deps = testDeps(db.runtime, [ROOT], { vault, settleAudit: false });
   root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   for (const environment of ['dev', 'prod']) {
@@ -58,7 +58,7 @@ beforeEach(async () => {
 async function page(client: CoffreClient): Promise<AuditEntryView[]> {
   const all: AuditEntryView[] = [];
   for (let before: string | undefined; ;) {
-    const { entries, next } = await client.audit.list({ sealed: '1', detail: '1', limit: 500, ...(before === undefined ? {} : { before }) } as Parameters<CoffreClient['audit']['list']>[0]);
+    const { entries, next } = await client.audit.list({ detail: '1', limit: 500, ...(before === undefined ? {} : { before }) } as Parameters<CoffreClient['audit']['list']>[0]);
     all.push(...entries);
     if (next === null) return all;
     before = next;
@@ -76,7 +76,6 @@ test("every entry today's page lists, the projection lists once, by its log and 
   await assert.rejects(ada.secrets.set('market/prod', { API_KEY: 'mine' }));
   await assert.rejects(ada.members.add('user:eve@acme.example', { role: 'member' }));
   await listAudit(deps.vault, signer!);
-  await signer!.projected();
   const [cursor] = await rowsOf<{ through: string; old_top: string }>(db.owner, sql`SELECT CAST(through AS text) AS through, CAST(old_top AS text) AS old_top FROM audit_cursor`);
   const listed = await rowsOf<{ k: string }>(db.owner, sql`SELECT log || ':' || number || ':' || action || ':' || allowed || ':' || actor || ':' || coalesce(subject, '-') AS k FROM audit_events`);
   // What the page lists as far as the projection has gone: 0.14's below its top, 0.15's through its cursor; a page's

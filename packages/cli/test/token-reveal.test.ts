@@ -29,7 +29,7 @@ test("the token reveal waits for the version it revealed: an earlier version's r
     audit: {
       list: async (query: { path?: string }) => {
         const reads = { through: new Date().toISOString(), behind: false };
-        if (query.path !== undefined) return { entries: [], more: false, next: null, reads, readsOmitted: 'path' };
+        if (query.path !== undefined) return { entries: [], more: false, next: null, reads };
         looks += 1;
         return { entries: looks >= 3 ? [readOf(9, 2, Date.now()), earlier] : [earlier], more: false, next: null, reads };
       },

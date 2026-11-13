@@ -5,7 +5,7 @@ import type { LogEntry, Pair } from '@coffre/core/merkle';
 import { useOfCode, type RebuildAuditInput } from '@coffre/core/vault';
 import type { ChangeRecord } from '@coffre/db/log';
 
-import { cursorMac, cursorVouched, eventMac, type AuditCursor, type AuditEvent } from './audit-rows.ts';
+import { cursorMac, cursorVouched, eventMac, oldWalkOpen, type AuditCursor, type AuditEvent } from './audit-rows.ts';
 import { logObject } from './inputs.ts';
 import { keyringOf, type Keyring, type VerifierKeys } from './keyring.ts';
 import { entryMac, type LogMacKey } from './log-entry.ts';
@@ -158,7 +158,7 @@ async function chainBatch(store: ProjectionStore, ring: Keyring, cursor: AuditCu
  */
 async function oldBatch(store: ProjectionStore, oldKeys: readonly LogKey[], cursor: AuditCursor, atOnce: number) {
   let walk = cursor;
-  if (walk.oldFrom === walk.oldFloor) {
+  if (!oldWalkOpen(walk)) {
     const next = await nextWalk(store, oldKeys, walk);
     if (next === null) return null;
     walk = next;

@@ -22,7 +22,7 @@ import {
 
 import { accessAllowed, authoredBy, changeNamed, entriesOf, indexOf } from './access-entries.ts';
 import { ACTIVE_SUBJECT } from './active-subject.ts';
-import { recordField, recorded } from './change-records.ts';
+import { recorded } from './change-records.ts';
 
 const bytea = customType<{ data: Buffer }>({
   dataType: () => 'bytea',
@@ -438,11 +438,12 @@ export const auditLog = pgTable(
       columns: [table.relatedSeq],
       foreignColumns: [table.seq],
     }).onDelete('restrict'),
-    // Pages read backwards by seq, within a place or an actor.
+    // The references made in or into a project (`referenceRows`), with `also_project_idx`.
     index('audit_log_project_idx').on(table.projectId, table.seq),
+    // The foreign keys' checks: a deleted environment or key looks for its entries through these, where it would
+    // otherwise scan the whole log once per row it deletes.
     index('audit_log_environment_idx').on(table.environmentId, table.seq),
     index('audit_log_secret_idx').on(table.secretId, table.seq),
-    index('audit_log_actor_idx').on(table.actor, table.seq),
     index('audit_log_action_idx').on(table.author, table.action, table.seq),
     // The references one member made (`referencesBy`): their `reference.create` seals, in one seek, however many
     // other entries they or the instance wrote (2,004 buffers where `actor_idx` and `action_idx` took 3,297 for a
@@ -508,9 +509,6 @@ export const auditLog = pgTable(
     // billing's reference is market's read, and billing's too.
     index('audit_log_also_project_idx')
       .on(sql`(((${table.metadata})::jsonb -> 'also') ->> 'projectId')`, table.seq)
-      .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL`),
-    index('audit_log_also_environment_idx')
-      .on(sql`(((${table.metadata})::jsonb -> 'also') ->> 'environmentId')`, table.seq)
       .where(sql`((${table.metadata})::jsonb -> 'also') IS NOT NULL`),
     index('audit_log_also_secret_idx')
       .on(sql`(((${table.metadata})::jsonb -> 'also') ->> 'secretId')`, table.seq)
@@ -1321,39 +1319,9 @@ export const logChanges = pgTable(
     // Each input's newest change, its seal from the index alone (INCLUDE (seal), in the migration's SQL: Drizzle
     // has no INCLUDE): one probe per input.
     index('log_changes_object_idx').on(table.object, table.number),
-    // The sign-ins through trust bindings, newest first by when the vault asked (`at`; its number comes later, after
-    // any wait), every service's and one's: what the audit pages list where 0.14's `token.exchange` stood (T156). Only
-    // a sign-in's payload holds a `signIn` object (change-records.ts, which the reads repeat).
-    index('log_changes_sign_in_idx').on(table.at, table.number).where(recorded(table.payload, 'signIn')),
-    index('log_changes_sign_in_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'signIn')),
-    // The vault's token issues, revokes and sign-outs, ordered as the sign-ins, every member's and one's: what the audit
-    // pages list where 0.14's `token.create`, `token.revoke` and `sign_out` stood, and count while they hide them (T164).
-    // Only an issue's payload, by how it starts, holds an `issue` record, and only a revoke's these reasons
-    // (change-records.ts). A binding's end revokes its credentials with the reason `unbound`, of which 0.14 logged
-    // none: left out.
-    index('log_changes_issue_revoke_idx').on(table.at, table.number).where(recorded(table.payload, 'issue', 'revoke', 'signOut')),
-    index('log_changes_issue_revoke_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'issue', 'revoke', 'signOut')),
-    // The key writes and the first adds down the two-trip path, recorded here alone since 0.16.0 (T179; change-records.ts),
-    // ordered as the sign-ins: what the audit pages list where 0.14's `secret.write` and `member.add` stood, every one,
-    // one member's, one environment's (by the payload's, `recordField`) and one key's; and an offboarding report's writes.
-    index('log_changes_written_idx').on(table.at, table.number).where(recorded(table.payload, 'written')),
-    index('log_changes_written_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'written')),
-    index('log_changes_written_environment_idx').on(recordField(table.payload, 'environmentId'), table.at, table.number).where(recorded(table.payload, 'written')),
-    index('log_changes_written_object_idx').on(table.object, table.at, table.number).where(recorded(table.payload, 'written')),
-    // One member's at one place, each read bounded by its page however many others' writes the place holds (review r1 of #490).
-    index('log_changes_written_actor_environment_idx').on(table.actor, recordField(table.payload, 'environmentId'), table.at, table.number).where(recorded(table.payload, 'written')),
-    index('log_changes_written_actor_object_idx').on(table.actor, table.object, table.at, table.number).where(recorded(table.payload, 'written')),
+    // The first adds down the two-trip path, recorded here alone (change-records.ts): those the log
+    // names with no row (`missingMembers`, and the vault's), read whole by this index.
     index('log_changes_admitted_idx').on(table.at, table.number).where(recorded(table.payload, 'admitted')),
-    index('log_changes_admitted_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'admitted')),
-    // The refusals of those two routes, recorded here in place of 0.14's deny entries since PR 6 (T179; refusal.ts): a key
-    // write's every one, one member's, one environment's and one member's there, as its writes; an add's, every one and
-    // one member's, as its adds.
-    index('log_changes_refused_write_idx').on(table.at, table.number).where(recorded(table.payload, 'refusedWrite')),
-    index('log_changes_refused_write_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'refusedWrite')),
-    index('log_changes_refused_write_environment_idx').on(recordField(table.payload, 'environmentId'), table.at, table.number).where(recorded(table.payload, 'refusedWrite')),
-    index('log_changes_refused_write_actor_environment_idx').on(table.actor, recordField(table.payload, 'environmentId'), table.at, table.number).where(recorded(table.payload, 'refusedWrite')),
-    index('log_changes_refused_add_idx').on(table.at, table.number).where(recorded(table.payload, 'refusedAdd')),
-    index('log_changes_refused_add_actor_idx').on(table.actor, table.at, table.number).where(recorded(table.payload, 'refusedAdd')),
   ],
 );
 
@@ -1396,96 +1364,6 @@ export const logUses = pgTable(
     // The checkpointer's window by number (T245, R48): its first entries in one step, however far behind it is, where the
     // index by `at` read every use from the floor and sorted them. Built without blocking writes (`online-indexes.ts`).
     index('log_uses_by_number_idx').on(table.number).concurrently(),
-  ],
-);
-
-/**
- * 0.15's reads as the audit pages list them (T166; formal/Reads.tla): a
- * projection of each use a signed pair seals, written by the vault's
- * projector apart from the checkpointer, from the sealed objects at the
- * use's number: its account, its key's place, the fork it was read in,
- * through a reference the source and its place, the version read; under the
- * vault's MAC over all of it, the number included. Partitioned by the day of
- * `at`, as the uses are (`make_reads_day`), and dropped with them.
- */
-export const logReads = pgTable(
-  'log_reads',
-  {
-    number: bigint({ mode: 'bigint' }).notNull(),
-    at: bigint({ mode: 'number' }).notNull(),
-    credential: uuid().notNull(),
-    purpose: smallint().notNull(),
-    principal: text().notNull(),
-    secret: uuid().notNull(),
-    environment: uuid().notNull(),
-    project: uuid().notNull(),
-    place: uuid(),
-    source: uuid(),
-    sourceEnvironment: uuid('source_environment'),
-    sourceProject: uuid('source_project'),
-    version: uuid(),
-    mac: bytea().notNull(),
-  },
-  (table) => [
-    check('log_reads_mac_check', sql`octet_length(${table.mac}) = 16`),
-    uniqueIndex('log_reads_number_idx').on(table.at, table.number),
-    // A pair's reads by number, which the reads check lists (T245, R48): the index by `at` read every read of the window's
-    // times, a stall's worth, for the few thousand a pair holds. Built without blocking writes (`online-indexes.ts`).
-    index('log_reads_by_number_idx').on(table.number).concurrently(),
-    index('log_reads_principal_idx').on(table.principal, table.at, table.number),
-    // A place's reads (T175): each column naming a place a read is at, newest first. Its key's, its environment's and its
-    // project's; the fork it was read in; through a reference, the source's three. Those that only some reads name are
-    // partial. A page of a place reads each of its few streams no further than a page (`log_reads_at`).
-    index('log_reads_secret_idx').on(table.secret, table.at, table.number),
-    index('log_reads_environment_idx').on(table.environment, table.at, table.number),
-    index('log_reads_project_idx').on(table.project, table.at, table.number),
-    index('log_reads_place_idx').on(table.place, table.at, table.number).where(sql`${table.place} IS NOT NULL`),
-    index('log_reads_source_idx').on(table.source, table.at, table.number).where(sql`${table.source} IS NOT NULL`),
-    index('log_reads_source_environment_idx').on(table.sourceEnvironment, table.at, table.number).where(sql`${table.sourceEnvironment} IS NOT NULL`),
-    index('log_reads_source_project_idx').on(table.sourceProject, table.at, table.number).where(sql`${table.sourceProject} IS NOT NULL`),
-  ],
-);
-
-/** The days each member's reads are in (`log_reads`), so that a page of theirs reads those days alone: the projector writes them with the reads. */
-export const logReadDays = pgTable(
-  'log_read_days',
-  { principal: text().notNull(), day: integer().notNull() },
-  (table) => [primaryKey({ name: 'log_read_days_pkey', columns: [table.principal, table.day] })],
-);
-
-/**
- * The days each place's reads are in (T175): a key, an environment or a
- * project, by its id, for each day `log_reads` holds a read at it, so that a
- * page of a place reads those days alone, never a probe of each day's
- * partition since. A trigger on `log_reads` writes them, whoever writes the
- * reads (migration 0050).
- */
-export const logReadPlaceDays = pgTable(
-  'log_read_place_days',
-  { place: uuid().notNull(), day: integer().notNull() },
-  (table) => [
-    primaryKey({ name: 'log_read_place_days_pkey', columns: [table.place, table.day] }),
-    // Retention's drop of a day.
-    index('log_read_place_days_day_idx').on(table.day),
-  ],
-);
-
-/** How far the projector has gone: the number every use at or below it is projected, and when. */
-export const logReadsCursor = pgTable(
-  'log_reads_cursor',
-  {
-    onlyRow: boolean('only_row').primaryKey().default(true),
-    through: bigint({ mode: 'bigint' }).notNull(),
-    // The signed pair at or below `through`, whose floor of `at` the next read of uses takes.
-    pair: bigint({ mode: 'bigint' }).notNull(),
-    at: bigint({ mode: 'number' }).notNull(),
-    // The vault's MAC over the three (formal/Reads.tla, CursorMac): a cursor moved ahead would have the pages list reads as
-    // whole that were never projected. Null at the start, before any read is projected.
-    mac: bytea(),
-  },
-  (table) => [
-    check('log_reads_cursor_only_row_check', sql`${table.onlyRow}`),
-    check('log_reads_cursor_mac_check', sql`${table.mac} IS NULL OR octet_length(${table.mac}) = 16`),
   ],
 );
 

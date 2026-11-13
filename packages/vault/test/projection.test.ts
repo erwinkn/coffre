@@ -130,6 +130,28 @@ test('each use a read at its places, by its account, in the summary; a refusal o
   assert.equal((await events()).length, listed.length);
 });
 
+test('while a walk down audit_log is under way, the vault answers a page that older entries are still being listed; once it is done, not', async () => {
+  await append(reads(7));
+  await checkpoint14();
+  const { vault } = await isolate();
+  const asked = async () => {
+    const c = await logStore(db.vault).auditCursor();
+    return vault.vouch({ entries: [{
+      tree: 'cursor', name: 'cursor', through: String(c.through), pair: String(c.pair), at: c.at, oldFloor: String(c.oldFloor), oldFrom: String(c.oldFrom),
+      oldTop: String(c.oldTop), oldHash: c.oldHash.toString('hex'), mac: c.mac === null ? null : c.mac.toString('hex'),
+    }] });
+  };
+  // At the start (after the upgrade, or a rebuild), nothing of it listed yet: no walk is open, and the page says it is
+  // behind instead (`readsListed`: the cursor below the newest pair).
+  assert.deepEqual(await asked(), { forged: [], listingOlder: false });
+  await project({ steps: 1, atOnce: 3 });
+  assert.deepEqual(await asked(), { forged: [], listingOlder: true });
+  await projectAll({ atOnce: 3 });
+  assert.deepEqual(await asked(), { forged: [], listingOlder: false });
+  // No cursor asked about: nothing to say.
+  assert.deepEqual(await vault.vouch({ entries: [] }), { forged: [], listingOlder: false });
+});
+
 test('audit_log is listed only behind the newest signed 0.14 checkpoint, batch by batch from the cursor, its heartbeats and checkpoints left out; the next checkpoint lists the rest', async () => {
   await append(reads(7));
   await append([{ actor: 'system:coffre', action: 'audit.heartbeat', decision: 'allow', metadata: '{}' }]);

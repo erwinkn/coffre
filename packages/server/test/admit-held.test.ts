@@ -530,7 +530,7 @@ test("a first add down the two-trip path, recorded in 0.15's log alone, is liste
   const added = await w.add();
   assert.equal(added.status, 200, JSON.stringify(added.body));
   assert.deepEqual(served(w.answers), ['served']);
-  const adds = async (query: Record<string, string | undefined>) => (await w.root.audit.list({ sealed: '1', limit: 50, ...query })).entries.filter((entry) => entry.action === 'member.add' && entry.log === '0.15');
+  const adds = async (query: Record<string, string | undefined>) => (await w.root.audit.list({ limit: 50, ...query })).entries.filter((entry) => entry.action === 'member.add' && entry.log === '0.15');
   for (const query of [{}, { actor: `user:${BOB}` }, { actor: BOB }]) {
     const [entry, ...more] = await adds(query);
     assert.deepEqual(more, [], JSON.stringify(query));

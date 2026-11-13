@@ -27,8 +27,8 @@ export const BUDGET = {
   // Ceilings, each today's largest, not a target.
   /** A call at the proxy, the vault's decision warm in its cache: its session (or binding) and place; the vault is not asked. */
   proxied: { statements: 1, vaultCalls: 0 },
-  /** A page's server render, warm: an Owner's page of a service account. */
-  page: { statements: 23, trips: 6, vaultCalls: 4 },
+  /** A page's server render, warm: a service account's page, an Owner's in statements and vault calls, a viewer's in trips. */
+  page: { statements: 19, trips: 5, vaultCalls: 4 },
   /** A read through the API, a reveal or an export included: a CI run's list. */
   read: { statements: 5, vaultCalls: 1 },
   /** A request's check of its caller (`me`): the app's reads alone; the vault is not asked. */

@@ -9,7 +9,6 @@ import { ALARMS_KEPT_MS, Fence, heldIn, OPEN_BOUND_MS, sealingOf, Stalled, Unsea
 import { daysAround, openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { vaultLogKey } from './log.ts';
 import { AuditProjector } from './projection.ts';
-import { Projector } from './reads.ts';
 import { verifierKeys } from './verifier.ts';
 import { logStore } from './log-store.ts';
 
@@ -56,8 +55,6 @@ export type RunningCheckpointer = {
   alarms(since?: number): Promise<Alarm[]>;
   /** The pair the signer remembers, from its file: what the vault's verifier holds its walks to (`VaultOptions.heldOutside`). */
   heldOutside(): Promise<PairNotes[]>;
-  /** The reads' projection run until it stands at the newest pair (T166): for tests and tools, never on a request's path. */
-  projected(): Promise<void>;
   /** The audit projection run until it has nothing left to list: for tests and tools. */
   auditProjected(): Promise<void>;
   /** Whether it seals (`Vault.sealing`): ticking, its last tick ended well, lately. */
@@ -143,15 +140,13 @@ export async function runCheckpointer(options: {
       void record({ at: Date.now(), message });
     },
   });
-  // The reads' projection (T166), kicked after each tick and never waited on: a projection behind lags the audit pages,
-  // never a seal (reads.ts).
+  // The audit projection, kicked after each tick and never waited on: a projection behind lags the audit
+  // pages, never a seal (projection.ts). The vault's 0.14 log keys check the anchor it walks from.
   const keys = await verifierKeys(options.signingKeys);
   const said = (message: string) => {
     console.warn(`coffre audit: ${message}`);
     void record({ at: Date.now(), message });
   };
-  const projector = new Projector(store, keys, said);
-  // The audit projection, beside it and likewise: the vault's 0.14 log keys check the anchor it walks from.
   const audit = new AuditProjector(store, keys, options.signingKeys.map(vaultLogKey), said);
   const interval = options.intervalMs ?? TICK_MS;
   let stopped = false;
@@ -196,7 +191,6 @@ export async function runCheckpointer(options: {
     ticking = checkpointer.tick().then((t) => {
       failed = null;
       last = { at: Date.now(), failures: t.failures };
-      projector.kick();
       audit.kick();
       more = t.more;
       // Beside the ticks, never ahead of them: an upkeep that waits on its database holds no tick back (CI, review of
@@ -225,17 +219,6 @@ export async function runCheckpointer(options: {
     async heldOutside() {
       return heldIn(await fileMemory(options.memory).last());
     },
-    async projected() {
-      // A run goes a few steps: as many runs as the ranges above the cursor take, and no more than a hundred.
-      for (let run = 0; run < 100; run += 1) {
-        await projector.settled();
-        projector.kick();
-        await projector.settled();
-        const [cursor, newest] = await Promise.all([store.readsCursor(), store.newest()]);
-        if (newest === null || cursor.through >= newest.upto) return;
-      }
-      throw new Error("the reads' projection did not catch up with the newest pair");
-    },
     async auditProjected() {
       await audit.settled();
       for (let run = 0; run < 100; run += 1) if (!(await audit.run())) return;
@@ -252,12 +235,12 @@ export async function runCheckpointer(options: {
       // A stalled one's session cut first, so that what its tick awaits fails now (T169).
       if (stalled) await session?.cut().catch(() => {});
       await ticking;
-      // The reads' projection runs no more. One that stalled leaves the run going, unawaited: it keeps none of the
+      // The audit projection runs no more. One that stalled leaves the run going, unawaited: it keeps none of the
       // signer's memory, and writes nothing once another projector has overtaken it (FromChecked), so a projection
       // hung in the database never holds back the runner that replaces this one (review r8). Otherwise its run ends
       // first, within its bound.
-      const projecting = Promise.all([projector.stop(), audit.stop()]);
-      if (!stalled) await within(projecting, options.tickBoundMs ?? OPEN_BOUND_MS, "the reads' projection").catch(() => {});
+      const projecting = audit.stop();
+      if (!stalled) await within(projecting, options.tickBoundMs ?? OPEN_BOUND_MS, "the audit projection").catch(() => {});
       // Closed, so that a handle kept after stop() never ticks beside a runner started over the same memory.
       await checkpointer.close();
       await session?.cut().catch(() => {});
