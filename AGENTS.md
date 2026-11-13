@@ -182,6 +182,11 @@ unsupported diff select full validation.
   another disposable cluster (`scripts/test-setup.sh`), as its superuser and
   as such an owner: setup makes cluster-wide roles, so never on the shared
   one. Postgres only.
+- `pnpm test:upgrade` upgrades a 0.14 database with a row of every kind to
+  0.16 (`docs/design/0.16.md`, "Upgrade from 0.14"), on a disposable
+  cluster, since it sets the runtime logins NOLOGIN, which are the cluster's;
+  then requires that database, one migrated from nothing and one made from
+  `schema.ts` alone to have the same schema. Postgres and Docker only.
 - `pnpm build` builds every package in dependency order (core and client first). The
   UI builds as a library, `vite build`, each page a module of its own
   (`@coffre/ui/pages/<name>`), which the examples' file routes name, and Start splits. Core and client build
