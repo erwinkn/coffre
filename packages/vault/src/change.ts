@@ -126,9 +126,10 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
   const at = vault.now();
   const parts = Object.entries(operation.read);
   if (parts.length === 0) throw new Error('a change reads at least its caller');
+  // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts).
   const found = await rowsOf<{ part: string; row: Wire }>(
     vault.db,
-    sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `),
+    sql`SELECT part, row, clock_timestamp() AS read_at FROM (${sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `)}) parts`,
   );
   const seen = Object.fromEntries(parts.map(([name]) => [name, [] as object[]]));
   const read = new Set<object>();

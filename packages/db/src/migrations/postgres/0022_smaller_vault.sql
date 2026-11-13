@@ -549,10 +549,6 @@ CREATE TABLE log_head (
     CONSTRAINT log_head_mac_check CHECK (octet_length(mac) = 36)
 );
 --> statement-breakpoint
-ALTER TABLE exposures
-    ADD CONSTRAINT exposures_principal_fkey FOREIGN KEY (principal) REFERENCES principals (id) ON DELETE RESTRICT,
-    ADD CONSTRAINT exposures_secret_id_fkey FOREIGN KEY (secret_id) REFERENCES secrets (id) ON DELETE RESTRICT;
---> statement-breakpoint
 CREATE INDEX exposures_secret_idx ON exposures (secret_id);
 --> statement-breakpoint
 
@@ -580,7 +576,7 @@ BEGIN
             EXECUTE format('ALTER TABLE %I ALTER COLUMN %I TYPE timestamp(3) with time zone', col.table_name, col.column_name);
         END IF;
     END LOOP;
-    FOREACH starred IN ARRAY ARRAY['projects', 'environments', 'secrets', 'principals', 'grants', 'identities', 'bindings', 'credentials', 'enrollment_codes', 'oauth_clients'] LOOP
+    FOREACH starred IN ARRAY ARRAY['projects', 'environments', 'secrets', 'dismissed_keys', 'principals', 'grants', 'identities', 'bindings', 'credentials', 'enrollment_codes', 'oauth_clients'] LOOP
         EXECUTE format('ALTER TABLE %I ADD COLUMN mac bytea DEFAULT ''\x''::bytea NOT NULL', starred);
         EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I CHECK (octet_length(mac) IN (0, 36))', starred, starred || '_mac_check');
     END LOOP;

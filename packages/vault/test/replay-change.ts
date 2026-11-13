@@ -6,8 +6,10 @@
 //   quint run change.qnt --main sound --mbt --n-traces 500 --max-samples 500 --max-steps 40 --out-itf 't{seq}.itf.json'
 //   node --conditions=coffre:source test/replay-change.ts t*.itf.json
 //
-// The model's uses and its clock change no row, and are skipped until the
-// use is built.
+// A use is the model's two steps too, src/use.ts on the same database: at
+// `useStart` the vault's memory must hold the read exactly when the model's
+// does, and at `useAnswer` the answer must be the model's. The model's clock
+// is the vault's, a second a tick, and its TTL the memory's two seconds.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
@@ -17,11 +19,16 @@ import { and, eq, sql } from 'drizzle-orm';
 
 import { change, commit, part, prepare, put, type Operation, type Prepared, type Seen } from '../src/change.ts';
 import type { Fresh, Row } from '../src/rows.ts';
+import { answer, memoryOf, read, recall, type Read } from '../src/use.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
+import { ask, credential, environment, grant, project, role, rows, secret, value, write } from './world.ts';
 
 type Role = 'Out' | 'Member' | 'Owner';
 type Op = 'Promote' | 'Demote' | 'Remove';
-type State = { actionTaken: string; nondetPicks: { p?: string; t?: string; op?: Op }; role: Record<string, Role>; gen: Record<string, number>; chg: Record<string, { decided: boolean }> };
+type State = {
+  actionTaken: string; nondetPicks: { p?: string; t?: string; op?: Op }; role: Record<string, Role>; gen: Record<string, number>; chg: Record<string, { decided: boolean }>;
+  use: Record<string, { reading: boolean; ok: boolean }>;
+};
 
 /** ITF's big integers, maps, sets, tuples and variants, as plain values, each variable under its own name. */
 function plain(value: unknown): unknown {
@@ -61,7 +68,7 @@ function act(p: string, op: Op, t: string) {
 }
 
 const vault = await openTestVault();
-let [steps, refusals, lost] = [0, 0, 0];
+let [steps, refusals, lost, uses, remembered] = [0, 0, 0, 0, 0];
 try {
   for (const file of process.argv.slice(2)) {
     const states = (JSON.parse(readFileSync(file, 'utf8')) as { states: unknown[] }).states.map(plain) as State[];
@@ -71,6 +78,20 @@ try {
       id: id(person), status: 'active', role: 'owner', scope: null, generation: 0, createdAt: at, createdBy: id(person), statusChangedAt: at, statusChangedBy: id(person), frozenAt: null,
     }));
     await change(vault, { read: { none: part(principals, sql`false`) }, decide: () => ({ writes: admitted.map((row) => put(principals, row)), entry: { kept: true, action: 'test.admit', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null }) });
+    // What a use reads: one key of one environment, which every member views, whatever their role on the instance.
+    const market = project('market');
+    const prod = environment(market, 'prod');
+    await write(
+      vault,
+      ...rows('projects', market), ...rows('environments', prod), ...rows('secrets', await value(vault, secret(prod, 'FLAG'), 'on')),
+      ...rows('roles', role(true, 'owner', []), role(true, 'member', []), role(false, 'viewer', ['secret.read'])),
+      ...rows('grants', ...people.map((person) => grant(id(person), 'viewer', { project: market }))),
+    );
+    Object.assign(vault, { memory: memoryOf(2) });
+    // Each person's newest credential, and the generation it was issued in: someone let back in signs in again.
+    const session = new Map<string, { label: string; generation: number }>();
+    const asking = (person: string) => ask(session.get(person)?.label ?? 'none', 'market/prod', ['FLAG']);
+    const reading = new Map<string, Read>();
     const decided = new Map<string, Prepared<null>>();
     for (const [i, state] of states.entries()) {
       const { p, t, op } = state.nondetPicks;
@@ -84,6 +105,25 @@ try {
       } else if (state.actionTaken === 'write') {
         if (!(await commit(vault, decided.get(p!)!))) lost += 1;
         decided.delete(p!);
+      } else if (state.actionTaken === 'tick') {
+        vault.tick(1000);
+      } else if (state.actionTaken === 'useStart') {
+        // The model answers from its memory at once, and otherwise reads.
+        const hit = !state.use[p!]!.reading;
+        const before = states[i - 1]!;
+        if (!hit && before.role[p!] !== 'Out' && session.get(p!)?.generation !== before.gen[p!]) {
+          session.set(p!, { label: `${p}-${before.gen[p!]}`, generation: before.gen[p!]! });
+          await write(vault, ...rows('credentials', credential(session.get(p!)!.label, id(p!), { generation: before.gen[p!]! })));
+        }
+        const kept = recall(vault, asking(p!));
+        assert.equal(kept !== undefined, hit, `${where}: the vault's memory`);
+        if (kept === undefined) reading.set(p!, await read(vault, asking(p!)));
+        else assert.ok('values' in (await answer(vault, asking(p!), kept)), `${where}: an answer from memory`);
+        remembered += hit ? 1 : 0;
+      } else if (state.actionTaken === 'useAnswer') {
+        const result = await answer(vault, asking(p!), reading.get(p!)!);
+        assert.equal('values' in result, states[i - 1]!.use[p!]!.ok, `${where}: ${JSON.stringify(result)}`);
+        uses += 1;
       }
       const found = await rowsOf<{ id: string; status: string; role: string; generation: number }>(vault.owner, sql`SELECT id, status, role, generation FROM principals`);
       assert.deepEqual(
@@ -97,4 +137,4 @@ try {
 } finally {
   await vault.close();
 }
-console.log(`replayed ${process.argv.length - 2} runs, ${steps} steps, ${refusals} refusals, ${lost} writes that lost: the vault's change agrees with the model`);
+console.log(`replayed ${process.argv.length - 2} runs, ${steps} steps, ${refusals} refusals, ${lost} writes that lost, ${uses} uses read and ${remembered} answered from memory: the vault agrees with the model`);

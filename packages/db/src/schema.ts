@@ -253,7 +253,9 @@ export const secretVersions = pgTable(
  * the project's other environments have them, and its missing-keys list
  * leaves them out until someone restores them (docs/design/environments.md).
  * One row per environment and key, updated in place: restoring sets
- * `restored_at`, dismissing again clears it.
+ * `restored_at`, dismissing again clears it. Under a MAC: a fork that
+ * dismissed a key does not inherit it, so a row decides what a use of the
+ * fork is given.
  */
 export const dismissedKeys = pgTable(
   'dismissed_keys',
@@ -264,9 +266,11 @@ export const dismissedKeys = pgTable(
     dismissedBy: text('dismissed_by').notNull(),
     restoredAt: at('restored_at'),
     restoredBy: text('restored_by'),
+    mac: mac(),
   },
   (table) => [
     primaryKey({ name: 'dismissed_keys_pkey', columns: [table.environmentId, table.key] }),
+    macCheck('dismissed_keys_mac_check', table.mac),
     check('dismissed_keys_key_check', sql`${table.key} ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'`),
     foreignKey({
       name: 'dismissed_keys_environment_id_fkey',
@@ -898,6 +902,12 @@ export const logHead = pgTable(
  * and three things ask this: the bulk cap (a principal's keys within its
  * window), a key's last use, and what someone who leaves has seen. Bounded
  * by principals times keys.
+ *
+ * It points at no other table by a foreign key, on purpose. A use writes
+ * it with no lock, and a foreign key's check would lock the principal's row
+ * and the secret's against a change that deletes or renames them: a use and
+ * a change could then wait on each other. Neither row is ever deleted, and
+ * a row here that names nothing is read by no page.
  */
 export const exposures = pgTable(
   'exposures',
@@ -908,16 +918,6 @@ export const exposures = pgTable(
   },
   (table) => [
     primaryKey({ name: 'exposures_pkey', columns: [table.principal, table.secretId] }),
-    foreignKey({
-      name: 'exposures_principal_fkey',
-      columns: [table.principal],
-      foreignColumns: [principals.id],
-    }).onDelete('restrict'),
-    foreignKey({
-      name: 'exposures_secret_id_fkey',
-      columns: [table.secretId],
-      foreignColumns: [secrets.id],
-    }).onDelete('restrict'),
     // A key's last use, for its environment's page. `seen_at` is in no index, so moving it on leaves none behind.
     index('exposures_secret_idx').on(table.secretId),
   ],

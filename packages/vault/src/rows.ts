@@ -1,6 +1,6 @@
 import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 
-import { getTableColumns, getTableName, type InferInsertModel, type InferSelectModel } from 'drizzle-orm';
+import { getTableColumns, getTableName, type InferSelectModel } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 
 /**
@@ -27,7 +27,10 @@ export type Row<T extends PgTable> = InferSelectModel<T>;
  * included: a default the database filled in would be a value the MAC covers
  * and the vault never saw.
  */
-export type Fresh<T extends PgTable> = Omit<Pick<Row<T>, keyof InferInsertModel<T> & keyof Row<T>>, 'mac'>;
+export type Fresh<T extends PgTable> = Omit<Row<T>, 'mac' | Computed<T>>;
+
+/** The columns of a table the database computes. */
+type Computed<T extends PgTable> = { [K in keyof T['_']['columns']]: T['_']['columns'][K]['_']['generated'] extends undefined ? never : K }[keyof T['_']['columns']];
 
 /** A row as JSON, keyed by column name: what `to_jsonb` gives and `jsonb_populate_recordset` takes. */
 export type Wire = Record<string, unknown>;
