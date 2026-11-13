@@ -847,26 +847,21 @@ export async function memberStanding(db: Queryable, principal: string): Promise<
     .select({ status: principals.status, generation: principals.generation, seal: principals.seal })
     .from(principals)
     .where(eq(principals.principal, principal));
-  return row === undefined ? null : { ...row, seal: sealHex(row.seal) };
-}
-
-/** A member's seal as the vault takes it back (`actorSeal`): hex, or null for none. */
-function sealHex(seal: Buffer | null): string | null {
-  return seal === null ? null : seal.toString('hex');
+  return row === undefined ? null : { ...row, seal: row.seal?.toString('base64') ?? null };
 }
 
 /**
  * `principal`'s seal, the vault's MAC over their object (status,
- * generation, role, scope, grants), as hex; null for no row. Read before
- * the vault is asked about them, and again under the head, it says whether
- * its answer is still theirs (`issuerStill`): the vault reseals the row with
- * each change of their access, under the same head. With the database
- * clock, as `findCredential` reads, so that Hyperdrive never answers it
- * from its cache.
+ * generation, role, scope, grants), base64 as `Access.seal`; null for no
+ * row. Read under the head, it says whether the vault's answer about them
+ * is still theirs (`issuerStill`): the vault reseals the row with each
+ * change of their access, under the same head. With the database clock, as
+ * `findCredential` reads, so that Hyperdrive never answers it from its
+ * cache.
  */
 export async function memberSeal(db: Queryable, principal: string): Promise<string | null> {
   const [row] = await db.select({ seal: principals.seal, now: clock() }).from(principals).where(eq(principals.principal, principal));
-  return sealHex(row?.seal ?? null);
+  return row?.seal?.toString('base64') ?? null;
 }
 
 /**
@@ -1442,16 +1437,15 @@ export async function passkeyHistory(db: Queryable, chainKey: Buffer, principal:
 }
 
 /** A member as a sign-in's callback weighs them (`signinMembers`). */
-export type SigninMember = { principal: string; status: string; generation: number; seal: string | null; ever: number; live: number };
+export type SigninMember = { principal: string; status: string; generation: number; ever: number; live: number };
 
 /**
  * What a sign-in's callback decides on (passkeys.md, section 3.1), beside the identity it reads in the same round trip
  * (`findIdentity`): the members its account may be, the one its live identity names and one per verified email, each
- * with its status and generation, its seal (`memberSeal`, which the sign-in's transaction holds it to under the head,
- * as `issuerStill` does), and its passkeys, ever and live at that generation.
- * One statement, with the database clock, so that Hyperdrive never answers it from its cache: a cached sequence
- * would read as moved under the head on every try. Rows of the vault's, unchecked: what they decide is only whether to
- * ask for a passkey first, and the sign-in checks the vault's own answer before it issues anything.
+ * with its status and generation, and its passkeys, ever and live at that generation.
+ * One statement, with the database clock, so that Hyperdrive never answers it from its cache. Rows of the vault's,
+ * unchecked: what they decide is only whether to ask for a passkey first, and the sign-in checks the vault's own
+ * answer before it issues anything.
  */
 export async function signinMembers(
   db: Queryable,
@@ -1468,7 +1462,6 @@ export async function signinMembers(
       principal: principals.principal,
       status: principals.status,
       generation: principals.generation,
-      seal: principals.seal,
       // Named in full: drizzle writes a column of the one table it selects from unqualified, which the subquery would read as its own.
       ever: sql<number>`(SELECT count(*) FROM passkeys ever WHERE ever.principal = principals.principal)`,
       live: sql<number>`(SELECT count(*) FROM passkeys live WHERE live.principal = principals.principal AND live.generation = principals.generation AND live.removed_at IS NULL)`,
@@ -1476,7 +1469,7 @@ export async function signinMembers(
     })
     .from(principals)
     .where(candidates.length === 0 ? inArray(principals.principal, bound) : or(inArray(principals.principal, candidates), inArray(principals.principal, bound)));
-  return new Map(rows.map(({ now: _, ever, live, seal, ...row }) => [row.principal, { ...row, seal: sealHex(seal), ever: Number(ever), live: Number(live) }]));
+  return new Map(rows.map(({ now: _, ever, live, ...row }) => [row.principal, { ...row, ever: Number(ever), live: Number(live) }]));
 }
 
 /** Whether a passkey row, anyone's, live or not, has this credential ID: what a first passkey's unique violation was. */

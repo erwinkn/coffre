@@ -364,7 +364,7 @@ export function checkIssue(input: IssueTokenInput): CredentialScope {
   const member = /^(user:[^\s]{1,320}|token:[a-z0-9][a-z0-9._-]{0,99})$/;
   if (typeof actor !== 'string' || !member.test(actor) || typeof principal !== 'string' || !member.test(principal) || !Number.isInteger(generation)
     || (via !== null && (typeof via !== 'string' || !UUID.test(via))) || !isPolicy(policy)
-    || (input.actorSeal !== null && (typeof input.actorSeal !== 'string' || !/^[0-9a-f]{32}$/.test(input.actorSeal))) || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)
+    || (input.actorSeal !== null && !isBase64(input.actorSeal, 16)) || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)
     || !isTrace(input.trace) || !isConfirmation(input.confirmed)) {
     throw new Error('an issue names its issuer, the credential it came in on, whom it acts as at which generation, the policy weighed, and the app\'s key');
   }
@@ -584,7 +584,7 @@ export function checkChangeBindings(input: ChangeBindingsInput): void {
   if (input?.continues !== undefined && !resumes) throw new Error('a change of bindings continues a removal only as the scheduled run, an unbind, naming its remover and when it closed them');
   const named = (before: { columns?: unknown; seal?: unknown } | undefined) => before !== undefined && isBase64(before.seal, 16);
   if (typeof actor !== 'string' || !(member.test(actor) || resumes) || (via !== null && (typeof via !== 'string' || !UUID.test(via)))
-    || (actorSeal !== null && (typeof actorSeal !== 'string' || !/^[0-9a-f]{32}$/.test(actorSeal)))
+    || (actorSeal !== null && !isBase64(actorSeal, 16))
     || !Array.isArray(ends) || (make === null && ends.length === 0) || !['replaced', 'keys_moved', 'unbound'].includes(reason)
     || typeof revokedAt !== 'number' || !Number.isSafeInteger(revokedAt) || typeof revokedBy !== 'string' || !isPolicy(policy) || policy === null
     || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)

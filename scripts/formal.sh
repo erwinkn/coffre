@@ -145,6 +145,8 @@ REMOVALS=(
   "Issuing ServiceRecheckInIssue TokensAtCurrentGeneration"
   "Issuing SealCompareAndSet SealedOnce"
   "Issuing IssuerGenerationKept+IssuerStandsUnderChangeLock IssuedAsAuthenticated"
+  # The seal held to is the vault's answer's: one the app read before asking comes back when a demotion is undone.
+  "IssuingFlip IssuerSealFromAnswer SensitiveOnlyFromOwners"
   # A person's factor lock (Factor.tla, T176 PR 3): every issue of theirs and every change to their passkeys takes it, the issue first.
   "Factor IssueTakesFactor ChangeEndsAll"
   "Factor IssueTakesFactor LiveFromLive"

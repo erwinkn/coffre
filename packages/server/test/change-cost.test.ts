@@ -310,8 +310,9 @@ const CASES: Case[] = [
     setup: async (i) => void (await owner.members.add(`user:leaving-${i}@acme.example`)),
     run: (i) => owner.members.remove(`user:leaving-${i}@acme.example`),
   },
-  { name: 'token issued', over: 9, run: () => owner.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
-  { name: 'token issued, by a Developer', over: 12, run: () => developer.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
+  // An issue holds its issuer to the seal of the vault's answer (`issuerNow`), which it reads nothing for.
+  { name: 'token issued', over: 9, statements: 9, run: () => owner.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
+  { name: 'token issued, by a Developer', over: 12, statements: 13, run: () => developer.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
   // An environment's proxy definitions: its first save, and one more item on top of the page it loaded.
   {
     name: 'proxy definitions, first save', over: 7,
@@ -328,7 +329,7 @@ const CASES: Case[] = [
   },
   // An Owner's reset of someone's passkeys: one passkey or ten, the removals asked together, the same round trips (below).
   ...[1, 10].map((held): Case => ({
-    name: `passkeys reset, ${held}`, over: 9,
+    name: `passkeys reset, ${held}`, over: 9, statements: held === 1 ? 24 : 33,
     setup: async (i) => {
       const email = `reset-${held}-${i}@acme.example`;
       await owner.members.add(`user:${email}`);

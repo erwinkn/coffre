@@ -83,7 +83,7 @@ function change(input: Partial<ChangeBindingsInput>): ChangeBindingsInput {
 /** A seal that is not `principal`'s: theirs with every bit flipped, as a seal from before a change of their access reads. */
 async function otherSeal(principal: string): Promise<string> {
   const [row] = await db.owner.select({ seal: principals.seal }).from(principals).where(eq(principals.principal, principal));
-  return Buffer.from(row!.seal!.map((byte) => byte ^ 0xff)).toString('hex');
+  return Buffer.from(row!.seal!.map((byte) => byte ^ 0xff)).toString('base64');
 }
 
 /** A binding as its row is now, with its seal: what a sign-in names, and what ending it names. */

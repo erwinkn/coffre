@@ -145,6 +145,30 @@ test("an Owner the deployment names, never admitted, passes the provider and sto
   assert.equal((await sessionRow(again)).passkeyId, added!.id);
 });
 
+test("a named Owner's first sign-in under `optional`, no row of theirs yet, completes with no decision made again: the answer that admits them carries the seal of the row it wrote", async () => {
+  const { cold } = laterOwner();
+  let asks = 0;
+  const counting = new Proxy(cold, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'access') return value;
+      return async (principal: string) => {
+        if (principal === `user:${LATER}`) asks += 1;
+        return (value as Vault['access']).call(target, principal);
+      };
+    },
+  });
+  const browser = new Browser(deployment('optional', undefined, counting));
+  assert.equal(await browser.provider(LATER), '/auth/passkey', 'an Owner of the whole instance adds a passkey first');
+  const atCallback = asks;
+  const done = await browser.answer(await register(await SoftAuthenticator.create('ES256'), (await browser.step()).body));
+  assert.deepEqual(done, { status: 200, body: { next: '/projects/market' } });
+  assert.equal(await me(browser), 'ok');
+  // The callback asks nothing about an Owner the rows hold no member of; the passkey's answer asks once, and that
+  // answer, which admits them, is the one its transaction holds them to: nothing decided again.
+  assert.deepEqual({ atCallback, all: asks }, { atCallback: 0, all: 1 });
+});
+
 test("an enrollment begun before an Owner's first admission adds nothing once they were admitted, removed and admitted again: it was for their first membership, never a later one (section 3.1; review r3 of #500)", async () => {
   const { later, cold } = laterOwner();
   const runtime = deployment('required', undefined, cold);
@@ -489,6 +513,33 @@ test("a person promoted to an Owner of the whole instance between the callback's
   assert.ok(promoted);
   assert.equal(browser.session, undefined);
   assert.equal((await browser.step()).body.purpose, 'enroll');
+  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, `user:${ADA}`)), [], 'nothing issued');
+});
+
+test("an Owner of the whole instance demoted as the callback asks the vault, and promoted back once it answered, is asked for a first passkey, not signed in by the provider alone", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.members.add(`user:${ADA}`, { role: 'owner' });
+  // The vault answers that Ada is a Developer, then she is an Owner again, her seal as it was before the demotion:
+  // only the answer's own says what the callback decided on.
+  let raced = false;
+  const racing = new Proxy(deps.vault, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'access') return value;
+      return async (principal: string) => {
+        if (principal !== `user:${ADA}` || raced) return (value as Vault['access']).call(target, principal);
+        raced = true;
+        await root.members.add(`user:${ADA}`, { role: 'developer' });
+        const answer = await (value as Vault['access']).call(target, principal);
+        await root.members.add(`user:${ADA}`, { role: 'owner' });
+        return answer;
+      };
+    },
+  });
+  const browser = new Browser(deployment('optional', undefined, racing));
+  assert.equal(await browser.provider(ADA), '/auth/passkey', 'decided again on the answer that is hers now');
+  assert.ok(raced);
+  assert.equal(browser.session, undefined);
   assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, `user:${ADA}`)), [], 'nothing issued');
 });
 

@@ -33,7 +33,7 @@ function vaultKnowing(known: Record<string, Partial<Access>>, onAsk = (_principa
   return {
     access: async (principal: string): Promise<Access> => {
       onAsk(principal);
-      return { principal, status: 'unknown', generation: 0, role: 'member', scope: EVERYWHERE, grants: [], since: null, by: null, ...known[principal] };
+      return { principal, status: 'unknown', generation: 0, role: 'member', scope: EVERYWHERE, grants: [], since: null, by: null, seal: null, ...known[principal] };
     },
   };
 }

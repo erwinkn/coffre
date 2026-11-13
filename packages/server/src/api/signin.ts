@@ -633,7 +633,7 @@ export class SigninService {
         });
         const now = new Date();
         const reading = Promise.all([
-          this.#stillMember(tx, principal, standing, known?.seal),
+          known === undefined ? this.#stillMember(tx, principal, standing) : this.#stillAnswered(tx, principal, standing),
           factor?.kind === 'enroll'
             ? none().then(({ ever, live }) => ever === factor.state.passkeysEver && live === 0)
             // `passkeyStands`' rule for a credential that names none, `optional` and none held, on rows checked.
@@ -820,7 +820,7 @@ export class SigninService {
     // The person: the live identity's, or the first verified email that the deployment names an Owner or the vault
     // holds a row of, in the order `#principalForEmails` asks the vault about them. Nobody: today's sign-in says why.
     const id = previous !== null ? memberOf(previous.principal).id : profile.emails.find((email) => owners.has(email) || members.has(`user:${email}`)) ?? null;
-    if (id === null) return this.#signedIn(profile, meta, null, { previous, person: null, seal: null });
+    if (id === null) return this.#signedIn(profile, meta, null, { previous, person: null });
     const principal = principalOf({ type: 'user', id });
     const row = members.get(principal);
     const active = row?.status === 'active' && (previous === null || previous.generation === row.generation) ? row : null;
@@ -844,7 +844,7 @@ export class SigninService {
     // Under `required`, a member who holds none adds one; under `optional`, one who asked to (`PendingState.addPasskey`).
     if (active !== null && (policy === 'required' || addPasskey)) return step('enroll', active.generation);
     try {
-      return await this.#signedIn(profile, meta, null, { previous, person: previous === null ? { id, email: id } : null, seal: row?.seal ?? null });
+      return await this.#signedIn(profile, meta, null, { previous, person: previous === null ? { id, email: id } : null });
     } catch (error) {
       if (error instanceof StepWanted) return step('enroll', error.access.generation);
       throw error;
@@ -1234,8 +1234,8 @@ export class SigninService {
     const principal = principalOf(member);
     try {
       return await withRefusals(this.#deps, async () => {
-        // The Owner as the vault answers now, held to under the head: demoted meanwhile, they reset no one (`issuerStill`;
-        // review r1 of #529), as an issuer demoted meanwhile gives a token nothing.
+        // The Owner as the vault answers now, held to under the head: demoted meanwhile, they reset no one (`issuerStill`),
+        // as an issuer demoted meanwhile gives a token nothing.
         const { caller, seal } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'passkey.reset' });
         const asker = { ...ctx, caller };
         mayReset(asker, member);
@@ -1527,16 +1527,22 @@ export class SigninService {
    * one under way waits for this transaction. What is issued carries the
    * generation it was issued under; a later removal moves past it, and it
    * stops working, whatever its own row says.
-   *
-   * With `seal`, their seal as the callback read it, before the vault answered (`memberSeal`): moved since (a role, a
-   * grant, a scope), the callback's decision whether to ask for a passkey first was made on an
-   * answer no longer theirs, and it decides again (`AccessMoved`; review r1 of #500), as `issuerStill` holds an issue.
    */
-  async #stillMember(tx: Transaction, principal: PrincipalRef, standing: Access, seal?: string | null): Promise<boolean> {
+  async #stillMember(tx: Transaction, principal: PrincipalRef, standing: Access): Promise<boolean> {
+    if (standing.status !== 'active') return false;
+    return standsAs(await memberStanding(tx, principalOf(principal)), standing);
+  }
+
+  /**
+   * `#stillMember` for the callback, and their row still has the seal `standing` carries (`Access.seal`): moved since
+   * (a role, a grant, a scope), the callback's decision whether to ask for a passkey first was made on an answer no
+   * longer theirs, and it decides again (`AccessMoved`), as `issuerStill` holds an issue.
+   */
+  async #stillAnswered(tx: Transaction, principal: PrincipalRef, standing: Access): Promise<boolean> {
     if (standing.status !== 'active') return false;
     const row = await memberStanding(tx, principalOf(principal));
-    if (seal !== undefined && (row?.seal ?? null) !== seal) throw new AccessMoved();
-    return row !== null && row.generation === standing.generation && row.status === 'active';
+    if ((row?.seal ?? null) !== standing.seal) throw new AccessMoved();
+    return standsAs(row, standing);
   }
 
   /**
@@ -2634,9 +2640,12 @@ type Known = {
   previous: Awaited<ReturnType<typeof findIdentity>>;
   /** The member a first sign-in binds, by the verified email that matched: the vault is asked about them alone. */
   person: { id: string; email: string } | null;
-  /** Their seal, read before the vault answered (`signinMembers`); null for no row. */
-  seal: string | null;
 };
+
+/** Whether a member's row, as `memberStanding` read it, is the active member `standing` answered, at its generation. */
+function standsAs(row: { status: string; generation: number } | null, standing: Access): boolean {
+  return row !== null && row.generation === standing.generation && row.status === 'active';
+}
 
 /** The person's access moved between the callback's reads and its transaction: decided again, from the reads. */
 class AccessMoved extends Error {

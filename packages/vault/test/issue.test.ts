@@ -352,11 +352,27 @@ test("an issue weighed before its issuer's demotion commits is weighed again, on
   }
 });
 
-/** A member's seal as the app reads it (`memberSeal`): hex, null for no row. */
+/** A member's seal as their row holds it (`memberSeal`): base64, null for no row. */
 async function sealOf(principal: string): Promise<string | null> {
   const [row] = await db.owner.select({ seal: principals.seal }).from(principals).where(eq(principals.principal, principal));
-  return row?.seal?.toString('hex') ?? null;
+  return row?.seal?.toString('base64') ?? null;
 }
+
+test("the vault's answer carries the seal of the row it checked: the Owner it names, at the first answer that makes their row; none without a row", async () => {
+  const vault = await openLocalVault(db.vault, configure(), { sealThrough: sealed, heldOutside: nothingHeld });
+  const first = await vault.access(ROOT);
+  assert.equal(first.role, 'owner');
+  assert.notEqual(first.seal, null);
+  assert.equal(first.seal, await sealOf(ROOT));
+  assert.equal((await vault.access('user:nobody@acme.example')).seal, null);
+  // A change reseals the row, and the next answer carries it.
+  assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'admin' })).ok);
+  const before = await sealOf(ADMIN);
+  assert.equal((await vault.access(ADMIN)).seal, before);
+  assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: ADMIN, role: 'developer' })).ok);
+  assert.notEqual(await sealOf(ADMIN), before);
+  assert.equal((await vault.access(ADMIN)).seal, await sealOf(ADMIN));
+});
 
 /** The Admin's service token, weighed on `seal`. */
 const byAdmin = (w: World, seal: string | null) => asked(w, (input) => ({ ...input, actor: ADMIN, actorSeal: seal, credential: { ...input.credential, createdBy: 'admin@acme.example' } }));
@@ -389,7 +405,7 @@ test("each change of a member's access moves their seal: an issue weighed before
   // An add: no row, no seal, then one.
   assert.equal(await sealOf('user:new@acme.example'), null);
   assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: 'user:new@acme.example' })).ok);
-  assert.match(String(await sealOf('user:new@acme.example')), /^[0-9a-f]{32}$/);
+  assert.match(String(await sealOf('user:new@acme.example')), /^[A-Za-z0-9+/]{22}==$/);
   assert.equal(await credentialRows(), 0);
 });
 
@@ -397,6 +413,8 @@ test('an issuer whose row holds no seal is refused, whatever seal the app weighe
   const w = await world();
   const weighed = await sealOf(ADMIN);
   await db.owner.update(principals).set({ seal: null }).where(eq(principals.principal, ADMIN));
+  // Its answer is `tampered`, and carries none.
+  assert.deepEqual(await w.vault.access(ADMIN).then(({ status, seal }) => ({ status, seal })), { status: 'tampered', seal: null });
   for (const seal of [weighed, null]) assert.equal(((await w.vault.issueToken!(byAdmin(w, seal))) as { refused?: string }).refused, 'ended');
   assert.equal(await credentialRows(), 0);
 });

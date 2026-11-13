@@ -1332,7 +1332,7 @@ export type ChangeBindingsInput = {
   actor: string;
   /** The credential the request came in on, by id; null for none. */
   via: string | null;
-  /** The issuer's seal as the app weighed the scope on (`IssueTokenInput.actorSeal`); null when it weighed none. */
+  /** The seal of the answer the app weighed the scope on (`IssueTokenInput.actorSeal`); null when it weighed none. */
   actorSeal: string | null;
   /** The MCP connection the request came through, at the caller's generation, held to still connected; null for none. */
   connection: { id: string; generation: number } | null;
@@ -1442,8 +1442,8 @@ export type IssueTokenInput = {
   /** The principal's generation it is issued at. */
   generation: number;
   /**
-   * The issuer's seal as the app read it before it weighed the scope
-   * (`issuerNow`), hex: the vault's MAC over their object, which it holds
+   * The seal of the vault's answer about the issuer that the app weighed
+   * the scope on (`Access.seal`, from `issuerNow`), which the vault holds
    * the issue to (`access`, as `issuerStill`); null to hold it to none.
    */
   actorSeal: string | null;
@@ -1930,6 +1930,14 @@ export type Access = {
   by: string | null;
   /** The instance's policy, which every decision about them reads: absent from a vault older than 0.10, which decides as it ships. */
   policy?: Policy;
+  /**
+   * Their row's seal, base64: the vault's MAC over their object, as it
+   * checked it against the rows it answers from. A change made on this
+   * answer commits only while the row still has it (`issuerStill`), and
+   * an issue and a change of bindings send it back (`actorSeal`). Null for
+   * no row, and for `tampered`.
+   */
+  seal: string | null;
   /**
    * The answer, in a word (`accessRevision`): the app keeps the answer
    * between requests, and a read it decides on the kept one names it, which

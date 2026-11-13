@@ -123,6 +123,20 @@ function onNextAccess(principal: string, meanwhile: () => Promise<unknown>, { af
   };
 }
 
+/** Around the vault's `nth` answer about `principal` from now (1, the next): `before` as it is asked, `after` once it has answered. */
+function aroundAccess(principal: string, nth: number, before: () => Promise<unknown>, after: () => Promise<unknown>): void {
+  const access = deps.vault.access;
+  let asks = 0;
+  deps.vault.access = async (asked, ...rest) => {
+    if (asked !== principal || ++asks < nth) return access(asked, ...rest);
+    deps.vault.access = access;
+    await before();
+    const answer = await access(asked, ...rest);
+    await after();
+    return answer;
+  };
+}
+
 /** The entries of `action`, oldest first. */
 async function entries(action: string) {
   return loggedEntries(db.owner, [action]);
@@ -391,6 +405,24 @@ test("an Owner demoted while resetting someone's passkeys resets nothing: weighe
   // The request's own ask answers him as an Owner; he is demoted before the reset weighs him.
   onNextAccess(`user:${BOB}`, () => root.members.add(`user:${BOB}`, { role: 'admin' }), { after: true });
   assert.deepEqual(refused(await act(bob, 'DELETE', `/api/members/user:${DANA}/passkeys`)), [403, 'forbidden', 'not_owner']);
+  assert.equal((await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${DANA}`)))[0]!.removedAt, null);
+  assert.equal(await me(dana), 'ok');
+});
+
+test("an Admin promoted to an Owner as the reset asks the vault about them, and demoted once it answered, resets nothing: held to the seal of the answer it weighed", async (t) => {
+  const { later } = clock(t);
+  const dana = await enroll(runtime, DANA, await SoftAuthenticator.create('ES256'));
+  const bobKey = await SoftAuthenticator.create('ES256');
+  later(1);
+  await enroll(runtime, BOB, bobKey);
+  const root = clientFor(deps, ROOT);
+  await root.members.add(`user:${BOB}`, { role: 'admin' });
+  later(1);
+  const bob = await touch(runtime, BOB, bobKey);
+  // The request's own ask answers him as an Admin; the reset's is asked as he is promoted, and he is demoted once
+  // it answered: his seal is back as it was, so only the answer's own says he was weighed an Owner.
+  aroundAccess(`user:${BOB}`, 2, () => root.members.add(`user:${BOB}`, { role: 'owner' }), () => root.members.add(`user:${BOB}`, { role: 'admin' }));
+  assert.deepEqual(refused(await act(bob, 'DELETE', `/api/members/user:${DANA}/passkeys`)), [409, 'conflict', 'access_changed']);
   assert.equal((await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${DANA}`)))[0]!.removedAt, null);
   assert.equal(await me(dana), 'ok');
 });

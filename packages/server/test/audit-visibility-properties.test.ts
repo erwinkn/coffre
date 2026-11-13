@@ -388,6 +388,7 @@ function callerOf({ policy, world }: Instance, asker: Who): Caller {
     grants: asker.grants.map((grant) => ({ ...grant, expiresAt: null })) as Access['grants'],
     since: null,
     by: null,
+    seal: null,
     policy: {
       roles: Object.fromEntries(Object.entries(policy.roles).map(([name, columns]) => [name, definition(name, columns)])),
       instanceRoles: Object.fromEntries(Object.entries(policy.instanceRoles).map(([name, columns]) => [name, definition(name, columns)])) as never,

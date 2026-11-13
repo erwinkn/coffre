@@ -453,39 +453,44 @@ sealed yet.
 
 - **Issuing a token** (`signin.ts`, `issueServiceToken`; a binding is made
   the same way, `bind`, `replaceKeys`):
-  1. the newest entry about the issuer's access, before the vault is asked;
-  2. the vault's answers about the issuer and the account;
-  3. under the change lock, both again, then the token.
+  1. the vault's answers about the issuer, with the seal it checked, and
+     the account;
+  2. under the change lock, both again, then the token.
 - **Sealing the older token at its first use** (`services.ts`,
   `sealCredentials`):
   1. the row;
-  2. the vault's answer about its issuer;
-  3. under the change lock, the issuer again, then the row, only as read.
-- **Changing access, in the vault:** demoting Olga, removing her and
-  admitting her again, an Owner again, at a new generation, removing the
-  account.
+  2. the vault's answer about its issuer, with the seal it checked;
+  3. under the change lock, the issuer's seal again, then the row, only as
+     read.
+- **Changing access, in the vault:** demoting Olga and promoting her back,
+  removing her and admitting her again, an Owner again, at a new
+  generation, removing the account.
+
+A member's seal is the vault's MAC over their object, so the model's seal
+is their state: whether an Owner, their status and their generation. A
+demotion undone puts it back as it was.
 
 | Protection, in the code | Turned off, TLC finds | Found by |
 |---|---|---|
-| The issuer is weighed from the vault's answer, read after the newest entry about their access, and committed only while that entry is still the newest (`issuerNow`, `issuerStill`) | a token reading sensitive values issued by someone demoted before it committed (`SensitiveOnlyFromOwners`) | this model, fixed with it |
+| The issuer is weighed from the vault's answer, and committed only while their row's seal is still the one that answer carries (`issuerNow`, `issuerStill`) | a token reading sensitive values issued by someone demoted before it committed (`SensitiveOnlyFromOwners`) | this model, fixed with it |
 | And so is a seal's (`sealCredentials`) | the older token sealed reading them, for someone demoted meanwhile (`SensitiveOnlyFromOwners`) | this model, fixed with it |
 | Issuing reads the account's standing again under the change lock (`#stillMember`) | a token at a generation a removal had moved past (`TokensAtCurrentGeneration`) | |
 | A seal updates the row only as it read it (`updateAuth`, matched on its scope) | the older token sealed twice (`SealedOnce`) | |
+| The seal held to is the one the vault's answer carries (`Access.seal`), not one the app read before asking (`IssuerSealFromAnswer`; `IssuingFlip`) | Omar demotes Olga, her request reads her seal, he promotes her, the vault answers that she is an Owner, he demotes her again, and her token commits reading sensitive values on the seal it read, back as it was (`SensitiveOnlyFromOwners`) | #628's review |
 | The vault's answer about the issuer counts only at the generation the request came in at (`issuerNow`), and under the change lock the request's credential and member still stand at it (`credentialStill`): each covers for the other | a token issued by a membership the request did not come in as, Olga removed and admitted again meanwhile, with what she holds now (`IssuedAsAuthenticated`) | #292's review |
 
 The race it found, with the fence off. Olga's request is weighed as an
-Owner's (steps 4 and 5), Omar demotes her (10), and her token commits
-reading the project's sensitive values (12). A demotion is no
+Owner's (step 4), Omar demotes her (9), and her token commits
+reading the project's sensitive values (11). A demotion is no
 `policy.change`, so `policyStill` let it through. Before the fix the
 request was weighed on the answer its authentication got; the same held
 for a binding, and for a seal, where the code said so and let it be.
 
 ```
-  4. olga      IssueLoad        issue actor olga who svc   -> issue.access
-  5. olga      IssueAccess      issue actor olga who svc   -> issue.changelock
- 10. omar      DemoteCommit     demote actor omar who olga -> idle               owners -olga; log +member.role who olga (omar); changeLock omar -> none
- 11. olga      IssueChangeLock  issue actor olga who svc   -> issue.commit       changeLock none -> olga
- 12. olga      IssueCommit      issue actor olga who svc   -> idle               log +token.create who olga sensitive true (olga); changeLock olga -> none
+  4. olga      IssueAccess      issue actor olga who svc   -> issue.changelock
+  9. omar      DemoteCommit     demote actor omar who olga -> idle               owners -olga; log +member.role who olga (omar); changeLock omar -> none
+ 10. olga      IssueChangeLock  issue actor olga who svc   -> issue.commit       changeLock none -> olga
+ 11. olga      IssueCommit      issue actor olga who svc   -> idle               log +token.create who olga sensitive true (olga); changeLock olga -> none
 ```
 
 ### Bulk.tla
@@ -861,7 +866,8 @@ batch's buffers its gate's and its keys' lone uses', its own 16 flat from
 | `Naming` | One request's key name mapped to its id once, while the key is renamed and another named so (T145, PR B) | 31 |
 | `Batching` | Two requests of one principal's, each two keys of three as one batch, at most two keys in the cap's set, every start of their rows, while the caller's standing is revoked or restored once and time ages a row once (T167, B2) | 76 thousand |
 | `BatchingRefused` | The same, the second request naming a key the rules refuse whatever the standing | 26 thousand |
-| `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 20 thousand |
+| `Issuing` | Olga issues the account a token, twice, while Omar demotes her, removes and admits her again, or removes the account, and two first uses seal the older token at once | 13 thousand |
+| `IssuingFlip` | Olga issues the account a token, and a first use seals the older one, while Omar demotes and promotes her, three times | 5 thousand |
 | `Bulk` | One principal reads two keys of three at most in a window of two ticks, on two credentials, with either kind of key, over three ticks | 12 thousand |
 
 ### What they abstract
@@ -2993,14 +2999,14 @@ wait, READ COMMITTED:
 a person adds a passkey before any session, under `optional`, for Ada, a
 Developer with no passkey:
 
-- `sgn`, the sign-in: one read of her access's sequence (`signinMembers`),
-  then the vault's answer, which decides (an Owner of the whole instance
+- `sgn`, the sign-in: one read of her passkeys (`signinMembers`), then the
+  vault's answer, with the seal it checked, which decides (an Owner of the whole instance
   adds a passkey first, and no session is made); else the change lock, and under
-  it the sequence read again (`#stillMember`), which, moved, sends the
+  it her seal read again (`#stillMember`), which, moved, sends the
   sign-in back to decide again from the reads; then a session the provider
   alone signed in;
 - `pro`, an Owner promoting her: the vault's change under the change lock, which
-  moves her sequence.
+  moves her seal.
 
 | Protection | Turned off, TLC finds |
 |---|---|
@@ -3011,7 +3017,7 @@ Developer with no passkey:
 | A change takes the change lock before it reads what to end (`ChangeTakesChangeLock`; `FactorApp`) | `ChangeEndsAll`: the first passkey's change reads Ada's credentials, `prev` takes the change lock and commits `o`, the change commits with `o` live |
 | The app's issue checks its source and the passkey rule under the change lock (`AppIssueChecks`; `FactorApp`) | `IssuedBacked`: `s` committed naming none after Ada's first passkey; and `LiveFromLive`: `s` issued from `cA` after a removal revoked it |
 | Every request holds its credential to a live passkey, or to none while its person holds none (`RequestChecks`; `FactorApp`) | `ServedBacked`: a request served on `o`, which the previous release issued after Ada's first passkey |
-| The sign-in holds the vault's answer to the access sequence it read, under the change lock (`SigninHoldsAccess`; `FactorSignin`) | `OwnersEnroll`: the vault answers that Ada is a Developer, `pro` promotes her and commits, `sgn` takes the change lock and commits a session the provider alone signed in, for an Owner |
+| The sign-in holds the vault's answer to the seal it carries, under the change lock (`SigninHoldsAccess`; `FactorSignin`) | `OwnersEnroll`: the vault answers that Ada is a Developer, `pro` promotes her and commits, `sgn` takes the change lock and commits a session the provider alone signed in, for an Owner |
 
 **The invariants.** `ChangeEndsAll`: once a change commits, every
 credential of Ada's its rule names is revoked but the session it issued.
@@ -3036,7 +3042,7 @@ the only one that names both, and nothing takes them the other way.
 |---|---|---|
 | `Factor` | the vault issues Ada a handle, and the previous release's vault another, while her first passkey is added, one removed or all reset | 395 |
 | `FactorApp` | the app issues on Ada's session, and the previous release's app signs her in, while a change to her passkeys runs; a request asks with either | 1,536 |
-| `FactorSignin` | Ada, a Developer with no passkey, signs in at the callback under `optional` while an Owner promotes her | 34 |
+| `FactorSignin` | Ada, a Developer with no passkey, signs in at the callback under `optional` while an Owner promotes her | 32 |
 
 **What it does not cover.** The checks `issue_token` made before (the
 issuer and account's standing, the policy, `via`'s seal and end), which

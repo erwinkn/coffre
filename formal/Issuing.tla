@@ -13,8 +13,9 @@
 (* lock (Coffre.tla; before 0.16 the log's head), which every app          *)
 (* transaction that changes something takes first.                         *)
 (*                                                                         *)
-(* Olga is an Owner of the project, and so is Omar, who may demote her,    *)
-(* or remove her and admit her again, an Owner again, at a new generation. *)
+(* Olga is an Owner of the project, and so is Omar, who may demote her    *)
+(* and promote her back, or remove her and admit her again, an Owner       *)
+(* again, at a new generation.                                             *)
 (* The service account "svc" holds a grant there. A token an older release *)
 (* issued it, by Olga, is not sealed yet: whether it reads the sensitive   *)
 (* values there is decided at its first use.                               *)
@@ -29,12 +30,17 @@ CONSTANTS
 CONSTANTS
     \* What decides a credential's sensitive reads, the issuer's standing as
     \* an Owner of the project, is weighed from the vault's answer about
-    \* them, read after the newest entry about their access, and committed
-    \* only while that entry is still the newest, under the change lock (server
-    \* api/services.ts, issuerNow and issuerStill): issuing a token, and
-    \* sealing one (sealCredentials).
+    \* them, and committed only while their row's seal is still the one that
+    \* answer carries, under the change lock (server api/services.ts,
+    \* issuerNow and issuerStill): issuing a token, and sealing one
+    \* (sealCredentials).
     IssuerFence,
     SealIssuerFence,
+    \* The seal held to is the one the vault checked against the object it
+    \* answered from (vault vault.ts, #read, Access.seal), not one the app
+    \* read before it asked: a seal is the member's state, which a demotion
+    \* and a promotion put back as it was.
+    IssuerSealFromAnswer,
     \* Issuing reads the service account's standing again under the change lock
     \* (server api/signin.ts, issueServiceToken, #stillMember).
     ServiceRecheckInIssue,
@@ -79,18 +85,12 @@ procs == <<pc, op, l, left>>
 vars == <<rows, log, locks, procs, given>>
 
 -----------------------------------------------------------------------------
-(* Access entries *)
+(* Seals *)
 
-\* The vault's entries that change someone's access: their role, grants or
-\* membership (core vault.ts, ACCESS_ACTIONS).
-AccessKinds == {"member.add", "member.restore", "member.owner", "member.role", "member.remove", "access.grant", "access.revoke"}
-
-\* The newest entry about m's access, by its place in the log; 0 for none:
-\* the model's stand-in for m's seal (server db/queries.ts, memberSeal),
-\* which each such entry moves.
-NewestAbout(m) ==
-    LET about == {i \in 1..Len(log) : log[i].kind \in AccessKinds /\ log[i].who = m} IN
-    IF about = {} THEN 0 ELSE CHOOSE i \in about : \A j \in about : j <= i
+\* m's seal (principals.seal): the vault's MAC over their object, so one
+\* value per state of it, whether an Owner, their status and generation,
+\* the same again once a change is undone.
+Seal(m) == <<m \in owners, IF m = "olga" THEN olgaStatus ELSE "active", IF m = "olga" THEN olgaGen ELSE 0>>
 
 \* Whether the vault answers that m is an Owner of the project
 \* (core access.ts, ownsProject): only while a member.
@@ -105,7 +105,7 @@ AsAuthenticated(gen) == olgaStatus = "active" /\ olgaGen = gen
 NoOp == [kind |-> "none", actor |-> None, who |-> None]
 
 L0 == [id |-> <<None, 0>>,
-       seq |-> 0,             \* the newest entry about the issuer's access, as read before the vault was asked
+       seal |-> <<>>,         \* the issuer's seal, held to under the change lock
        owner |-> FALSE,       \* whether the vault answered that the issuer is an Owner
        gen |-> 0,             \* the service account's generation, as the vault answered
        auth |-> 0,            \* the issuer's generation, as the request authenticated
@@ -150,6 +150,7 @@ FirstLabel(kind) ==
     CASE kind = "issue"  -> "issue.auth"
       [] kind = "seal"   -> "seal.read"
       [] kind = "demote" -> "demote.lock"
+      [] kind = "promote" -> "promote.lock"
       [] kind = "remove" -> "remove.lock"
       [] kind = "readmit" -> "readmit.lock"
 
@@ -159,7 +160,7 @@ Begin(p) ==
     /\ \E o \in Ops[p] :
          /\ op' = [op EXCEPT ![p] = o]
          /\ l' = [l EXCEPT ![p] = [L0 EXCEPT !.id = <<p, left[p]>>,
-                                             !.toLock = CASE o.kind \in {"demote", "readmit"} -> Sorted({o.actor, o.who})
+                                             !.toLock = CASE o.kind \in {"demote", "promote", "readmit"} -> Sorted({o.actor, o.who})
                                                            [] o.kind = "remove" -> <<o.who>>
                                                            [] OTHER -> <<>>]]
          /\ Goto(p, FirstLabel(o.kind))
@@ -179,31 +180,33 @@ Begin(p) ==
 IssueAuth(p) ==
     /\ pc[p] = "issue.auth"
     /\ IF olgaStatus = "active"
-         THEN Read(p, "issue.load", [l[p] EXCEPT !.auth = olgaGen])
+         THEN Read(p, IF IssuerSealFromAnswer THEN "issue.access" ELSE "issue.load", [l[p] EXCEPT !.auth = olgaGen])
          ELSE Refuse(p)
 
-\* The newest entry about the issuer's access, before the vault is asked.
+\* Without IssuerSealFromAnswer: the issuer's seal, read before the vault is asked.
 IssueLoad(p) ==
     /\ pc[p] = "issue.load"
-    /\ Read(p, "issue.access", [l[p] EXCEPT !.seq = NewestAbout(op[p].actor)])
+    /\ Read(p, "issue.access", [l[p] EXCEPT !.seal = Seal(op[p].actor)])
 
 \* The vault's answers, outside any transaction: whether the issuer is an
 \* Owner of the project, which is whether the scope reads its sensitive
-\* values; and the account's standing (managedAccount).
+\* values, with the seal it checked; and the account's standing
+\* (managedAccount).
 IssueAccess(p) ==
     /\ pc[p] = "issue.access"
     /\ IF svcStatus = "active" /\ (IssuerGenerationKept => AsAuthenticated(l[p].auth))
-         THEN Read(p, "issue.changelock", [l[p] EXCEPT !.owner = Owns(op[p].actor), !.gen = svcGen])
+         THEN Read(p, "issue.changelock", [l[p] EXCEPT !.owner = Owns(op[p].actor), !.gen = svcGen,
+                                                       !.seal = IF IssuerSealFromAnswer THEN Seal(op[p].actor) ELSE @])
          ELSE Refuse(p)
 
 IssueChangeLock(p) == pc[p] = "issue.changelock" /\ TakeChangeLock(p, "issue.commit")
 
-\* Under the change lock: the account again, the issuer's newest access entry
-\* again, then the token and `token.create`.
+\* Under the change lock: the account again, the issuer's seal again, then
+\* the token and `token.create`.
 IssueCommit(p) ==
     /\ pc[p] = "issue.commit"
     /\ IF \/ ServiceRecheckInIssue /\ ~(svcStatus = "active" /\ svcGen = l[p].gen)
-          \/ IssuerFence /\ NewestAbout(op[p].actor) # l[p].seq
+          \/ IssuerFence /\ Seal(op[p].actor) # l[p].seal
           \/ IssuerStandsUnderChangeLock /\ ~AsAuthenticated(l[p].auth)
          THEN Refuse(p)
          ELSE /\ log' = Append(log, [Entry("token.create", p) EXCEPT !.who = op[p].actor, !.sensitive = l[p].owner])
@@ -220,26 +223,27 @@ IssueCommit(p) ==
 (* api/services.ts, sealScopes and sealCredentials; api/signin.ts, verify). *)
 (***************************************************************************)
 
-\* The row, unsealed, and the newest entry about its issuer's access.
+\* The row, unsealed; without IssuerSealFromAnswer, its issuer's seal too.
 SealRead(p) ==
     /\ pc[p] = "seal.read"
     /\ IF legacy # "unsealed"
          THEN Refuse(p)
-         ELSE Read(p, "seal.access", [l[p] EXCEPT !.seq = NewestAbout(op[p].who)])
+         ELSE Read(p, "seal.access", [l[p] EXCEPT !.seal = IF IssuerSealFromAnswer THEN @ ELSE Seal(op[p].who)])
 
-\* The vault's answer about the issuer, outside any transaction.
+\* The vault's answer about the issuer, with the seal it checked, outside
+\* any transaction.
 SealAccess(p) ==
     /\ pc[p] = "seal.access"
-    /\ Read(p, "seal.changelock", [l[p] EXCEPT !.owner = Owns(op[p].who)])
+    /\ Read(p, "seal.changelock", [l[p] EXCEPT !.owner = Owns(op[p].who), !.seal = IF IssuerSealFromAnswer THEN Seal(op[p].who) ELSE @])
 
 SealChangeLock(p) == pc[p] = "seal.changelock" /\ TakeChangeLock(p, "seal.commit")
 
-\* Under the change lock: the issuer's newest access entry again, then the row,
+\* Under the change lock: the issuer's seal again, then the row,
 \* only if it is still as read, and `token.seal`. One sealed meanwhile is
 \* left as it is, and logs nothing.
 SealCommit(p) ==
     /\ pc[p] = "seal.commit"
-    /\ IF SealIssuerFence /\ NewestAbout(op[p].who) # l[p].seq
+    /\ IF SealIssuerFence /\ Seal(op[p].who) # l[p].seal
          THEN Refuse(p)
          ELSE IF SealCompareAndSet /\ legacy # "unsealed"
            THEN Refuse(p)
@@ -267,6 +271,21 @@ DemoteCommit(p) ==
     /\ IF ~(Owns(op[p].actor) /\ Owns(op[p].who))
          THEN Refuse(p)
          ELSE /\ owners' = owners \ {op[p].who}
+              /\ log' = Append(log, Entry("member.role", p))
+              /\ Release(p)
+              /\ Goto(p, "idle")
+              /\ UNCHANGED <<olgaStatus, olgaGen, svcStatus, svcGen, legacy, op, l, left, given>>
+
+\* Promoting her back, the same way: `member.role` about her, an Owner again.
+PromoteLock(p) == pc[p] = "promote.lock" /\ LockNext(p, "promote.changelock")
+
+PromoteChangeLock(p) == pc[p] = "promote.changelock" /\ TakeChangeLock(p, "promote.commit")
+
+PromoteCommit(p) ==
+    /\ pc[p] = "promote.commit"
+    /\ IF ~(Owns(op[p].actor) /\ op[p].who \notin owners /\ olgaStatus = "active")
+         THEN Refuse(p)
+         ELSE /\ owners' = owners \cup {op[p].who}
               /\ log' = Append(log, Entry("member.role", p))
               /\ Release(p)
               /\ Goto(p, "idle")
@@ -330,6 +349,7 @@ Step(p) ==
     \/ IssueAuth(p) \/ IssueLoad(p) \/ IssueAccess(p) \/ IssueChangeLock(p) \/ IssueCommit(p)
     \/ SealRead(p) \/ SealAccess(p) \/ SealChangeLock(p) \/ SealCommit(p)
     \/ DemoteLock(p) \/ DemoteChangeLock(p) \/ DemoteCommit(p)
+    \/ PromoteLock(p) \/ PromoteChangeLock(p) \/ PromoteCommit(p)
     \/ RemoveLock(p) \/ RemoveChangeLock(p) \/ RemoveCommit(p)
     \/ ReadmitLock(p) \/ ReadmitChangeLock(p) \/ ReadmitCommit(p)
 

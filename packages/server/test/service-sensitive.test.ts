@@ -23,7 +23,7 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditLog, credentials, environments, logChanges, secretReferences, secrets, secretVersions, serviceBindings, principals } from '@coffre/db/schema';
-import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -224,6 +224,48 @@ function onNextAccess(principal: string, meanwhile: () => Promise<unknown>, { af
   };
 }
 
+/** Around the vault's next answer about `principal`: `before` as it is asked, `after` once it has answered. */
+function aroundNextAccess(principal: string, before: () => Promise<unknown>, after: () => Promise<unknown>): void {
+  const access = deps.vault.access;
+  deps.vault.access = async (asked, ...rest) => {
+    if (asked !== principal) return access(asked, ...rest);
+    deps.vault.access = access;
+    await before();
+    const answer = await access(asked, ...rest);
+    await after();
+    return answer;
+  };
+}
+
+/**
+ * Ada's service token issued by the app itself, as through an MCP connection: the vault declines it as one it cannot
+ * log. Her request authenticated first; then `around` runs about the issue's own ask of the vault (`aroundNextAccess`).
+ */
+async function issuedByApp(around: () => void): Promise<{ id: string }> {
+  const asker = await contextFor(deps, ADA);
+  around();
+  const issueToken = deps.vault.issueToken!;
+  deps.vault.issueToken = async () => ({ ok: false, refused: 'unlogged' });
+  try {
+    return await runtime.signin!.issueServiceToken(asker, 'ci', { label: 'ci', expiresInDays: 30 });
+  } finally {
+    deps.vault.issueToken = issueToken;
+  }
+}
+
+const ownerOfBackend = () => root.access.set(`user:${ADA}`, { backend: 'owner' });
+const developerOfBackend = () => root.access.set(`user:${ADA}`, { backend: 'developer' });
+
+test("a Developer promoted to an Owner as the vault is asked, and demoted once it answered, issues nothing: the app holds the issue to the seal of the answer it weighed (formal/Issuing.tla, IssuerSealFromAnswer)", async () => {
+  // Her seal after the demotion is the one before the promotion: only the answer's own says she was weighed an Owner.
+  await assert.rejects(issuedByApp(() => aroundNextAccess(`user:${ADA}`, ownerOfBackend, developerOfBackend)), { status: 409, reason: 'access_changed' });
+  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
+  // Demoted and put back before the vault is asked, she is weighed on the seal she has: issued.
+  await ownerOfBackend();
+  const issued = await issuedByApp(() => aroundNextAccess(`user:${ADA}`, async () => { await developerOfBackend(); await ownerOfBackend(); }, async () => {}));
+  assert.deepEqual(await stored(credentials, issued.id), [{ role: 'viewer', sensitive: true }, { role: 'viewer', sensitive: true }]);
+});
+
 test('an Owner demoted while issuing a token gives it no sensitive value: weighed as the vault answered, committed only while still so (formal/Issuing.tla)', async () => {
   // Owen is an Owner of backend as his request is checked, and as the vault answers for his token; demoted before it commits.
   onNextAccess(CI, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }));
@@ -396,20 +438,35 @@ test('the vault decides it too, whatever the app asks: a service reads a sensiti
   assert.deepEqual(denied, Array(3).fill({ actor: CI, code: 'not_owner_issued' }));
 });
 
-test('an Owner demoted while their older token is sealed seals it reading nothing sensitive: the seal is weighed as the vault answered, committed only while still so', async () => {
+/** A token an older release issued CI, by `by`, its scope not yet weighed for sensitive values: the next use seals it. */
+async function olderToken(by: string): Promise<{ id: string; token: string }> {
   const [member] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
   const [dev] = await db.owner.select({ projectId: environments.projectId, id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
   const scope = JSON.stringify([{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
   const token = generateToken('service');
   const row = {
     id: randomUUID(), kind: 'service', tokenHash: hashToken(token), generation: member!.generation, tokenHint: tokenHint(token),
-    principal: CI, identityId: null, label: '0.10', createdBy: OWEN, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, scope, passkeyId: null, confirmedAt: null,
+    principal: CI, identityId: null, label: '0.10', createdBy: by, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, scope, passkeyId: null, confirmedAt: null,
   };
   await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
+  return { id: row.id, token };
+}
+
+test('a Developer promoted to an Owner as the seal of their older token asks the vault, and demoted once it answered, seals nothing: held to the seal of the answer it weighed', async () => {
+  const older = await olderToken(ADA);
+  aroundNextAccess(`user:${ADA}`, ownerOfBackend, developerOfBackend);
+  assert.equal(await read(older.token, 'backend/dev/STRIPE_SECRET_KEY'), '503');
+  // The next use seals it as she is now: a Developer's, which reads none.
+  assert.equal(await read(older.token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
+  assert.deepEqual(await stored(credentials, older.id), [{ role: 'viewer', sensitive: false }]);
+});
+
+test('an Owner demoted while their older token is sealed seals it reading nothing sensitive: the seal is weighed as the vault answered, committed only while still so', async () => {
+  const { id, token } = await olderToken(OWEN);
   // The seal asks the vault about Owen, an Owner of backend; he is demoted before it commits.
   onNextAccess(`user:${OWEN}`, () => root.access.set(`user:${OWEN}`, { backend: 'developer' }), { after: true });
   assert.equal(await read(token, 'backend/dev/STRIPE_SECRET_KEY'), '503');
   // The next use seals it as he is now: a Developer's, which reads none.
   assert.equal(await read(token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
-  assert.deepEqual(await stored(credentials, row.id), [{ role: 'viewer', sensitive: false }]);
+  assert.deepEqual(await stored(credentials, id), [{ role: 'viewer', sensitive: false }]);
 });

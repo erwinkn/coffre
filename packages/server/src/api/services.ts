@@ -138,10 +138,14 @@ export function notManager(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourc
  * Who issues a credential, as the vault answers now: what they may give it,
  * and whether its scope reads the sensitive values of a project, where they
  * are an Owner of it (`ownsProject`, R32), are weighed from this answer,
- * with the policy it carries. With it, read before the vault was asked, the
- * newest `policy.change`, which `audited` holds the issuing transaction to
- * (`policyStill`), and the issuer's seal (`memberSeal`), which
- * `issuerStill` does, both under the head. The request was
+ * with the policy it carries. With it, the newest `policy.change`, read
+ * before the vault was asked, which `audited` holds the issuing transaction
+ * to (`policyStill`), and the seal the answer carries (`Access.seal`), the
+ * vault's MAC over the object it weighed, which `issuerStill` does, both
+ * under the head. A seal comes back when a change is undone, so only the
+ * answer's own says what was weighed: one read before the vault answered
+ * would let a promotion before the answer and a demotion after it through
+ * (formal/Issuing.tla, `IssuerSealFromAnswer`). The request was
  * authenticated earlier, on an answer that only the policy fences: a person
  * demoted since would hand a service account what they can no longer give
  * it (formal/Issuing.tla, `IssuerFence`). Given the request (`as`), an
@@ -152,6 +156,10 @@ export function notManager(ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourc
  *   Olga, an Owner of market, asks for a token on market   her answer: Owner, seal 3f…
  *   Omar demotes her                                       her row resealed: 9c…
  *   her transaction, under the head: 9c…, not 3f…          409; asked again, the token reads no sensitive value
+ *
+ *   Olga, a Developer: Omar promotes her                   her answer: Owner, seal 3f…
+ *   Omar demotes her again                                 her row resealed as before: 9c…
+ *   her transaction, under the head: 9c…, not 3f…          409, as above
  */
 export async function issuerNow(
   deps: { db: Queryable; vault: Vault },
@@ -159,8 +167,8 @@ export async function issuerNow(
   as?: { ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>; action: string },
 ): Promise<{ caller: Caller; seal: string | null }> {
   const member = formatMember(principal);
-  // Both read before the vault is asked, together: a change after either is seen by the check that holds the issue to them.
-  const [policySeq, seal] = await Promise.all([newestPolicySeq(deps.db), memberSeal(deps.db, member)]);
+  // Read before the vault is asked: a policy change after it is seen by the check that holds the issue to it.
+  const policySeq = await newestPolicySeq(deps.db);
   const access = await deps.vault.access(member);
   // The membership the request came in as, or none: removed and admitted again since, they are someone the request is not.
   // A row that fails its check is refused as one, by what weighs the answer (`callerFrom`).
@@ -171,10 +179,10 @@ export async function issuerNow(
     );
   }
   // The credential's kind too: a workload's issuer is a workload, held to what it only uses, never a bearer.
-  return { caller: callerFrom(principal, access, policySeq, as?.ctx.caller.credentialScope ?? null, as?.ctx.caller.kind), seal };
+  return { caller: callerFrom(principal, access, policySeq, as?.ctx.caller.credentialScope ?? null, as?.ctx.caller.kind), seal: access.seal };
 }
 
-/** Refuse, 409, if the vault changed the issuer's access since `issuerNow` asked: under the head, so no change commits between. */
+/** Refuse, 409, unless the issuer's row still has the seal of the answer `issuerNow` weighed: under the head, so no change commits between. */
 export async function issuerStill(db: Queryable, issuer: Pick<Caller, 'principal'>, seal: string | null): Promise<void> {
   if ((await memberSeal(db, formatMember(issuer.principal))) === seal) return;
   throw new ApiError('conflict', 'your access changed while this ran: try again', ACCESS_CHANGED);

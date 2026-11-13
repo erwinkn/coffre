@@ -2634,8 +2634,9 @@ class VaultService implements Vault {
     };
   }
 
-  #access(principal: string, row: Member | undefined, held: readonly GrantRow[], at: number, tampered: boolean, policy: Policy): Access {
-    return answerFrom(principal, row, held, at, tampered, policy);
+  /** The answer, with the row's seal as `#onLog` checked it (`log`). */
+  #access(principal: string, row: Member | undefined, held: readonly GrantRow[], at: number, tampered: boolean, policy: Policy, log: MemberLog): Access {
+    return answerFrom(principal, row, held, at, tampered, policy, log.seal?.toString('base64') ?? null);
   }
 
   /** The revision of what `access` would answer about a standing a decision read: none but an active member's matches a kept answer. */
@@ -2644,7 +2645,7 @@ class VaultService implements Vault {
     if (standing.status !== 'active' || policy === undefined) return null;
     // Its grants that hold, as `access` answers them (`#heldGrants`): those `all` keeps.
     const held = standing.stored.filter((grant) => grant.environmentId === null || standing.all.grants.some((kept) => kept.environmentId === grant.environmentId));
-    return this.#access(standing.principal, d.members.get(standing.principal), held, d.at, false, policy).revision!;
+    return this.#access(standing.principal, d.members.get(standing.principal), held, d.at, false, policy, standing.log).revision!;
   }
 
   /**
@@ -2671,11 +2672,13 @@ class VaultService implements Vault {
     const read = async (db: Queryable, reports: NewEntry[]) => {
       const reads = await snapshot(db, { principals: [principal], members: true });
       const [row, held, at] = [reads.members.get(principal), reads.grants.get(principal)!, this.#at(reads)];
+      // The snapshot's: the seal `#integrity` checks the row against is the one the answer carries.
+      const log = await this.#memberLog(db, principal, reads);
       const fault = await this.#integrity(db, principal, row, held, reports, reads);
       // Their grants but those on a place whose row is not as 0.15's log holds it, which hold nothing (T159).
       const holding = fault === null ? await this.#heldGrants(db, held, reports, reads.environments) : held;
       const { policy } = await this.#policyAt(db, reports, at, reads);
-      return this.#access(principal, row, holding, at, fault !== null, policy);
+      return this.#access(principal, row, holding, at, fault !== null, policy, log);
     };
     const found: NewEntry[] = [];
     const quick = await read(this.#db, found).catch((error: unknown) => {
@@ -4299,8 +4302,8 @@ class VaultService implements Vault {
     const actorRow = reads.members.get(actor);
     const acting = await this.#standing(this.#db, actor, actorRow, at, reports, reads);
     if (acting.status !== 'active' || actorRow === undefined) return refuse('ended');
-    // Their seal, which `#standing` held to the log, as the app read it when it weighed them.
-    if (input.actorSeal !== null && acting.log.seal?.toString('hex') !== input.actorSeal) return refuse('access');
+    // Their seal, which `#standing` held to the log, as the vault's answer the app weighed them on carried it.
+    if (input.actorSeal !== null && acting.log.seal?.toString('base64') !== input.actorSeal) return refuse('access');
     // The credential the request came in on: the log's (its seal the vault's, and its object's newest change's), live, its issuer's.
     let viaScope: CredentialScope | null = null;
     if (input.via !== null) {

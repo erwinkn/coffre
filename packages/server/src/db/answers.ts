@@ -62,7 +62,7 @@ export function answerOf(principal: string, answer: unknown): Shown {
   const environments = new Map(raw.environments.map(({ id, slug, deleted }) => [id, { slug, deleted }]));
   const { policy } = policyFrom(raw.policy, environments, at);
   return {
-    access: answerFrom(principal, member, grants, at, false, policy),
+    access: answerFrom(principal, member, grants, at, false, policy, raw.member?.seal ?? null),
     settings: settingsFrom(raw.settings),
     policySeq: raw.policySeq === null ? null : BigInt(raw.policySeq),
   };
@@ -99,7 +99,7 @@ type Int = number | string;
 
 type Raw = {
   at: Int;
-  member: { status: 'active' | 'removed'; owner: boolean; role: string | null; scope: string | null; generation: Int; statusChangedAt: Int; statusChangedBy: string } | null;
+  member: { status: 'active' | 'removed'; owner: boolean; role: string | null; scope: string | null; generation: Int; statusChangedAt: Int; statusChangedBy: string; seal: string | null } | null;
   grants: { projectId: string | null; environmentId: string | null; role: string; expiresAt: Int | null; grantedAt: Int; grantedBy: string }[];
   policySeq: Int | null;
   policy: string | null;
@@ -125,7 +125,7 @@ export function answerQuery(principal: SQL): SQL {
       'at', (extract(epoch from clock_timestamp()) * 1000)::bigint,
       'member', (
         SELECT json_build_object('status', status, 'owner', owner, 'role', role, 'scope', scope, 'generation', generation,
-          'statusChangedAt', status_changed_at, 'statusChangedBy', status_changed_by)
+          'statusChangedAt', status_changed_at, 'statusChangedBy', status_changed_by, 'seal', encode(seal, 'base64'))
         FROM principals WHERE principal = ${principal}
       ),
       'grants', (

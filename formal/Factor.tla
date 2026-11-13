@@ -91,8 +91,8 @@ CONSTANTS
     \* live passkey stands behind (section 6.2).
     RequestChecks,
     \* A provider-only sign-in's transaction holds the vault's answer to the
-    \* access sequence read before it was asked, under the change lock, and
-    \* decides again when it moved (`#stillMember`; review r1 of #500).
+    \* seal it carries, under the change lock, and decides again when it
+    \* moved (`#stillMember`).
     SigninHoldsAccess
 
 None == "none"
@@ -128,9 +128,9 @@ VARIABLES
     l,          \* a change: the credentials it read to end, and those it holds
     leftover,   \* at a change's commit: what it should have ended and did not
     unbacked,   \* the credentials a request was served on with no live passkey behind them
-    acc         \* Ada's access: her role and its sequence, as committed; what a sign-in
-                \* read of them (`seq`, then the vault's `answer`); and `wrong`, whether a
-                \* provider-only session was committed while she was an Owner
+    acc         \* Ada's access: her role and her seal (`seq`), as committed; the vault's
+                \* `answer` a sign-in read, and the seal it carried (`seen`); and `wrong`,
+                \* whether a provider-only session was committed while she was an Owner
 
 locks == <<fx, changeLock, mx, ms, cx, cs>>
 vars == <<rows, passkeys, locks, pc, op, l, leftover, unbacked, acc>>
@@ -304,26 +304,23 @@ Request(p) ==
 -----------------------------------------------------------------------------
 (* A sign-in at the callback, Ada holding no passkey, under `optional` *)
 
-\* The members' read: her access's sequence (`signinMembers`), with whether
-\* she holds a passkey, which would make the step a touch, not modelled.
+\* The members' read (`signinMembers`): whether she holds a passkey, which
+\* would make the step a touch, not modelled.
 SigninRead(p) ==
     /\ pc[p] = "begin"
-    /\ IF passkeys # {}
-          THEN /\ pc' = [pc EXCEPT ![p] = "done"]
-               /\ UNCHANGED acc
-          ELSE /\ acc' = [acc EXCEPT !.seen = acc.seq]
-               /\ pc' = [pc EXCEPT ![p] = "ask"]
-    /\ UNCHANGED <<rows, passkeys, locks, op, l, leftover, unbacked>>
+    /\ pc' = [pc EXCEPT ![p] = IF passkeys # {} THEN "done" ELSE "ask"]
+    /\ UNCHANGED <<rows, passkeys, locks, op, l, leftover, unbacked, acc>>
 
-\* The vault's answer, later: an Owner of the whole instance adds a passkey
-\* first (`StepWanted`), and no session is made; anyone else signs in.
+\* The vault's answer, later, with the seal it checked (`Access.seal`): an
+\* Owner of the whole instance adds a passkey first (`StepWanted`), and no
+\* session is made; anyone else signs in.
 SigninAsk(p) ==
     /\ pc[p] = "ask"
-    /\ acc' = [acc EXCEPT !.answer = acc.role]
+    /\ acc' = [acc EXCEPT !.answer = acc.role, !.seen = acc.seq]
     /\ pc' = [pc EXCEPT ![p] = IF acc.role = "owner" THEN "done" ELSE "changelock"]
     /\ UNCHANGED <<rows, passkeys, locks, op, l, leftover, unbacked>>
 
-\* Under the change lock: the sequence as read, or decided again from the reads.
+\* Under the change lock: the seal as answered, or decided again from the reads.
 SigninCheck(p) ==
     /\ pc[p] = "held"
     /\ IF SigninHoldsAccess /\ acc.seq # acc.seen

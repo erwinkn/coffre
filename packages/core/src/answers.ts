@@ -52,10 +52,13 @@ export type GrantFacts = {
 
 /**
  * What `access` answers about `principal`, from their row and their
- * grants, lapsed ones too, as of `at`; `tampered` when a row failed the
- * vault's check, which only the vault can tell.
+ * grants, lapsed ones too, as of `at`, and the row's seal, base64;
+ * `tampered` when a row failed the vault's check, which only the vault
+ * can tell.
  */
-export function answerFrom(principal: string, row: MemberFacts | undefined, held: readonly GrantFacts[], at: number, tampered: boolean, policy: Policy): Access {
+export function answerFrom(
+  principal: string, row: MemberFacts | undefined, held: readonly GrantFacts[], at: number, tampered: boolean, policy: Policy, seal: string | null,
+): Access {
   const active = PRINCIPAL.test(principal) && !tampered && row?.status === 'active';
   const access: Access = {
     principal,
@@ -66,6 +69,7 @@ export function answerFrom(principal: string, row: MemberFacts | undefined, held
     since: row ? iso(row.statusChangedAt) : null,
     by: row?.statusChangedBy ?? null,
     policy,
+    seal: row === undefined || tampered ? null : seal,
   };
   return { ...access, revision: accessRevision(access) };
 }

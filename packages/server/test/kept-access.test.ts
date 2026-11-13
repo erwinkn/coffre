@@ -217,7 +217,7 @@ test('a read of plain values alone, which opens nothing, asks before it answers'
 
 test("an answer from a vault older than 0.14.1, which names none, is never kept: beside one, every read asks", () => {
   const accesses = new Accesses();
-  const answer = { principal: `user:${READER}`, status: 'active' as const, generation: 0, role: 'member' as const, scope: { kind: 'everywhere' } as never, grants: [], since: null, by: null };
+  const answer = { principal: `user:${READER}`, status: 'active' as const, generation: 0, role: 'member' as const, scope: { kind: 'everywhere' } as never, grants: [], since: null, by: null, seal: null };
   accesses.remember(answer);
   assert.equal(accesses.recall(answer.principal), undefined);
   accesses.remember({ ...answer, revision: 'r1' });
