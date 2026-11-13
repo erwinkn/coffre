@@ -219,9 +219,13 @@ export function placesOf(stored: string | null): string[] {
   }
 }
 
-/** Whether a workload's row is live on the database's clock: not revoked, not expired, not past its hard end. */
+/**
+ * Whether a workload's row is live on the database's clock: sealed, not revoked, not expired, not past its hard end.
+ * A row with no seal is none, as every reader of credentials has it (`unrevokedSealed`): the app's MAC does not cover
+ * the seal. The session's own row and each of its ancestors are held to it.
+ */
 function live(row: SessionRow, now: number): boolean {
-  return row.kind === 'workload' && row.revokedAt === null && row.expiresAt.getTime() > now && row.notAfter !== null && row.notAfter.getTime() > now;
+  return row.kind === 'workload' && row.seal !== null && row.revokedAt === null && row.expiresAt.getTime() > now && row.notAfter !== null && row.notAfter.getTime() > now;
 }
 
 /**
@@ -362,8 +366,7 @@ async function sessionRowsFor(runtime: Pick<CoffreRuntime, 'db' | 'chainKey'>, t
   const own = rows.find((candidate) => candidate.credential.tokenHash.equals(tokenHash));
   if (own === undefined) throw unknown();
   const { credential: row, binding, now } = own;
-  // A row with no seal is none, as every reader of credentials has it (`unrevokedSealed`): the app's MAC does not cover the seal.
-  if (row.seal === null || !checkAuthRow(runtime.chainKey, 'credentials', row) || !live(row, now)) throw unknown();
+  if (!checkAuthRow(runtime.chainKey, 'credentials', row) || !live(row, now)) throw unknown();
   if (own.memberStatus !== 'active' || own.memberGeneration !== row.generation) throw unknown();
   // A binding a removal closed stands for none of its sessions from then on, renewal included: they end as its
   // sign-ins do, at the close, not when the removal reaches their batch, which on Workers may be a scheduled run later.

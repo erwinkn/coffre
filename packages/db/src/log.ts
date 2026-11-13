@@ -727,7 +727,7 @@ export async function newestAuthentic(page: (limit: number, before: bigint | und
  * (`Vault.prepare`), each `app_change` (migrations 0025, 0026 and 0030), in its
  * transaction, once its rows and 0.14 entries are written: in order, in one
  * round trip, or in the append's own (`appendEntries`). Each entry's number;
- * 0 for a row of 0.14's, which logs nothing; null where a row's seal moved
+ * null where a row's seal moved
  * since the app read it, and nothing was done (ChangeCAS: read again). A row
  * that is not its object's newest change's fails the call (`isStaleChange`),
  * and its transaction with it.
@@ -744,9 +744,9 @@ export async function appChanges(tx: Transaction, calls: readonly PreparedChange
  */
 export type ChangeNumbers = { readonly answer: Promise<bigint[]>; /** The request ids of the calls that make an entry. */ readonly requests: readonly string[] };
 
-/** The calls' request ids, but those that make no entry (0.14's rows: `app_change` answers 0). */
-function requestsOf(calls: readonly { requestId: string | null }[]): string[] {
-  return calls.flatMap(({ requestId }) => (requestId === null ? [] : [requestId]));
+/** The calls' request ids, one each: every call makes an entry. */
+function requestsOf(calls: readonly { requestId: string }[]): string[] {
+  return calls.map(({ requestId }) => requestId);
 }
 
 /**
@@ -758,7 +758,7 @@ function requestsOf(calls: readonly { requestId: string | null }[]): string[] {
  */
 export async function newestCommitted(db: Queryable, numbers: ChangeNumbers): Promise<bigint | null> {
   const read = await numbers.answer.catch(async (unread: unknown) => {
-    // No call made an entry (0.14's rows, each answering 0): committed, there is no seal to wait for (review r2).
+    // No call, so no entry: committed, there is no seal to wait for.
     if (numbers.requests.length === 0) return [];
     const requests = sql.join(numbers.requests.map((request) => sql`${request}`), sql`, `);
     const rows = await rowsOf<{ number: string | number | bigint }>(db, sql`SELECT number FROM log_changes WHERE request_id IN (${requests})`)

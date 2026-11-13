@@ -93,9 +93,8 @@ const WORKLOAD_FIELDS = [
  * The tuple's kind and fields: an exchanged credential's are its own, and
  * so are a binding's that carries its issuer's keys, which covers them. A
  * token's or a binding's scope makes another kind again, which covers it:
- * the rows of 0.4 had none, and still check as they were sealed until the
- * app seals them with one (`sealScopes`); a scope cleared or changed fails
- * either way. A handle's places do the same, and a binding's policy, last:
+ * a row with none checks as one without (the rows of 0.4, which reach
+ * nothing: `readScope`), and a scope cleared or changed fails either way. A handle's places do the same, and a binding's policy, last:
  * a binding that carries one never checks as one `/api/auth/oidc` takes.
  * A workload's session is its own kind first, whatever else it carries,
  * and so is an enrollment code.

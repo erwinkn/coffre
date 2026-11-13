@@ -178,7 +178,7 @@ async function bind(claims: BindingClaims, replaces: string[] = [], profile: Wor
 
 /**
  * A binding as a release before 0.11 left one in the log: the vault's, sealed and live, its scope naming each
- * place but not whether it reads sensitive values there (`unsealedScope`).
+ * place but not whether it reads sensitive values there, which reaches nothing (`readScope`).
  */
 async function bindUnsealed(claims: BindingClaims): Promise<string> {
   const real = deps.vault.changeBindings!;
