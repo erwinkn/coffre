@@ -2674,7 +2674,7 @@ class VaultService implements Vault {
       const [row, held, at] = [reads.members.get(principal), reads.grants.get(principal)!, this.#at(reads)];
       // The snapshot's: the seal `#integrity` checks the row against is the one the answer carries.
       const log = await this.#memberLog(db, principal, reads);
-      const fault = await this.#integrity(db, principal, row, held, reports, reads);
+      const fault = await this.#integrity(db, principal, row, held, reports, reads, new Map([[principal, log]]));
       // Their grants but those on a place whose row is not as 0.15's log holds it, which hold nothing (T159).
       const holding = fault === null ? await this.#heldGrants(db, held, reports, reads.environments) : held;
       const { policy } = await this.#policyAt(db, reports, at, reads);

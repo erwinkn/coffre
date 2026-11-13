@@ -470,3 +470,14 @@ test('an Owner demoted while their older token is sealed seals it reading nothin
   assert.equal(await read(token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
   assert.deepEqual(await stored(credentials, id), [{ role: 'viewer', sensitive: false }]);
 });
+
+test("an older token whose issuer's row fails its check is sealed reading nothing sensitive, and the isolate's other credentials are checked as ever", async () => {
+  const older = await olderToken(ADA);
+  const issued = await owen.tokens.issue(CI, { expiresInDays: 30, scope: { 'backend/dev': 'viewer' } });
+  // Ada's row made an Owner's around the vault: it fails its check, and the vault weighs her as holding nothing.
+  await db.owner.update(principals).set({ role: 'owner' }).where(eq(principals.principal, `user:${ADA}`));
+  // The isolate's first credential check seals the older token first (`sealScopes`): Owen's new one is served.
+  assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), STRIPE);
+  assert.deepEqual(await stored(credentials, older.id), [{ role: 'viewer', sensitive: false }]);
+  assert.equal(await read(older.token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
+});

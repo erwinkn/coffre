@@ -518,7 +518,9 @@ export async function sealCredentials(db: Database, chainKey: Buffer, vault: Vau
     });
   });
   return audited({ db, chainKey, vault, caller: { policySeq, policy } }, async (tx) => {
-    for (const { caller, seal } of issuers.values()) await issuerStill(tx, caller, seal);
+    // An issuer whose row fails its check was weighed as holding nothing: what is sealed from that reads no sensitive
+    // value whatever the row becomes, so nothing holds it to a seal.
+    for (const { caller, seal } of issuers.values()) if (!caller.tampered) await issuerStill(tx, caller, seal);
     const written: string[] = [];
     let count = 0;
     for (const [i, row] of rows.entries()) {

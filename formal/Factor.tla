@@ -92,7 +92,7 @@ CONSTANTS
     RequestChecks,
     \* A provider-only sign-in's transaction holds the vault's answer to the
     \* seal it carries, under the change lock, and decides again when it
-    \* moved (`#stillMember`).
+    \* moved (`#stillAnswered`).
     SigninHoldsAccess
 
 None == "none"
@@ -128,7 +128,8 @@ VARIABLES
     l,          \* a change: the credentials it read to end, and those it holds
     leftover,   \* at a change's commit: what it should have ended and did not
     unbacked,   \* the credentials a request was served on with no live passkey behind them
-    acc         \* Ada's access: her role and her seal (`seq`), as committed; the vault's
+    acc         \* Ada's access: her role and her seal (`seq`), as committed: a counter, which
+                \* never comes back, so a seal undone is not modelled here (IssuingFlip has it); the vault's
                 \* `answer` a sign-in read, and the seal it carried (`seen`); and `wrong`,
                 \* whether a provider-only session was committed while she was an Owner
 

@@ -3002,7 +3002,7 @@ Developer with no passkey:
 - `sgn`, the sign-in: one read of her passkeys (`signinMembers`), then the
   vault's answer, with the seal it checked, which decides (an Owner of the whole instance
   adds a passkey first, and no session is made); else the change lock, and under
-  it her seal read again (`#stillMember`), which, moved, sends the
+  it her seal read again (`#stillAnswered`), which, moved, sends the
   sign-in back to decide again from the reads; then a session the provider
   alone signed in;
 - `pro`, an Owner promoting her: the vault's change under the change lock, which
