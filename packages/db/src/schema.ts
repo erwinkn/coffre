@@ -253,7 +253,9 @@ export const secretVersions = pgTable(
  * the project's other environments have them, and its missing-keys list
  * leaves them out until someone restores them (docs/design/environments.md).
  * One row per environment and key, updated in place: restoring sets
- * `restored_at`, dismissing again clears it.
+ * `restored_at`, dismissing again clears it. Under a MAC: a fork that
+ * dismissed a key does not inherit it, so a row decides what a use of the
+ * fork is given.
  */
 export const dismissedKeys = pgTable(
   'dismissed_keys',
@@ -264,9 +266,11 @@ export const dismissedKeys = pgTable(
     dismissedBy: text('dismissed_by').notNull(),
     restoredAt: at('restored_at'),
     restoredBy: text('restored_by'),
+    mac: mac(),
   },
   (table) => [
     primaryKey({ name: 'dismissed_keys_pkey', columns: [table.environmentId, table.key] }),
+    macCheck('dismissed_keys_mac_check', table.mac),
     check('dismissed_keys_key_check', sql`${table.key} ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'`),
     foreignKey({
       name: 'dismissed_keys_environment_id_fkey',

@@ -11,7 +11,8 @@ Three [Quint](https://quint.sh) models of the design in
   A row's MAC is a function of its content, so a row changed and changed back
   compares equal. `sound` passes, 24,627,382 distinct states. `noReadSet` and
   `stampLate` must fail. `packages/vault/test/replay-change.ts` replays its
-  runs against the vault's change on Postgres (its header says how).
+  runs against the vault's change and its use on Postgres (its header says
+  how).
 - `log.qnt`: the log, the signer and its mirror of the access rows' MACs,
   against a database writer without the key. `logSound` passes, 52,048,877
   states, with one row, MACs 0 to 2, three entries and two moves by the

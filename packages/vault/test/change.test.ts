@@ -15,7 +15,7 @@ import { keyOf, nameOf, sealedBy, shapeOf, type Fresh, type Row, type Sealed } f
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 import { emptyDatabase, openTestVault, VAULT_URL } from './database.ts';
 
-const { bindings, credentials, deviceLogins, enrollmentCodes, environments, grants, identities, oauthClients, policy, principals, projects, roles, secrets } = schema;
+const { bindings, credentials, deviceLogins, dismissedKeys, enrollmentCodes, environments, grants, identities, oauthClients, policy, principals, projects, roles, secrets } = schema;
 
 const vault = await openTestVault();
 after(() => vault.close());
@@ -81,6 +81,8 @@ test('every sealed table has a row that reads back as the vault sealed it', asyn
   const written: [Sealed, object][] = [
     [projects, { id: project, slug: 'market', name: 'Market', createdAt: at, archivedAt: at, folder: 'Payments' }],
     [projects, { id: randomUUID(), slug: 'billing', name: 'Billing', createdAt: at, archivedAt: null, folder: null }],
+    [dismissedKeys, { environmentId: parent, key: 'OLD_KEY', dismissedAt: at, dismissedBy: ada, restoredAt: at, restoredBy: ada }],
+    [dismissedKeys, { environmentId: environment, key: 'OLD_KEY', dismissedAt: at, dismissedBy: ada, restoredAt: null, restoredBy: null }],
     [environments, { id: parent, projectId: project, slug: 'prod', name: 'Production', createdAt: at, archivedAt: at, parentId: null, owner: null, protected: true, frozenCredentials: ['stripe', 'aws'] }],
     [environments, { id: environment, projectId: project, slug: 'ada', name: 'Ada’s', createdAt: at, archivedAt: null, parentId: parent, owner: ada, protected: false, frozenCredentials: [] }],
     [secrets, { id: source, projectId: project, environmentId: parent, key: 'STRIPE_KEY', createdAt: at, updatedAt: at, versions: 3, currentVersion: 3, archivedAt: at, folder: 'Payments', sourceId: null }],
@@ -117,7 +119,7 @@ test('every sealed table has a row that reads back as the vault sealed it', asyn
   await done(writing(...written.map(([table, row]) => put(table, row as never))));
 
   // The schema's own mark of one: a MAC that may be empty, as the upgrade leaves it. The log's MACs never are.
-  const sealed = Object.values(schema).filter((table): table is Sealed => is(table, PgTable) && 'mac' in table && (table.mac as { hasDefault: boolean }).hasDefault);
+  const sealed = Object.values(schema).filter((table: unknown): table is Sealed => is(table, PgTable) && 'mac' in table && (table.mac as { hasDefault: boolean }).hasDefault);
   assert.deepEqual(sealed.map((table) => shapeOf(table).name).sort(), [...new Set(written.map(([table]) => shapeOf(table).name))].sort(), 'a sealed table this test writes no row of');
   for (const table of sealed) {
     const wrote = written.filter(([its]) => its === table);

@@ -933,6 +933,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "mac": {
+          "name": "mac",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'\\x'::bytea"
         }
       },
       "indexes": {},
@@ -966,6 +973,10 @@
         "dismissed_keys_key_check": {
           "name": "dismissed_keys_key_check",
           "value": "\"dismissed_keys\".\"key\" ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'"
+        },
+        "dismissed_keys_mac_check": {
+          "name": "dismissed_keys_mac_check",
+          "value": "octet_length(\"dismissed_keys\".\"mac\") IN (0, 36)"
         }
       },
       "isRLSEnabled": false
