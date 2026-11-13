@@ -245,11 +245,11 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     if (!rows.some((other) => other.row === name)) rows.push({ row: name, was: mac, now: mac });
   }
   const versions: Wire[] = [];
-  /** A row of `table` this change writes, or else read, by its key. */
+  /** A row of `table` as this change leaves it, by its key: the one it writes, or else the one it read. None for a row it drops. */
   const rowOf = <T extends Sealed>(table: T, key: object): Fresh<T> | undefined => {
     const name = nameOf(table, key);
-    const made = plan.writes.find((write) => write.table === table && write.row !== null && nameOf(table, write.row) === name);
-    if (made !== undefined) return made.row as Fresh<T>;
+    const made = plan.writes.find((write) => write.table === table && nameOf(table, write.row ?? write.was!) === name);
+    if (made !== undefined) return (made.row ?? undefined) as Fresh<T> | undefined;
     for (const [row, of] of read) if (of === name) return row as Fresh<T>;
     return undefined;
   };
@@ -257,8 +257,8 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     // Sealed under what its secret's row and its environment's say, as this change leaves them: a use opens it by the same rows.
     const held = plan.writes.find((write) => write.table === secrets && (write.row as { id?: string } | null)?.id === version.secretId)?.row as Fresh<typeof secrets> | undefined;
     const place = held && rowOf(environments, { id: held.environmentId });
-    if (held === undefined || place === undefined || held.currentVersion !== version.version || held.versions !== version.version) {
-      throw new Error('a change writes a value as the current version of a secret it writes, in an environment it read');
+    if (held === undefined || place === undefined || place.projectId !== held.projectId || held.currentVersion !== version.version || held.versions !== version.version) {
+      throw new Error('a change writes a value as the current version of a secret it writes, in an environment of its project that it read');
     }
     if (version.plaintext !== null && version.plaintext !== text.toString('utf8')) throw new Error("a plain value's copy is the value");
     versions.push(toWire(secretVersions, { ...version, ...(await sealValue(text, contextOf(held, version, place.owner), vault.keks)) }));

@@ -13,7 +13,7 @@ import { bindings, environments } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, type Asking } from '../src/caller.ts';
-import { commit, part, prepare } from '../src/change.ts';
+import { commit, prepare } from '../src/change.ts';
 import { entryOf } from '../src/entry.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
 import { openLocalVault } from '../src/local.ts';
@@ -24,7 +24,8 @@ const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
 after(() => world.close());
 
-const [ada, bo, cy, dee, eve] = [user('ada'), user('bo'), user('cy'), user('dee'), user('eve')];
+const [ada, bo, cy, dee, eve, fay] = [user('ada'), user('bo'), user('cy'), user('dee'), user('eve'), user('fay')];
+let elsewhere: ReturnType<typeof environment>;
 let url: { id: string };
 let stripe: { id: string };
 let market: ReturnType<typeof project>;
@@ -39,19 +40,22 @@ beforeEach(async () => {
   const old = environment(market, 'old', { archivedAt: new Date(Date.UTC(2026, 10, 1)) });
   const billing = project('billing');
   const there = environment(billing, 'prod');
+  elsewhere = environment(billing, 'vault', { protected: true });
   const source = (stripe = value(world, secret(there, 'STRIPE_KEY'), 'sk_live'));
   const database = (url = value(world, secret(prod, 'DATABASE_URL'), 'postgres://old'));
   const viewer = JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]);
-  await write(world, ...rows('projects', market, billing), ...rows('environments', prod, guarded, adas, old, there),
+  await write(world, ...rows('projects', market, billing), ...rows('environments', prod, guarded, adas, old, there, elsewhere),
     ...rows('secrets', database, source, secret(prod, 'STRIPE_KEY', { sourceId: source.id }), secret(prod, 'GONE', { archivedAt: new Date(Date.UTC(2026, 10, 1)) })),
     // A developer writes everywhere; a contributor writes, but not where an environment is protected; a viewer reads. An Owner of the instance holds what its role says, with no grant.
-    ...rows('roles', role(false, 'developer', ['secret.read', 'secret.write']), role(false, 'contributor', ['secret.read', 'secret.write'], ['secret.read']), role(false, 'viewer', ['secret.read']), role(true, 'owner', ['secret.read', 'secret.write']), role(true, 'member', [])),
-    ...rows('principals', principal(ada), principal(bo), principal(cy), principal(dee, { role: 'owner' }), principal(eve), principal(api)), ...rows('policy', instance()),
+    ...rows('roles', role(false, 'developer', ['secret.read', 'secret.write']), role(false, 'contributor', ['secret.read', 'secret.write'], ['secret.read']), role(false, 'viewer', ['secret.read']), role(true, 'owner', ['secret.read', 'secret.write']), role(true, 'member', []),
+      // An Admin of this instance writes everywhere but where an environment is protected.
+      role(true, 'admin', ['secret.write'], [])),
+    ...rows('principals', principal(ada), principal(bo), principal(cy), principal(dee, { role: 'owner' }), principal(eve), principal(fay, { role: 'admin' }), principal(api)), ...rows('policy', instance()),
     ...rows('grants',
       // Ada's grant on billing, and everyone else's on market, decide nothing of a write of hers in market: none is read.
       grant(ada, 'developer', { project: market }), grant(ada, 'developer', { project: billing }), grant(bo, 'viewer', { project: market }), grant(cy, 'contributor', { project: market }),
       grant(eve, 'developer', { environment: prod }), grant(eve, 'developer', { project: market }, { expiresAt: new Date(world.now() - 1000) }), grant(api, 'developer', { project: market })),
-    ...rows('credentials', credential('ada-cli', ada), credential('bo-cli', bo), credential('cy-cli', cy), credential('dee-cli', dee), credential('eve-cli', eve),
+    ...rows('credentials', credential('ada-cli', ada), credential('bo-cli', bo), credential('cy-cli', cy), credential('dee-cli', dee), credential('eve-cli', eve), credential('fay-cli', fay),
       // A personal token reaches no further than its scope, whatever its person holds; a handle changes nothing.
       credential('ada-pat', ada, { kind: 'personal', scope: viewer }), credential('ada-handle', ada, { kind: 'handle', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'developer' }]) }),
       credential('api-token', api, { scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'developer' }]) })));
@@ -96,7 +100,8 @@ test('a write gives each key its next version, makes the keys the environment la
   // It names the rows it was decided on, each with its MAC: who asked and what they hold, the place, and each secret, replaced or made.
   const tables = entry.rows.map(({ row: name, was, now }) => `${(JSON.parse(name) as string[])[0]} ${was === null ? 'made' : was === now ? 'read' : 'replaced'}`).sort();
   // One grant and its role, with her role in the instance: not her grant on billing, nor anyone else's on market.
-  assert.deepEqual(tables, ['credentials read', 'environments read', 'grants read', 'principals read', 'projects read', 'roles read', 'roles read', 'secrets made', 'secrets made', 'secrets replaced']);
+  // And two environments: the one written in, and the one its project protects, which weighs on what she holds there.
+  assert.deepEqual(tables, ['credentials read', 'environments read', 'environments read', 'grants read', 'principals read', 'projects read', 'roles read', 'roles read', 'secrets made', 'secrets made', 'secrets replaced']);
   assert.ok(entry.objects.includes(`secret:${url.id}`) && entry.objects.includes(`principal:${ada}`), entry.objects.join());
   const [by] = await rowsOf<{ by: string }>(world.owner, sql`SELECT created_by AS by FROM secret_versions WHERE secret_id = ${url.id} AND version = 2`);
   assert.equal(by!.by, ada);
@@ -202,22 +207,32 @@ test('a workload\'s session writes as its service may, with its key; one that is
   assert.deepEqual(await by('pod'), { refused: 'frozen' });
 });
 
-test('what a caller holds is weighed with the environments asked about: which are protected, and where a grant on one is', async () => {
+test('what a caller holds in a change\'s project is whole, whatever else the operation reads: its protected environments, and where a grant on one is', async () => {
   const project = sql`(SELECT p.id FROM projects p WHERE p.slug = 'market')`;
+  // An operation that decides for the project and reads no environment of its own.
   const asking = async (label: string) => {
-    let found!: { caller: Asking; rows: Parameters<Asking['holding']>[0] };
-    const read = { ...callerParts(tokenOf(label), project), environment: part(environments, sql`${environments.projectId} = ${project}`) };
-    await prepare(world, { read, decide: (seen, at) => ((found = { caller: callerFrom(seen, { proof: null, ip: null }, world.workloads, at)!, rows: seen.environment }), { refused: 'only a read' }) });
+    let found!: Asking;
+    await prepare(world, { read: callerParts(tokenOf(label), project), decide: (seen, at) => ((found = callerFrom(seen, { proof: null, ip: null }, world.workloads, at)!), { refused: 'only a read' }) });
     return found;
   };
-  const { caller: cy, rows } = await asking('cy-cli');
-  const [prod, guarded] = ['prod', 'guarded'].map((slug) => rows.find((row) => row.slug === slug)!);
-  const whole = cy.holding(rows);
-  assert.deepEqual(whole.policy!.protected, [guarded!.id]);
-  assert.deepEqual(whole.policy!.protectedIn, { [market.id]: [{ environmentId: guarded!.id, slug: 'guarded' }] });
-  assert.deepEqual([cy.may('secret.write', prod!), cy.may('secret.write', guarded!)], [true, false]);
-  // A grant on one environment is in that environment's project, as its row says, and nowhere without it.
-  const { caller: eve } = await asking('eve-cli');
-  const there = { projectId: market.id, environmentId: prod!.id, environmentSlug: 'prod' };
-  assert.deepEqual([allows(eve.holding([prod!]), 'secret.write', there), allows(eve.holding([]), 'secret.write', there), eve.may('secret.write', guarded!)], [true, false, false]);
+  const places = await rowsOf<{ id: string; slug: string }>(world.owner, sql`SELECT id, slug FROM environments WHERE project_id = ${market.id}`);
+  const [prod, guarded] = ['prod', 'guarded'].map((slug) => places.find((row) => row.slug === slug)!.id);
+  const at = (environmentId: string, slug: string) => ({ projectId: market.id, environmentId, environmentSlug: slug });
+
+  const cy = await asking('cy-cli');
+  assert.deepEqual(cy.holds.policy.protected, [guarded]);
+  assert.deepEqual(cy.holds.policy.protectedIn, { [market.id]: [{ environmentId: guarded, slug: 'guarded' }] });
+  assert.deepEqual([allows(cy.holds, 'secret.write', at(prod!, 'prod')), allows(cy.holds, 'secret.write', at(guarded!, 'guarded'))], [true, false]);
+  // A grant on one environment is in that environment's project, as its row says: read with the caller, not by the operation.
+  const eve = await asking('eve-cli');
+  assert.deepEqual([allows(eve.holds, 'secret.write', at(prod!, 'prod')), allows(eve.holds, 'secret.write', at(guarded!, 'guarded'))], [true, false]);
+  // Asked about an environment of a project the change did not name, the row itself says it is protected.
+  const fay = await asking('fay-cli');
+  const row = (of: ReturnType<typeof environment>, more: object = {}) => ({ ...of, mac: Buffer.alloc(36), ...more });
+  assert.deepEqual([fay.may('secret.write', row(elsewhere)), fay.may('secret.write', row(elsewhere, { protected: false }))], [false, true]);
+  // A deleted environment protects nothing: its tombstone is not among them, a grant on it or not.
+  await amend(world, 'environments', eq(environments.id, guarded!), { slug: 'guarded~1' });
+  assert.deepEqual((await asking('cy-cli')).holds.policy, { ...cy.holds.policy, protected: [], protectedIn: {} });
+  await amend(world, 'environments', eq(environments.id, prod!), { slug: 'prod~1', protected: true });
+  assert.deepEqual((await asking('eve-cli')).holds.policy.protectedIn, {});
 });
