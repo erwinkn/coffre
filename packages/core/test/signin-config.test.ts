@@ -189,7 +189,7 @@ test('session lifetimes are positive and bounded', () => {
   assert.equal(define({ cliSessionDays: 7.5 }).cliSessionDays, 7.5);
   assert.throws(() => define({ cliSessionDays: 366 }), /cliSessionDays must be a number above 0 and at most 365/);
   assert.equal(define({ cliSessionDays: 365 }).cliSessionDays, 365);
-  // A service token lasts a year at most (R76); a deployment may say fewer whole days.
+  // A service token lasts a year at most; a deployment may say fewer whole days.
   assert.equal(define({}).serviceTokenMaxDays, 365);
   assert.equal(define({ serviceTokenMaxDays: 30 }).serviceTokenMaxDays, 30);
   for (const value of [0, 366, 1.5, NaN]) {

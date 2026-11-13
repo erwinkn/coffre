@@ -168,7 +168,7 @@ test(`losing a grant or narrowing a scope never widens anything, seed ${settings
 }, settings));
 
 /**
- * R15: a personal token keeps what its role held when it was issued, no
+ * A personal token keeps what its role held when it was issued, no
  * more than its person held there, column by column (`issuedGrant`,
  * `heldColumns`). Later, the roles edited, the environments protected or
  * not, the person given more or less: a request on it holds no more than
@@ -280,7 +280,7 @@ test(`a service credential its issuer may issue reaches nothing its account lack
 }, settings));
 
 /**
- * R30, R32: an Owner of a project, as a person on no credential, reads and
+ * An Owner of a project, as a person on no credential, reads and
  * does anything in it but its sensitive values, which no person reads: an
  * instance Owner whose scope takes the project in whole, or one by a grant
  * on the project. An Owner of every `prod`, or one's token, owns no project.

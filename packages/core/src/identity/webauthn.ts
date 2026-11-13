@@ -151,7 +151,7 @@ const fail = (reason: PasskeyReason, message: string): never => {
 // authenticator data and the attestation object, the spec leaves open
 // (unknown client data members, extensions, an attestation statement's
 // certificate chain): what bounds them is the request they come in, which
-// its server reads under the bounds it reads every API body to (R70): its
+// its server reads under the bounds it reads every API body to: its
 // bytes, and its values, which the CBOR it carries decodes to as well
 // (`CeremonyExpectation.values`).
 export const MAX_CREDENTIAL_ID = 1023;

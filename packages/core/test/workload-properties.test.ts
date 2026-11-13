@@ -10,7 +10,7 @@ import { canonicalHtu, parseProof, thumbprint, verifyProof } from '../src/identi
 import { checkPolicy, policyText, POLICY_FIELDS, type WorkloadProfile } from '../src/identity/workloads.ts';
 import { propertySettings } from './properties.ts';
 
-// Properties of docs/design/workload-access.md's PR 0 (section 12): what a
+// Properties of docs/design/workload-access.md, section 12: what a
 // proof signs, and the canonical forms both sides compute. Each is checked
 // against what it must be, not against how the code gets there.
 
@@ -223,7 +223,7 @@ function meaning(profile: WorkloadProfile, policy: Record<string, unknown>) {
     keys: read.keys === '*' ? '*' : [...new Set((read.keys ?? []).map((key) => key.toLowerCase()))].sort(),
     mints: [...new Set(read.mints ?? [])].sort(),
   }]).filter(([, read]) => (read as { keys: unknown }).keys === '*' || ((read as { keys: string[] }).keys.length > 0) || (read as { mints: string[] }).mints.length > 0)
-    // By environment, whatever order the policy names them in: a map's meaning has no order (T213).
+    // By environment, whatever order the policy names them in: a map's meaning has no order.
     .sort(([x], [y]) => ((x as string) < (y as string) ? -1 : (x as string) > (y as string) ? 1 : 0)));
   return {
     profile,

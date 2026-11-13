@@ -36,7 +36,7 @@ export function soleAudience(aud: unknown): string | null {
 }
 
 /**
- * A binding as the vault weighs a sign-in through it (T149, PR 3b): its
+ * A binding as the vault weighs a sign-in through it: its
  * sealed object's columns, the instance it was made on (`origin`), and the
  * keys uploaded with it as its row keeps them, which must be the ones its
  * `jwksUri` digests. Only such a binding's: the vault fetches nothing, so
@@ -83,8 +83,8 @@ function shownKid(header: Record<string, unknown>): string | null {
 }
 
 /**
- * Verify a CI run's or a workload's ID token against one binding, sealed
- * (D148), whose keys were uploaded with it: the vault's own check, which
+ * Verify a CI run's or a workload's ID token against one binding, sealed,
+ * whose keys were uploaded with it: the vault's own check, which
  * no app can steer, and which asks no one. The binding's keys, held to the
  * digest its seal covers (a key they lack is refused, never looked for),
  * its issuer, its audience (the instance it was made on, or, for a

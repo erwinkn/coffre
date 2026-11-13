@@ -4,7 +4,7 @@ import { checkpointBody, noteSigner, noteVerifier, openCheckpoint, signNote, typ
 import type { Hash } from './tree.ts';
 
 /**
- * 0.15's log is two growing trees, one per retention class (W212, by numbers):
+ * 0.15's log is two growing trees, one per retention class:
  * `changes`, kept for good, and `uses`, dropped by day. Each is a standard log
  * with its own origin and key, so any C2SP witness or Go's tlog reads either
  * one alone. They stay one log by moving as one pair:
@@ -66,7 +66,7 @@ export async function openPair(notes: PairNotes, verifiers: PairVerifiers): Prom
 
 /**
  * The pair two notes make under whichever of `keys` signed them: a log whose
- * signing key was rotated has pairs under each (T168). Null if none did.
+ * signing key was rotated has pairs under each. Null if none did.
  */
 export async function openPairUnder(notes: PairNotes, keys: PairVerifiers | readonly PairVerifiers[]): Promise<Pair | null> {
   for (const verifiers of Array.isArray(keys) ? (keys as readonly PairVerifiers[]) : [keys as PairVerifiers]) {

@@ -78,7 +78,7 @@ test('a project grant they hold stays when the new one would not hold all it doe
 });
 
 test('where one grant cannot hold both, a project\'s goes on to its environments, and nothing is lost', () => {
-  // W59's case: viewer on every project and auditor on billing kept auditor alone, and billing's values were lost.
+  // Viewer on every project and auditor on billing: keeping auditor alone would lose billing's values.
   const auditor = convertEveryProjectGrants(person([all('viewer')], { grants: [held('billing', 'auditor')] }));
   assert.deepEqual(given(auditor), ['viewer market', 'viewer billing/dev']);
   assert.deepEqual(losses(auditor), ["viewer on billing's environments"]);

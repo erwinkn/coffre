@@ -308,7 +308,7 @@ test("a call never waits behind another call's hung requests: a use's key opens 
 
 // The adapter's timing, on a clock the test drives (`mock.timers`: `setTimeout`, `Date` and `AbortSignal.timeout`): the
 // host's scheduling cannot stall it, so each attempt's start and end is held to the millisecond, and an attempt the
-// deadline must cut always exists when the rule says it does (review r6 of #549). Math.random is 0: each pause at its
+// deadline must cut always exists when the rule says it does. Math.random is 0: each pause at its
 // least, 100 × 4^(attempt-1) ms.
 // The clock's timers: Node 26 mocks `AbortSignal.timeout` beside them, which @types/node 26.1.1 does not list yet.
 const CLOCK = ['setTimeout', 'Date', 'AbortSignal.timeout'] as unknown as ('setTimeout' | 'Date')[];

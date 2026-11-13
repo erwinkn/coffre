@@ -71,7 +71,7 @@ export type SigninConfig = {
   browserSessionHours: number;
   /** Absolute lifetime of a CLI session. */
   cliSessionDays: number;
-  /** The longest a service account's token may last here, in whole days: `MAX_SERVICE_TOKEN_DAYS` unless set lower (R76). */
+  /** The longest a service account's token may last here, in whole days: `MAX_SERVICE_TOKEN_DAYS` unless set lower. */
   serviceTokenMaxDays: number;
   /**
    * No service token is issued or taken: services sign in only with a key,
@@ -153,11 +153,11 @@ export type RateLimiter = { limit(options: { key: string }): Promise<{ success: 
  * `perSource`: what one address may ask of an entry point that takes
  * anyone, before coffre knows who: each entry point counted apart, as the
  * key names it (`exchange:<address>`, `oauth:token:<address>`, …), so one
- * limiter serves them all (W331, D177).
+ * limiter serves them all.
  */
 export type WorkloadLimits = {
   perSource: RateLimiter;
-  /** @deprecated 0.15's limit for all sources together, gone in 0.16 (W331, D177): read no more, and refused in 0.17. Remove it. */
+  /** @deprecated 0.15's limit for all sources together, gone in 0.16: read no more, and refused in 0.17. Remove it. */
   total?: RateLimiter;
 };
 
@@ -195,9 +195,9 @@ export type McpOptions = {
 
 export type McpLimits = {
   perSource: RateLimiter;
-  /** @deprecated 0.15's limit on a connection's tool calls, gone in 0.16 (W331, D177): read no more, and refused in 0.17. Remove it. */
+  /** @deprecated 0.15's limit on a connection's tool calls, gone in 0.16: read no more, and refused in 0.17. Remove it. */
   perConnection?: RateLimiter;
-  /** @deprecated 0.15's limit for all sources together, gone in 0.16 (W331, D177): read no more, and refused in 0.17. Remove it. */
+  /** @deprecated 0.15's limit for all sources together, gone in 0.16: read no more, and refused in 0.17. Remove it. */
   total?: RateLimiter;
 };
 
@@ -463,7 +463,7 @@ export function defineSignin(options: {
  * `off`: every sign-in of a person who has one, and under `required` every sign-in, would be out of reach. Whether a
  * parent is registrable (`acme.co.uk`) or a public suffix (`co.uk`, `workers.dev`) is the browser's public suffix
  * list's to say, which changes weekly and which coffre does not ship: a parent the browser refuses fails the first
- * passkey asked for, the Owner's as the deployment is set up, and the page names `passkeys.rpId` (review r15 of #500).
+ * passkey asked for, the Owner's as the deployment is set up, and the page names `passkeys.rpId`.
  */
 export function passkeysConfig(options: PasskeysOptions | undefined, origin: string): PasskeysConfig {
   const { policy: asked, rpId: named } = checkPasskeysOption(options);
