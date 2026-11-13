@@ -89,13 +89,6 @@ const MAX_STATEMENT_MS = 2_147_483_647;
 export const RELEASES_KEPT_MS = MAX_BULK_WINDOW_MINUTES * 60_000 + 3_600_000;
 
 /**
- * Delete up to `atMost` rows of `vault_releases` released over
- * `RELEASES_KEPT_MS` before the database's clock: what no bulk count can
- * read again. The vault's login deletes no row itself, and asks
- * `prune_vault_releases`, which deletes only those (migration 0021). How
- * many went.
- */
-/**
  * Events through `log_events` (migration 0085), one statement, each row as `eventRow` signed it (note.ts): their
  * numbers, a retry's the one it was first written under. An id already written with another event throws (23505).
  */
@@ -106,6 +99,25 @@ export async function logEvents(db: Queryable, events: readonly { at: number; re
   return row!.numbers.map(BigInt);
 }
 
+/**
+ * Whether the change under `requestId` is the vault's, held to its MAC under any of `macs`; null when there is none.
+ * `log_events`' retry match compares the payload and not the MAC, so a writer's row under an event's id passes it: the
+ * beat asks this after, so that a finding it did not write never counts as written (T277, review r2).
+ */
+export async function changeHoldsUnder(db: Queryable, macs: readonly LogMacKey[], requestId: string): Promise<boolean | null> {
+  type Read = { at: string | number; request_id: string; object: string; actor: string; payload: string; seal: Buffer | Uint8Array | null; mac: Buffer | Uint8Array };
+  const [row] = await rowsOf<Read>(db, sql`SELECT at, request_id, object, actor, payload, seal, mac FROM log_changes WHERE request_id = ${requestId}`);
+  if (row === undefined) return null;
+  return changeHolds(macs, { at: Number(row.at), requestId: row.request_id, object: row.object, actor: row.actor, payload: row.payload, seal: bytes(row.seal), mac: Buffer.from(row.mac) });
+}
+
+/**
+ * Delete up to `atMost` rows of `vault_releases` released over
+ * `RELEASES_KEPT_MS` before the database's clock: what no bulk count can
+ * read again. The vault's login deletes no row itself, and asks
+ * `prune_vault_releases`, which deletes only those (migration 0021). How
+ * many went.
+ */
 export async function pruneReleases(db: Queryable, atMost: number): Promise<number> {
   const [row] = await rowsOf<{ pruned: number }>(db, sql`SELECT prune_vault_releases(${atMost}::int) AS pruned`);
   return row!.pruned;

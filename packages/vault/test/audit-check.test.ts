@@ -285,7 +285,7 @@ async function insertEntry(tx: Queryable, f: LogFields, prev: Buffer, mac: Buffe
 
 /** The upgrade's anchor change, naming `anchor`, as V1's step writes it (upgrade.ts), under `mac`. */
 async function anchored(mac: LogMacKey, anchor: { seq: bigint; hash: Buffer }): Promise<void> {
-  const row = { at: Date.now(), requestId: UPGRADE_REQUESTS.anchor, object: ANCHOR_OBJECT, actor: UPGRADE_ACTOR, payload: anchorPayload(anchor, anchor), seal: null };
+  const row = { at: Date.now(), requestId: UPGRADE_REQUESTS.anchor, object: ANCHOR_OBJECT, actor: UPGRADE_ACTOR, payload: anchorPayload(anchor, anchor, 'outside'), seal: null };
   await db.owner.transaction(async (tx) => {
     await run(tx, sql`SELECT pg_advisory_xact_lock_shared(1668244070, 0)`);
     await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
@@ -387,7 +387,7 @@ test('the vault answers `check` over its own log, held to what its signer answer
 });
 
 /** The events the vault wrote under `id`: its payload and actor. */
-const events = (id: string) => rows<{ actor: string; payload: string }>(db.owner, sql`SELECT actor, payload FROM log_changes WHERE request_id = ${id}`);
+const events = (id: string) => rows<{ actor: string; payload: string; mac: Buffer }>(db.owner, sql`SELECT actor, payload, mac FROM log_changes WHERE request_id = ${id}`);
 
 test('`beat`: ok writes nothing; not ok, the finding, an event of the vault\'s under `findingEventId`, written once over beats', async () => {
   const { vault, cp, signer, mac } = await vaulted();
@@ -411,6 +411,11 @@ test('`beat`: ok writes nothing; not ok, the finding, an event of the vault\'s u
   const again = await vault.beat!(input);
   assert.ok(again.ok && again.finding === id);
   assert.equal((await events(id)).length, 1);
+
+  // A writer's row planted under the id of the finding it causes (its MAC fails, so `broken`): never counted as it.
+  const broken = `system:vault/finding:${cp.pair.pair.upto}:broken`;
+  await run(db.owner, sql`UPDATE log_changes SET request_id = ${broken}, mac = ${Buffer.alloc(written!.mac.length, 7)} WHERE request_id = ${id}`);
+  await assert.rejects(vault.beat!(input), /the row under the finding's id .* is not the vault's/);
 });
 
 test('`beat`: a projector that stopped, below the checkpoint and still two beats on, fails the run with no finding', async () => {

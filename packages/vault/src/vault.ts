@@ -4019,7 +4019,7 @@ class VaultService implements Vault {
     const everyMs: unknown = (input as { everyMs?: unknown } | undefined)?.everyMs;
     if (!Number.isSafeInteger(everyMs) || (everyMs as number) <= 0) throw new Error(`a beat runs every so many ms, a positive integer, not ${String(everyMs)}`);
     const { forged: _forged, listed, ...checked } = await this.#audit({ events: [], cursor: input.cursor });
-    const finding = checked.state === 'ok' ? null : await writeFinding(this.#db, this.#log015().mac, checked);
+    const finding = checked.state === 'ok' ? null : await writeFinding(this.#db, this.#log015().macs, checked);
     return { ok: true, ...checked, finding, projector: projectorStopped(listed, checked.checkpoint, everyMs as number) };
   }
 

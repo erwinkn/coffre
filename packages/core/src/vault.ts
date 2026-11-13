@@ -422,7 +422,7 @@ export interface Vault {
    * finding, an event of the vault's (`findingEventId`), when it is not `ok`. The full walk is the Verify button's and `coffre verify log`'s, never this.
    * Retention's floor, for this check and the full walk alike, is read from the sealed retention change, never from
    * `audit_cursor.reads_from`, which no MAC covers (`AuditCursorRow`). What each row's MAC and the cursor's cover is
-   * the audit projector's to say. Not built: the vault throws, and nothing calls it.
+   * the audit projector's to say. Nothing calls it yet.
    */
   check?(input: CheckInput): Promise<CheckOutcome>;
   /**

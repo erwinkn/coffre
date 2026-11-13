@@ -14,7 +14,9 @@ import { UPGRADE_REQUESTS, type AnchorPayload, parseAnchor } from './upgrade.ts'
 import type { Reached } from './checkpointer.ts';
 import type { LogMacKey } from './log-entry.ts';
 import { eventRow, findingEventId } from './note.ts';
-import { logEvents } from './store.ts';
+
+import { logEvents, changeHoldsUnder } from './store.ts';
+import { parseAnchor, UPGRADE_REQUESTS } from './upgrade.ts';
 import { checkTrees } from './verifier.ts';
 
 // The audit's two checks. `checkAudit`, the page's and the beat's: flat, the newest checkpoint and what lies above it,
@@ -144,9 +146,11 @@ export function projectorStopped(listed: Checked['listed'], checkpoint: Checked[
  * `note` writes one, under `findingEventId` of the checkpoint and the state, so that it is written once however many
  * beats see it. Its detail is `audit_log`'s finding's, the reason the UI shows (`audit-sentences.ts`), with the state
  * and the checkpoint. A beat that finds the event under its id, for this reason or another, writes nothing: the id
- * names one finding per checkpoint and state. Its id, the event's, whichever wrote it. Anything else throws.
+ * names one finding per checkpoint and state. Its id, the event's, whichever wrote it, once the row under it holds
+ * under the vault's keys (`macs`): a writer's row planted under the id throws, so the beat fails rather than count a
+ * finding nobody wrote. Anything else throws.
  */
-export async function writeFinding(db: Database, key: LogMacKey, checked: Pick<Checked, 'state' | 'reason' | 'checkpoint'>): Promise<string> {
+export async function writeFinding(db: Database, macs: readonly LogMacKey[], checked: Pick<Checked, 'state' | 'reason' | 'checkpoint'>): Promise<string> {
   if (checked.state === 'ok') throw new Error('an ok check has no finding');
   const id = findingEventId(checked.checkpoint === null ? null : BigInt(checked.checkpoint.number), checked.state);
   const event: NoteInput = {
@@ -154,13 +158,15 @@ export async function writeFinding(db: Database, key: LogMacKey, checked: Pick<C
     places: { projectId: null, environmentId: null, secretId: null, versionId: null }, credential: null, id, requestId: null, operationId: null,
     sourceIp: null, detail: { state: checked.state, reason: checked.reason, checkpoint: checked.checkpoint?.number ?? null },
   };
-  const row = eventRow(key, Date.now(), event, 'vault');
+  const row = eventRow(macs[0]!, Date.now(), event, 'vault');
   try {
     await logEvents(db, [row]);
   } catch (error) {
-    // The id written already, with another reason: the same finding.
+    // The id written already, with another reason: the same finding, if the row under it is the vault's.
     if (!isUniqueViolation(error)) throw error;
   }
+  // Asked on both paths: `log_events` takes a row with this payload and any MAC as the retry of this one.
+  if ((await changeHoldsUnder(db, macs, id)) !== true) throw new Error(`the row under the finding's id (${id}) is not the vault's: its MAC does not hold`);
   return id;
 }
 
