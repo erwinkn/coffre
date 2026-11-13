@@ -142,11 +142,17 @@ test("below its migrations, a plugin's WebSocket is refused at the same door, on
 test('a plugin that takes 20 s to admit a WebSocket, as under a burst of runs at once, is let in; past 45 s, refused', async () => {
   let decide!: (answer: Response) => void;
   const runtime = { ...freshRuntime(), plugins: [{ name: 'sockets', routes: { prefix: '/sockets', fetch: async () => new Response(), socket: () => new Promise<Response>((resolve) => (decide = resolve)) } }] };
+  // The door settled, so that nothing before the plugin awaits the database, whose timers the mocked clock would hold.
   runtime.schema.migrated = true;
+  runtime.appKey.settled = true;
   mock.timers.enable({ apis: ['setTimeout'] });
   try {
     const slow = admitSocket(new Request(`${ORIGIN}/sockets/x`), runtime, null);
-    while (decide === undefined) await new Promise((resolve) => setImmediate(resolve));
+    const asked = performance.now() + 10_000;
+    while (decide === undefined) {
+      if (performance.now() > asked) throw new Error('the plugin was not asked within 10 s');
+      await new Promise((resolve) => setImmediate(resolve));
+    }
     mock.timers.tick(20_000);
     decide(new Response('admitted'));
     assert.equal(await ((await slow) as Response).text(), 'admitted');

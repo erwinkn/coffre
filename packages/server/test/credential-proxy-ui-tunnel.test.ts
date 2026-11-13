@@ -167,7 +167,7 @@ useMcp(async () => {
 const appClientOf = (password = handle): AppClient => appClient(listenerPort, password);
 
 const endsWithin = (client: AppClient, ms: number): Promise<boolean> =>
-  Promise.race([client.ended.then(() => true), new Promise<boolean>((resolve) => setTimeout(resolve, ms, false))]);
+  Promise.race([client.ended.then(() => true), new Promise<boolean>((resolve) => setTimeout(resolve, ms, false).unref())]);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 

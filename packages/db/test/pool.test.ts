@@ -571,7 +571,7 @@ test('a held connection whose lifetime ends meanwhile closes once given back, an
       await reserved.unsafe('select pg_sleep(0.4)');
       reserved.release();
     }
-    assert.equal(await Promise.race([client.end().then(() => 'ended'), new Promise((resolve) => setTimeout(resolve, 3000, 'waiting'))]), 'ended', hold);
+    assert.equal(await Promise.race([client.end().then(() => 'ended'), new Promise((resolve) => setTimeout(resolve, 3000, 'waiting').unref())]), 'ended', hold);
   }
 });
 

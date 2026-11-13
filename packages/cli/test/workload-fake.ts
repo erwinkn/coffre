@@ -204,7 +204,7 @@ export async function fakeCoffre(options: FakeOptions = {}) {
         if (req.method === 'GET') {
           if (options.planDelayMs !== undefined) {
             log.push(`GET ${url.pathname} waiting`);
-            await new Promise((resolve) => setTimeout(resolve, options.planDelayMs));
+            await new Promise((resolve) => setTimeout(resolve, options.planDelayMs).unref());
           }
           return answer(res, { status: 200, body: (typeof options.plan === 'function' ? options.plan(place) : options.plan) ?? { environment: place, values: {}, credentials: [], tunnels: {} } });
         }

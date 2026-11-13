@@ -241,7 +241,7 @@ test('a body past the bound, on a kept answer, is refused at once, its stream ca
   } as RequestInit);
   const answered = await Promise.race([
     coffreRoute(request, runtime, '203.0.113.7'),
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000).unref()),
   ]);
   // Past the API's bound (`API_BODY_BYTES`): 413 `too_large`, .
   assert.equal(answered?.status, 413);

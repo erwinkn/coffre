@@ -76,7 +76,7 @@ async function grow(total: number): Promise<void> {
   await run(db.owner, sql`VACUUM ANALYZE`);
 }
 
-test('R48: a route use is one statement on a warm map, its buffers the same at 10k and at 1M entries and at 1k and 10k environments, the route\'s named call\'s too (T205); its rows the same at 1 definition and at 256', { timeout: 900_000 }, async () => {
+test('a route use is one statement on a warm map, its buffers the same at 10k and at 1M entries and at 1k and 10k environments, the route\'s named call\'s too; its rows the same at 1 definition and at 256 [full]', { timeout: 900_000 }, async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
   const name = await w.nameOf(key);

@@ -719,7 +719,7 @@ test("a proxied call whose cache lapsed, after its service's access changed, ask
   for (const spent of [changed, after]) assertOver('a proxied call, cold', spentOf(spent), OVER.coldUse);
 });
 
-test('a request runs the same statements, and reads the same rows, however large the log, the members, their sessions and tokens, and the policy grow', async () => {
+test('a request runs the same statements, and reads the same rows, however large the log, the members, their sessions and tokens, and the policy grow [full]', async () => {
   await warm();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await repeated(request);
@@ -774,7 +774,7 @@ test('a request runs the same statements, and reads the same rows, however large
  * members hold, which the member list reads by principal. No statement scans the log, nor
  * one principal's reads in it (the bulk count reads `vault_releases`).
  */
-test("each hot request's statements read as many pages however long the log grows", async () => {
+test("each hot request's statements read as many pages however long the log grows [full]", async () => {
   /** `count` entries more, older than any, copies of the reads and uses the log holds: what the hot paths would scan. */
   const grow = async (count: number) => {
     // In parts, each within a statement's time on the fixture's connections. Each copy is older than the read it
@@ -948,7 +948,7 @@ const growth = gs.record({
 });
 const growthSettings = propertySettings(4, 10);
 
-test(`a request costs the same after any growth of the instance, seed ${growthSettings.seed}`, async () => {
+test(`a request costs the same after any growth of the instance, seed ${growthSettings.seed} [full]`, async () => {
   await warm();
   const small: Record<string, Cost> = {};
   for (const [name, { request }] of Object.entries(requests)) small[name] = await repeated(request);
@@ -1038,7 +1038,7 @@ test(`a request costs the same after any growth of the instance, seed ${growthSe
   }, growthSettings);
 });
 
-test('readiness costs the same however long the log, and however far it ran past the anchor', async () => {
+test('readiness costs the same however long the log, and however far it ran past the anchor [full]', async () => {
   await beat();
   assert.equal((await ready()).ok, true);
   const small = await cost(ready);
@@ -1112,7 +1112,7 @@ test("a beat's transactions read the same however far its walk goes", async () =
   assert.deepEqual({ statements: long.statements, rows: long.rows }, { statements: short.statements, rows: short.rows });
 });
 
-test('a standing finding costs each beat the same on the app\'s side, however long it stands and the log grows', async () => {
+test('a standing finding costs each beat the same on the app\'s side, however long it stands and the log grows [full]', async () => {
   assert.equal(await beat(), true);
   await append(1);
   const [x] = await db.owner.select().from(auditLog).orderBy(desc(auditLog.seq)).limit(1);
@@ -1310,7 +1310,7 @@ test("a project's audit page reads as many pages however many keys the project h
  * the plan of the missing members' read (`missingMembers`, which the next test holds). The log is analyzed before each count here, so that both are planned on fresh statistics, and
  * no auto-analyze is left due to land between them.
  */
-test("a member's report, `me` and the members list read as many pages however many keys the instance holds (T221)", async () => {
+test("a member's report, `me` and the members list read as many pages however many keys the instance holds [full]", async () => {
   const someone = (await root.members.list()).members.find((entry) => entry.member.startsWith('user:'))!.member;
   const reads: Record<string, () => Promise<unknown>> = {
     "a member's report": () => root.members.get(someone),
@@ -1461,7 +1461,7 @@ test("the missing members' read reads as many pages however many refusals the lo
  * live keys in 706). Postgres can still pick an index scan of the keys that reads a page for each, when the archived
  * keys' order makes the table look sorted by environment (`countedPlaceRows`): this holds the shape, not every plan.
  */
-test("the project list and a render's shell count the keys within twice their table's and index's pages (T221)", async () => {
+test("the project list and a render's shell count the keys within twice their table's and index's pages [full]", async () => {
   const reads: Record<string, () => Promise<unknown>> = {
     'the project list': () => root.projects.list(),
     "an owner's project page": () => projectPage('owner'),
@@ -1565,7 +1565,7 @@ test("the project list and a render's shell count no deleted place's keys in thi
 /** Where the changes planted below are numbered from: past those the fixture's requests made, and below the missing members' test's (`changes`). */
 const PLANTED = 10_000_000n;
 
-test("the audit pages' records of 0.15's log read as many pages however many other changes the log holds", async () => {
+test("the audit pages' records of 0.15's log read as many pages however many other changes the log holds [full]", async () => {
   const counted = createDatabase(app.client);
   // Numbered past the changes the fixture's own requests made, which are newer than any planted here: `n` is the
   // number a planted change takes.
@@ -1844,7 +1844,7 @@ const signIns = (count: number) => append(2 * count, (i): NewEntry => i % 2 === 
   ? { actor: 'token:ci-deploy', action: 'token.exchange', decision: 'allow', metadata: JSON.stringify({ credentialId: randomUUID(), run: { repository: 'acme/app', ref: 'refs/heads/main' } }) }
   : { actor: 'user:other@acme.example', action: 'token.create', decision: 'allow', metadata: JSON.stringify({ targetCredentialId: randomUUID(), kind: 'personal', label: `laptop-${i}` }) });
 
-test("the audit pages' reads, each a use of 0.15's log as the vault's projector lists it, read as many pages however many other reads the log holds (T166)", async () => {
+test("the audit pages' reads, each a use of 0.15's log as the vault's projector lists it, read as many pages however many other reads the log holds [full]", async () => {
   const counted = createDatabase(app.client);
   const ADA = 'user:ada@acme.example';
   const OTHER = 'user:other@acme.example';
@@ -1983,7 +1983,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
   }
 });
 
-test("a place's page of reads, a key's, an environment's or a project's, reads as many pages however large the place's history grows: its forks, references repointed into it and out of it, others' reads anywhere (T175, R48)", async () => {
+test("a place's page of reads, a key's, an environment's or a project's, reads as many pages however large the place's history grows: its forks, references repointed into it and out of it, others' reads anywhere [full]", async () => {
   const counted = createDatabase(app.client);
   const ADA = 'user:ada@acme.example';
   const OTHER = 'user:other@acme.example';

@@ -198,7 +198,7 @@ test("once the app has closed, the listener's WebSocket closes at once, however 
   const sending = setInterval(() => ws.readyState === ws.OPEN && ws.send(Buffer.alloc(64 * 1024)), 1);
   try {
     const started = Date.now();
-    await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 3000))]);
+    await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, 3000).unref())]);
     assert.ok(Date.now() - started < 3000, "the listener's WebSocket is still open");
   } finally {
     clearInterval(sending);

@@ -235,6 +235,15 @@ test('the slow tier runs on its own inputs: the matrices and Terraform', () => {
   assert.ok(!run(['packages/server/src/app.ts']).names.includes('terraform'))
 })
 
+test('a diff leaves out the cases named [full], which --full runs', () => {
+  for (const changed of [['packages/server/src/app.ts'], ['scripts/test-databases.mjs'], ['pnpm-lock.yaml']]) {
+    const { steps } = run(changed)
+    assert.deepEqual([steps.tests.skipFull, steps.alone.skipFull], [true, true], changed[0])
+  }
+  const { steps } = run([], { full: true })
+  assert.deepEqual([steps.tests.skipFull, steps.alone.skipFull], [false, false])
+})
+
 test('--full runs every step that is on, every file and every scenario', () => {
   const { steps, all } = run([], { full: true })
   assert.equal(all.length, 17)

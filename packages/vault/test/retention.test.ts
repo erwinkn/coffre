@@ -588,7 +588,7 @@ test('the database drops nothing a sealed retention change does not cut, and nev
 });
 
 
-test('R48: retention\'s reads cost the same at 10k and at 1M entries: a day\'s cut, the newest sealed cut, the newest retention change', { timeout: 600_000 }, async () => {
+test('retention\'s reads cost the same at 10k and at 1M entries: a day\'s cut, the newest sealed cut, the newest retention change [full]', { timeout: 600_000 }, async () => {
   const { cp, store } = await open();
   await midnight(cp);
   await later(cp);

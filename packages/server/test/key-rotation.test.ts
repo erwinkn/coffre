@@ -553,7 +553,7 @@ test('an instance the log moved on from leaves the anchor as it is, whatever its
   assert.deepEqual(await anchor.read(), backlog);
 });
 
-test("the app's newest entry is one step of the log however many of the vault's came after it (T245, R48)", async () => {
+test("the app's newest entry is one step of the log however many of the vault's came after it [full]", async () => {
   // The app's entries, then the vault's, as an app idle while the vault's beats go on: heartbeats, which no fence follows.
   // Enough of the app's that an index keyed by author alone, then by action, key or subject, would sort them all.
   const append = (author: 'app' | 'vault', count: number) => db.owner.execute(sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)

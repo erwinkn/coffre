@@ -699,7 +699,7 @@ test("the versions a report names by id are read a thousand a statement: an offb
   assert.equal((await versionsOf(db.runtime, ids)).size, 0);
 });
 
-test("a page of many environments' key writes reads them a few hundred a statement, and lists the newest of them all: a project of more environments than Postgres takes a statement's parameters (review r3 of #490)", async () => {
+test("a page of many environments' key writes reads them a few hundred a statement, and lists the newest of them all: a project of more environments than Postgres takes a statement's parameters [full]", async () => {
   await resetDatabase(db.owner);
   const environments = Array.from({ length: 2 * READS_PER_STATEMENT + 100 }, () => randomUUID());
   const [first, last] = [environments[10]!, environments.at(-10)!];

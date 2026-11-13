@@ -342,7 +342,7 @@ async function heapHeld(): Promise<number> {
   }
 }
 
-test("a long result streamed through the object leaves its heap as it was: each chunk is let go once sent", { timeout: 180_000 }, async () => {
+test("a long result streamed through the object leaves its heap as it was: each chunk is let go once sent [full]", { timeout: 180_000 }, async () => {
   const ws = new WebSocket(`${at}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}`, 'coffre-tunnel-flow': 'credit' } });
   await once(ws, 'message');
   let received = 0;

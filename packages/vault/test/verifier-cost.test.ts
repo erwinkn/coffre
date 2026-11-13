@@ -53,7 +53,7 @@ function counting(): { db: Database; statements: () => number; close: () => Prom
   return { db: createDatabase(counted(pool)), statements: () => statements, close: () => pool.end() };
 }
 
-test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, its statements flat as the log grows', { timeout: 600_000 }, async () => {
+test('a page\'s check at 1,000 uses a second reads a tick\'s worth, its statements flat as the log grows [full]', { timeout: 600_000 }, async () => {
   for (const table of ['log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles', 'log_changes']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
   await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
   const today = new Date().toISOString().slice(0, 10);

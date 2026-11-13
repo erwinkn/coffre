@@ -457,7 +457,7 @@ async function history(object: string, count: number): Promise<void> {
     SELECT ${from} + n, 0, ${object} || '-' || (${from} + n), ${object}, 'system:x', '{"op":"x"}', CASE WHEN n < ${count} THEN ${randomBytes(16)} END, ${randomBytes(16)} FROM g`);
 }
 
-test("what an unarchive restores is read with two probes of each key's changes, however long their history: never a walk of it (T134, R48)", { timeout: 600_000 }, async () => {
+test("what an unarchive restores is read with two probes of each key's changes, however long their history: never a walk of it [full]", { timeout: 600_000 }, async () => {
   const refs: Ref[] = [{ kind: 'secret', id: randomUUID() }, { kind: 'secret', id: randomUUID() }];
   const cost = async (): Promise<number> => {
     const [row] = await rows<Record<string, unknown>>(db.owner, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${loggedChangesQuery(refs, refs)}`);

@@ -9,7 +9,8 @@
 //   has one (an example `init` copies, a module).
 //   The suite runs each test file that runs or reads a changed file; all of them when
 //   the diff touches the harness every file runs on (scripts/test-suite.sh, the
-//   migrations its template takes, Postgres's compose file).
+//   migrations its template takes, Postgres's compose file). A diff leaves out the
+//   cases named `[full]` (a growth, heap or large-N check), which `--full` runs.
 // - A file of a package, an example or the dev deployment that no test reaches (a path
 //   built in pieces, or code nothing tests) runs that package's tests.
 // - The dependencies (a lockfile, a manifest's fields other than its scripts, the
@@ -171,13 +172,14 @@ export function plan({ root, files, changed, read = (f) => readFileSync(join(roo
 
   const testsFrom = (list, label) => {
     const harnessHit = changed.find((f) => hits(harness, f)) ?? postgres
-    if (wide) return { why: wide, files: list }
-    if (harnessHit) return { why: `${harnessHit} changed (every test file runs on it)`, files: list }
+    const skipFull = !full
+    if (wide) return { why: wide, files: list, skipFull }
+    if (harnessHit) return { why: `${harnessHit} changed (every test file runs on it)`, files: list, skipFull }
     const hit = list.filter((f) => affected.has(f) || fallback.has(unitOf(f)))
     if (!hit.length) return { why: null }
     const read = inputs(hit)
     const by = changed.filter((f) => read.has(f) || fallback.has(unitOf(f)))
-    return { why: `${hit.length} of ${list.length} ${label}, for ${by.slice(0, 2).join(', ')}${by.length > 2 ? ` and ${by.length - 2} more` : ''}`, files: hit }
+    return { why: `${hit.length} of ${list.length} ${label}, for ${by.slice(0, 2).join(', ')}${by.length > 2 ? ` and ${by.length - 2} more` : ''}`, files: hit, skipFull }
   }
   const rule = (name, { slow = false, db = false } = {}) => () => ({
     why: everything ?? (slow ? null : why(deps)) ?? (db ? why(postgres) : null) ?? why(ownHit(name)),

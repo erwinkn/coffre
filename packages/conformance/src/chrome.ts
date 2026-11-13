@@ -172,7 +172,7 @@ export class Chrome {
       for (const domain of ['Runtime', 'Log', 'Page', 'Network']) await this.#send(`${domain}.enable`, {}, sessionId);
       for (const [name, value] of cookies) await this.#send('Network.setCookie', { name, value, url }, sessionId);
       await this.#send('Page.navigate', { url }, sessionId);
-      await Promise.race([load, new Promise((resolve) => setTimeout(resolve, 30_000))]);
+      await within(load, 30_000);
       // What streams in after the load, and hydration, have their time: the page may render, then fail.
       await new Promise((resolve) => setTimeout(resolve, settle));
       let answer: unknown = null;
@@ -207,9 +207,19 @@ export class Chrome {
     await this.#send('Browser.close').catch(() => {});
     this.#socket.close();
     if (this.#process.exitCode === null) {
-      await Promise.race([new Promise((resolve) => this.#process.once('exit', resolve)), new Promise((resolve) => setTimeout(resolve, 5_000))]);
+      await within(new Promise((resolve) => this.#process.once('exit', resolve)), 5_000);
       this.#process.kill('SIGKILL');
     }
     rmSync(this.#profile, { recursive: true, force: true });
+  }
+}
+
+/** `promise` settled, or `ms` gone, whichever comes first; its timer cleared either way, so that it keeps no process open. */
+async function within(promise: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([promise, new Promise((resolve) => (timer = setTimeout(resolve, ms)))]);
+  } finally {
+    clearTimeout(timer);
   }
 }

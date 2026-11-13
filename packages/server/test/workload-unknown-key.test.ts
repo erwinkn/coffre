@@ -236,7 +236,7 @@ test('a refusal capped out answers while another transaction holds the log\'s he
   });
   await holding;
   try {
-    const answered = await Promise.race([signIn(podToken('forged-b')), new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000))]);
+    const answered = await Promise.race([signIn(podToken('forged-b')), new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000).unref())]);
     assert.equal(answered?.reason, 'unknown_key', 'answered with the head held');
   } finally {
     release();
