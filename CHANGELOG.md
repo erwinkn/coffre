@@ -9,8 +9,10 @@
   connection back. A value an administrator set stays. A login that may
   not prints the two `ALTER ROLE`s to run once per server
   (docs/deploy.md, "Statement timeouts"). The run ends those logins' idle
-  sessions on the database so that pools reconnect with it; a query sent
-  on one at that moment fails once.
+  sessions on the database, where its login may signal them, so that
+  pools reconnect with it; a query sent on one at that moment fails once.
+  A `statement_timeout` in a login's URL, or set for the role in one
+  database, outranks it and stays.
 - **0.16 upgrades offline, from exactly 0.15.0.** Stop the deployment,
   run `coffre migrate`, then deploy 0.16: 0.15.0's code cannot run on
   the new schema. To go back, restore the backup taken before the

@@ -97,7 +97,7 @@ test(
 );
 
 test(
-  "the runtime logins get coffre's statement timeout once, however many migrations of other databases race to; one coffre gave before moves to today's, an administrator's own stays, and the login's idle sessions here end",
+  "the runtime logins get coffre's statement timeout once, however many migrations race to; one coffre gave before moves to today's, an administrator's own stays, and the login's idle sessions here end",
   async () => {
     await withRoles(async (owner, [none, earlier, own]) => {
       await owner.unsafe(`ALTER ROLE ${earlier!} SET statement_timeout = '45s'`);
@@ -145,6 +145,28 @@ test(
       }
       assert.deepEqual(await setting(owner, none!), []);
       assert.deepEqual(await setting(owner, earlier!), ['statement_timeout=45s']);
+    });
+  },
+);
+
+test(
+  "a login that may alter the runtime logins but not signal their sessions gives them the timeout and leaves their idle sessions as they are",
+  async () => {
+    await withRoles(async (owner, [none], { login, password }) => {
+      // As `coffre setup`'s administrator on a managed Postgres may be: CREATEROLE and ADMIN, without the login's privileges.
+      await owner.unsafe(`ALTER ROLE ${login} CREATEROLE`);
+      await owner.unsafe(`GRANT ${none!} TO ${login} WITH ADMIN OPTION, INHERIT FALSE, SET FALSE`);
+      const idle = postgresClient(asLogin(none!, 'local-plan-only'), { max: 1 });
+      const migrator = postgresClient(asLogin(login, password), { max: 1 });
+      try {
+        const [before] = await idle.unsafe<[{ pid: number }]>('SELECT pg_backend_pid() AS pid');
+        assert.deepEqual(await holdRuntimeTimeouts(migrator, { logins: [none!], given: [] }), []);
+        assert.deepEqual(await setting(owner, none!), [`statement_timeout=${RUNTIME_SETTINGS.statement_timeout}`]);
+        const [after] = await idle.unsafe<[{ pid: number }]>('SELECT pg_backend_pid() AS pid');
+        assert.equal(after.pid, before.pid);
+      } finally {
+        await Promise.all([idle.end(), migrator.end()]);
+      }
     });
   },
 );

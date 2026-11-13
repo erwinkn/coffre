@@ -196,7 +196,7 @@ const GIVEN_STATEMENT_TIMEOUTS: readonly string[] = ['60s'];
  * role's setting: to each that exists and has none of its own, or one coffre gave before (`GIVEN_STATEMENT_TIMEOUTS`),
  * where this login may alter the role (CREATEROLE and ADMIN on it, as `coffre setup`'s administrator has). Postgres
  * applies a role's setting at login, so the sessions of a login given it now are ended, those idle on this database,
- * and their pools reconnect with it; a query sent on one just as Postgres ends it fails once, as on a restart, and a
+ * where this login may signal them, and their pools reconnect with it; a query sent on one just as Postgres ends it fails once, as on a restart, and a
  * busy one takes it once its pool replaces it. Returns the logins this one may not give it, which the run says
  * (`untimedNote`). The roles are the server's, so a run on another database may be changing them too: Postgres fails
  * the second change, and it looks again once the first has committed.
@@ -216,6 +216,8 @@ export async function holdRuntimeTimeouts(
                   WHERE s.setrole = to_regrole($1) AND s.setdatabase = 0 AND split_part(setting, '=', 1) = 'statement_timeout') AS held`,
         [login],
       );
+      // A retry that finds today's value lost a race to a run on another database, whose sessions there it ended; these here are this run's.
+      if (found!.exists && found!.held === today && attempt > 1) given.push(login);
       if (!found!.exists || found!.held === today || (found!.held !== null && !before.includes(found!.held))) break;
       try {
         await client.unsafe(`ALTER ROLE ${quoteIdentifier(login)} SET statement_timeout = '${today}'`);
@@ -239,6 +241,8 @@ export async function holdRuntimeTimeouts(
     BEGIN
       FOR idle IN SELECT pid FROM pg_stat_activity
                    WHERE usename = ANY(ARRAY[${given.map(quoteLiteral).join(', ')}]::text[]) AND datname = current_database() AND state = 'idle' LOOP
+        -- Refused (42501) to a login without the privileges of the role or pg_signal_backend, which CREATEROLE and ADMIN
+        -- do not give (docs/design/config.md): that session keeps its old settings until its pool replaces it.
         BEGIN
           PERFORM pg_terminate_backend(idle);
         EXCEPTION WHEN insufficient_privilege THEN NULL;

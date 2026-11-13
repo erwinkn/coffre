@@ -161,9 +161,19 @@ ALTER ROLE coffre_vault_runtime SET statement_timeout = '60s';
 ```
 
 Postgres applies a role's setting when a session logs in. So the run that
-sets it also ends those logins' idle sessions on the database, and their
-pools log in again with it. A query sent on such a session at that moment
-fails once, as it would during a restart.
+sets it also ends those logins' idle sessions on the database, where its
+login may signal them (a superuser, a member of `pg_signal_backend`, or
+one with the role's privileges; `CREATEROLE` and `ADMIN` are not enough),
+and their pools log in again with it. A query sent on such a session at
+that moment fails once, as it would during a restart. A session the run
+may not end, or one on another database, keeps the old value until its
+pool replaces it.
+
+Two settings outrank the role's: a `statement_timeout` (or `options`) in
+the login's connection URL, and one set for the role in a single
+database (`ALTER ROLE … IN DATABASE … SET`). coffre leaves both as they
+are and does not report them, so a deployment that set either keeps its
+own value, whatever coffre gives the role.
 
 `coffre setup` makes `coffre_backup_login` and grants it the group.
 `coffre migrate --backup-login <role>` grants `coffre_backup` to that

@@ -1854,7 +1854,8 @@ export const LOCK_WAIT_MS = HOT_LOCK_TIMEOUT_MS / 2;
  * (`scripts/growth-sweep-known.txt` empty; docs/design/config.md, Q5). The vault's transactions with a deadline
  * tighten it for themselves (`SET LOCAL`), and the hot login keeps its own (`HOT_STATEMENT_TIMEOUT_MS`).
  * `coffre migrate` and `coffre setup` give it to the roles where their login may (`holdRuntimeTimeouts`,
- * `@coffre/db/migrate`).
+ * `@coffre/db/migrate`). It is the role's setting, server-wide, so a `statement_timeout` in the login's URL or set for
+ * the role in one database outranks it, and coffre leaves both (docs/deploy.md, "Statement timeouts").
  */
 export const RUNTIME_STATEMENT_TIMEOUT_MS = 60_000;
 
