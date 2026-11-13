@@ -15,7 +15,9 @@
   1 MiB at most). Everything is refused before a byte is read; a
   workload's raw message declares its `Content-Digest`, which its proof
   signs, and the signature answers only once the bytes match it and the
-  length. JSON past 1 MiB is a 413 that names the raw shape. The JSON sign
+  length, and before its values lapse (503 `late`, so a handle revoked
+  during an upload signs nothing past `cacheSeconds`). JSON past 1 MiB is
+  a 413 that names the raw shape. The JSON sign
   and verify are unchanged. No migration.
 
 ## 0.14.5 (2026-10-26)

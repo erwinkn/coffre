@@ -1406,10 +1406,11 @@ run` calls the same `credential(name).verify` from
   `<header>.<payload>`, base64url).
 - **Bounded.** A message is 64 KiB at most: Equisafe's largest webhook in
   90 days of production was DFNS's, 5,234 bytes (p99 2,272), Yousign's
-  2,013. `hmac(…, { maxBytes })` takes up to 1 MiB for a provider whose
-  bodies run longer. coffre reads a request up to what the longest of its
-  signers and verifiers takes, before it knows who asks, and refuses past
-  it with 413, before anything is opened. The cap keeps that read far
+  2,013. `hmac(…, { maxBytes })` takes up to 1 MiB as JSON for a provider
+  whose bodies run longer, and a signer's up to 12 MiB raw (below). coffre
+  reads a JSON request up to what the longest of its signers and verifiers
+  takes as JSON, before it knows who asks, and refuses past it with 413,
+  before anything is opened; past 1 MiB, the 413 names the raw shape. The cap keeps that read far
   below the 16 MiB a request through a credential is read up to. On a
   413 the client's `verify` throws, and the app answers the provider
   4xx, so that it stops retrying. The CPU is the body's: about 0.2 ms at
@@ -1433,8 +1434,10 @@ run` calls the same `credential(name).verify` from
   proof, the environment, the secret. A workload's request declares the
   body's SHA-256 in a `Content-Digest`, which its proof signs; a handle's
   may. The signature answers only once the body ended at its length and
-  matched its digest; otherwise 400, and no signature. Opened, logged and
-  limited as a JSON sign.
+  matched its digest; otherwise 400, and no signature. A body still coming
+  when its values lapse (`cacheSeconds` from when the vault was asked)
+  answers 503 `late`, so a handle revoked during an upload signs nothing
+  past that window. Opened, logged and limited as a JSON sign.
 - **Opened as a credential's values are, logged once a minute.** A
   webhook comes on a request's path, and the vault is the instance's
   narrowest point, so a verify or an HMAC signature opens its secret as a

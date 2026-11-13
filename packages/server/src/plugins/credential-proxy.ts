@@ -1016,7 +1016,7 @@ async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User
   // A narrowed session's signers are named, and one limited to methods or paths signs nothing: no request to check them on.
   if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: name })) return failure(403, `this narrowed session may not sign with ${name}`, 'narrowed');
   if (signer.kind === 'hmac') {
-    const secret = await hmacSecret(coffre, proxy, path, who, name, signer);
+    const { secret } = await hmacSecret(coffre, proxy, path, who, name, signer);
     return answer({ signature: await hmacSign(secret, message, { encoding: signer.encoding, prefix: signer.prefix ?? '' }) });
   }
   const sha256 = hex(await crypto.subtle.digest('SHA-256', message));
@@ -1048,7 +1048,7 @@ async function verify(coffre: PluginContext, proxy: Proxy, path: string, who: Us
   if (message.byteLength > most) return failure(413, `${name} checks a message of ${sized(most)} at most${most < MAX_MESSAGE_BYTES ? ": its hmac()'s maxBytes takes a longer one" : ''}`);
   if (typeof asked.signature !== 'string') return failure(400, 'verify a signature given as a string, as its header carried it');
   if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: name })) return failure(403, `this narrowed session may not verify with ${name}`, 'narrowed');
-  const secret = await hmacSecret(coffre, proxy, path, who, name, verifier);
+  const { secret } = await hmacSecret(coffre, proxy, path, who, name, verifier);
   return answer({ valid: await hmacVerify(secret, message, asked.signature, { encoding: verifier.encoding, prefix: verifier.prefix ?? '' }) });
 }
 
@@ -1060,7 +1060,9 @@ async function verify(coffre: PluginContext, proxy: Proxy, path: string, who: Us
  * and its kind, the length it says, the caller and its proof, the environment, the secret. A workload's proof signs the
  * SHA-256 its `Content-Digest` declares, which the bytes are held to as they pass (`declaredBody`), as a streamed body
  * through a credential is; a handle's request may declare one too. The signature answers once the body ended at its
- * length and matched its digest. Opened, logged and limited as a JSON sign is (`hmacSecret`).
+ * length and matched its digest, and before its values lapsed (`by`): a body that takes longer answers 503 `late`, so
+ * a handle revoked while it uploads signs nothing past `cacheSeconds`. Opened, logged and limited as a JSON sign is
+ * (`hmacSecret`).
  */
 async function signRaw(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null): Promise<Response> {
   const name = new URL(request.url).searchParams.get('sign') ?? '';
@@ -1090,10 +1092,12 @@ async function signRaw(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (caller instanceof Response) return caller;
   const run = async (who: User, at: string): Promise<Response> => {
     if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: at, credential: name })) return failure(403, `this narrowed session may not sign with ${name}`, 'narrowed');
-    const secret = await hmacSecret(coffre, proxy, at, who, name, signer);
+    const { secret, by } = await hmacSecret(coffre, proxy, at, who, name, signer);
     const mac = hmacParts(secret, { encoding: signer.encoding, prefix: signer.prefix ?? '' });
     const refused = await fed(request.body, length, digest, (part) => mac.update(part));
-    return refused === null ? answer({ signature: mac.signature() }) : failure(400, refused);
+    if (refused !== null) return failure(400, refused);
+    if (Date.now() > by) return failure(503, `${name}: the message came after its values may be used; send it again`, 'late');
+    return answer({ signature: mac.signature() });
   };
   if (caller !== null) {
     return answering(caller, async () => {
@@ -1183,12 +1187,12 @@ function messageOf(given: unknown): Uint8Array<ArrayBuffer> | null {
   return Buffer.from(given, 'base64url');
 }
 
-/** An HMAC signer's or verifier's secret, opened for the caller as a credential's values are: remembered for `cacheSeconds`, logged as one use when opened. */
-async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, hmac: Hmac): Promise<string> {
-  const { values } = await valuesFor(coffre, proxy, who, path, { name, keys: [hmac.key] }, { hmac: true });
+/** An HMAC signer's or verifier's secret, opened for the caller as a credential's values are: remembered for `cacheSeconds`, logged as one use when opened; and until when it may serve (`valuesFor`). */
+async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, hmac: Hmac): Promise<{ secret: string; by: number }> {
+  const { values, by } = await valuesFor(coffre, proxy, who, path, { name, keys: [hmac.key] }, { hmac: true });
   // WebCrypto takes no empty HMAC key: said as what is wrong with the value, not the platform's error.
   if (values[hmac.key] === '') throw new CoffreError(409, 'conflict', `${path}'s ${hmac.key} is empty, and ${name} signs and checks nothing with an empty secret`);
-  return values[hmac.key]!;
+  return { secret: values[hmac.key]!, by };
 }
 
 /**
@@ -1763,7 +1767,9 @@ function cacheKey(user: User, path: string, name: string): string {
  * is served the entry meanwhile, so a steady caller does not turn a lapse
  * into a call per request. The one asking is served the entry too should
  * the vault not answer, and a second later another asks; refused, the
- * entry goes. Nothing serves past `until`.
+ * entry goes. Nothing serves past `until`, and `by` says when that is: a
+ * kept entry's `until`, or `cacheSeconds` from the asking (60 s under
+ * `cacheSeconds: 0`), never past the handle's or session's end.
  */
 async function valuesFor(
   coffre: PluginContext,
@@ -1775,7 +1781,7 @@ async function valuesFor(
   through: { host: string } | { tunnel: true } | { hmac: true },
   /** Told when the vault decided now, not the cache. */
   decided?: () => void,
-): Promise<Opened> {
+): Promise<Opened & { by: number }> {
   const key = cacheKey(user, path, credential.name);
   const now = Date.now();
   const kept = proxy.cache.get(key);
@@ -1783,7 +1789,7 @@ async function valuesFor(
   // Until when this request holds the others off, should it ask.
   const hold = now + Math.min(REFRESH_ATTEMPT_MS, refreshWindow(proxy.cacheMs) / 2);
   if (live !== undefined) {
-    if (now < live.refreshFrom || (live.hold !== undefined && now < live.hold)) return live;
+    if (now < live.refreshFrom || (live.hold !== undefined && now < live.hold)) return { values: live.values, plain: live.plain, by: live.until };
     live.hold = hold;
   }
   let used: Used;
@@ -1802,7 +1808,7 @@ async function valuesFor(
     console.error("the proxy's cache asked the vault again, unanswered; serving what it holds", logged(error));
     // Another a second on, unless one already asks after it, whose hold stands.
     if (held === live && live.hold === hold) live.hold = Date.now() + REFRESH_RETRY_MS;
-    return held;
+    return { values: held.values, plain: held.plain, by: held.until };
   }
   const missing = credential.keys.filter((name) => !Object.hasOwn(used.values, name));
   if (missing.length > 0) {
@@ -1822,7 +1828,7 @@ async function valuesFor(
     const refreshFrom = live !== undefined && until <= live.until ? until : until - refreshWindow(proxy.cacheMs);
     proxy.cache.set(key, { values: used.values, plain: used.plain, until, refreshFrom });
   }
-  return { values: used.values, plain: used.plain };
+  return { values: used.values, plain: used.plain, by: Math.min(now + (proxy.cacheMs || 60_000), Date.parse(used.expiresAt)) };
 }
 
 /**

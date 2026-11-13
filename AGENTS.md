@@ -202,7 +202,7 @@ unsupported diff select full validation.
   own build no longer checks. A check that fails prints what it saw, then the processes'
   output.
 - `pnpm test:compat [--kind workers|node] [--release <v>] [--schema <v>]` installs
-  the newest release from npm as `init` writes it, has its own conformance
+  the newest release of this checkout's line (`0.14.x`) from npm as `init` writes it, has its own conformance
   migrate with this checkout's migrations, and requires it conformant; then
   requires a synthetic destructive migration to fail it. `--schema` applies a
   published version's migrations instead, to check past releases. It needs

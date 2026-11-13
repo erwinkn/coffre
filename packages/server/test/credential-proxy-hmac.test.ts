@@ -5,7 +5,7 @@
 // schemes, each signed as the provider signs it with `node:crypto`, the
 // app's own HS256 token, the log once a minute, and no byte of a secret in
 // anything coffre answers, logs or says on the console. And SumSub's
-// document upload, a message of 10 MiB signed raw, as its bytes come.
+// document upload, a message of 12 MiB signed raw, as its bytes come.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync } from 'node:crypto';
@@ -28,7 +28,6 @@ const SECRETS = {
   IFRAME_TOKEN_SECRET: 'iframe_secret_5f4dcc3b5aa765d61d8327deb882cf99',
   SUMSUB_SECRET_KEY: 'sumsub_sk_0f1e2d3c4b5a69788796a5b4c3d2e1f0',
 };
-/** What SumSub's document upload takes: a 10 MiB file in its multipart, behind `ts + method + path`. */
 /** sumsub-key's maxBytes: the ceiling, `MAX_RAW_MESSAGE_BYTES`. */
 const SUMSUB_BYTES = 12 * 1024 * 1024;
 const options: CredentialProxyOptions = {
@@ -283,6 +282,30 @@ test("a project named as a form rule's credential: a raw sign at /use/<project>/
   assert.equal(body.pulled(), 0, 'its body read');
   const message = Buffer.alloc(100 * 1024, 'p');
   assert.deepEqual(await (await ask('sumsub-key', message, message.length)).json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
+});
+
+test('a raw message whose body comes after its values lapse is signed by nothing: 503 late, sent again it signs', async () => {
+  const proxy = credentialProxy({ credentials: {}, cacheSeconds: 1, signers: { 'sumsub-key': hmac('SUMSUB_SECRET_KEY', { encoding: 'hex', maxBytes: SUMSUB_BYTES }) } });
+  const context = fake('SUMSUB_SECRET_KEY', SECRETS.SUMSUB_SECRET_KEY);
+  const message = Buffer.alloc(128 * 1024, 's');
+  const ask = (body: BodyInit) => proxy.routes!.fetch(new Request('https://coffre.example/use/market/dev?sign=sumsub-key', {
+    method: 'POST', headers: { authorization: `Bearer coffre_use_${'h'.repeat(43)}`, 'content-type': 'application/octet-stream', 'content-length': String(message.length) }, body, duplex: 'half',
+  } as RequestInit), context);
+  // Half, then the rest past the second its values serve: a handle revoked meanwhile would still be signing.
+  let sent = 0;
+  const slow = new ReadableStream<Uint8Array>({
+    pull: async (out) => {
+      if (sent === message.length) return out.close();
+      if (sent > 0) await new Promise((resolve) => setTimeout(resolve, 1_200));
+      out.enqueue(message.subarray(sent, sent + message.length / 2));
+      sent += message.length / 2;
+    },
+  }, { highWaterMark: 0 });
+  const late = await ask(slow);
+  const text = await late.text();
+  assert.deepEqual([late.status, (JSON.parse(text) as { reason: string }).reason], [503, 'late'], text);
+  assert.ok(!text.includes('signature'), text);
+  assert.deepEqual(await (await ask(message)).json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
 });
 
 test('a raw message longer or shorter than it declares, or other than its Content-Digest, is signed by nothing', async () => {

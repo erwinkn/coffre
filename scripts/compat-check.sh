@@ -14,7 +14,9 @@
 #
 #   pnpm test:compat [--kind workers|node] [--release <version>] [--schema <version>] [--port <n>] [<dir>]
 #
-#   --release  the release to hold; by default the newest on npm
+#   --release  the release to hold; by default the newest on npm of this
+#              checkout's line (0.14.x on release/0.14: 0.15's code needs
+#              0.15's migrations)
 #   --schema   a published version's migrations instead of this checkout's,
 #              to check past releases: --release 0.4.0 --schema 0.4.1
 #
@@ -37,7 +39,10 @@ while [[ "${1:-}" == --* ]]; do
         *) echo "compat-check: unknown option $1" >&2; exit 2 ;;
     esac
 done
-release="${release:-$(npm view @coffre/cli version)}"
+if [[ -z "$release" ]]; then
+    line="$(node -p "require('$root/packages/cli/package.json').version.split('.').slice(0, 2).join('.')")"
+    release="$(npm view "@coffre/cli@~$line.0" version --json | node -p "[].concat(JSON.parse(require('fs').readFileSync(0, 'utf8'))).at(-1)")"
+fi
 temporary=false
 if [[ -n "${1:-}" ]]; then
     work="$1"
