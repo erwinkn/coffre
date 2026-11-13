@@ -97,7 +97,7 @@ export async function checkAudit(db: Database, keys: VerifierKeys, input: CheckI
 
   const broken: string[] = walked.problems.filter((p) => !walked.behind || !p.startsWith(ENDS_BELOW));
   if (forged.length > 0) broken.push(`${forged.length} of the rows shown: not the projector's (their MAC does not hold)`);
-  if (listed === null) broken.push("the audit cursor is not the projector's (its MAC does not hold)");
+  if (listed === null) broken.push("the audit cursor is not the projector's (its MAC, or the order of its old positions, does not hold)");
   const frozen = frozenLog(read.anchor, read.last, ring);
   if (frozen !== null) broken.push(frozen);
   const behind = walked.behind ? ['the database ends below the checkpoint its signer wrote: checkpoints were deleted, or an older one is served'] : [];

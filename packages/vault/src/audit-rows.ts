@@ -9,6 +9,8 @@ import type { LogMacKey } from './log-entry.ts';
 // 0087). The one home of both MAC inputs: the projector writes under them (projection.ts), and whatever checks a row a
 // page shows, or the cursor, checks them here. Each is HMAC-SHA256 under the log's MAC key (its key, not its tag: a
 // row is no entry of the log), over a domain of its own, then JSON of every column but the MAC, cut to 16 bytes.
+// It also holds the one parser of the rows as the app hands them in (`eventOf`, `cursorOf`), which `vouch` and
+// `check` both use.
 
 /** Which log an entry is of: 0.14's `audit_log`, 0.15's changes, 0.15's uses. */
 export type AuditLog = 14 | 15 | 16;
