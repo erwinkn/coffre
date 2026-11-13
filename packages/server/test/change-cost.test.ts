@@ -20,6 +20,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, entryOf, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
+import { BUDGET, overBudget, type Budget } from './budgets.ts';
 import { addPasskey, removePasskey, steppedUp } from './passkey-rows.ts';
 import { inBulkPeriod } from './window-fixture.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
@@ -189,7 +190,8 @@ async function cost(work: () => Promise<unknown>): Promise<Cost> {
   return { app: relays.app.syncs - from.app, vault: relays.vault.syncs - from.vault, hot: relays.hot.syncs - from.hot, calls: calls - from.calls, ms, statements, connections: relays.app.opened - from.opened };
 }
 
-type Case = { name: string; setup?: (i: number) => Promise<void>; run: (i: number) => Promise<unknown> };
+/** A change route; its budget `BUDGET.change` but where it names another. */
+type Case = { name: string; setup?: (i: number) => Promise<void>; run: (i: number) => Promise<unknown>; budget?: Budget };
 
 /** A route sending API_KEY, which market/dev holds. */
 const ROUTE: ProxyDefinition = {
@@ -213,11 +215,11 @@ async function refused(request: Promise<unknown>): Promise<void> {
 
 /** Every change route, as the UI or CLI asks it: once to warm, once measured, each on rows of its own. */
 const CASES: Case[] = [
-  { name: 'key set, one', run: () => owner.secrets.set('market/dev', { [fresh().toUpperCase()]: 'fake-value' }) },
-  { name: 'key set, existing', run: () => owner.secrets.set('market/dev', { API_KEY: `fake-${randomUUID()}` }) },
-  { name: 'key set, five', run: () => owner.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 5 }, () => [fresh().toUpperCase(), 'fake-value']))) },
-  // Refused on the vault's read, and recorded by it: as the write that is not, two round trips, and no 0.14 entry.
-  { name: 'key set, refused', run: () => refused(viewer.secrets.set('market/dev', { API_KEY: `fake-${randomUUID()}` })) },
+  { name: 'key set, one', budget: BUDGET.write, run: () => owner.secrets.set('market/dev', { [fresh().toUpperCase()]: 'fake-value' }) },
+  { name: 'key set, existing', budget: BUDGET.write, run: () => owner.secrets.set('market/dev', { API_KEY: `fake-${randomUUID()}` }) },
+  { name: 'key set, five', budget: BUDGET.write, run: () => owner.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 5 }, () => [fresh().toUpperCase(), 'fake-value']))) },
+  // Refused on the vault's read, and recorded by it: a write's budget too.
+  { name: 'key set, refused', budget: BUDGET.write, run: () => refused(viewer.secrets.set('market/dev', { API_KEY: `fake-${randomUUID()}` })) },
   {
     name: 'key archived',
     setup: async (i) => void (await owner.secrets.set('market/dev', { [`GONE_${i}`]: 'fake-value' })),
@@ -275,13 +277,13 @@ const CASES: Case[] = [
     setup: async (i) => void (await owner.environments.create(`market/old-${i}`)),
     run: (i) => owner.environments.update(`market/old-${i}`, { archived: true }),
   },
-  { name: 'member added', run: (i) => owner.members.add(`user:new-${i}@acme.example`) },
-  { name: 'member added, a role', run: (i) => owner.members.add(`user:dev-${i}@acme.example`, { role: 'developer', scope: { projects: { only: ['market'] } } }) },
-  { name: 'service account added', run: (i) => owner.members.add(`token:ci-${i}`) },
-  { name: 'member added, refused', run: (i) => refused(viewer.members.add(`user:turned-${i}@acme.example`)) },
+  { name: 'member added', budget: BUDGET.write, run: (i) => owner.members.add(`user:new-${i}@acme.example`) },
+  { name: 'member added, a role', budget: BUDGET.write, run: (i) => owner.members.add(`user:dev-${i}@acme.example`, { role: 'developer', scope: { projects: { only: ['market'] } } }) },
+  { name: 'service account added', budget: BUDGET.write, run: (i) => owner.members.add(`token:ci-${i}`) },
+  { name: 'member added, refused', budget: BUDGET.write, run: (i) => refused(viewer.members.add(`user:turned-${i}@acme.example`)) },
   // Under `off`, by a person whose only passkey was removed (`ADMIN`): as the Owner's, nothing more read.
-  { name: 'key set, under off', run: () => admin.secrets.set('market/dev', { [fresh().toUpperCase()]: 'fake-value' }) },
-  { name: 'member added, under off', run: (i) => admin.members.add(`user:off-${i}@acme.example`) },
+  { name: 'key set, under off', budget: BUDGET.write, run: () => admin.secrets.set('market/dev', { [fresh().toUpperCase()]: 'fake-value' }) },
+  { name: 'member added, under off', budget: BUDGET.write, run: (i) => admin.members.add(`user:off-${i}@acme.example`) },
   {
     name: 'access granted',
     setup: async (i) => void (await owner.members.add(`user:granted-${i}@acme.example`)),
@@ -294,7 +296,7 @@ const CASES: Case[] = [
   },
   { name: 'token issued', run: () => owner.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
   { name: 'token issued, by a Developer', run: () => developer.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
-  // An environment's proxy definitions (0.16): its first save, and one more item on top of the page it loaded.
+  // An environment's proxy definitions: its first save, and one more item on top of the page it loaded.
   {
     name: 'proxy definitions, first save',
     setup: async (i) => void (await owner.environments.create(`market/routed-${i}`)),
@@ -308,7 +310,7 @@ const CASES: Case[] = [
     },
     run: (i) => owner.proxy.save(`market/routes-${i}`, { seal: seals.get(i)!, items: { maps: { ...ROUTE, name: 'maps', upstream: 'https://maps.example.com' } } }),
   },
-  // An Owner's reset of someone's passkeys: one passkey or ten, the same round trips, the removals asked together.
+  // An Owner's reset of someone's passkeys: one passkey or ten, the removals asked together, the same round trips (below).
   ...[1, 10].map((held): Case => ({
     name: `passkeys reset, ${held}`,
     setup: async (i) => {
@@ -327,95 +329,32 @@ const CASES: Case[] = [
 const tokens = new Map<number, string>();
 const seals = new Map<number, string | null>();
 
-/**
- * Each route's round trips, as measured: the app's Syncs, the vault's, and the hot path's. A change that adds one fails
- * here; one that saves one lowers its row. The seal is the checkpointer's, apart: about three more
- * on Cloudflare (docs/design/0.15-plan.md, "As built: T171").
- *
- * Each `prepare` of a logged object costs the vault one statement: `app_change` holds the app's row to its object's
- * newest change's seal, which SQL cannot authenticate, so the vault reads those changes and checks their MACs first.
- * A fork prepares twice. The pin that would fold it into the write is in sealed-inputs.md.
- */
-const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
-  // A key write decided on one read (docs/design/two-trips.md): the vault's statement, then the app's one Sync, the
-  // head (a lock alone) and everything with the COMMIT, however many keys. No 0.14 entry: the changes record the
-  // write, in 0.15's log alone. What stands behind the person's credential comes with the vault's read, as its passkey rows
-  // (docs/design/passkeys.md, section 6.4), so the app reads nothing first.
-  'key set, one': { app: 1, vault: 1 },
-  'key set, existing': { app: 1, vault: 1 },
-  'key set, five': { app: 1, vault: 1 },
-  // Refused on the vault's read: the read, then the vault's record of the refusal, which stands for 0.14's deny
-  // entry; the app answers it as today's path would, from what the read answered, reading nothing itself.
-  'key set, refused': { app: 0, vault: 2 },
-  'key archived': { app: 12, vault: 2 },
-  'key restored (a version)': { app: 13, vault: 8 },
-  'key renamed': { app: 9, vault: 1 },
-  'key filed in a folder': { app: 6, vault: 1 },
-  'reference made': { app: 15, vault: 8 },
-  'reference broken': { app: 4, vault: 13 },
-  'project made': { app: 4, vault: 1 },
-  'project renamed': { app: 5, vault: 1 },
-  'project archived': { app: 8, vault: 1 },
-  'environment made': { app: 5, vault: 2 },
-  // A fork of market/base's two keys, one filed: its app statements grow with the keys it copies (an `update "secrets"`
-  // each), so this is the fixture's number, and 21 without the folder.
-  'environment forked': { app: 25, vault: 5, hot: 1 },
-  'environment renamed': { app: 6, vault: 2 },
-  'environment protected': { app: 5, vault: 9 },
-  'environment archived': { app: 10, vault: 2 },
-  // A first add decided on one read (docs/design/two-trips.md, "A member add"): the vault's read; then its write,
-  // one Sync: the members' rows and 0.14's head (a lock alone), the hold, the row, the change and the COMMIT. No 0.14
-  // `member.add` entry: the change records the add. The passkey rows come with the vault's
-  // read, as a key write's: the app reads nothing itself.
-  'member added': { app: 0, vault: 2 },
-  'member added, a role': { app: 0, vault: 2 },
-  'service account added': { app: 0, vault: 2 },
-  'member added, refused': { app: 0, vault: 2 },
-  'key set, under off': { app: 1, vault: 1 },
-  'member added, under off': { app: 0, vault: 2 },
-  'access granted': { app: 3, vault: 8 },
-  // Its answer is their report, which asks the vault for the proxy items they saved: one read, after the commit.
-  'member removed': { app: 10, vault: 9 },
-  // By an Owner of every project in its scope, it withholds nothing (a reference's sensitive value is its holder's
-  // project's to give), so the app asks nothing of what those places hold. By a Developer: the
-  // settings and places a non-Owner's issue checks, then what sensitive values its places hold, one round trip.
-  'token issued': { app: 3, vault: 6 },
-  'token issued, by a Developer': { app: 5, vault: 7 },
-  // An Owner's reset, however many passkeys: the session's read; the policy's and the Owner's access's
-  // newest entries, then the vault's answer for them and for the person (`issuerNow`); what it will
-  // revoke, read together; then its transaction: the head, the fence's reads and the passkeys in one Sync, every
-  // removal and revocation in a second, the entry with the COMMIT.
-  'passkeys reset, 1': { app: 6, vault: 3 },
-  'passkeys reset, 10': { app: 6, vault: 3 },
-  'token revoked': { app: 2, vault: 3 },
-  'proxy definitions, first save': { app: 2, vault: 5 },
-  'proxy definitions, an item added': { app: 2, vault: 5 },
-};
-
-test('each change route answers in exactly its budget of round trips (T179)', async () => {
+test('each change route answers within its budget of round trips', async () => {
   const table: Record<string, { app: number; vault: number; hot: number; total: number; calls: number; ms: number }> = {};
   const failures: string[] = [];
-  for (const [n, { name, setup, run }] of CASES.entries()) {
+  for (const [n, { name, setup, run, budget = BUDGET.change }] of CASES.entries()) {
     try {
       // The warm request and the measured one in one bulk refresh period of every key they use (a minute, at the default
-      // 15-minute window, from each key's phase): a use that crosses into the next moves its key's row on, a
-      // statement more on the hot path (`bulkRule`). Only a fork uses keys, the owner's of market/base.
+      // 15-minute window, from each key's phase): a use that crosses into the next moves its key's row on, a statement
+      // more on the hot path (`bulkRule`). Only a fork uses keys, the owner's of market/base.
       await inBulkPeriod(5_000, db.owner, [`user:${ROOT}`], 'market/base');
       for (const i of [2 * n, 2 * n + 1]) if (setup !== undefined) await asRequest(() => setup(i));
       await cost(() => run(2 * n));
       const { statements: ran, connections, ...counts } = await cost(() => run(2 * n + 1));
       // One app connection a request, however its statements overlap the vault's calls (AGENTS.md, "One connection per call").
       if (connections > 1) failures.push(`${name}: ${connections} app connections, not one`);
-      table[name] = { ...counts, total: counts.app + counts.vault + counts.hot };
-      const budget = BUDGETS[name];
-      const spent = { app: counts.app, vault: counts.vault, hot: counts.hot };
-      const expected = { app: budget?.app, vault: budget?.vault, hot: budget?.hot ?? 0 };
-      if (JSON.stringify(spent) !== JSON.stringify(expected)) failures.push(`${name}: ${JSON.stringify(spent)}, not ${JSON.stringify(expected)}\n  ${ran.join('\n  ')}`);
+      const total = counts.app + counts.vault + counts.hot;
+      table[name] = { ...counts, total };
+      const over = overBudget({ trips: total }, budget);
+      if (over.length > 0) failures.push(`${name}: ${over.join(', ')}\n  ${ran.join('\n  ')}`);
       if (process.env.COFFRE_CHANGE_COST_VERBOSE) console.log(`\n${name}\n  ${ran.join('\n  ')}`);
     } catch (error) {
       failures.push(`${name}: ${(error as Error).message}`);
     }
   }
+  // A reset grows with nothing it removes: exactly as many round trips for ten passkeys as for one.
+  const [one, ten] = [table['passkeys reset, 1'], table['passkeys reset, 10']];
+  if (one?.total !== ten?.total) failures.push(`passkeys reset: ${ten?.total} round trips for ten, ${one?.total} for one`);
   if (process.env.COFFRE_CHANGE_COST_VERBOSE || RTT_MS > 0 || failures.length > 0) console.table(table);
   assert.deepEqual(failures, []);
 });

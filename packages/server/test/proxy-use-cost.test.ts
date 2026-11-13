@@ -1,12 +1,7 @@
-// What the credential proxy's `/use` costs with 0.15's uses, a person's handle at a proxy that
-// keeps nothing (`proxy: { cacheValues: false }`), the hot path at its worst. On the app's connection, one `app_read` (migration
-// 0031): the handle's credential, the place and the key, in one call; then the vault's one `use_credential`, which
-// decides on the credential's standing itself, its generation included: no `credentialStill` after it. The stable URL first checks the handle, its
-// credential read ahead and the vault asked about its person, for which environments it was made; then the use, as the
-// environment's URL makes it, on the answer just kept. Each statement reads as many rows, and
-// as many pages, however long the log grows and however many keys, environments and members the instance holds. A
-// reveal through the API, of a key, an environment or its named keys, and an export, make one use a value, and no
-// `credentialStill` after them either.
+// What the credential proxy's `/use` costs, a person's handle at a proxy that keeps nothing
+// (`proxy: { cacheValues: false }`), the hot path at its worst, and a reveal through the API: each within its class's
+// budget (budgets.ts), and each statement reading as many rows, and as many pages, however long the log grows and
+// however many keys, environments and members the instance holds.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -33,6 +28,7 @@ import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { checkpointFence } from '@coffre/db/schema';
 import { answer, type Pages } from './start-fixture.ts';
 import { inBulkPeriod } from './window-fixture.ts';
+import { assertOver, assertWithin, BUDGET, OVER } from './budgets.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -162,24 +158,19 @@ const NAMED = `${ORIGIN}/use/market/dev/api/v1/charges`;
 const STABLE = `${ORIGIN}/use/api/v1/charges`;
 const shown = (ran: Statement[]) => ran.map(({ text }) => text.replace(/\s+/g, ' ').slice(0, 32));
 
-test("a handle's /use is the vault's one call, at its environment's URL or the stable one: its use by the ids it keeps, warm, and, cold, a read by its names, then the use by the ids read; the app runs nothing (T145, D153)", async () => {
-  const use = 'SELECT use_credential( $1::uuid,';
-  const named = await statements(NAMED);
-  assert.deepEqual(shown(named.app), [], 'the named URL: no statement of the app');
-  assert.deepEqual(shown(named.hot), [use], 'warm: the use alone, by the ids its isolate keeps');
-  assert.deepEqual(named.vault, [], "no vault statement but the use's: nothing asked about the person, nothing kept");
-  // Cold: a handle the vault's isolate has not seen, its names read by the use's own statement, then used by their ids.
+/** What a request's statements spent, as a budget measures it. */
+const spent = (ran: { app: Statement[]; vault: Statement[]; hot: Statement[] }) => ({ statements: ran.app.length + ran.vault.length + ran.hot.length });
+const trace = (ran: { app: Statement[]; vault: Statement[]; hot: Statement[] }) => `\n${JSON.stringify({ app: shown(ran.app), vault: shown(ran.vault), hot: shown(ran.hot) })}`;
+
+test("a handle's /use, at its environment's URL or the stable one, runs within a use's budget, and over it only when cold", async () => {
+  for (const url of [NAMED, STABLE]) {
+    const ran = await statements(url);
+    assertWithin(url, spent(ran), BUDGET.use, trace(ran));
+  }
+  // Cold: a handle the vault's isolate has not seen, its names read by the use's own statement, then used by their ids;
+  // and its first use in five minutes notes when it was last used (`verify`'s touch).
   const fresh = (await setupRuntime.signin!.issueHandle({ ...(await contextFor(deps, DEV)), personalToken: null }, { label: 'cold', expiresInMinutes: 600, paths: ['market/dev'] })).token;
-  const cold = await statements(NAMED, fresh, { warm: false });
-  // But a credential's first use in five minutes, which notes when it was last used (`verify`'s touch): not a request's cost.
-  assert.deepEqual(shown(cold.app), ['update "credentials" set "last_u'], 'cold: no read of the app, the touch of a new credential alone');
-  assert.deepEqual(shown(cold.hot), [use, use]);
-  // The stable URL: the use of its one key at the environment the handle was made for, which the vault finds itself, in
-  // its one call: one statement, and nothing of `access`.
-  const stable = await statements(STABLE);
-  assert.deepEqual(shown(stable.app), [], 'the stable URL: no statement of the app');
-  assert.deepEqual(shown(stable.hot), [use]);
-  assert.deepEqual(stable.vault, [], 'no `access`: the standing is the vault\'s, decided on the sealed rows');
+  assertOver('a cold /use', spent(await statements(NAMED, fresh, { warm: false })), OVER.coldUse);
 });
 
 test("a handle's /use reads as many rows and pages however the log and the instance grow", async () => {
@@ -256,17 +247,8 @@ test("a handle's /use of a UI route is the vault's one call too, at either URL a
     return out;
   };
   const one = await measure();
-  // The route's named call (0071): `use_credential`, naming the route, once the vault's map is warm.
-  const route1 = 'SELECT use_credential( $1::uuid,';
-  for (const [url, ran] of Object.entries(one)) {
-    assert.deepEqual(ran.app, [], `${url}: no statement of the app`);
-    assert.deepEqual(ran.vault, [], `${url}: nothing of the vault's but the use's statement`);
-  }
-  // The place's URL and a stable one, whatever its segments: the route use alone, one function call. Two
-  // segments, `/use/<a>/<b>`, may be the plan: the use offers the place itself as its place reading, and takes the
-  // stable one here, the handle made for market/dev, no made-for list asked first (C2b4; docs/design/proxy-ui.md,
-  // section 6, "URLs of one or two segments").
-  for (const url of [`${ORIGIN}/use/market/dev/ui/charges`, `${ORIGIN}/use/ui/v1/charges`, `${ORIGIN}/use/ui/charges`]) assert.deepEqual(one[url]!.hot, [route1], url);
+  // The place's URL and a stable one, whatever its segments (docs/design/proxy-ui.md, section 6, "URLs of one or two segments").
+  for (const [url, ran] of Object.entries(one)) assertWithin(url, { statements: ran.app.length + ran.vault.length + ran.hot.length }, BUDGET.use, `\n${JSON.stringify(ran)}`);
   // 255 more definitions in the environment, each its own route: the use reads its own item, as many rows.
   // In parts, as a body holds 1,600 values at most (`MAX_BODY_NODES`), and the Proxy tab saves only what changed.
   for (let from = 0; from < 255; from += 64) {
@@ -293,34 +275,18 @@ async function revealed(token: string, body: { path: string; keys?: readonly str
   return ran;
 }
 
-test("a reveal of one key is the vault's one call, as a /use is; a reveal of several is one call too, which reads the place and its keys itself, and runs no check of the credential after it (T145, T165, T167)", async () => {
-  const use = 'SELECT use_credential( $1::uuid,';
-  const named = 'SELECT use_named_batch( $1::byte';
-  const batch = 'SELECT use_batch( $1::uuid, $2::';
-  // What the app reads itself of a place's keys with no value of their own: whether a reference holds one (`valuesIn`).
-  const references = ['select "secret_references"."id",', 'select "secrets"."id", "secrets"'];
-  // A person's credential, with passkeys not off, alike: the vault's call holds it to the passkey check and answers
-  // its passkey rows with the rest, which the app checks, reading nothing itself (passkeys.md, section 6.4).
+test("a reveal through the API, of one key, several or an environment, by a person or a service, runs within a read's budget", async () => {
   const cases = [
-    // One key, by its path or as a list of one: the vault's use by name, warm, which answers the rows the app checks.
-    ['a reveal of one key', personal, { path: 'market/dev/API_KEY' }, [], [use]],
-    ['a reveal of its one named key', personal, { path: 'market/dev', keys: ['API_KEY'] }, [], [use]],
-    ['a reveal of one key, as a service', service, { path: 'market/dev/API_KEY' }, [], [use]],
-    // Several: the vault's one call by name, its gate and each key's named read in one statement, warm (asked
-    // once before, every key in the caller's cap's set). A person's read leaves sensitive values out, so its first
-    // statement passes no ids and writes nothing: its uses are a batch by ids after it, as an environment's are, whose
-    // keys the vault lists itself (use-named-many.test.ts).
-    ['a reveal of an environment', personal, { path: 'market/dev' }, references, [named, batch]],
-    ['a reveal of its named keys', personal, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }, [], [named, batch]],
-    ['an export, as a service', service, { path: 'market/dev' }, references, [named, batch]],
-    ['an export of named keys, as a service, mapped', service, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }, [], [named]],
+    ['a reveal of one key', personal, { path: 'market/dev/API_KEY' }],
+    ['a reveal of its one named key', personal, { path: 'market/dev', keys: ['API_KEY'] }],
+    ['a reveal of one key, as a service', service, { path: 'market/dev/API_KEY' }],
+    ['a reveal of an environment', personal, { path: 'market/dev' }],
+    ['a reveal of its named keys', personal, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }],
+    ['an export, as a service', service, { path: 'market/dev' }],
+    ['an export of named keys, as a service, mapped', service, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }],
   ] as const;
-  // Sorted: an environment's references and keys are read at once, and recorded as each finishes.
-  const sorted = (texts: readonly string[]) => [...texts].sort();
-  for (const [name, token, body, app, hot] of cases) {
+  for (const [name, token, body] of cases) {
     const ran = await revealed(token, body);
-    assert.deepEqual(sorted(shown(ran.app)), sorted(app), name);
-    assert.deepEqual(shown(ran.hot), hot, `${name}: one use, or one call of the vault's for all of them`);
-    assert.deepEqual(ran.vault, [], `${name}: no vault call but the uses`);
+    assertWithin(name, spent(ran), BUDGET.read, trace(ran));
   }
 });

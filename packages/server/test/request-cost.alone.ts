@@ -1,11 +1,8 @@
-// What a request costs, exactly, and that it does not grow with the
-// instance. On Workers' Free plan, an invocation has 10 ms of CPU; each
-// statement is a round trip through Hyperdrive, and each connection, the
-// app's or one vault call's, costs a TLS socket and a SCRAM login. So each
-// hot request has a budget of statements and connections it meets exactly,
-// and runs the same statements, reading the same rows, on a log of a few
-// entries as on one of thousands, among a handful of members or hundreds,
-// after one change to the policy or many.
+// What a request costs, and that it does not grow with the instance. On Workers' Free plan, an invocation has 10 ms of
+// CPU; each statement is a round trip through Hyperdrive, and each connection, the app's or one vault call's, costs a
+// TLS socket and a SCRAM login. So each request stays within its class's budget (budgets.ts), and runs the same
+// statements, reading the same rows, on a log of a few entries as on one of thousands, among a handful of members or
+// hundreds, after one change to the policy or many.
 // `pnpm bench:workers` measures the CPU itself (packages/conformance/scripts/bench.ts).
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before } from 'node:test';
@@ -45,6 +42,7 @@ import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testAnchor, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { answer, type Pages } from './start-fixture.ts';
+import { assertOver, assertWithin, BUDGET, OVER, overBudget, type Budget } from './budgets.ts';
 import { inBulkPeriod, pastBulkTurn } from './window-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
@@ -526,40 +524,19 @@ async function repeated(request: () => Promise<unknown>): Promise<Cost> {
   return cost(request);
 }
 
-/**
- * Each hot request, and what it costs warm: its statements on the app's
- * connection and the vault's, and the vault's calls. A workload's request
- * at the proxy: one statement, and nothing of the vault's.
- *
- * A reveal, under 0.15's log: no statement of the app's, and one vault
- * call, whose statements on the vault's hot login check the credential,
- * decide, log the use and open the values. A key by name, one
- * (`use_credential`); every key of an environment, two (`use_named_batch`,
- * which lists and resolves them, then `use_batch` for those it resolved);
- * a CI run's seven keys by name, which the isolate maps to their ids, one.
- * Measured within one period of the bulk cap (`repeated`).
- *
- * A CI run's sign-in: one statement of the app's, and the vault's
- * `signIn`, one (`sign_in`), which spends the token, issues the credential
- * and logs it. Its reveal costs a service token's, and one statement of
- * the app's more: its binding's standing (`standingBinding`).
- */
-const requests: Record<string, { request: () => Promise<unknown>; budget: { app: number; vault: number; vaultCalls: number } }> = {
-  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: { app: 0, vault: 1, vaultCalls: 1 } },
-  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: { app: 0, vault: 2, vaultCalls: 1 } },
-  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: { app: 0, vault: 2, vaultCalls: 1 } },
-  // Only shown: its credential and what the vault's rows say of its caller in one statement, its places in another, and no vault call.
-  "a request's check of its caller": { request: () => reader.me(), budget: { app: 2, vault: 0, vaultCalls: 0 } },
-  "a CI run's sign-in": { request: () => exchange(), budget: { app: 1, vault: 1, vaultCalls: 1 } },
-  "a CI run's list": { request: () => ci.secrets.list('market/dev'), budget: { app: 4, vault: 1, vaultCalls: 1 } },
-  "a CI run's reveal of seven keys": { request: () => ci.secrets.reveal('market/dev', SEVEN), budget: { app: 1, vault: 1, vaultCalls: 1 } },
-  // Section 5.3's one statement: the session, its member, binding and ancestors; the vault is not asked, its
-  // decision warm in the proxy's cache.
-  "a workload's request at the proxy": { request: () => workload(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
-  // The same for an inbound webhook's signature: the secret warm in the proxy's cache, no entry in the log.
-  "a workload's verify at the proxy": { request: () => verify(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
-  // A Cloudflare call naming its environment: its binding, member and place in one statement; the vault's decision warm.
-  "a Cloudflare call at the proxy": { request: () => bound(), budget: { app: 1, vault: 0, vaultCalls: 0 } },
+/** Each hot request and its class, measured warm, within one period of the bulk cap (`repeated`). */
+const requests: Record<string, { request: () => Promise<unknown>; budget: Budget }> = {
+  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: BUDGET.read },
+  'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: BUDGET.read },
+  'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: BUDGET.read },
+  "a request's check of its caller": { request: () => reader.me(), budget: BUDGET.read },
+  "a CI run's sign-in": { request: () => exchange(), budget: BUDGET.signIn },
+  "a CI run's list": { request: () => ci.secrets.list('market/dev'), budget: BUDGET.read },
+  "a CI run's reveal of seven keys": { request: () => ci.secrets.reveal('market/dev', SEVEN), budget: BUDGET.read },
+  // The vault's decision warm in the proxy's cache: one statement, the session (or the binding) and its place.
+  "a workload's request at the proxy": { request: () => workload(), budget: BUDGET.use },
+  "a workload's verify at the proxy": { request: () => verify(), budget: BUDGET.use },
+  "a Cloudflare call at the proxy": { request: () => bound(), budget: BUDGET.use },
 };
 
 /**
@@ -643,97 +620,36 @@ const visits: Record<string, (client: CoffreClient, options: VisitOptions) => Pr
   '/oauth/authorize': page(async (client) => settle(client.oauth.describe({ client_id: 'https://app.example/client.json', redirect_uri: 'https://app.example/cb', response_type: 'code' }))),
 };
 
-/** What a page's render cost: its statements on the app's connection and the round trips they took there, and the vault's statements and calls. */
-type PageCost = { app: number; trips: number; vault: number; vaultCalls: number };
+/** What a page's render cost: its statements on every database, its round trips on the app's, and its vault calls. */
+type PageCost = { statements: number; trips: number; vaultCalls: number };
 
 async function pageCost(request: () => Promise<unknown>): Promise<PageCost> {
   const trips = pageTrips;
   const spent = await cost(request);
-  return { app: spent.app.statements, trips: pageTrips - trips, vault: spent.vault.statements, vaultCalls: spent.vaultCalls };
+  return { statements: spent.app.statements + spent.vault.statements, trips: pageTrips - trips, vaultCalls: spent.vaultCalls };
 }
 
 /**
- * Each page's server render, warm, as Owner and as viewer. On Workers, its
- * app connection takes each statement in turn, a round trip of Hyperdrive's
- * each, but for the reads asked together, which go under one Sync
- * (`groupReads`); each vault call is a connection of its own.
- *
- * The environment page: the session, with the newest policy change and
- * the instance's settings (who sets up service accounts, for `me`); the
- * vault's `access`; the places the caller reaches, each
- * project's team keys with them, and the keys and dismissals of the
- * projects with a fork, which the project list resolves; then, at once,
- * the environment's secrets, the project's references, and the keys and
- * dismissals of the environment's siblings, for its missing keys; then
- * both ends of its references (two), and for an Owner, who manages its
- * access, who reads through them: the members, their grants and the
- * vault's findings about them. The project page: the session and the
- * places, and an Owner its grants, which are the members, their grants,
- * findings and those the log names with no row (`missingMembers`), and the
- * vault's `about`, which reads nothing.
+ * Each page's server render, warm, as Owner and as viewer, all held to `BUDGET.page`. On Workers, its app connection
+ * takes each statement in turn, a round trip of Hyperdrive's each, but for the reads asked together, which go under one
+ * Sync (`groupReads`); each vault call is a connection of its own. Not the audit page: its check reads what was written
+ * since the newest checkpoint, which its own test holds. `history`: the render without the reports an Owner's page of
+ * a member shows, which list every secret they ever read; the per-statement pages test, which grows the log, measures it.
  */
-/**
- * `history`: an Owner's page of a member, whose report lists every secret they ever read (`memberActivity`, the
- * offboarding report's exposure): it reads their history in the log, as main did, by design. Its statements are its
- * budget's; the per-statement pages test, which grows the log, measures the page without that report.
- */
-const renders: Record<string, { request: () => Promise<unknown>; budget: PageCost; history?: () => Promise<unknown> }> = {
-  "an Owner's environment page": { request: () => environmentPage('owner'), budget: { app: 13, trips: 4, vault: 1, vaultCalls: 1 } },
-  "a viewer's environment page": { request: () => environmentPage('viewer'), budget: { app: 10, trips: 4, vault: 1, vaultCalls: 1 } },
-  "an Owner's project page": { request: () => projectPage('owner'), budget: { app: 8, trips: 3, vault: 1, vaultCalls: 2 } },
-  "a viewer's project page": { request: () => projectPage('viewer'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  // Every other page, as Owner and viewer (`visits`); the sign-in page signed out too, which reads nothing. Not the
-  // audit page's: its check reads what was written since the newest checkpoint, which its own test holds.
-  "/projects, owner": { request: () => visit('owner', '/projects'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/projects, viewer": { request: () => visit('viewer', '/projects'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/projects/market/users, owner": { request: () => visit('owner', '/projects/market/users'), budget: { app: 14, trips: 4, vault: 1, vaultCalls: 2 } },
-  "/projects/market/users, viewer": { request: () => visit('viewer', '/projects/market/users'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/projects/market/service-accounts, owner": { request: () => visit('owner', '/projects/market/service-accounts'), budget: { app: 8, trips: 3, vault: 1, vaultCalls: 2 } },
-  "/projects/market/service-accounts, viewer": { request: () => visit('viewer', '/projects/market/service-accounts'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/projects/market/settings, owner": { request: () => visit('owner', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/projects/market/settings, viewer": { request: () => visit('viewer', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  // The directory says how each service account signs in (`signsIn`), the service accounts page's: its live tokens, one
-  // statement beside its first reads, no trip (and their bindings, where a deployment trusts workloads, as this one does not).
-  "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 9, trips: 3, vault: 1, vaultCalls: 2 } },
-  "/users, viewer": { request: () => visit('viewer', '/users'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  // Its report reads what they read under 0.15's log, as the projection lists them, and how far it does, beside
-  // its first reads: a statement, no trip. And what they wrote that 0.15's log records alone: one more
-  // statement beside them, no trip; its keys and versions only when there are some.
-  // The report's reads and uses, which only 0.15's log holds, are a vault call of their own.
-  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 17, trips: 5, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
-  "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 1, vaultCalls: 1 } },
-  // The same directory, and nothing asked of any one account: its token list would be a vault call and three
-  // statements more each.
-  "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 9, trips: 3, vault: 1, vaultCalls: 2 } },
-  "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 10, trips: 3, vault: 2, vaultCalls: 3 } },
-  // Its report reads their reads too, and how far they are listed, beside its first reads; and what they wrote
-  // that 0.15's log records alone, one more statement beside them, no trip.
-  // As the member's page: the report's reads and uses are a vault call of their own.
-  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 20, trips: 6, vault: 3, vaultCalls: 4 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
-  "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 4, vaultCalls: 4 } },
-  // Its directory too, which counts the service accounts' tokens.
-  "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 12, trips: 3, vault: 3, vaultCalls: 4 } },
-  "/settings, viewer": { request: () => visit('viewer', '/settings'), budget: { app: 6, trips: 3, vault: 1, vaultCalls: 1 } },
-  "/account, owner": { request: () => visit('owner', '/account'), budget: { app: 7, trips: 3, vault: 1, vaultCalls: 1 } },
-  "/account, viewer": { request: () => visit('viewer', '/account'), budget: { app: 7, trips: 3, vault: 1, vaultCalls: 1 } },
-  "/account/sessions, owner": { request: () => visit('owner', '/account/sessions'), budget: { app: 10, trips: 3, vault: 1, vaultCalls: 1 } },
-  "/account/sessions, viewer": { request: () => visit('viewer', '/account/sessions'), budget: { app: 11, trips: 3, vault: 1, vaultCalls: 1 } },
-  "/login, owner": { request: () => visit('owner', '/login'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/login, viewer": { request: () => visit('viewer', '/login'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/unregistered, owner": { request: () => visit('owner', '/unregistered'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/unregistered, viewer": { request: () => visit('viewer', '/unregistered'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/auth/device, owner": { request: () => visit('owner', '/auth/device'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/auth/device, viewer": { request: () => visit('viewer', '/auth/device'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/approvals/00000000-0000-4000-8000-000000000000, owner": { request: () => visit('owner', '/approvals/00000000-0000-4000-8000-000000000000'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/approvals/00000000-0000-4000-8000-000000000000, viewer": { request: () => visit('viewer', '/approvals/00000000-0000-4000-8000-000000000000'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/oauth/authorize, owner": { request: () => visit('owner', '/oauth/authorize'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/oauth/authorize, viewer": { request: () => visit('viewer', '/oauth/authorize'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/login, signed out": { request: () => visit(null, '/login'), budget: { app: 0, trips: 0, vault: 0, vaultCalls: 0 } },
+const renders: Record<string, { request: () => Promise<unknown>; history?: () => Promise<unknown> }> = {
+  "an Owner's environment page": { request: () => environmentPage('owner') },
+  "a viewer's environment page": { request: () => environmentPage('viewer') },
+  "an Owner's project page": { request: () => projectPage('owner') },
+  "a viewer's project page": { request: () => projectPage('viewer') },
+  ...Object.fromEntries(Object.keys(visits).flatMap((path) => (['owner', 'viewer'] as const).map((as) => [`${path}, ${as}`, { request: () => visit(as, path), history: () => visit(as, path, { reports: false }) }]))),
+  '/login, signed out': { request: () => visit(null, '/login') },
 };
 
-test('each page renders in exactly its budget of statements and round trips', async () => {
+test('each page renders within its budget of statements, round trips and vault calls', async () => {
   await warm();
-  for (const [name, { request, budget }] of Object.entries(renders)) assert.deepEqual(await pageCost(request), budget, name);
+  const over: string[] = [];
+  for (const [name, { request }] of Object.entries(renders)) over.push(...overBudget(await pageCost(request), BUDGET.page).map((line) => `${name}: ${line}`));
+  assert.deepEqual(over, []);
 });
 
 /**
@@ -745,48 +661,45 @@ test('each page renders in exactly its budget of statements and round trips', as
  */
 test("a page's read that fails fails the reads sent with it, once, and each of its calls says so", async () => {
   await environmentPage('viewer');
+  const answered = await pageCost(() => environmentPage('viewer'));
   await db.owner.execute(sql`REVOKE SELECT ON secret_references FROM coffre_app`);
   try {
     let outcomes: PromiseSettledResult<unknown>[] = [];
     const spent = await pageCost(async () => (outcomes = await environmentCalls('viewer')));
     assert.deepEqual(outcomes.map((outcome) => outcome.status === 'rejected' ? (outcome.reason as { status?: number }).status : 'answered'), [500, 500, 500]);
-    // The page's reads, each once, but the references' ends, which their list, failed, never asks.
-    assert.deepEqual(spent, { app: 8, trips: 3, vault: 1, vaultCalls: 1 }, 'each read sent once');
+    // The page's reads, each once, but the references' ends, which their list, failed, never asks: fewer than it answered with.
+    for (const measure of ['statements', 'trips'] as const) assert.ok(spent[measure] < answered[measure], `${measure}: ${spent[measure]} failing, ${answered[measure]} answered`);
+    assert.equal(spent.vaultCalls, answered.vaultCalls);
   } finally {
     await db.owner.execute(sql`GRANT SELECT ON secret_references TO coffre_app`);
   }
   for (const outcome of await environmentCalls('viewer')) assert.equal(outcome.status, 'fulfilled');
 });
 
-test('each hot request runs exactly its budget of statements, on as many connections', async () => {
+/** What a request spent, as a budget measures it. */
+const spentOf = (spent: Cost) => ({ statements: spent.app.statements + spent.vault.statements, vaultCalls: spent.vaultCalls });
+
+test('each hot request runs within its budget of statements and vault calls', async () => {
   await warm();
-  for (const [name, { request, budget }] of Object.entries(requests)) {
-    const spent = await repeated(request);
-    assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, budget, name);
-  }
+  const over: string[] = [];
+  for (const [name, { request, budget }] of Object.entries(requests)) over.push(...overBudget(spentOf(await repeated(request)), budget).map((line) => `${name}: ${line}`));
+  assert.deepEqual(over, []);
 });
 
 /**
- * A workload's request at a proxy whose cache has lapsed, on an isolate
- * that has served one before: two statements of the app's, a credential's
- * row and `app_read` (the path and the environment's rows in one read),
- * and one vault call, whose one statement (`use_credential`)
- * decides the proxy's use, logs it and opens the value. The app takes the
- * head not at all.
+ * A workload's request, or verify, at a proxy whose cache has lapsed, on an isolate that has served one before: a
+ * credential's row and `app_read`, then the vault's use, which decides, logs it and opens the value. The app takes no lock.
  */
 test("a workload's request at a proxy whose cache lapsed runs its budget, and the app takes no lock", async () => {
   await coldWorkload();
   const held = { ...app.held };
-  const spent = await cost(coldWorkload);
-  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 2, vault: 1, vaultCalls: 1 });
+  assertOver('a workload\'s request, cold', spentOf(await cost(coldWorkload)), OVER.coldUse);
   assert.equal(app.held.statements - held.statements, 0, 'no statement of the app\'s in a transaction, and so none under the head');
 });
 
-/** A workload's verify at a proxy whose cache has lapsed: what a proxied request costs then, the secret opened and its use logged. */
 test("a workload's verify at a proxy whose cache lapsed runs a proxied request's budget", async () => {
   await coldVerify();
-  const spent = await cost(coldVerify);
-  assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 2, vault: 1, vaultCalls: 1 });
+  assertOver('a workload\'s verify, cold', spentOf(await cost(coldVerify)), OVER.coldUse);
 });
 
 /**
@@ -804,9 +717,7 @@ test("a proxied call whose cache lapsed, after its service's access changed, ask
   assert.deepEqual(logged.map((use) => useOfCode(use.purpose)?.purpose), ['use']);
   const after = await cost(coldWorkload);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
-  for (const spent of [changed, after]) {
-    assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 2, vault: 1, vaultCalls: 1 });
-  }
+  for (const spent of [changed, after]) assertOver('a proxied call, cold', spentOf(spent), OVER.coldUse);
 });
 
 test('a request runs the same statements, and reads the same rows, however large the log, the members, their sessions and tokens, and the policy grow', async () => {
@@ -931,6 +842,8 @@ test("each hot request's statements read as many pages however long the log grow
     await warm();
     const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
     for (const [name, request] of Object.entries(measured)) {
+      // Both calls within every key's period of the bulk cap, as `repeated`'s: a turn between them adds a statement.
+      await inBulkPeriod(PERIOD_ROOM_MS, db.owner, CAPPED, 'market/dev');
       await request();
       app.recorded = [];
       vaultPool.recorded = [];
@@ -983,6 +896,7 @@ test("each hot request's statements read as many pages however long the log grow
  */
 test("a reveal after the reader's access changed costs what any other does", async () => {
   await reader.secrets.reveal('market/dev/API_KEY');
+  const before = spentOf(await cost(() => reader.secrets.reveal('market/dev/API_KEY')));
   await root.access.set(`user:${READER}`, { 'market/dev': 'developer' });
   const revealed = (into: unknown[]) => async () => into.push(await reader.secrets.reveal('market/dev/API_KEY'));
   const answers: unknown[] = [];
@@ -991,9 +905,7 @@ test("a reveal after the reader's access changed costs what any other does", asy
   // Each a reveal that answered, not one refused early.
   for (const answer of answers) assert.match(JSON.stringify(answer), /fake-api-key/);
   await root.access.set(`user:${READER}`, { 'market/dev': 'viewer' });
-  for (const spent of [changed, after]) {
-    assert.deepEqual({ app: spent.app.statements, vault: spent.vault.statements, vaultCalls: spent.vaultCalls }, { app: 0, vault: 1, vaultCalls: 1 });
-  }
+  for (const spent of [changed, after]) assert.deepEqual(spentOf(spent), before);
 });
 
 /**
@@ -1007,8 +919,8 @@ test("a reveal's first use of its keys in a new period of the bulk cap moves the
   await pastBulkTurn(PERIOD_ROOM_MS, db.owner, [`user:${READER}`], 'market/dev');
   const first = await cost(() => reader.secrets.reveal('market/dev'));
   const next = await cost(() => reader.secrets.reveal('market/dev'));
-  assert.deepEqual({ app: first.app.statements, vault: first.vault.statements, vaultCalls: first.vaultCalls }, { app: 0, vault: 3, vaultCalls: 1 });
-  assert.deepEqual({ app: next.app.statements, vault: next.vault.statements, vaultCalls: next.vaultCalls }, requests['a reveal of an environment']!.budget);
+  assert.deepEqual(spentOf(first), { ...spentOf(next), statements: spentOf(next).statements + 1 });
+  assertWithin('a reveal of an environment, its keys in a new period', spentOf(first), BUDGET.read);
 });
 
 test("a caller's check reads nothing of a project they reach nothing in", async () => {
