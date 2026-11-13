@@ -32,6 +32,7 @@ const TREE = {
   'scripts/x.mjs': '',
   'scripts/x.test.mjs': "import { x } from './x.mjs'",
   'scripts/lonely.mjs': '',
+  'scripts/upgrade-check.sh': '',
   'scripts/formal.sh': 'REMOVALS=(\n  # One, without P\n  "One P Inv"\n)\nEXPECTED=(\n)\njava -jar tlc.jar',
   'eslint.config.js': "export default [{ files: ['packages/*/src/**/*.ts'] }]",
   'formal/A.tla': '---- MODULE A ----\nEXTENDS Naturals, Sequences\n====',
@@ -169,12 +170,12 @@ test('the harness and what it runs, the migrations among them, run every test fi
   assert.ok(!migration.includes('matrices'), 'the matrices run on their own inputs')
 })
 
-test('a script file no rule claims runs every step but TLC, the growth sweep and what is off', () => {
+test('a script file no rule claims runs every step but TLC, the growth sweep, the upgrade check and what is off', () => {
   const { steps, names } = run(['scripts/lonely.mjs'])
   assert.match(steps.tests.why, /scripts\/lonely\.mjs changed and no rule claims it/)
   assert.equal(steps.tests.files.length, 8)
   for (const name of ['matrices', 'schema', 'workers', 'terraform', 'consumer']) assert.ok(names.includes(name), name)
-  assert.ok(!names.includes('formal') && !names.includes('sweep'))
+  assert.ok(!names.includes('formal') && !names.includes('sweep') && !names.includes('upgrade'))
   assert.equal(names.includes('node'), nodeConformance)
   // One its test reaches is claimed.
   assert.deepEqual(run(['scripts/x.mjs']).names, ['docs', 'tests'])
@@ -237,11 +238,17 @@ test('the slow tier runs on its own inputs: the matrices and Terraform', () => {
 
 test('--full runs every step that is on, every file and every scenario', () => {
   const { steps, all } = run([], { full: true })
-  assert.equal(all.length, 17)
-  assert.equal(Object.keys(steps).length, nodeConformance ? 17 : 16)
+  assert.equal(all.length, 18)
+  assert.equal(Object.keys(steps).length, nodeConformance ? 18 : 17)
   assert.equal(steps.tests.files.length, 8)
   assert.deepEqual(steps.formal.scenarios, ['One', 'Three', 'Two'])
   assert.equal(steps.sweep.why, '--full')
+  assert.equal(steps.upgrade.why, '--full')
+})
+
+test('the upgrade check runs on a change to its own scripts, not to what it reads', () => {
+  assert.equal(run(['scripts/upgrade-check.sh']).steps.upgrade.why, 'scripts/upgrade-check.sh changed')
+  assert.ok(!run(['packages/db/src/migrations/postgres/0001.sql']).names.includes('upgrade'))
 })
 
 test('comments go, strings and regular expressions stay', () => {

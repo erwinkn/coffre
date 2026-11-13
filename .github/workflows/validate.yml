@@ -475,6 +475,20 @@ jobs:
   # tagged: 0.16 upgrades offline from exactly 0.15.0 and no 0.15 code serves on its schema (D197). It returns, here and
   # in `pnpm validate`, with the first change after that tag.
 
+  upgrade:
+    name: 0.14.5 through 0.15.0 to this revision
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
+      # Both releases from npm, on a Postgres of the script's own: what an Owner's upgrade keeps (scripts/upgrade-check.sh).
+      - name: A database of 0.14.5's, upgraded through 0.15.0 to this revision
+        run: pnpm upgrade:check
+
   image:
     name: CLI image
     runs-on: ubuntu-24.04
@@ -496,7 +510,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [action, pins, checks, tests, matrices, schema, formal, proofs, workers, terraform, consumer, image]
+    needs: [action, pins, checks, tests, matrices, schema, formal, proofs, workers, terraform, consumer, upgrade, image]
     if: always()
     steps:
       - name: Require every job

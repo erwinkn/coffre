@@ -21,6 +21,7 @@ export {
   NO_EDITS,
   policyFrom,
   PRINCIPAL,
+  protectionDisagrees,
   readEdits,
   roleOf,
   settingsFrom,

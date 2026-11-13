@@ -8,7 +8,8 @@
 //   pnpm validate                  what this diff can change
 //   pnpm validate --full           everything, as the release's Validate (the image aside; the
 //                                  packed client on this Node, or those COFFRE_CLIENT_NODES lists),
-//                                  and the growth sweep, which Validate has no job for
+//                                  and the growth sweep, which Validate has no job for; the
+//                                  upgrade check runs here alone
 //   pnpm validate --base <rev>     the revision the change is on (default origin/main)
 //   pnpm validate --skip a,b       leave steps out; one the diff needs is OMITTED and the
 //                                  summary reads PARTIAL (exit 1), never pass
@@ -25,7 +26,7 @@
 // installed from the lockfile first. Each step that needs Postgres gets a container of
 // its own (a compose project and a free port, never the shared :55432), removed when the
 // step ends, whether it passed, failed or was stopped; the containers of one run share
-// its network, so a run takes one of Docker's subnets. A run with a Postgres step first
+// its network, so a run takes one of Docker's subnets (and the upgrade check, which starts its own, one more). A run with a Postgres step first
 // removes what runs killed outright left behind: the projects and networks of a
 // validate.mjs of this boot no longer alive. A teardown that hangs holds the run until a
 // second signal, which ends that attempt and skips its retry. Each conformance run gets free ports of its own. The local COFFRE_TEST_* and
@@ -132,7 +133,7 @@ const STEPS = {
   proofs: { job: 'proofs', install: true, run: () => ['pnpm formal:lean'] },
   workers: { job: 'workers', install: true, build: true, postgres: true, browser: true, ports: true, run: () => [`pnpm conformance:workers --browser ${BROWSER} --port "$COFFRE_VALIDATE_PORT"`] },
   node: { job: 'node', install: true, build: true, postgres: true, browser: true, ports: true, run: () => [`pnpm conformance:node --browser ${BROWSER} --port "$COFFRE_VALIDATE_PORT"`] },
-  terraform: { job: 'terraform', install: true, build: true, postgres: true, run: () => ['pnpm test:terraform'] },
+  terraform: { job: 'terraform', install: true, build: true, postgres: true, ports: true, run: () => ['pnpm test:terraform --port "$COFFRE_VALIDATE_PORT"'] },
   // The consumer script starts Postgres itself (ensure-postgres.sh), so it gets the step's.
   consumer: {
     job: 'consumer',
@@ -144,6 +145,10 @@ const STEPS = {
   },
   // No job of validate.yml: the growth sweep (docs/growth-sweep.md) runs before a tag, on the step's own Postgres, as it requires.
   sweep: { install: true, postgres: true, run: () => [`pnpm sweep:growth --out ${quote([join(logs, 'sweep')])}`] },
+  // A database of 0.14.5's through 0.15.0 to this revision (scripts/upgrade-check.sh), about 4.5 min: --full
+  // runs it, and a change to its own files. Its Postgres is a compose project the script starts and removes
+  // itself, on a network of its own, beside the run's.
+  upgrade: { job: 'upgrade', install: true, build: true, ports: true, run: () => ['pnpm upgrade:check --port "$COFFRE_VALIDATE_PORT"'] },
 }
 
 const names = new Set(Object.keys(STEPS))
@@ -496,7 +501,7 @@ const runStep = async (s) => {
 const toRun = entries.filter((s) => s.run)
 console.log(`validate: ${toRun.map((s) => s.name).join(', ') || 'nothing'} on ${head.slice(0, 10)}, logs in ${logs}`)
 // The longest first, so that the --jobs slots go to what holds the run up.
-const ORDER = ['tests', 'matrices', 'formal', 'consumer', 'alone', 'workers', 'schema', 'sweep', 'node', 'terraform', 'typecheck', 'proofs', 'action', 'lint']
+const ORDER = ['tests', 'matrices', 'formal', 'consumer', 'upgrade', 'alone', 'workers', 'schema', 'sweep', 'node', 'terraform', 'typecheck', 'proofs', 'action', 'lint']
 if (toRun.some((s) => STEPS[s.name].postgres)) await sweep()
 await Promise.all(toRun.sort((a, b) => ORDER.indexOf(a.name) - ORDER.indexOf(b.name)).map((s) => runStep(s).catch((error) => record(s.name, { status: 'FAIL', why: error.message }))))
 if (networkMade && !opt['keep-db'] && !(await twice(`docker network rm ${network}`, { log: sweepLog }))) {

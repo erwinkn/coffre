@@ -123,6 +123,7 @@ pnpm conformance:workers   # examples/workers, held to docs/conformance.md (afte
 pnpm conformance:node      # examples/node, its two processes (after pnpm build)
 pnpm test:consumer     # pack the packages, init both examples outside the repo, run them
                        # --kind workers or --kind node selects one deployment
+pnpm upgrade:check     # 0.14.5 through 0.15.0 to this checkout on one database, before a tag (about 4 min, after pnpm build)
 pnpm test:image        # the CLI's image for amd64 and arm64, and coffre serve run in it (needs Docker)
 pnpm check:pins        # every dependency, action, image, download and install pinned
 pnpm check:workflows   # zizmor over every workflow and action, each pinned to its commit

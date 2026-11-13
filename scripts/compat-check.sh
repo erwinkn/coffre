@@ -74,16 +74,8 @@ esac
 mkdir -p "$work"
 work="$(cd "$work" && pwd)"
 
-# A step's output kept in the work directory, and its end shown when it fails.
-quietly() {
-    local what="$1" log="$2"
-    shift 2
-    if ! "$@" >"$log" 2>&1; then
-        tail -n 20 "$log" >&2
-        echo "compat-check: $what failed; see $log" >&2
-        exit 1
-    fi
-}
+# shellcheck source=compat/release.sh
+. "$root/scripts/compat/release.sh"
 
 finish() {
     result=$?
@@ -119,13 +111,6 @@ else
 fi
 export HOME="$work/home" npm_config_update_notifier=false
 mkdir -p "$HOME"
-
-# The release's own CLI, to write its deployments.
-mkdir -p "$work/cli"
-echo '{ "private": true }' >"$work/cli/package.json"
-# unpinned: a published release at its exact version, checked above; what it depends on, as npm has it today.
-quietly "installing @coffre/cli@$release" "$work/cli.log" \
-    pnpm --dir "$work/cli" add --save-exact --store-dir "$store" "@coffre/cli@$release"
 
 # The ways the release's conformance migrates, each replaced by one that
 # migrates with $against and leaves a mark, so that a release migrating some
@@ -220,10 +205,7 @@ conformance() {
 for kind in "${kinds[@]}"; do
     project="$work/coffre-$kind"
     echo "==> coffre $release, as init writes it (--$kind), on $against"
-    rm -rf "$project"
-    quietly "coffre $release init --$kind" "$work/$kind-init.log" "$work/cli/node_modules/.bin/coffre" init "--$kind" "$project"
-    # unpinned: init writes no lockfile; this installs what a new deployment's first install does, under its own minimumReleaseAge.
-    quietly "installing coffre-$kind" "$work/$kind-install.log" pnpm --dir "$project" install --store-dir "$store"
+    release "$release" "$kind" "$project"
 
     # 0.16.0 renamed tables (postgres/0076_table_renames.sql). On
     # Postgres a release before it runs through the views kept under the old

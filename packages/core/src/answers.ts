@@ -189,6 +189,20 @@ export function livePolicy(rows: ReadonlyMap<string, PolicyEnvironment>, edits: 
   };
 }
 
+/**
+ * The environments whose protection the newest `policy.change`'s edits and their own rows disagree on: listed by one
+ * and not by the other. Only a row has a flag to compare: an id the edits list with no row (a fork never written), or
+ * with a deleted one, agrees. 0.16's upgrade refuses while any disagrees, before it fills the policy's protected list
+ * from the edits (state-rows.md, section 6): its precheck on 0.15.0 (`scripts/upgrade-check.mjs`) and the vault's step.
+ *
+ *   edits list prod; prod's row protected: false   ['<prod's id>']
+ *   edits list a fork's id, no row yet             []
+ */
+export function protectionDisagrees(edits: PolicyEdits, rows: ReadonlyMap<string, { protected: boolean | null; deleted: boolean }>): string[] {
+  const listed = new Set(edits.protected.map((place) => place.environmentId));
+  return [...rows].filter(([id, row]) => !row.deleted && listed.has(id) !== (row.protected === true)).map(([id]) => id).sort();
+}
+
 // --- the settings -----------------------------------------------------------------
 
 /** The settings before anyone changed them: people set up service accounts anywhere they hold access. */

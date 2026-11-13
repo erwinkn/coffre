@@ -166,6 +166,9 @@ importers:
 
   .:
     dependencies:
+      '@coffre/core':
+        specifier: workspace:*
+        version: link:packages/core
       '@coffre/db':
         specifier: workspace:*
         version: link:packages/db
