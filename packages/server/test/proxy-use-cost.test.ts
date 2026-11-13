@@ -275,18 +275,18 @@ async function revealed(token: string, body: { path: string; keys?: readonly str
   return ran;
 }
 
-test("a reveal through the API, of one key, several or an environment, by a person or a service, runs within a read's budget", async () => {
+test("a reveal through the API, of one key, several or an environment, by a person or a service, runs within a use's budget for one key, a read's for more", async () => {
   const cases = [
-    ['a reveal of one key', personal, { path: 'market/dev/API_KEY' }],
-    ['a reveal of its one named key', personal, { path: 'market/dev', keys: ['API_KEY'] }],
-    ['a reveal of one key, as a service', service, { path: 'market/dev/API_KEY' }],
-    ['a reveal of an environment', personal, { path: 'market/dev' }],
-    ['a reveal of its named keys', personal, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }],
-    ['an export, as a service', service, { path: 'market/dev' }],
-    ['an export of named keys, as a service, mapped', service, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }],
+    ['a reveal of one key', personal, { path: 'market/dev/API_KEY' }, BUDGET.use],
+    ['a reveal of its one named key', personal, { path: 'market/dev', keys: ['API_KEY'] }, BUDGET.use],
+    ['a reveal of one key, as a service', service, { path: 'market/dev/API_KEY' }, BUDGET.use],
+    ['a reveal of an environment', personal, { path: 'market/dev' }, BUDGET.read],
+    ['a reveal of its named keys', personal, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }, BUDGET.read],
+    ['an export, as a service', service, { path: 'market/dev' }, BUDGET.read],
+    ['an export of named keys, as a service, mapped', service, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }, BUDGET.read],
   ] as const;
-  for (const [name, token, body] of cases) {
+  for (const [name, token, body, budget] of cases) {
     const ran = await revealed(token, body);
-    assertWithin(name, spent(ran), BUDGET.read, trace(ran));
+    assertWithin(name, spent(ran), budget, trace(ran));
   }
 });

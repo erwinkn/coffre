@@ -180,6 +180,7 @@ test('through an MCP connection, a Cloudflare binding, or behind Access, a value
     const ran = await statements(request);
     holds(`${name}, ran ${JSON.stringify(ran)}`, { statements: ran.app.length + ran.vault.length + ran.hot.length });
     assert.deepEqual(ran.hot, [USE], `${name}: the value is the hot path's one use`);
+    assert.deepEqual(ran.vault, [], `${name}: no vault call but the use`);
     assert.ok(!ran.app.some((text) => text.startsWith(STILL)), `${name}: no read of the way in after the use: ${JSON.stringify(ran.app)}`);
     assert.ok(!ran.app.some((text) => /audit_chain_head/.test(text)), `${name}: nothing of 0.14's head`);
   }

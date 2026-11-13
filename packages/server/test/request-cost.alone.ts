@@ -526,17 +526,16 @@ async function repeated(request: () => Promise<unknown>): Promise<Cost> {
 
 /** Each hot request and its class, measured warm, within one period of the bulk cap (`repeated`). */
 const requests: Record<string, { request: () => Promise<unknown>; budget: Budget }> = {
-  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: BUDGET.read },
+  'a reveal of one key': { request: () => reader.secrets.reveal('market/dev/API_KEY'), budget: BUDGET.use },
   'a reveal of an environment': { request: () => reader.secrets.reveal('market/dev'), budget: BUDGET.read },
   'an export, as a service': { request: () => service.secrets.reveal('market/dev'), budget: BUDGET.read },
-  "a request's check of its caller": { request: () => reader.me(), budget: BUDGET.read },
+  "a request's check of its caller": { request: () => reader.me(), budget: BUDGET.caller },
   "a CI run's sign-in": { request: () => exchange(), budget: BUDGET.signIn },
   "a CI run's list": { request: () => ci.secrets.list('market/dev'), budget: BUDGET.read },
   "a CI run's reveal of seven keys": { request: () => ci.secrets.reveal('market/dev', SEVEN), budget: BUDGET.read },
-  // The vault's decision warm in the proxy's cache: one statement, the session (or the binding) and its place.
-  "a workload's request at the proxy": { request: () => workload(), budget: BUDGET.use },
-  "a workload's verify at the proxy": { request: () => verify(), budget: BUDGET.use },
-  "a Cloudflare call at the proxy": { request: () => bound(), budget: BUDGET.use },
+  "a workload's request at the proxy": { request: () => workload(), budget: BUDGET.proxied },
+  "a workload's verify at the proxy": { request: () => verify(), budget: BUDGET.proxied },
+  "a Cloudflare call at the proxy": { request: () => bound(), budget: BUDGET.proxied },
 };
 
 /**
@@ -630,25 +629,25 @@ async function pageCost(request: () => Promise<unknown>): Promise<PageCost> {
 }
 
 /**
- * Each page's server render, warm, as Owner and as viewer, all held to `BUDGET.page`. On Workers, its app connection
+ * Each page's server render, warm, as Owner and as viewer, held to `BUDGET.page`, and signed out to `BUDGET.signedOut`. On Workers, its app connection
  * takes each statement in turn, a round trip of Hyperdrive's each, but for the reads asked together, which go under one
  * Sync (`groupReads`); each vault call is a connection of its own. Not the audit page: its check reads what was written
  * since the newest checkpoint, which its own test holds. `history`: the render without the reports an Owner's page of
  * a member shows, which list every secret they ever read; the per-statement pages test, which grows the log, measures it.
  */
-const renders: Record<string, { request: () => Promise<unknown>; history?: () => Promise<unknown> }> = {
+const renders: Record<string, { request: () => Promise<unknown>; history?: () => Promise<unknown>; budget?: Budget }> = {
   "an Owner's environment page": { request: () => environmentPage('owner') },
   "a viewer's environment page": { request: () => environmentPage('viewer') },
   "an Owner's project page": { request: () => projectPage('owner') },
   "a viewer's project page": { request: () => projectPage('viewer') },
   ...Object.fromEntries(Object.keys(visits).flatMap((path) => (['owner', 'viewer'] as const).map((as) => [`${path}, ${as}`, { request: () => visit(as, path), history: () => visit(as, path, { reports: false }) }]))),
-  '/login, signed out': { request: () => visit(null, '/login') },
+  '/login, signed out': { request: () => visit(null, '/login'), budget: BUDGET.signedOut },
 };
 
 test('each page renders within its budget of statements, round trips and vault calls', async () => {
   await warm();
   const over: string[] = [];
-  for (const [name, { request }] of Object.entries(renders)) over.push(...overBudget(await pageCost(request), BUDGET.page).map((line) => `${name}: ${line}`));
+  for (const [name, { request, budget = BUDGET.page }] of Object.entries(renders)) over.push(...overBudget(await pageCost(request), budget).map((line) => `${name}: ${line}`));
   assert.deepEqual(over, []);
 });
 
@@ -667,9 +666,9 @@ test("a page's read that fails fails the reads sent with it, once, and each of i
     let outcomes: PromiseSettledResult<unknown>[] = [];
     const spent = await pageCost(async () => (outcomes = await environmentCalls('viewer')));
     assert.deepEqual(outcomes.map((outcome) => outcome.status === 'rejected' ? (outcome.reason as { status?: number }).status : 'answered'), [500, 500, 500]);
-    // The page's reads, each once, but the references' ends, which their list, failed, never asks: fewer than it answered with.
-    for (const measure of ['statements', 'trips'] as const) assert.ok(spent[measure] < answered[measure], `${measure}: ${spent[measure]} failing, ${answered[measure]} answered`);
-    assert.equal(spent.vaultCalls, answered.vaultCalls);
+    // The page's reads, each once, but the references' ends, which their list, failed, never asks: two statements and
+    // their round trip fewer than it answered with.
+    assert.deepEqual(spent, { statements: answered.statements - 2, trips: answered.trips - 1, vaultCalls: answered.vaultCalls });
   } finally {
     await db.owner.execute(sql`GRANT SELECT ON secret_references TO coffre_app`);
   }

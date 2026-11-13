@@ -20,7 +20,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, entryOf, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
-import { BUDGET, overBudget, type Budget } from './budgets.ts';
+import { assertOver, assertWithin, BUDGET, OVER, type Budget, type Over } from './budgets.ts';
 import { addPasskey, removePasskey, steppedUp } from './passkey-rows.ts';
 import { inBulkPeriod } from './window-fixture.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
@@ -80,13 +80,17 @@ before(async () => {
   deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { sealThrough: sealedNow, heldOutside: nothingHeld }) });
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
-  for (const path of ['market/dev', 'market/prod', 'market/base']) await root.environments.create(path);
+  for (const path of ['market/dev', 'market/prod', 'market/base', 'market/wide']) await root.environments.create(path);
   await root.secrets.set('market/dev', { API_KEY: 'fake-api-key', DATABASE_URL: 'postgres://fake' });
   // What a fork copies: two keys of an environment no other case writes to, so that their two periods surely leave a
   // shared stretch to measure in (`inBulkPeriod`). market/dev gathers a key or more a case, and twenty random phases
   // need not leave five seconds between their turns. One is filed, so that the fork's copy of folders is counted.
-  await root.secrets.set('market/base', { API_KEY: 'fake-api-key', DATABASE_URL: 'postgres://fake' });
-  await root.secrets.update('market/base/API_KEY', { folder: 'stripe' });
+  // market/wide holds one key more, for a fork of three.
+  for (const path of ['market/base', 'market/wide']) {
+    await root.secrets.set(path, { API_KEY: 'fake-api-key', DATABASE_URL: 'postgres://fake' });
+    await root.secrets.update(`${path}/API_KEY`, { folder: 'stripe' });
+  }
+  await root.secrets.set('market/wide', { THIRD: 'fake-third' });
   await root.members.add(SERVICE);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
   await root.members.add(`user:${VIEWER}`);
@@ -190,8 +194,11 @@ async function cost(work: () => Promise<unknown>): Promise<Cost> {
   return { app: relays.app.syncs - from.app, vault: relays.vault.syncs - from.vault, hot: relays.hot.syncs - from.hot, calls: calls - from.calls, ms, statements, connections: relays.app.opened - from.opened };
 }
 
-/** A change route; its budget `BUDGET.change` but where it names another. */
-type Case = { name: string; setup?: (i: number) => Promise<void>; run: (i: number) => Promise<unknown>; budget?: Budget };
+/**
+ * A change route; its budget `BUDGET.change` but where it names another, or is held over its class (`over`). `uses`:
+ * the environment whose keys it uses, market/base unless it names another.
+ */
+type Case = { name: string; setup?: (i: number) => Promise<void>; run: (i: number) => Promise<unknown>; budget?: Budget; over?: Over; uses?: string };
 
 /** A route sending API_KEY, which market/dev holds. */
 const ROUTE: ProxyDefinition = {
@@ -261,7 +268,9 @@ const CASES: Case[] = [
     run: (i) => owner.projects.update(`shelved-${i}`, { archived: true }),
   },
   { name: 'environment made', run: (i) => owner.environments.create(`market/env-${i}`) },
-  { name: 'environment forked', run: (i) => owner.environments.create(`market/fork-${i}`, { from: 'base' }) },
+  // A fork of two keys or of three: one round trip more a key (below).
+  { name: 'environment forked, 2 keys', over: OVER.fork, run: (i) => owner.environments.create(`market/fork-${i}`, { from: 'base' }) },
+  { name: 'environment forked, 3 keys', over: OVER.fork, uses: 'market/wide', run: (i) => owner.environments.create(`market/fork-${i}`, { from: 'wide' }) },
   {
     name: 'environment renamed',
     setup: async (i) => void (await owner.environments.create(`market/was-${i}`)),
@@ -332,12 +341,12 @@ const seals = new Map<number, string | null>();
 test('each change route answers within its budget of round trips', async () => {
   const table: Record<string, { app: number; vault: number; hot: number; total: number; calls: number; ms: number }> = {};
   const failures: string[] = [];
-  for (const [n, { name, setup, run, budget = BUDGET.change }] of CASES.entries()) {
+  for (const [n, { name, setup, run, budget = BUDGET.change, over, uses = 'market/base' }] of CASES.entries()) {
     try {
       // The warm request and the measured one in one bulk refresh period of every key they use (a minute, at the default
       // 15-minute window, from each key's phase): a use that crosses into the next moves its key's row on, a statement
-      // more on the hot path (`bulkRule`). Only a fork uses keys, the owner's of market/base.
-      await inBulkPeriod(5_000, db.owner, [`user:${ROOT}`], 'market/base');
+      // more on the hot path (`bulkRule`). Only a fork uses keys, the owner's of the environment it copies.
+      await inBulkPeriod(5_000, db.owner, [`user:${ROOT}`], uses);
       for (const i of [2 * n, 2 * n + 1]) if (setup !== undefined) await asRequest(() => setup(i));
       await cost(() => run(2 * n));
       const { statements: ran, connections, ...counts } = await cost(() => run(2 * n + 1));
@@ -345,16 +354,22 @@ test('each change route answers within its budget of round trips', async () => {
       if (connections > 1) failures.push(`${name}: ${connections} app connections, not one`);
       const total = counts.app + counts.vault + counts.hot;
       table[name] = { ...counts, total };
-      const over = overBudget({ trips: total }, budget);
-      if (over.length > 0) failures.push(`${name}: ${over.join(', ')}\n  ${ran.join('\n  ')}`);
+      const trace = `\n  ${ran.join('\n  ')}`;
+      if (over === undefined) assertWithin(name, { trips: total }, budget, trace);
+      else assertOver(name, { trips: total }, over, trace);
+      // A write's decision is the vault's alone: nothing on the hot path.
+      if (budget === BUDGET.write && counts.hot > 0) failures.push(`${name}: ${counts.hot} round trips on the hot path`);
       if (process.env.COFFRE_CHANGE_COST_VERBOSE) console.log(`\n${name}\n  ${ran.join('\n  ')}`);
     } catch (error) {
       failures.push(`${name}: ${(error as Error).message}`);
     }
   }
-  // A reset grows with nothing it removes: exactly as many round trips for ten passkeys as for one.
-  const [one, ten] = [table['passkeys reset, 1'], table['passkeys reset, 10']];
-  if (one?.total !== ten?.total) failures.push(`passkeys reset: ${ten?.total} round trips for ten, ${one?.total} for one`);
+  // A reset grows with nothing it removes: exactly as many round trips for ten passkeys as for one. A fork sets each
+  // key's current version in a round trip of its own: exactly one more for three keys than for two.
+  for (const [route, few, more, per] of [['passkeys reset', '1', '10', 0], ['environment forked', '2 keys', '3 keys', 1]] as const) {
+    const [a, b] = [table[`${route}, ${few}`], table[`${route}, ${more}`]];
+    if (a === undefined || b === undefined || b.total !== a.total + per) failures.push(`${route}: ${b?.total} round trips for ${more}, ${a?.total} for ${few}`);
+  }
   if (process.env.COFFRE_CHANGE_COST_VERBOSE || RTT_MS > 0 || failures.length > 0) console.table(table);
   assert.deepEqual(failures, []);
 });
