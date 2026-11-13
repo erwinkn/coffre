@@ -1,4 +1,4 @@
-// A database saved in the Proxy tab, tunnelled to (0.16, T186 PR C2b3; docs/design/proxy-ui.md, section 3, "Tunnels";
+// A database saved in the Proxy tab, tunnelled to (docs/design/proxy-ui.md, section 3, "Tunnels";
 // formal/Tunnel.tla): `coffre run`'s listener, a handle as its password, coffre's own vault deciding the item by name,
 // and the suite's Postgres as the database. The open dials the decided item's hosts; each recheck is the same use,
 // passing only on the item dialled, by its own digest (DigestRecheck), so an Owner who narrows `hosts` mid-session ends

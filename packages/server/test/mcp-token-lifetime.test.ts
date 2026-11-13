@@ -1,4 +1,4 @@
-// A deployment that holds service tokens to fewer days (`serviceTokenMaxDays`, R76): MCP asks the person to approve
+// A deployment that holds service tokens to fewer days (`serviceTokenMaxDays`): MCP asks the person to approve
 // only a lifetime issuing then accepts, and refuses a longer one before anyone is asked.
 import test from 'node:test';
 import assert from 'node:assert/strict';

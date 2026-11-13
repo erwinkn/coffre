@@ -65,7 +65,7 @@ export function publicFetch(lookup: LookupFunction = publicLookup, tls: { ca?: s
   // `tls.ca`, a test's own authority for its fake upstream: the system's roots otherwise, and the name is checked either way.
   const dispatcher = new Agent({ connect: { ...tls, lookup } });
   return async (url, init) => {
-    // Node asks no resolver for an address written as one: `lookup` never sees `https://240.0.0.1` (review r3 of #467).
+    // Node asks no resolver for an address written as one: `lookup` never sees `https://240.0.0.1`.
     const literal = literalRefusal(new URL(url).hostname);
     if (literal !== null) throw new TypeError('fetch failed', { cause: literal });
     return (await undiciFetch(url, { ...(init as Parameters<typeof undiciFetch>[1]), dispatcher })) as unknown as Response;

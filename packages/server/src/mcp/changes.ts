@@ -86,8 +86,8 @@ const secret = z.string().min(1).describe('A secret, as project/environment/KEY:
 const environment = z.string().min(1).describe('An environment, as project/environment: market/prod');
 const member = z.string().min(1).describe('A member: user:ada@acme.example, or service:ci-deploy for a service account');
 const service = z.string().min(1).describe('A service account: service:ci-deploy, or ci-deploy');
-// A project or environment goes by its slug since 0.6.2. A call made before
-// takes a name still, so that it matches the approval it asked for.
+// A project or environment goes by its slug. A call that still sends a name
+// is taken, so that it matches the approval it asked for.
 const name = z.string().trim().min(1).optional().describe('Ignored: it goes by its slug');
 
 /** `market/prod/KEY` as its environment and key, or why not. */
@@ -351,8 +351,8 @@ const role = roleId;
  * as the page says it, and its basis: Approve reads it again and is refused
  * if it differs from what the person read, as when the account was given
  * another grant since, and makes the change with it (`pinned`). And the
- * places of it that hold a sensitive value it will not read (`withheld`,
- * R32), said before it is approved.
+ * places of it that hold a sensitive value it will not read (`withheld`),
+ * said before it is approved.
  */
 function reaching(plan: { scope: CredentialScope; withheld?: readonly string[] }, state: Record<string, unknown> = {}): Replaced {
   const withheld = plan.withheld ?? [];
@@ -755,7 +755,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       apply: async (api, { member }) => {
         const removed = await api.members.remove(apiMember(member));
         const toRotate = (removed.report?.exposed ?? []).map((entry) => `${entry.project}/${entry.environment}/${entry.key}`);
-        // 0.15's reads are named once listed: while reads sealed since wait, the list is as of then, and says so (review r6).
+        // 0.15's reads are named once listed: while reads sealed since wait, the list is as of then, and says so.
         const reads = removed.report?.reads;
         const behind = reads?.behind === true;
         const what = toRotate.length === 0
@@ -920,7 +920,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
         try {
           await api.bindings.remove(serviceMember(service), id);
         } catch (error) {
-          // More credentials than one request revokes on Workers (W331): the binding is closed, so no run signs in with it,
+          // More credentials than one request revokes on Workers: the binding is closed, so no run signs in with it,
           // and the scheduled run, every few minutes, revokes the rest and ends it (`resumeRemovals`).
           if (!(error instanceof CoffreError && error.code === 'removal_under_way')) throw error;
           return {

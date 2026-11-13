@@ -105,7 +105,7 @@ export async function connectedApp(owner: Database, chainKey: Buffer, email: str
 /**
  * `email`'s browser session `token`, signed in by the provider alone, stepped up with a touch of a passkey added for
  * them (docs/design/passkeys.md, section 6.5): the new session the step-up issued, through the app's own issue, which
- * 0.15's log holds, confirmed now. What a person who acts on what a fresh check guards holds.
+ * `log_changes` holds, confirmed now. What a person who acts on what a fresh check guards holds.
  */
 export async function steppedUp(signin: SigninService, owner: Database, chainKey: Buffer, email: string, token: string): Promise<{ token: string; id: string }> {
   const passkey = await addPasskey(owner, chainKey, email);

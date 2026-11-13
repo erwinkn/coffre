@@ -83,7 +83,7 @@ export function forgetKeys(): void {
  * `Cache-Control` (RFC 9111, section 5.2): its `max-age`, up to
  * `KEYS_KEPT_MS`; `KEYS_KEPT_MS` when it says none. Never less than
  * `KEYS_FRESH_MS`, which is coffre's own refresh and keeps a set that long
- * whatever the issuer says, as before. A header it cannot read, or a
+ * whatever the issuer says. A header it cannot read, or a
  * `max-age` given twice or not as a number, keeps nothing past fresh.
  *
  *   public, max-age=3600, must-revalidate     an hour (GitHub's)
@@ -279,7 +279,7 @@ export async function verifyWithKeys(
     keys = entry.keys!;
   } else if (failure(url, now) !== null) {
     // The minute after a key the set lacked holds back no refresh of a stale set: a token whose key the old set has is
-    // not held up a minute, past the CLI's patience (review r5 of #565).
+    // not held up a minute, past the CLI's patience.
     standIn = unavailable(url, expected.issuer, now, { kid: false });
     const set = standIn.transient ? kept(url, now) : null;
     if (set === null) throw standIn;

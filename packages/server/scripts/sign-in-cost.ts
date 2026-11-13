@@ -14,7 +14,7 @@
  *    `decodeWorkloadToken`: ES256, RS256 of 2,048 bits (what GitHub and
  *    GitLab publish) and of 4,096, its bytes in its payload or in its
  *    protected header (many members, one long value, nesting, an `x5c`),
- *    which jose's own verification parsed again at each try (review r8).
+ *    which jose's own verification parsed again at each try.
  *    Each try checks a signature over the whole token.
  * 2. Claim matching (`differingClaims`) of a B-byte token against realistic
  *    bindings, GitHub's, GitLab's and Kubernetes', one of names of five
@@ -112,8 +112,8 @@ function strangerToken(kind: KeyKind, bytes: number, fill: Fill = 'payload'): st
   const claims = { iss: ISSUER, aud: AUDIENCE, sub: 'repo:acme/app:ref:refs/heads/main', iat: now, exp: now + 300 };
   const alg = kind === 'ec' ? 'ES256' : 'RS256';
   // A signature of the key's own size, as a real one is: RSA's is its modulus, which WebCrypto checks in full only
-  // then; a shorter one is refused before any arithmetic, and would measure that instead (review r9). An RSA one is
-  // also below the modulus, or it is refused before the exponentiation too (review r10): its top bit clear, it is
+  // then; a shorter one is refused before any arithmetic, and would measure that instead. An RSA one is
+  // also below the modulus, or it is refused before the exponentiation too: its top bit clear, it is
   // below 2^(bits - 1), and a modulus of that many bits is at least that. `belowEveryModulus` checks it.
   const raw = randomBytes(SIGNATURE_BYTES[kind]);
   if (kind !== 'ec') raw[0] &= 0x7f;
@@ -132,7 +132,7 @@ function strangerToken(kind: KeyKind, bytes: number, fill: Fill = 'payload'): st
   return `${b64(head)}.${b64(body)}.${signature}`;
 }
 
-/** Throws unless the token's signature, read as an integer, is below every RSA key's modulus (review r10). */
+/** Throws unless the token's signature, read as an integer, is below every RSA key's modulus. */
 function belowEveryModulus(token: string, keys: { keys: Record<string, unknown>[] }): void {
   const int = (b64url: string) => BigInt(`0x${Buffer.from(b64url, 'base64url').toString('hex') || '0'}`);
   const signature = int(token.slice(token.lastIndexOf('.') + 1));

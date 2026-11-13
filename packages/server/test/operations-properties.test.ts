@@ -199,7 +199,7 @@ async function scenario(operations: readonly Operation[]) {
    * the instance, as the setting (everywhere) lets any person: she holds
    * that role there, and every grant ci holds, which it must hold one of
    * (it was admitted by the root, not her). `givesService`,
-   * `managesService` (T213).
+   * `managesService`.
    */
   const adaSetsUpCi = (role: Role, key: string) =>
     model.active.ada && signedIn('ada') && adaHolds(role, key)
@@ -207,7 +207,7 @@ async function scenario(operations: readonly Operation[]) {
   function may(member: Member, environment: Environment | undefined, write = false): boolean {
     if (!model.active[member] || model.project === null || model.project.archived || environment === undefined || environment.archived) return false;
     if (adaDevelops(member, environment.slug)) return true;
-    // A token reaches what both its scope and its account hold (D105).
+    // A token reaches what both its scope and its account hold.
     return holdsAt(member, [`project:${model.project.generation}`, `env:${environment.n}`], write);
   }
   /** Whether `member` reads billing/prod/VALUE: a grant on billing/prod, or a role on prod, and a value or a live reference to a live source. */
@@ -222,8 +222,8 @@ async function scenario(operations: readonly Operation[]) {
   /**
    * Whether billing's reference reads `environment` now, or anything in
    * market when none is named: live, its source and project not archived,
-   * and billing/prod, which holds it, not archived either (D58). Archiving
-   * what it reads is refused (D41); restoring never is.
+   * and billing/prod, which holds it, not archived either. Archiving
+   * what it reads is refused; restoring never is.
    */
   function readThrough(environment?: Environment): boolean {
     const { reference } = model.billing;
@@ -332,7 +332,7 @@ async function scenario(operations: readonly Operation[]) {
   }
   /**
    * The uses the vault answered with a value: each read on a credential, counted as answered, since
-   * a repeat rides its cover and writes no row of its own. A use's row is slim (R53).
+   * a repeat rides its cover and writes no row of its own. A use's row is slim.
    */
   const usesAllowed = () => uses.answered.filter((outcome) => outcome.ok).length;
   async function invariants() {
@@ -421,7 +421,7 @@ async function scenario(operations: readonly Operation[]) {
       case 'revoke':
       case 'grant-as-ada': {
         // The root grants; or ada, as an Admin, who manages access, or setting a service account up. Never to herself:
-        // an Admin is refused 409, and anyone else lacks grant.manage first (T213).
+        // an Admin is refused 409, and anyone else lacks grant.manage first.
         const granting = op.kind !== 'revoke';
         const asAda = op.kind === 'grant-as-ada';
         const herself = asAda && op.member === 'ada';
@@ -434,7 +434,7 @@ async function scenario(operations: readonly Operation[]) {
         const previous = noOp ? await state() : undefined;
         // On every project is no place a grant can be: refused before anyone's rights are asked. But only of a caller
         // signed in: ada with no live credential (removed, every one of hers ended) is the app's 401 before it reads the
-        // request (T213).
+        // request.
         const everyProject = op.scope === 'every' || op.scope === 'every-env';
         const status = asAda && !signedIn('ada') ? 401 : everyProject ? 400 : herself && key !== null && adaManages() ? 409 : undefined;
         const result = await allowed(() => (asAda ? client('ada') : root).access.set(principal(op.member), { [where]: granting ? op.role : null }), permitted, true, status);
@@ -588,7 +588,7 @@ async function scenario(operations: readonly Operation[]) {
         break;
       }
       case 'archive-holder': {
-        // billing/prod, which holds the reference, archived or restored: archived, it blocks no archive of its source (D58).
+        // billing/prod, which holds the reference, archived or restored: archived, it blocks no archive of its source.
         await root.environments.update('billing/prod', { archived: !model.billing.archived });
         model.billing.archived = !model.billing.archived;
         break;
@@ -646,7 +646,7 @@ test('API operation sequence covers invitation, grants, values, removal, re-admi
     { ...base, kind: 'revoke-token' },
     { ...base, kind: 'remove' },
     { ...base, kind: 'remove' },
-    // Removed, her credentials ended: 401 for whatever she asks, a grant on every project too (T213).
+    // Removed, her credentials ended: 401 for whatever she asks, a grant on every project too.
     { ...base, kind: 'grant-as-ada', scope: 'every' },
     { ...base, kind: 'grant-as-ada' },
     { ...base, kind: 'invite' },
@@ -712,10 +712,10 @@ test('API operation sequence covers references: made, read in both projects, rot
     base,
     { ...base, kind: 'rotate' },
     { ...base, kind: 'refer' },
-    // What the reference reads cannot be archived, nor its project (D41): break it first.
+    // What the reference reads cannot be archived, nor its project: break it first.
     { ...base, kind: 'archive-env' },
     { ...base, kind: 'archive-project' },
-    // Unless what holds it is archived (D58): then the source archives, and the holder, restored, reads nothing until it is back.
+    // Unless what holds it is archived: then the source archives, and the holder, restored, reads nothing until it is back.
     { ...base, kind: 'archive-holder' },
     { ...base, kind: 'set-holder', value: 'refused' },
     { ...base, kind: 'archive-env' },
@@ -766,7 +766,7 @@ test('API operation sequence covers a person setting a service account up: what 
     { ...base, scope: 'project' },
     { ...base, kind: 'grant', member: 'ada', scope: 'project' },
     { ...base, scope: 'project', role: 'developer' },
-    // The shrunk failure of seed 450058576: viewer on market, given as she holds it (T213).
+    // The shrunk failure of seed 450058576: viewer on market, given as she holds it.
     { ...base, scope: 'project' },
     { ...base, kind: 'create-env' },
     { ...base, role: 'developer' },

@@ -1,4 +1,4 @@
-// `processLimits`, Node's limit per source (W331, D177): 10,000 requests per
+// `processLimits`, Node's limit per source: 10,000 requests per
 // 10-second window by default, each key counted apart, at most 10,000 keys.
 import test from 'node:test';
 import assert from 'node:assert/strict';

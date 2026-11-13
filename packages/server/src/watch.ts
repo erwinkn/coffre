@@ -8,7 +8,7 @@
 //
 // Only coffre's own plugins carry a `Watcher`: core takes one only if
 // coffre's own code made it (`watcher`), whatever a plugin object says, so
-// a third-party plugin keeps routes and the API as a caller (R9).
+// a third-party plugin keeps routes and the API as a caller.
 import type { Checkpoint, CheckpointKey, Confirmation, LogHead, Outcome, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { KeyRetired } from '@coffre/db/log';

@@ -6,7 +6,7 @@ import { logged } from './logged.ts';
 import type { AuditEntry } from './db/audit.ts';
 
 /**
- * A key write or a member's first add the vault's decision refused on its read (T179 PR 6; docs/design/two-trips.md,
+ * A key write or a member's first add the vault's decision refused on its read (docs/design/two-trips.md,
  * "As built: PR 6"). The app answers it as today's path would, for the caller that read decided, checked on its
  * rows as a served try's is: its router's check or its handler refuses it, with the same status and body. Where that
  * path appends a 0.14 deny entry of the action the vault refused, the vault records the refusal in 0.15's log instead
@@ -15,7 +15,7 @@ import type { AuditEntry } from './db/audit.ts';
  *   Ada's PATCH market/dev, no grant there   vault: refused, `no_grant`     the router: 403 "you need secret.write on
  *                                                                           market/dev", recorded by the vault
  *
- * A ticket expired meanwhile (the app took more than its 30 s) records nothing: the entry is appended as before.
+ * A ticket expired meanwhile (the app took more than its 30 s) records nothing: the app appends the entry itself.
  */
 export class RefusalRecord {
   readonly refused: VaultRefused;
@@ -36,7 +36,7 @@ export class RefusalRecord {
 
   /**
    * The record written and sealed, once however often asked; false where its ticket expired, nothing written. Written
-   * but not sealed in time, it answers 503 as a change does, in words of its own: no change was made (review r2).
+   * but not sealed in time, it answers 503 as a change does, in words of its own: no change was made.
    */
   record(): Promise<boolean> {
     this.#recorded ??= this.#vault.recordRefusal!({ ticket: this.refused.ticket }).then(

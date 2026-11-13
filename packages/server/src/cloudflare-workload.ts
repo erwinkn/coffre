@@ -3,8 +3,8 @@
 // caller's `props` name its service, `{ "entrypoint": "CoffreWorkload",
 // "props": { "service": "edge-api" } }`, with the proxy as its `fetch` and
 // `sign`, `verify` and `presign` over RPC. The deployment exports it,
-// `export const CoffreWorkload = coffre.Workload`. Declared by that design's
-// PR 0, so a Worker can name it; PR 6 builds it, here.
+// `export const CoffreWorkload = coffre.Workload`. Declared so a Worker can
+// name it, and not built yet.
 
 /** The entrypoint a `cloudflare` binding's Worker calls. */
 export class CoffreWorkload {

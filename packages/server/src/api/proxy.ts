@@ -12,8 +12,8 @@ import type { ProxyCodeItem } from '../proxy-code.ts';
 import { gateProxy } from '../proxy-gate.ts';
 
 /**
- * An environment's proxy definitions written in the UI (0.16, T186;
- * docs/design/proxy-ui.md), the Proxy tab's API. Every read and write is a
+ * An environment's proxy definitions written in the UI
+ * (docs/design/proxy-ui.md), the Proxy tab's API. Every read and write is a
  * vault call: the vault seals the definitions, checks them on every read
  * (a forged object shows as `tampered`), and decides every save on its own
  * sealed objects. The checks here, the deployment's code first, are for the
@@ -29,7 +29,7 @@ import { gateProxy } from '../proxy-gate.ts';
  * The tab's view: the environment's items as its sealed object holds them,
  * the names code reserved, whether this caller may save here now and why
  * not, and the items this deployment's code defines, whose rows show locked
- * with code's values (R66).
+ * with code's values.
  *
  *   { items: [{ definition: { kind: 'route', name: 'openai', … }, savedBy: 'user:ada@acme.example', … }],
  *     editable: false, readOnly: { reason: 'missing_proxy_edit', message: '…' },
@@ -41,7 +41,7 @@ export type ProxyPage = ProxyView & {
   /** Why this caller may not save here now, as the page says it; null when they may. */
   readOnly: { reason: string; message: string } | null;
   code: ProxyCodeItem[];
-  /** Whether this caller's save routes the place's sensitive keys: an Owner of its project (R66), audited. */
+  /** Whether this caller's save routes the place's sensitive keys: an Owner of its project, audited. */
   routesSensitive: boolean;
   /** Whether this caller releases a reserved name: an Owner of the whole instance, signed in as themselves. */
   releases: boolean;

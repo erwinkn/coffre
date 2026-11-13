@@ -1,4 +1,4 @@
-// Uses at a steady rate beside ci.ts's sign-ins (T123, R58): `use_credential`
+// Uses at a steady rate beside ci.ts's sign-ins: `use_credential`
 // called as 0.15's hot path's login, each call one round trip through a relay
 // of its own (`farPostgres`), on a thread of its own so that the sign-ins'
 // work never delays a use's timer. Each use is timed from when it was due

@@ -1,4 +1,4 @@
-// The fresh check (docs/design/passkeys.md, section 4; T176 PR 5b), through the deployment's own
+// The fresh check (docs/design/passkeys.md, section 4), through the deployment's own
 // routes, as a browser goes: what widens someone's reach, mints a credential or cannot be undone takes a session a
 // passkey touch confirmed in the last five minutes (`FRESH_ROUTES`). Refused, `403 fresh_check_required`, nothing is
 // written; the step-up confirms the browser's session anew, and the act goes. A person with no passkey yet, under

@@ -1,6 +1,5 @@
-// No value leaves coffre for someone the rules forbid it to (R8, R15, R16,
-// R18, R20, R23, R24, R30, R32). A random world from the shared domain
-// generators is built through the API: projects, environments, forks that
+// No value leaves coffre for someone the rules forbid it to. A random world
+// from the shared domain generators is built through the API: projects, environments, forks that
 // inherit, `@me` overlays, keys of every nature, references, people with
 // instance roles and grants, service accounts, an edited policy with
 // protected environments, and personal tokens, service tokens and trust
@@ -29,7 +28,7 @@
 // themselves, or, for an old version, hold at its place what it takes to
 // bring back (write for a plain one, read for a secret, use for a sensitive
 // one); and a sensitive value made reachable as anything else takes an
-// Owner of its project (R30).
+// Owner of its project.
 import assert from 'node:assert/strict';
 import test, { after, before } from 'node:test';
 import { generateKeyPairSync, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';
@@ -324,7 +323,7 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
    * lists (reads or uses) where it is read and where it is held, a secret to
    * whoever reads both, a sensitive one only to a service, on a credential
    * an Owner of the project it is held in issued (a reference's holder's,
-   * not its source's: R71); a personal config's own values to its owner
+   * not its source's); a personal config's own values to its owner
    * alone.
    */
   function receives(reader: Reader, serving: Serving): boolean {
@@ -482,7 +481,7 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
         const held = atIssue.get(env.key) ?? personAt(issuerThen, env, policyThen, false);
         return held.has('grant.manage') ? ALL : held;
       },
-      // R32: a service reads a project's sensitive values only on a credential an Owner of that project issued.
+      // A service reads a project's sensitive values only on a credential an Owner of that project issued.
       sensitive: new Set(held.filter((place) => ownsProject(issuer, place.projectId)).map((place) => place.projectId)),
       live: true, buried: false, token, repository,
     });
@@ -725,7 +724,7 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
         const { env, key, row } = at;
         const version = row.versions[row.current!]!;
         const done = await attempt(() => clientOf(actor).secrets.set(writePath(env), { [key]: { sensitivity: op.nature } })) !== null;
-        // Looser only a sensitive value made a secret, by an Owner of its project (R30); stricter, by the instance's Owner
+        // Looser only a sensitive value made a secret, by an Owner of its project; stricter, by the instance's Owner
         // always. Whatever else a mark takes, it is not checked here: refused or not, the reads after hold it to the rules.
         const looser = STRICTNESS[op.nature] < STRICTNESS[version.nature];
         if (looser && !(version.nature === 'sensitive' && op.nature === 'secret' && ownsProject(actor, env.projectId))) assert.equal(done, false, `${actor} made ${pathOf(env)}/${key} ${op.nature} from ${version.nature}`);
@@ -751,14 +750,14 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
         const { env, key, row } = at;
         const version = op.index % row.versions.length + 1;
         const target = row.versions[version - 1]!;
-        // It comes back no looser than it was, nor than that very value was made since, in place (R24); an Owner's loosening
-        // is the current value's alone (R30); and sensitive while the key is, or its newest version (credential-proxy.md).
+        // It comes back no looser than it was, nor than that very value was made since, in place; an Owner's loosening
+        // is the current value's alone; and sensitive while the key is, or its newest version (credential-proxy.md).
         const now = resolve(env, key)?.nature;
         const since = row.versions.findLast((later) => later.text === target.text)!.nature;
         const held = STRICTNESS[since] > STRICTNESS[target.nature] ? since : target.nature;
         const nature = now === 'sensitive' || row.versions.at(-1)!.nature === 'sensitive' ? 'sensitive' : held;
         const done = await attempt(() => clientOf(actor).secrets.restore(`${writePath(env)}/${key}`, version)) !== null;
-        // A restore writes, and brings back an old value as it is held: refused to whoever cannot read it so (R24), plain
+        // A restore writes, and brings back an old value as it is held: refused to whoever cannot read it so, plain
         // taking write alone, as does the current version, which makes no value live; never refused the instance's Owner.
         if (env.owner === null) {
           const holding = holds(sessionReader(actor), env);
@@ -871,7 +870,7 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
   function unjustified(actor: string, text: string, before: readonly Serving[], dormant: readonly Serving[]): string | null {
     if (typed.get(actor)!.has(text)) return null;
     const was = before.filter((serving) => serving.text === text);
-    // A sensitive value made reachable as anything looser: an Owner of its project's alone (R30).
+    // A sensitive value made reachable as anything looser: an Owner of its project's alone.
     if (was.length > 0 && was.every((serving) => serving.nature === 'sensitive') && servings().some((serving) => serving.text === text && serving.nature !== 'sensitive')) {
       return was.some((serving) => ownsProject(actor, serving.project)) ? null : 'a sensitive value loosened by someone who owns none of its projects';
     }
@@ -879,7 +878,7 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
     const me = sessionReader(actor);
     const has = (env: Env, permission: Permission) => env.owner !== null ? ownsOverlay(me, env) : holds(me, env).has(permission);
     const takes = (nature: Nature): Permission[] => nature === 'plain' ? [READ, USE] : nature === 'secret' ? [READ] : [USE];
-    // Served now: reading it as it is served, using it where it is sensitive (R24).
+    // Served now: reading it as it is served, using it where it is sensitive.
     if (was.some((serving) => takes(serving.nature).some((permission) => has(serving.env, permission) && has(serving.holder, permission)))) return null;
     // An old version, or an archived key's: what it takes to bring back, unless its value is served stricter now.
     for (const old of dormant.filter((each) => each.text === text)) {
@@ -994,20 +993,20 @@ test('a fixed world: who receives each nature of value, on each credential, and 
     ],
   };
   const outcome = await scenario(world, asShipped(['prod']), [
-    // Only an Owner of market makes its sensitive value a secret, in place (R30).
+    // Only an Owner of market makes its sensitive value a secret, in place.
     { ...CHANGE, kind: 'mark', actor: actorOf(BO), nature: 'secret', target: { env: 'dev', key: 'STRIPE_KEY' } },
     { ...CHANGE, kind: 'mark', actor: actorOf(CY), nature: 'secret', target: { env: 'dev', key: 'STRIPE_KEY' } },
   ]);
   const [database, stripe, region, token, mine, mySensitive] = ['dev/DATABASE_URL', 'dev/STRIPE_KEY', 'dev/REGION', 'prod/API_TOKEN', 'dev@ada/DATABASE_URL', 'dev@ada/STRIPE_KEY'].map((at) => valueOf(outcome, at));
   const got = (label: string) => [database, stripe, region, token, mine, mySensitive].filter((text) => outcome.received.get(label)?.has(text!));
   // People: an Owner, of the instance or of market, reads no sensitive value nor anyone's `@me`; a Contributor only plain ones;
-  // a reference in staging lends prod's value, protected, to staging's readers (R20). Once loosened, dev's readers read STRIPE_KEY.
+  // a reference in staging lends prod's value, protected, to staging's readers. Once loosened, dev's readers read STRIPE_KEY.
   assert.deepEqual(got(`session of ${ROOT}`), [database, stripe, region, token]);
   assert.deepEqual(got(`session of ${CY}`), [database, stripe, region, token]);
   assert.deepEqual(got(`session of ${ADA}`), [database, stripe, region, token, mine]);
   assert.deepEqual(got(`session of ${BO}`), [region]);
   // Credentials: the service token an Owner of market issued reads its sensitive value, and prod's through staging; the
-  // Developer's reads dev's secret, and its sensitive value only once loosened; ROOT's binding for billing reads market's sensitive one through billing's reference, ROOT owning billing (R71); Ada's personal token
+  // Developer's reads dev's secret, and its sensitive value only once loosened; ROOT's binding for billing reads market's sensitive one through billing's reference, ROOT owning billing; Ada's personal token
   // reads dev and her own `@me` values.
   const label = (prefix: string) => [...outcome.received.keys()].find((each) => each.startsWith(prefix))!;
   assert.deepEqual(got(label(`service token 0 of ${CI} by ${CY}`)), [database, stripe, region, token]);

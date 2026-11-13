@@ -1,7 +1,7 @@
 // Every request body is read with a byte cap and abandoned past it, 413, so
 // an oversize or endless body never buffers and never reaches JSON.parse:
-// before sign-in, the device-login endpoints (W155 red-team: a 20 MB body
-// was buffered and parsed before validation) and every other, to
+// before sign-in, the device-login endpoints (where a 20 MB body would be
+// buffered and parsed before validation) and every other, to
 // `SIGN_IN_BODY_BYTES`; the authenticated API, to `API_BODY_BYTES`; and its
 // values counted before it is parsed (`MAX_BODY_NODES`), then validated to
 // their first issue.

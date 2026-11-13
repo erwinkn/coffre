@@ -77,7 +77,7 @@ async function refusal(promise: Promise<unknown>): Promise<{ status: number; rea
     await promise;
   } catch (error) {
     const { status, code, reason, message } = error as { status: number; code?: string; reason?: string; message: string };
-    // A key's one refusal says no reason (D153): the app's entry of it does, the newest refusal of a read.
+    // A key's one refusal says no reason: the app's entry of it does, the newest refusal of a read.
     if (code === 'not_available') return { status, reason: await refusedFor(), message };
     return { status, reason: reason ?? null, message };
   }
@@ -178,14 +178,14 @@ test('a person reads every value of an environment but its sensitive ones, which
     const read = await person.secrets.reveal('market/dev');
     assert.deepEqual(read.values, { REGION: 'eu-west-3', WEBHOOK });
     assert.deepEqual([...read.sensitive].sort(), ['API_KEY', 'DB_PASSWORD']);
-    // One key's refusal, as every one (D153): its reason the log's.
+    // One key's refusal, as every one: its reason the log's.
     assert.deepEqual(await refusal(person.secrets.reveal('market/dev/API_KEY')), {
       status: 404,
       reason: 'sensitive',
       message: 'not available: no such key, or no access to it',
     });
   }
-  // A "no" is decided before the use, which writes nothing (D153): the app's entry of the request logs it, by the person.
+  // A "no" is decided before the use, which writes nothing: the app's entry of the request logs it, by the person.
   const refused = (await entries('secret.read')).filter((entry) => entry.author !== 'vault' && entry.decision === 'deny');
   assert.deepEqual(refused.map((entry) => [entry.actor, entry.metadata.reason]), [[`user:${DEV}`, 'sensitive'], [`user:${DEV}`, 'sensitive'], [`user:${ROOT}`, 'sensitive']]);
   assert.deepEqual([...(await replayStored(db.owner, [deps.vault.signingKey])).decided.values()].filter((code) => code !== null), []);
@@ -221,7 +221,7 @@ test('a rollback brings an old value back as it was held, and sensitive while th
   assert.deepEqual(restored!.metadata, { key: 'REGION', version: 4, from: 1, sensitive: true });
 
   // Written again as a secret, the key takes back the plain version as that value was made last, sensitive, never plain:
-  // no person is shown a value once made sensitive (R16), and the sensitive version as sensitive.
+  // no person is shown a value once made sensitive, and the sensitive version as sensitive.
   await root.secrets.set('market/dev', { REGION: { value: 'eu-west-1', sensitivity: 'secret' } });
   await root.secrets.restore('market/dev/REGION', 1);
   assert.equal((await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'REGION')!.value, null);
@@ -519,7 +519,7 @@ test('the vault judges a rollback no looser than its version, nor than its value
   await root.secrets.set('market/dev', { HOOK: { value: 'whsec_second_0123456789', sensitivity: 'secret' } });
   await root.secrets.restore('market/dev/HOOK', 1);
   assert.deepEqual((await history('market/dev/HOOK'))[0], [4, 'sensitive'], 'the app asks for it sensitive');
-  // An app that asked for it looser, a secret, is refused by the vault itself (R16): the vault is the backstop.
+  // An app that asked for it looser, a secret, is refused by the vault itself: the vault is the backstop.
   await root.secrets.set('market/dev', { HOOK: { value: 'whsec_third_0123456789', sensitivity: 'secret' } });
   const rewrap = deps.vault.rewrap;
   t.mock.method(deps.vault, 'rewrap', (input: Parameters<typeof rewrap>[0]) => rewrap({ ...input, items: input.items.map((item) => ({ ...item, secret: { ...item.secret, sensitive: false } })) }));
@@ -527,7 +527,7 @@ test('the vault judges a rollback no looser than its version, nor than its value
   assert.deepEqual((await history('market/dev/HOOK'))[0], [5, 'secret'], 'nothing restored');
   t.mock.restoreAll();
 
-  // TOKEN: v1 sensitive, v2 that value made a secret in place by an Owner (R30), v3 another value: v1 comes back
+  // TOKEN: v1 sensitive, v2 that value made a secret in place by an Owner, v3 another value: v1 comes back
   // sensitive, as it was, and v2 a secret, as it was; the loosening was the current value's then, not every version's.
   await root.secrets.set('market/dev', { TOKEN: { value: 'tok_first_0123456789', sensitivity: 'sensitive' } });
   await root.secrets.set('market/dev', { TOKEN: { sensitivity: 'secret' } });
@@ -567,7 +567,7 @@ test("an app before 0.10 copies no sensitive value for a fork: the vault opens o
 });
 
 /**
- * `local@me` (R18), its parent a fork of dev, as Equisafe's `backend/local@me`: its owner, whatever their role, overrides
+ * `local@me`, its parent a fork of dev, as Equisafe's `backend/local@me`: its owner, whatever their role, overrides
  * every key; their own value is read as its own level says, plain and secret by them alone, sensitive by nobody; and what
  * it inherits is read as on the parent.
  */

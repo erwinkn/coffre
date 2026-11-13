@@ -317,9 +317,9 @@ function refusedKey(runtime: CoffreRuntime, reason: string): void {
 }
 
 /**
- * Spent tokens forgotten a beat, in one call: twice what R44's 1,000
- * sign-ins a second spend in one (600,000 a five-minute beat), so a beat
- * keeps up and a backlog from beats missed drains. One scan of the table
+ * Spent tokens forgotten a beat, in one call: twice what 1,000 sign-ins a
+ * second (`SIGN_INS_PER_SECOND`) spend in one (600,000 a five-minute
+ * beat), so a beat keeps up and a backlog from beats missed drains. One scan of the table
  * finds them and they go by `ctid` (migration 0080): on the 7.5 million
  * records two hours at that rate leaves, measured on the compose
  * Postgres, under a second. The table then holds 1.4 GB with its index.
@@ -345,8 +345,8 @@ async function ready(runtime: CoffreRuntime): Promise<{ ok: boolean } & Record<s
   });
   if (held === 'error') return { ok: false, appKey: 'error' };
   if (held !== null) return { ok: false, ...(held.kind === 'rotating' || held.kind === 'stalled' ? { rotating: true } : held.kind === 'refused' ? { appKey: false } : {}) };
-  // Under 0.15's log a change answers once sealed (R51): whether the checkpointer seals, red within seconds of a stall
-  // and green again once it ticks (T169).
+  // Under 0.15's log a change answers once sealed: whether the checkpointer seals, red within seconds of a stall
+  // and green again once it ticks.
   const unsealed = await unsealing(runtime);
   if (unsealed !== null) return { ok: false, sealing: false };
   if (watch === null) return { ok: true, watched: false };
@@ -357,12 +357,12 @@ async function ready(runtime: CoffreRuntime): Promise<{ ok: boolean } & Record<s
 /** How long readiness waits on the vault's word on its checkpointer: past it, the checkpointer does not seal. */
 const SEALING_ASKED_MS = 3000;
 
-/** Why 0.15's checkpointer does not seal, said in the server's log once while it stands; null when it does (T169). */
+/** Why 0.15's checkpointer does not seal, said in the server's log once while it stands; null when it does. */
 async function unsealing(runtime: CoffreRuntime): Promise<string | null> {
   const { vault } = runtime;
   if (vault.sealing === undefined) return null;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  // The vault's word on what it has, its `about`, inside the same bound (review r1): a vault that does not answer is red.
+  // The vault's word on what it has, its `about`, inside the same bound: a vault that does not answer is red.
   // Called on the vault itself, never a method of it taken apart: a Worker's stub answers `bind` as a call of its own.
   const said = await Promise.race([
     (async () => ((await vaultSaysSealing(vault)) ? await vault.sealing!() : ({ ok: true } as const)))()
@@ -385,7 +385,7 @@ const sealingSaid = new WeakMap<object, string>();
  * The scheduled run: the audit watch's beat, if the deployment added one;
  * the vault's checkpoint of the log, once, which the beat asked for if it
  * ran, and which keeps every verification a walk from the newest
- * checkpoint (R25); then spent tokens' upkeep. Throws so the scheduler
+ * checkpoint; then spent tokens' upkeep. Throws so the scheduler
  * reports failures.
  */
 export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
@@ -407,7 +407,7 @@ export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
   );
   // After the beat, which a failed prune never holds back, and reported as the run's failure too.
   const pruned = await pruneSpentTokens(runtime.db, SPENT_TOKENS_PER_BEAT).then(() => null, (error: Error) => error);
-  // A removal a request left under way, gone on with (W331, A'): a closed binding signs nobody in, but what it issued
+  // A removal a request left under way, gone on with: a closed binding signs nobody in, but what it issued
   // serves until revoked. On a Worker, as far as this run's own budget goes (removal.ts); the next beat goes on.
   const removed = runtime.workloads === null ? null : await runtime.workloads.resumeRemovals().then(
     ({ failed }) => (failed.length === 0 ? null : new Error(failed.map(({ id, error }) => `${id}: ${error}`).join('; '))),

@@ -1,4 +1,4 @@
-// GET /audit/trees: the log as the vault's verifier finds it (docs/design/0.15-plan.md, PR 8), for whoever reads the
+// GET /audit/trees: the log as the vault's verifier finds it (docs/design/0.15-plan.md), for whoever reads the
 // whole log. The app's writes are changes sealed by a checkpointer that runs here, and a checkpoint the database's
 // writer forges is named.
 import { after, beforeEach, test } from 'node:test';

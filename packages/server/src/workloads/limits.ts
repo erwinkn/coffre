@@ -8,10 +8,10 @@ import type { RateLimiter } from '@coffre/core/identity';
  * serves `workloads.limits` and `mcp.limits` both. A deployment with
  * several processes allows each its own.
  *
- * `perSource`: 10,000 a window by default, 1,000 a second (R44's CI
- * sign-in rate, W331, D177): a fleet behind one NAT, a cluster's egress
+ * `perSource`: 10,000 a window by default, 1,000 a second (the target CI
+ * sign-in rate): a fleet behind one NAT, a cluster's egress
  * address or a CI provider's runner pool, is one address, so one address
- * may carry the whole target. The 0.15 options `perConnection` and
+ * may carry the whole target. The options `perConnection` and
  * `total` are taken and read no more, and the limiters of those names it
  * still returns, for a deployment that picks them out (`{ total:
  * processLimits().total }`), let every request through (deprecated; gone
@@ -20,25 +20,25 @@ import type { RateLimiter } from '@coffre/core/identity';
 export function processLimits(
   options: {
     perSource?: number;
-    /** @deprecated gone in 0.16 (W331, D177): read no more. */
+    /** @deprecated Read no more. */
     perConnection?: number;
-    /** @deprecated gone in 0.16 (W331, D177): read no more. */
+    /** @deprecated Read no more. */
     total?: number;
   } = {},
 ): {
   perSource: RateLimiter;
-  /** @deprecated gone in 0.16 (W331, D177): lets every request through. */
+  /** @deprecated Lets every request through. */
   perConnection: RateLimiter;
-  /** @deprecated gone in 0.16 (W331, D177): lets every request through. */
+  /** @deprecated Lets every request through. */
   total: RateLimiter;
 } {
   return { perSource: windowed(options.perSource ?? PER_SOURCE), perConnection: UNLIMITED, total: UNLIMITED };
 }
 
-/** 0.15's limits that 0.16 dropped, as `processLimits` still returns them for one release: no count. */
+/** The deprecated limits, as `processLimits` still returns them for one release: no count. */
 const UNLIMITED: RateLimiter = { limit: async () => ({ success: true }) };
 
-/** R44: CI sign-in at 1,000 a second, what the limits here and the spent tokens' pruning (`SPENT_TOKENS_PER_BEAT`) are sized for. */
+/** CI sign-in at 1,000 a second, what the limits here and the spent tokens' pruning (`SPENT_TOKENS_PER_BEAT`) are sized for. */
 export const SIGN_INS_PER_SECOND = 1_000;
 /** Cloudflare's rate-limiting binding counts in 10 s or 60 s periods: the shorter, as the examples' binding does, so a burst is refused for 10 s, not a minute. */
 const WINDOW_MS = 10 * 1000;

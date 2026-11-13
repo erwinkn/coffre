@@ -27,7 +27,7 @@ import { Superseded } from '../watch.ts';
  *                          section 4): confirm at the step-up and send it again, with `caller` as its `coffre-caller`
  *                          header; `reason: 'add_passkey'` when the person holds none yet, who adds one first
  *   404 not_found          no such project, environment, secret or member
- *   404 not_available      a key a request named, by name, that it may not have: none such, or no access to it, alike (D153)
+ *   404 not_available      a key a request named, by name, that it may not have: none such, or no access to it, alike
  *   405 method_not_allowed
  *   409 conflict           the request is valid but the current state refuses it; `reason: 'caller_changed'`: an act
  *                          sent again after its fresh check, by another person than the one who sent it first
@@ -144,7 +144,7 @@ export function callerName(principal: { type: string; id: string }): string {
 
 /**
  * The vault's refusal of a use by ids it decided before writing anything (`number` null: its key would have taken
- * its principal's lock, which only a use the vault allowed takes; DecideBeforeLock, review r2 of D153). Answered as
+ * its principal's lock, which only a use the vault allowed takes; DecideBeforeLock). Answered as
  * the refusal it carries; the vault logged no request, so the app does, whoever asked (`withRefusals`), with `fields`:
  * where the use was, its key, its operation and its purpose.
  */
@@ -164,7 +164,7 @@ export const forbidden = (message = 'you do not have permission to do that') =>
 export const notFound = (message = 'not found') => new ApiError('not_found', message);
 export const conflict = (message: string) => new ApiError('conflict', message);
 /**
- * A key a request named that it may not have, whatever the reason (D153): there is none of that name, the caller may
+ * A key a request named that it may not have, whatever the reason: there is none of that name, the caller may
  * not use it, or read it, a reference it is has ended, a row of it was put back. One answer for all, so that nobody
  * learns a key is held from being refused it; the reason is the audit log's.
  */
@@ -184,7 +184,7 @@ export function vaultRefused(refusal: { code: string; message: string }): ApiErr
   }
   // A sensitive value, which no person is handed: not a refusal of their access, which the message says how to use.
   if (refusal.code === 'sensitive') return new ApiError('forbidden', refusal.message, refusal.code);
-  // A sensitive value its credential's issuer could not hand a service account (R32): the message says who can.
+  // A sensitive value its credential's issuer could not hand a service account: the message says who can.
   if (refusal.code === 'not_owner_issued') return new ApiError('forbidden', refusal.message, refusal.code);
   // Not the caller's doing: the instance is misconfigured, and stays unable to open any value until restarted.
   if (refusal.code === 'wrong_kek') return new ApiError('unavailable', refusal.message, refusal.code);
@@ -202,7 +202,7 @@ export const UNAVAILABLE = 'coffre cannot reach what it depends on right now; tr
 
 /**
  * How long, in seconds, a 503 `unavailable` tells its caller to wait
- * (`Retry-After`), derived from the lock waits that refuse (R75, W331):
+ * (`Retry-After`), derived from the lock waits that refuse:
  * every wait for a lock is `LOCK_WAIT_MS` (500 ms), the app's write
  * transactions' once, the vault's again after each pause for its call's
  * `CALL_DEADLINE_MS` (5 s). What refused gave up one lock wait ago at most,
@@ -215,14 +215,14 @@ export const UNAVAILABLE = 'coffre cannot reach what it depends on right now; tr
 export const UNAVAILABLE_RETRY_AFTER = String(Math.ceil(LOCK_WAIT_MS / 1000));
 
 /**
- * What a change is told when it committed but its seal did not come in time
- * (T169; R51): it is in force, and nothing says so yet but the log.
+ * What a change is told when it committed but its seal did not come in time:
+ * it is in force, and nothing says so yet but the log.
  */
 export const UNSEALED_MESSAGE = 'coffre made this change, but could not seal it in its audit log in time; it will once it can. Check before you make it again';
 
 /**
- * What a refused key write or first add is told when the record of its refusal (T179 PR 6, refused.ts) committed but
- * its seal did not come in time: as `UNSEALED_MESSAGE`'s 503, but nothing was changed, so it says so (review r2).
+ * What a refused key write or first add is told when the record of its refusal (refused.ts) committed but
+ * its seal did not come in time: as `UNSEALED_MESSAGE`'s 503, but nothing was changed, so it says so.
  */
 export const REFUSAL_UNSEALED_MESSAGE = 'coffre did not make this change, but could not seal its refusal in its audit log in time; it will once it can. Try again in a moment';
 
@@ -268,7 +268,7 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
       body: { error: 'bad_request', message: `${where}${issue?.message ?? 'invalid input'}` },
     };
   }
-  // A change committed whose seal did not come in time (T169): the vault's checkpointer stalled or did not answer.
+  // A change committed whose seal did not come in time: the vault's checkpointer stalled or did not answer.
   if (isUnsealed(error)) {
     console.error('a change was not sealed in time', logged(error));
     return { status: 503, body: { error: 'unavailable', message: UNSEALED_MESSAGE } };

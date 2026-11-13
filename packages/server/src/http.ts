@@ -147,7 +147,7 @@ export async function readLimitedJson(request: Request, max: number): Promise<un
 /**
  * A JSON body of at most `max` bytes, or `fallback` when the body is empty.
  * Every body is bounded: the stream is abandoned past the limit, so an
- * oversize or endless body never buffers (the heart of R27's CPU budget).
+ * oversize or endless body never buffers: the bound is what holds a request to its CPU budget.
  */
 export async function readJson(request: Request, max: number, fallback?: unknown): Promise<unknown> {
   const text = await readLimitedText(request, max);

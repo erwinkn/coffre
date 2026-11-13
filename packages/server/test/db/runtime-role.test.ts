@@ -15,7 +15,7 @@ import {
 const EXPECTED_UPDATE_COLUMNS = [
   'audit_chain_head.head_hash',
   'audit_chain_head.next_seq',
-  // A capped alert's last time, moved on when it is raised again (T98).
+  // A capped alert's last time, moved on when it is raised again.
   'capped_alerts.raised_at',
   // A workload's session: approved by a person, where its binding asks, and renewed (docs/design/workload-access.md).
   'credentials.approved_at',
@@ -40,7 +40,7 @@ const EXPECTED_UPDATE_COLUMNS = [
   'dismissed_keys.dismissed_by',
   'dismissed_keys.restored_at',
   'dismissed_keys.restored_by',
-  // An enrollment code's MAC, signed again by the app key's rotation (T105): nothing else of a code changes.
+  // An enrollment code's MAC, signed again by the app key's rotation: nothing else of a code changes.
   'enrollment_codes.auth_mac',
   'environments.archived_at',
   'environments.name',
@@ -229,7 +229,7 @@ test(
 test(
   "the runtime logins run at the server's planner settings, none of their own",
   async () => {
-    // T207: every statement coffre runs is one whose plan stands at the defaults (docs/design/planner-defaults.md).
+    // Every statement coffre runs is one whose plan stands at the defaults (docs/design/planner-defaults.md).
     // Every run reasserts the logins; then each, as it logs in, takes no planner setting from its role.
     await migrateDatabase(TEST_OWNER_DATABASE_URL);
     const logins = { coffre_runtime: TEST_RUNTIME_DATABASE_URL, coffre_vault_runtime: TEST_VAULT_DATABASE_URL, coffre_vault_hot: TEST_HOT_DATABASE_URL };

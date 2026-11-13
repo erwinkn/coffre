@@ -26,8 +26,8 @@ const entry: AuditEntry = { actorType: 'system', actorId: 'test', action: 'test'
 for (const preceding of [0, 5_000]) {
   test(`the runtime login moving the head forward stops the next append, after ${preceding} entries`, async () => {
     await write(preceding);
-    // Review F4: a gap made by moving the head, which an honest append then
-    // filled in after. The append checks that the head names the last entry.
+    // A gap made by moving the head, which an honest append would then fill
+    // in. The append checks that the head names the last entry.
     await db.runtime.update(auditChainHead).set({ nextSeq: BigInt(preceding + 5) });
     await assert.rejects(
       db.runtime.transaction((tx) => appendAudit(tx, deps.chainKey, [entry], [], true)),
@@ -57,7 +57,7 @@ for (const preceding of [0, 5_000]) {
   });
 }
 
-/** An entry in the vault's name, with a MAC made up, linked after the log's last as anyone could: review of #28, R1. */
+/** An entry in the vault's name, with a MAC made up, linked after the log's last as anyone could. */
 async function forgeVaultEntry(writer: typeof db.owner): Promise<void> {
   const [head] = await db.owner.select().from(auditChainHead);
   const fields = {
@@ -251,7 +251,7 @@ test('a log longer than one walk is checked as far as one goes, and walked from 
   await write(12_000);
   // Someone admitted past where one walk reaches: the rows hold them, the walk does not, and that is no tampering.
   assert.equal((await deps.vault.admit({ actor: 'user:root@acme.example', principal: 'user:ada@acme.example' })).ok, true);
-  // No beat yet, as after an upgrade from 0.10.0: the check starts at the first entry, and stops one walk on.
+  // No beat yet: the check starts at the first entry, and stops one walk on.
   const [{ nextSeq }] = await db.owner.select().from(auditChainHead);
   const first = await root.audit.verify();
   assert.deepEqual(first.ok && [first.from, first.through, first.remaining], [0, CHAIN_WALK - 1, Number(nextSeq) - CHAIN_WALK], JSON.stringify(first));

@@ -145,7 +145,7 @@ test('an HMAC signer signs as Node does and checks its own signatures; a verifie
   assert.equal(await iframe.verify(`${payload}x`, signature), false);
   await assert.rejects(used(env, 'yousign').sign(YOUSIGN_BODY), /yousign is a verifier, which checks signatures and makes none/);
   await assert.rejects(used(env, 'dfns-key').verify('m', 'sig'), /verify names a verifier/);
-  // An environment that holds no secret for it: the one "no" of a key (D153), which names nothing, its reason in the app's entry.
+  // An environment that holds no secret for it: the one "no" of a key, which names nothing, its reason in the app's entry.
   const bare = await run(['market/bare']);
   const absent = (await route('/use/market/bare', { method: 'POST', headers: { authorization: `Bearer ${bare.env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ verify: { credential: 'yousign', message: 'aGk', signature: 'sha256=00' } }) }));
   assert.deepEqual([absent.status, await absent.json(), await refusedFor()], [404, NO, 'missing']);
@@ -224,7 +224,7 @@ test("SumSub's document upload, 10 MiB, signs raw as Node's createHmac signs it,
   const json = await route('/use/market/dev', { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ sign: { credential: 'sumsub-key', message: message.subarray(0, 1024 * 1024 + 1).toString('base64url') } }) });
   assert.equal(json.status, 413);
   assert.match(((await json.json()) as { message: string }).message, /goes raw, its bytes as the body: POST \?sign=sumsub-key, Content-Type: application\/octet-stream/);
-  // A message to verify is JSON's, 1 MiB at most, whatever the signer's maxBytes takes (Fable's review of #572).
+  // A message to verify is JSON's, 1 MiB at most, whatever the signer's maxBytes takes.
   const long = message.subarray(0, 1024 * 1024 + 2000);
   const verify = await route('/use/market/dev', { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ verify: { credential: 'sumsub-key', message: long.toString('base64url'), signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, long) } }) });
   assert.deepEqual([verify.status, ((await verify.json()) as { message: string }).message], [413, 'sumsub-key checks a message of 1 MiB at most']);
@@ -322,7 +322,7 @@ test('a raw message longer or shorter than it declares, or other than its Conten
 
 test("verifies and HMAC signatures are logged once a minute per handle and name, as a credential's requests are, the vault asked once", async () => {
   const { env } = await run();
-  // How the vault opens a value: a use, one a key, by name for a handle's one key (T145).
+  // How the vault opens a value: a use, one a key, by name for a handle's one key.
   const methods = ['use', 'useNamed'] as const;
   const kept = methods.map((method) => (deps.vault[method] as (...args: unknown[]) => Promise<unknown>).bind(deps.vault));
   let opened = 0;
@@ -340,7 +340,7 @@ test("verifies and HMAC signatures are logged once a minute per handle and name,
   } finally {
     for (const [i, method] of methods.entries()) (deps.vault as unknown as Record<string, unknown>)[method] = kept[i];
   }
-  // The record: a use of each key, its row slim (R53), naming neither the name nor that it signs.
+  // The record: a use of each key, its row slim, naming neither the name nor that it signs.
   assert.equal((await usesLogged(db.owner)).filter((use) => use.purpose === 4).length, 2);
 });
 
@@ -396,7 +396,7 @@ test('the configuration refuses what is no HMAC-SHA256 of these schemes', () => 
   refused({ credentials: { x: { upstream: 'https://api.example', inject: { kind: 'header', name: 'x-key', template: '{KEY}' } } }, verifiers: { x: hmac('KEY', { encoding: 'hex' }) } }, /x names a credential and a verifier/);
   refused({ verifiers: { x: hmac('KEY', { encoding: 'hex', limit: { perMinute: 0 } }) } }, /limit is \{ perMinute\?, perDay\? \}/);
   for (const maxBytes of [0, 1.5, 1024 * 1024 + 1]) refused({ verifiers: { x: hmac('KEY', { encoding: 'hex', maxBytes }) } }, /maxBytes is a whole number of bytes, 1 MiB at most/);
-  // A signer's message past 1 MiB goes raw, up to 12 MiB: what R27 holds of two SHA-256 passes over it.
+  // A signer's message past 1 MiB goes raw, up to 12 MiB.
   for (const maxBytes of [0, 12 * 1024 * 1024 + 1]) refused({ signers: { x: hmac('KEY', { encoding: 'hex', maxBytes }) } }, /maxBytes is a whole number of bytes, 12 MiB at most/);
   assert.doesNotThrow(() => credentialProxy({ credentials: {}, signers: { x: hmac('KEY', { encoding: 'hex', maxBytes: 12 * 1024 * 1024 }) } }));
 });

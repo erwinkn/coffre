@@ -12,39 +12,39 @@
 // waiting on locks, almost all of it, and which statements waited. With 5
 // to 15 runs a level, its p99 is its slowest run.
 // The sign-in's credential is a change of the vault's log, which a Node checkpointer seals before the sign-in answers
-// (R51; docs/design/0.15-plan.md, "As built: PR 4b"), over its own connection, near; and each vault call has the hot
-// path's login too, so that a job's reveal is a use, as a deployment's is (T145).
+// (docs/design/0.15-plan.md, "As built: PR 4b"), over its own connection, near; and each vault call has the hot
+// path's login too, so that a job's reveal is a use, as a deployment's is.
 // With `--uses <rate>`, uses run beside, that many a second, each one `use_credential` call through a relay of its
 // own (uses.ts), and it reports their latency and refusals for each level, `0` jobs a level of uses alone (`--idle`
-// seconds): what a sign-in costs the hot path (R58). `--signin-only` leaves each job's list and reveal out.
+// seconds): what a sign-in costs the hot path. `--signin-only` leaves each job's list and reveal out.
 // With `--proxy <rate>` instead, the uses beside are the whole app's `/use`, the credential proxy on 100 people's
-// handles (proxy-uses.ts, PR 5b): each request a use. `--proxy-cache <s>` is the proxy's
+// handles (proxy-uses.ts): each request a use. `--proxy-cache <s>` is the proxy's
 // values' lifetime, `proxy.revokedWithinSeconds` (0, the default here: none kept, every request opens its key); `--proxy-stable` sends each to the stable URL;
 // `--proxy-names <n>` caps the vault's map of names at n a thread, its handles picked at random (0: every request cold).
 // `--proxy-pair` gives the proxy's credential two keys, `API_KEY` and `API_SECRET` in one header: each `/use` a request of
-// several keys, the vault's named batch (T165, PR 2); `--proxy-unnamed` hides that batch from the app, as a vault older
-// than it: the app reads the keys, then uses them by ids (T167), the path before.
-// `--proxy-ui` saves `api` in ci/dev's Proxy tab instead, the proxy's code naming none (T186 PR C): each `/use` a route
+// several keys, the vault's named batch; `--proxy-unnamed` hides that batch from the app, as a vault older
+// than it: the app reads the keys, then uses them by ids.
+// `--proxy-ui` saves `api` in ci/dev's Proxy tab instead, the proxy's code naming none: each `/use` a route
 // use, at a path of its own, so that the vault's map keys on no URL.
 // `--proxy-path` puts `API_KEY` in a segment of the path instead, `path('bot{API_KEY}')`, the handle in the app's path
-// alone, as Telegram's Bot API takes its token (T208).
-// `--proxy-fork` makes every handle for ci/feature, a fork of ci/dev that inherits its `API_KEY` (T165): what a fork's
-// `/use` costs, by the vault's one call by name or, before T165, by the app's own path.
+// alone, as Telegram's Bot API takes its token.
+// `--proxy-fork` makes every handle for ci/feature, a fork of ci/dev that inherits its `API_KEY`: what a fork's
+// `/use` costs, by the vault's one call by name.
 // `--cgroup <dir>`, the Postgres container's cgroup, adds its CPU per use of each level (cpu.stat's usage_usec over
 // the uses sent), and the same by login: the app's (`runtime`), the vault's, the hot path's (`vault_hot`), the server's own.
-// `--principals` spreads the uses over that many services (1: one hot principal, T127), `--keys` gives ci/dev that many
+// `--principals` spreads the uses over that many services (1: one hot principal), `--keys` gives ci/dev that many
 // keys (7 by default, the reveal's), and `--use-cold <n>` makes n uses a second more, each on a new connection of its
-// own, a new backend whose first call plans the statement (T131): reported apart from the others. `--window` is
+// own, a new backend whose first call plans the statement: reported apart from the others. `--window` is
 // the cap's window in minutes (1 by default; its rows move on every tenth of it), its count a million.
-// `--issue` makes each job a service token's issue by the Owner instead (T149, PR 2), the vault weighing it: what a burst
+// `--issue` makes each job a service token's issue by the Owner instead, the vault weighing it: what a burst
 // of issues costs beside the uses.
 // `--bindings <n>` spreads a level's jobs over n bindings of the one service, each a workflow of its own (a binding's
-// sign-ins share its row, W331).
+// sign-ins share its row).
 // `--unbind <n>`, after the levels, signs n runs in through one binding, then removes it while the uses beside run: what
-// a removal in batches (W331, `UNBIND_BATCH` a call, each holding the fence) costs the hot path, reported as the uses of
+// a removal in batches (`UNBIND_BATCH` a call, each holding the fence) costs the hot path, reported as the uses of
 // its own phase, `unbind`, beside `--jobs 0`'s, which holds none.
-// `--days <n>` attaches the log's days back to n days ago, empty, as an instance that keeps every day has them attached
-// (T187's measure): what a use costs as the log ages (R48, T207).
+// `--days <n>` attaches the log's days back to n days ago, empty, as an instance that keeps every day has them
+// attached: what a use costs as the log ages.
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
@@ -311,7 +311,7 @@ try {
   await root.secrets.set('ci/dev', Object.fromEntries(keys.map((key) => [key, `${key.toLowerCase()}-value`])));
   await root.members.add(MEMBER);
   await root.access.set(MEMBER, { 'ci/dev': 'viewer' });
-  /** Each workflow's binding, made once: a binding takes as many sign-ins as its runs ask (W331, D177). */
+  /** Each workflow's binding, made once: a binding takes as many sign-ins as its runs ask. */
   const bound = new Set<number>();
   /** `jobs` sign-ins, job i through binding i mod `--bindings`, each binding made before its first. */
   const room = async (jobs: number) => {

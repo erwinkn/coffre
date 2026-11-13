@@ -1,5 +1,5 @@
 // The environment and project pages' server render, as Workers runs it, each Sync a round trip of `RTT` ms (34 by
-// default, Warsaw's Worker to a Paris database through Hyperdrive, T141): the app's statements on a connection of the
+// default, Warsaw's Worker to a Paris database through Hyperdrive): the app's statements on a connection of the
 // render's own (`HyperdrivePool`, its reads asked together under one Sync), the vault's on its pool, each through a
 // relay that holds each Sync that long (`postgresProxy`). Prints each page's time, p50 and p90, and its Syncs, as
 // Owner and as viewer, in an instance as request-cost.alone.ts makes it: a reference into the environment and a

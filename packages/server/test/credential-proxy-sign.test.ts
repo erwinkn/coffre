@@ -151,7 +151,7 @@ test("DFNS's SDK signs a user action through coffre: the key stays there, the si
 
   await signer.sign({ challenge: 'second', challengeIdentifier: 'x' } as UserActionChallenge);
   watched.stop();
-  // Each signature one use of the key, never from the proxy's cache. Its row is slim (R53), naming no message, and a
+  // Each signature one use of the key, never from the proxy's cache. Its row is slim, naming no message, and a
   // repeat its isolate's cover rides writes none: the vault's uses are counted, not the rows.
   const key = await keyIds(db.owner, 'DFNS_PRIVATE_KEY');
   assert.equal(watched.asked.filter((use) => key.includes(use.secretId) && use.purpose === 'use').length, 2);
@@ -191,7 +191,7 @@ test('refused: no handle, an unknown signer, a key the environment lacks, a mess
   assert.equal((await post({ sign: { credential: 'dfns-key', message: 'aGk' } }, 'Bearer nope')).status, 401);
   assert.equal((await post({ sign: { credential: 'nope', message: 'aGk' } })).status, 404);
   assert.equal((await post({ sign: { credential: 'dfns', message: 'aGk' } })).status, 404, 'a credential with an upstream signs nothing');
-  // A key the environment lacks: the one "no" of a key (D153), its reason in the app's entry.
+  // A key the environment lacks: the one "no" of a key, its reason in the app's entry.
   const absent = await post({ sign: { credential: 'absent', message: 'aGk' } });
   assert.deepEqual([absent.status, await absent.json(), await refusedFor()], [404, NO, 'missing']);
   assert.equal((await post({ sign: { credential: 'dfns-key', message: 'a+b/' } })).status, 400);

@@ -1,7 +1,7 @@
 // Each service token and trust binding carries its own scope, at most what
 // its account holds and its issuer could give when it is made, and a request
 // made with it reaches what both its scope and the account hold then:
-// docs/design/instance-roles.md, "Credentials' scopes" (D105).
+// docs/design/instance-roles.md, "Credentials' scopes".
 import { defineDeployment } from '@coffre/core/deployment';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -259,7 +259,7 @@ test("a binding that replaces a Viewer's keeps what the Viewer held, both column
   const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));
   for (const binding of [first, again, moved]) {
     const [row] = await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, binding.binding.id));
-    // Ada, a Developer, made the first: none reads dev's sensitive values, Root's included, which keep what it held (R32).
+    // Ada, a Developer, made the first: none reads dev's sensitive values, Root's included, which keep what it held.
     assert.deepEqual(JSON.parse(row!.scope!), [{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] }, sensitive: false }], binding.binding.id);
   }
 });
@@ -289,7 +289,7 @@ test('the scope is listed wherever tokens are, and logged by id when made', asyn
   // Offboarding Ada lists what she issued, with what each reaches.
   const report = await root.members.get(ADA);
   assert.deepEqual(report.issuedTokens.map((token) => [token.id, token.scope]), [[issued.id, { 'market/dev': 'viewer' }]]);
-  // The vault issues it (T149): its change records the scope it seals (D147).
+  // The vault issues it: its change records the scope it seals.
   const [change] = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).filter(({ payload }) => (JSON.parse(payload) as { issue?: unknown }).issue !== undefined);
   const logged = (JSON.parse(change!.payload) as { scope: unknown }).scope;
   const [dev] = await db.owner.select({ id: environments.id, projectId: environments.projectId }).from(environments).where(eq(environments.slug, 'dev'));

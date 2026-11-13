@@ -1,8 +1,8 @@
-// What a read costs through a way in with no credentials row, with 0.15's uses (T147; formal/WaysIn.tla): an MCP
+// What a read costs through a way in with no credentials row, with 0.15's uses (formal/WaysIn.tla): an MCP
 // client's reveal through its connection, a Worker's /use through its Cloudflare binding, and a reveal from a browser
 // behind Cloudflare Access. Each value is one `use_credential` call on the hot path's login, deciding on the way in
 // itself: no `credentialStill` on the app's connection after it, no vault call but the uses, and nothing of 0.14's
-// head. Before, each was 0.14's unwrap under that head, then the app's check of the way in.
+// head.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -105,7 +105,7 @@ before(async () => {
 
   // The Worker's Cloudflare binding, sealed by the vault as it makes one.
   await own.workloads!.bind(await contextFor(deps, ROOT), EDGE.slice('token:'.length), { profile: 'cloudflare', issuer: null, claims: {} as never, label: 'edge', replaces: [], policy: {} }, { dryRun: false });
-  // Dev's MCP client, connected: its row and its object, made together (T147).
+  // Dev's MCP client, connected: its row and its object, made together.
   connectionId = randomUUID();
   const expiresAt = new Date(Date.now() + 86_400_000);
   const member = `user:${DEV}`;
@@ -147,7 +147,7 @@ async function statements(request: () => Promise<Response>): Promise<{ app: stri
     assert.ok(response.status === 200 || response.status === 204, `${response.status}: ${await response.clone().text()}`);
     await response.arrayBuffer();
   };
-  // The warm-up and the measured request share one refresh period of the bulk cap: a use in the next one writes its key's row again (T202).
+  // The warm-up and the measured request share one refresh period of the bulk cap: a use in the next one writes its key's row again.
   await inBulkPeriod(5000, db.owner, [`user:${DEV}`, EDGE], 'market/dev');
   await run();
   for (const pool of [app, vaultPool, hot]) pool.recording = [];
@@ -164,7 +164,7 @@ const reveal = (runtime: CoffreRuntime, identity: () => Promise<AuthenticatedIde
     runtime, { sourceIp: null, authenticate: identity });
 
 const USE = 'SELECT use_credential( $1::uuid,';
-/** `credentialStill`'s read of the way in, after the vault released (`wayInStands`): what a use through it no longer needs. */
+/** `credentialStill`'s read of the way in, after the vault released (`wayInStands`): what a use through it does not need. */
 const STILL = 'select "principals"."status",';
 
 test('through an MCP connection, a Cloudflare binding, or behind Access, a value is the hot path\'s one call: no check of the way in after it, no vault call but the use, nothing of 0.14\'s head (T147)', async () => {

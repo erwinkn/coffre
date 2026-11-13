@@ -236,8 +236,8 @@ test('a token issued through an approval is shown on the page, once, and never t
   assert.equal(JSON.stringify(result.body).includes(issued), false);
   assert.equal(JSON.stringify(await approvalRows()).includes(issued), false);
 
-  // Revoked through an approval too. On the audit page, each says what 0.14's entry said: the app,
-  // its connection and the approval it went through, not the session that approved it (T164, review r1 of W261).
+  // Revoked through an approval too. On the audit page, each names the app, its connection and the
+  // approval it went through, not the session that approved it.
   const [{ id: tokenId }] = await db.owner.select({ id: credentials.id }).from(credentials).where(eq(credentials.principal, 'token:ci-deploy'));
   const revoking = idOf(await callRaw(token, 'revoke_service_token', { service: 'ci-deploy', id: tokenId! }));
   assert.equal((await decide(revoking, true)).body.status, 'approved');
@@ -422,8 +422,6 @@ test('a disconnected app’s approvals can no longer be decided', async () => {
   assert.equal((await view(id)).status, 409);
   assert.equal(await archived('OLD_KEY'), false);
 });
-
-// --- W47's findings ----------------------------------------------------------
 
 /** An approval as a call would have opened it, for a tool this instance cannot check a call of (trust bindings are off here). */
 async function opened(email: string, tool: string, args: Record<string, unknown>): Promise<string> {
@@ -644,8 +642,6 @@ test('a change the person could not make is refused before anyone is asked, for 
   assert.match(environment.content[0]!.text!, /you need environment\.manage on market/);
   assert.equal((await approvalRows()).length, 0);
 });
-
-// --- W49's findings on the fixes -----------------------------------------------
 
 test("trust_workload names IDs only from github.com and gitlab.com: an issuer the app names is flagged, and never asked (M1)", async () => {
   await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });

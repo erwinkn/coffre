@@ -26,7 +26,7 @@ test("a code route's allow list says how it matches: as code, as before 0.16, or
   assert.equal(items.open?.allowAs, null);
   assert.deepEqual(items.modern?.allowAs, { from: 'code', methods: null });
   assert.deepEqual(items.legacy?.allowAs, { from: 'legacy', methods: ['GET'] });
-  // `methods: []` took no method before 0.16; the tab's `methods: []` is any, so the item says so apart.
+  // Code's legacy `methods: []` takes no method; the tab's `methods: []` is any, so the item says so apart.
   assert.deepEqual(items.none?.allowAs, { from: 'legacy', methods: [] });
   assert.deepEqual(items.none?.definition.kind === 'route' && items.none.definition.allow, [{ methods: [], path: '/' }]);
   // `paths: []` leaves no allow entry, so its methods, which still answer first (405), live in `allowAs` alone.

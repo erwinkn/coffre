@@ -138,7 +138,7 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
 
 test('the longest issuer, beside the longest principal in UTF-8, fits the index entry they share: made, not a 500', async () => {
   // 320 characters of three bytes each, the most a service's ID holds as UTF-8 (`principalId`), and an issuer of
-  // MAX_ISSUER_BYTES that does not compress (review r5).
+  // MAX_ISSUER_BYTES that does not compress.
   const wide = `token:${Array.from({ length: 320 }, (_, i) => String.fromCodePoint(0x4e00 + ((i * 7919) % 20000))).join('')}`;
   assert.equal(Buffer.byteLength(wide), 6 + 960);
   assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: wide })).ok, true);
@@ -296,7 +296,7 @@ test('with workloads off, the routes say how to turn them on', async () => {
       new RegExp(`workloads\\.${option} is`),
     );
   }
-  // Never without its limit per source; 0.15's limit in total still taken, for a deployment not yet changed, and read no more (W331, D177).
+  // Never without its limit per source; 0.15's limit in total still taken, for a deployment not yet changed, and read no more.
   assert.throws(
     () => defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: { total: LIMITS.perSource } } as never }),
     /workloads need their limit per source/,

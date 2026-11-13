@@ -147,7 +147,7 @@ beforeEach(async () => {
   await holdSomething(db.owner, deps.vault, MEMBER, `user:${ROOT}`);
 });
 
-/** An `aws` binding of the service, as PR 1a's binding creation will store one: its claims, and a policy; made on `origin` when said (PR 3b). */
+/** An `aws` binding of the service, written to its row: its claims, and a policy; made on `origin` when said. */
 async function bind(claims: BindingClaims = { account: ACCOUNT, role_id: ROLE_ID }, origin?: string): Promise<string> {
   const standing = await memberStanding(deps.db, MEMBER);
   const id = randomUUID();

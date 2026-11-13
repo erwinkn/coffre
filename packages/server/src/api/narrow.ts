@@ -1,7 +1,7 @@
 // `narrow()` (docs/design/workload-access.md, section 8.4): a workload's
 // session making a child with less authority, bound to another key.
-// `POST /api/auth/workload/narrow`, beside the exchange; declared by that
-// design's PR 0, and served here by PR 4.
+// `POST /api/auth/workload/narrow`, beside the exchange; declared, and not
+// built yet.
 import { errorResponse } from '../http.ts';
 import type { CoffreRuntime } from '../runtime.ts';
 import { notBuilt } from './errors.ts';

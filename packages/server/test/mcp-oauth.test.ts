@@ -465,7 +465,7 @@ test('the unauthenticated endpoints pass their limit per source first, each coun
   open.closed = 'oauth:token:203.0.113.7';
   const limited = await route('/api/oauth/token', tokenRequest({ grant_type: 'refresh_token', refresh_token: 'x', client_id: CLAUDE_CODE }));
   assert.equal(limited.status, 429);
-  // Asked again once the window has moved on: 10 s, not a minute (W331).
+  // Asked again once the window has moved on: 10 s, not a minute.
   assert.equal(limited.headers.get('retry-after'), '10');
   // The same address's registration and revocation are counted apart from its token requests; none counts them all.
   assert.equal((await route('/api/oauth/register', { method: 'POST', body: '{}' })).status, 400);
@@ -748,8 +748,7 @@ test('a connection no passkey stands behind is refused once its person holds one
 
 // What a connection issues, through `POST /api/members/<member>/tokens` (`issue_service_token`), names its passkey, as a
 // session's issue names the session's. The vault holds `via` to a credential, and a connection is none, so the app issues
-// it, holding the connection and its passkey under its head (review of #497 by Fable 5.1: the vault refused a passkey with
-// no `via` as a programming error, 500).
+// it, holding the connection and its passkey under its head.
 test("a token issued through a connection names the connection's passkey, and none is issued once that passkey is gone", async () => {
   const key = await addPasskey(db.owner, deps.chainKey, ROOT);
   const { verifier, challenge } = pkce();

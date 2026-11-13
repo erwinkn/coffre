@@ -1,8 +1,8 @@
 // A reference is used and read as the environment it lives in allows, its
-// sensitive value too (R20, R71; A516): a workload, a service token or a
+// sensitive value too: a workload, a service token or a
 // person with a grant on landing/prod alone, none on backend, uses and reads
 // landing/prod/CLERK_SECRET_KEY, a reference to backend/prod's, as they do
-// landing's own keys. Its source is checked when it is made (R24), never at a
+// landing's own keys. Its source is checked when it is made, never at a
 // read.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -156,7 +156,7 @@ function bearer(token: string): CoffreClient {
   return createClient({ url: ORIGIN, headers: () => ({ authorization: `Bearer ${token}` }), transport: (request) => coffreRoute(request, runtime, IP).then((response) => response!) });
 }
 
-/** A key's value revealed by `client`, or why it was refused: its status and the reason the app's entry logs (D153). */
+/** A key's value revealed by `client`, or why it was refused: its status and the reason the app's entry logs. */
 async function revealed(client: CoffreClient, path: string): Promise<string> {
   try {
     return Object.values((await client.secrets.reveal(path)).values).join();

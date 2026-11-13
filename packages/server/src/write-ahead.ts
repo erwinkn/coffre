@@ -19,7 +19,7 @@ import { RefusalRecord } from './refused.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
 /**
- * A key write in five round trips (T179 PR 3; docs/design/two-trips.md, "A key write"; formal/Writing.tla), the app's
+ * A key write in five round trips (docs/design/two-trips.md, "A key write"; formal/Writing.tla), the app's
  * front door. Served before `authenticate` and the router, as a named use is: the vault's one call reads everything its
  * decision weighs, the caller's rows among them, decides, wraps each data key and prepares each key's change; the app
  * checks the caller's rows' `auth_mac` on what it answered (`authenticateRequest`, reading nothing), and the route then
@@ -32,7 +32,7 @@ import type { CoffreRuntime } from './runtime.ts';
  *
  * Null wherever this path does not serve the request: another route or shape, a token of another kind or refused for
  * its kind alone, a vault that does not serve it (older, mid-deploy; a key service's), or the vault's own
- * `served: false`. The request then goes as ever, and is answered as ever. A refusal of the vault's decision (PR 6) is
+ * `served: false`. The request then goes as ever, and is answered as ever. A refusal of the vault's decision is
  * served: the caller checked on its rows as a served try's, the route answers it as ever, and the vault records it
  * where that answer would append a 0.14 entry (refused.ts): two round trips.
  */
@@ -79,7 +79,7 @@ export function writeAsked(request: Request, body: Uint8Array): WriteAsked | nul
     if (value === null) return null;
     if (typeof value !== 'string' && !('generated' in value && value.generated.pair === undefined && value.sensitivity === undefined)) return null;
     // A regenerate's precondition as a version's id, as the vault takes it: any other string the route takes names no
-    // version, which today's path answers 409 `stale` (review r1 of #469: here, the vault's check of its input, a 500).
+    // version, which today's path answers 409 `stale` (here, the vault's check of its input, a 500).
     if (typeof value !== 'string' && 'replaces' in value && value.replaces !== undefined && !VERSION_ID.test(value.replaces)) return null;
     patch[name] = value;
   }
@@ -95,7 +95,7 @@ export type WriteTry = {
 };
 
 /**
- * A try the vault's decision refused on its read (PR 6): the route answers it, and the vault records it (`RefusalRecord`).
+ * A try the vault's decision refused on its read: the route answers it, and the vault records it (`RefusalRecord`).
  * Its operation, which the record names and an expired ticket's 0.14 entry names too, as today's path's does.
  */
 export type RefusedTry = { refused: RefusalRecord; operationId: string };
@@ -139,8 +139,7 @@ export class Written {
 
   /**
    * Whether a try's read found the place at the environment the route writes to, by its ids: a try asks by the
-   * slugs, which a rename and a new environment of the old name may have moved to another since the first (review r1
-   * of #469). Its read and decision are that other's, so it commits nothing at this one.
+   * slugs, which a rename and a new environment of the old name may have moved to another since the first. Its read and decision are that other's, so it commits nothing at this one.
    */
   at(tried: Tried, environment: { projectId: string; environmentId: string }): boolean {
     const place = this.#placeOf(tried);
@@ -246,7 +245,7 @@ export async function writeAhead(
   let touched: Touch | null = null;
   // The credential checked on the rows the vault answered, its MAC and token's hash among them, its expiry at the
   // vault's `at` (one clock), its standing as the vault decided it (AuthChecked: before anything commits), and what
-  // stands behind a person's, the passkey rows the read answered with it (T216; docs/design/passkeys.md, section 6.4):
+  // stands behind a person's, the passkey rows the read answered with it (docs/design/passkeys.md, section 6.4):
   // refused, 401 `passkey_required` (or 401, 503, as it answers any), nothing written and what the vault prepared
   // dropped, its refusal, if it refused, never recorded.
   const identity = await authenticateRequest(request, runtime, requestId, token, sourceIp, {

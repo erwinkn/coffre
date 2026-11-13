@@ -1,6 +1,6 @@
 // No page of coffre's own asks the audit list for what it leaves out (`hidden`): the audit page, a member's Activity,
 // `coffre audit`, MCP's `read_audit_log` and conformance each ask `sealed` alone, so a page always fills with what it
-// shows, and none counts. A caller that asks follows `next` through pages that may show nothing (T164, review r4).
+// shows, and none counts. A caller that asks follows `next` through pages that may show nothing.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';

@@ -1,5 +1,5 @@
-// A sign-in whose token names a key its service's uploaded keys lack
-// (T98): most likely its cluster rotated them, and every pod is locked out.
+// A sign-in whose token names a key its service's uploaded keys lack:
+// most likely its cluster rotated them, and every pod is locked out.
 // One `workload.alert` and one delivery to the deployment's `alert`, naming
 // the issuer, the key and the fix, at most once an hour per service
 // whatever the key, decided by one conditional write outside any

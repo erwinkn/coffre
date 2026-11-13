@@ -68,7 +68,7 @@ test("ESO's store check and reads: lookup-self, then an environment, logged as o
   // The environment's own version, as `GET /api/projects/market/prod/version` answers it, without a read.
   assert.equal(metadata.custom_metadata.coffre_version, (await clientFor(deps, ROOT).environments.version('market/prod')).version);
 
-  // A use of each key the environment opened, on the token (#242).
+  // A use of each key the environment opened, on the token.
   const uses = await usesLogged(db.owner);
   assert.equal(new Set(uses.map((use) => use.credential)).size, 1, 'one credential, the token');
   const stripe = await keyIds(db.owner, 'STRIPE_KEY');
@@ -90,7 +90,7 @@ test("an environment the token cannot read is Vault's 403, with no value; one th
   const missing = await vault('secret/data/market/nowhere');
   assert.equal(missing.status, 404);
   assert.deepEqual(await missing.json(), { errors: [] });
-  // A key not there is one answer with a key refused (D153): Vault's 403, never 404, which ESO would read as gone.
+  // A key not there is one answer with a key refused: Vault's 403, never 404, which ESO would read as gone.
   const nope = await vault('secret/data/market/prod/NOPE');
   assert.equal(nope.status, 403);
   assert.deepEqual(await nope.json(), { errors: ['permission denied: not available: no such key, or no access to it'] });
@@ -146,7 +146,7 @@ test("a fork that inherits reads its parent's values live, as the API's reveal d
   assert.deepEqual((await body(await vault('secret/data/market/prod-eu', both))).data.data, { ...PROD, REGION: 'eu-west-1' });
   await root.secrets.set('market/prod', { STRIPE_KEY: 'sk_live_rotated' });
   assert.equal((await body(await vault('secret/data/market/prod-eu/STRIPE_KEY', both))).data.data!.STRIPE_KEY, 'sk_live_rotated');
-  // Read on the fork alone: its inherited keys are refused (R8), and nothing is revealed.
+  // Read on the fork alone: its inherited keys are refused, and nothing is revealed.
   await root.access.set('token:eso', { 'market/prod': null });
   const refused = await vault('secret/data/market/prod-eu', both);
   assert.equal(refused.status, 403);

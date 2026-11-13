@@ -1,17 +1,17 @@
 import { ApiError } from './api/errors.ts';
 
 /**
- * A value an isolate asks for once and keeps (T201): the vault's `about()`, the proxy gate's reservation. What it keeps
+ * A value an isolate asks for once and keeps: the vault's `about()`, the proxy gate's reservation. What it keeps
  * is settled values only, never a pending call (AGENTS.md, "What an isolate keeps"): the answer, once there is one, and
  * the attempt under way, a record of when it began and, once it has, how it settled.
  *
  * The first request to find nothing makes the call, an attempt of its own. Each other request that finds an attempt
  * under way joins it: it keeps the attempt's record, polls it on timers of its own, and takes its outcome as its own,
  * the value or the failure. So no request waits on another's I/O, and an outcome reaches only the requests that joined
- * its attempt: a retry's followers never take the failure before it, nor a superseded attempt's late one (review r1 of
- * T201). A call whose request was cancelled before it settled (on Workers, a page that navigates away) leaves its
- * attempt under way, unsettled: a request waiting trusts it `TAKE_OVER_MS`, then makes the call itself, a new attempt,
- * which the others join. A failure is kept only on its attempt: the next request asks again.
+ * its attempt: a retry's followers never take the failure before it, nor a superseded attempt's late one. A call whose
+ * request was cancelled before it settled (on Workers, a page that navigates away) leaves its attempt under way,
+ * unsettled: a request waiting trusts it `TAKE_OVER_MS`, then makes the call itself, a new attempt, which the others
+ * join. A failure is kept only on its attempt: the next request asks again.
  *
  *   an isolate's first request                      1 call
  *   the requests that come while it is under way    no call: each polls its attempt, from 1 ms to every 20 ms
@@ -21,7 +21,7 @@ import { ApiError } from './api/errors.ts';
  *   every request after                             no call
  *
  * Each concurrent first request making its own call instead, a Node deployment's start at 1,000 requests a second
- * queued 200 to 270 of the gate's calls a thread on its vault's pool (8 connections) for 2 s (T201's bench).
+ * queued 200 to 270 of the gate's calls a thread on its vault's pool (8 connections) for 2 s.
  */
 export type AskedOnce<T> = { answer: { value: T } | null; under: Attempt<T> | null };
 
@@ -54,7 +54,7 @@ export async function askOnce<T>(
   // A request that joins one waits WAIT_MS in all. A call it takes over is an attempt of its own, which it waits on as
   // it did on the one it joined: by polling, under the same deadline, so its own call hanging (Workers cancelled the
   // request that made the attempt it took over, and then this call) holds it no longer, nor keeps from it an answer
-  // another attempt gives meanwhile (review r2 of T201).
+  // another attempt gives meanwhile.
   const deadline = Date.now() + waitMs;
   let mine: { attempt: Attempt<T>; settles: Promise<unknown> } | null = null;
   for (let joined: Attempt<T> | null = kept.under, pause = POLL_MS; ; pause = Math.min(2 * pause, POLL_MAX_MS)) {
@@ -89,7 +89,7 @@ export async function askOnce<T>(
     // Its own call, once it made one, wakes it as soon as it settles; another's only on its next poll. Once its own call
     // has settled, in an attempt it no longer waits on (taken over meanwhile, it joined the newer one), its wake has
     // fired for good: raced again, it would answer every poll at once, a loop of microtasks that never yields to a timer
-    // or I/O until the deadline (review r3 of T201). Its rejection stays handled: `settles` caught it.
+    // or I/O until the deadline. Its rejection stays handled: `settles` caught it.
     if (mine?.attempt.settled) mine = null;
     const polled = new Promise((resolve) => setTimeout(resolve, Math.min(pause * (0.5 + Math.random()), deadline - now)));
     await (mine === null ? polled : Promise.race([polled, mine.settles]));

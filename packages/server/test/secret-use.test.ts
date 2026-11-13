@@ -66,7 +66,7 @@ async function refusal(promise: Promise<unknown>): Promise<{ status: number; rea
     await promise;
   } catch (error) {
     const { status, code, reason, message } = error as { status: number; code?: string; reason?: string; message: string };
-    // A key's one refusal says no reason (D153): the app's entry of it does, the newest refusal of a read.
+    // A key's one refusal says no reason: the app's entry of it does, the newest refusal of a read.
     if (code === 'not_available') return { status, reason: await refusedFor(), message };
     return { status, reason: reason ?? null, message };
   }
@@ -89,7 +89,7 @@ test('a Contributor lists the keys and writes values, and is refused every value
   assert.ok(typeof (await contributor.environments.version('market/dev')).version === 'string');
   // A value of their own, written without reading the one before.
   assert.deepEqual(outcomes((await contributor.secrets.set('market/dev', { WEBHOOK: 'whsec_rotated_0123456789' })).keys), { WEBHOOK: { version: 2, sensitivity: 'secret' } });
-  // The environment's read says why; a key's is the one "no" (D153), the why in the app's entry.
+  // The environment's read says why; a key's is the one "no", the why in the app's entry.
   const whole = await refusal(contributor.secrets.reveal('market/dev'));
   assert.equal(whole.status, 403);
   assert.match(whole.message, /without reading them \(secret\.use\)/);
@@ -159,7 +159,7 @@ test('a personal token of a Contributor names contributor, and reaches no read',
   const token = await bearer(session).tokens.issue(`user:${CONTRIBUTOR}`, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'contributor' } });
   const agent = bearer(token.token);
   assert.deepEqual((await agent.secrets.list('market/dev')).keys.map((entry) => entry.key), ['API_KEY', 'REGION', 'WEBHOOK']);
-  // Its reason: the app's, or, by name, the vault's own (D153).
+  // Its reason: the app's, or, by name, the vault's own.
   assert.deepEqual(await refusal(agent.secrets.reveal('market/dev/API_KEY')), { status: 404, reason: 'no_grant', message: NOT_AVAILABLE });
 });
 

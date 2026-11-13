@@ -204,7 +204,7 @@ test("a set past fresh is fetched again during another call's fetch for a key it
   scripted = [refetch.answer];
   const lacked = verify(unknown, KEYS_FRESH_MS - 1000);
   await started(2);
-  // Stale now: fetched again as any stale set, not held up to a minute by the unknown key (review r5 of #565).
+  // Stale now: fetched again as any stale set, not held up to a minute by the unknown key.
   assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1000), { outcome: VERIFIED, fetches: 1 });
   // The minute stays on: a key the new set lacks fetches nothing.
   assert.deepEqual(await verify(unknown, KEYS_FRESH_MS + 1500), { outcome: 'unavailable 58', fetches: 0 });
@@ -466,7 +466,7 @@ test('a key the fresh set lacks is fetched for with a retry, and a timeout leave
   timeouts = 2;
   assert.deepEqual(await verify(unknown, KEYS_COOLDOWN_MS + 2000), { outcome: `unavailable ${KEYS_UNREACHED_MS / 1000}`, fetches: 2 });
   assert.deepEqual(await verify(rotated, KEYS_COOLDOWN_MS + 3000), { outcome: VERIFIED, fetches: 0 });
-  // The failure lifted that fetch's minute: its ten seconds alone hold the next unknown key back (review r8 of #565).
+  // The failure lifted that fetch's minute: its ten seconds alone hold the next unknown key back.
   assert.deepEqual(await verify(unknown, KEYS_COOLDOWN_MS + 7000), { outcome: 'unavailable 5', fetches: 0 });
   assert.deepEqual(await verify(unknown, KEYS_COOLDOWN_MS + 2000 + KEYS_UNREACHED_MS), { outcome: `unavailable ${KEYS_COOLDOWN_MS / 1000}`, fetches: 1 });
 });
@@ -503,7 +503,7 @@ test('an issuer that answers, but not with keys, is not asked again at once, and
   assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });
   answering = 503;
   assert.deepEqual(await verify(known, KEYS_FRESH_MS + 1), { outcome: VERIFIED, fetches: 1 });
-  // A status past 5xx is no moment's: an answer, as a 404 (review r4 of #565).
+  // A status past 5xx is no moment's: an answer, as a 404.
   forgetKeys();
   answering = null;
   assert.deepEqual(await verify(known), { outcome: VERIFIED, fetches: 1 });

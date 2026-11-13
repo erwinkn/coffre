@@ -161,7 +161,7 @@ export async function entries(action: string) {
   return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
 }
 
-/** The proxy's one "no" for a key its request may not have (D153), whichever reason its entry gives. */
+/** The proxy's one "no" for a key its request may not have, whichever reason its entry gives. */
 export const NO = { error: 'credential_proxy', message: 'not available: no such key, or no access to it', reason: 'not_available' };
 
 /** The reason the app's newest refusal of a read gives (`refusedIn`). */

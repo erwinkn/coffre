@@ -256,7 +256,7 @@ test('every entry made with a personal token names its person and the token, the
     .orderBy(asc(auditLog.seq));
   const made = written.filter((row) => JSON.parse(row.metadata).credentialId === issued.id).map((row) => `${row.author} ${row.action}`);
   // The read is a use, its credential the token's: no entry here.
-  // The write goes down the two-trip path, which since 0.16.0 writes no 0.14 entry (T179):
+  // The write goes down the two-trip path, which writes no 0.14 entry:
   // its record is the key's change in 0.15's log, which names her and the token it was decided for.
   assert.deepEqual(made.filter((action) => action === 'app secret.write' || action === 'vault key.wrap'), []);
   const changes = await db.owner.select({ actor: logChanges.actor, payload: logChanges.payload }).from(logChanges)
@@ -264,8 +264,8 @@ test('every entry made with a personal token names its person and the token, the
   assert.deepEqual(changes.map(({ actor, payload }) => [actor, (JSON.parse(payload) as { request: { credential: string } }).request.credential]), [[ADA, issued.id]]);
   assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [issued.id]);
 
-  // The vault issues it (T149), and its change records it (D147): the page lists the change, and the token's label
-  // beside what it made (T164).
+  // The vault issues it, and its change records it: the page lists the change, and the token's label
+  // beside what it made.
   assert.deepEqual((await issuesLogged(db.owner)).map(({ kind, label, targetCredentialId }) => [kind, label, targetCredentialId]), [['personal', 'cursor-agent', issued.id]]);
   const { entries } = await root.audit.list({ actor: ADA, detail: '1', sealed: '1' });
   const create = entries.find((entry) => entry.action === 'token.create')!;
@@ -394,7 +394,7 @@ test("a personal token's label is shown wherever it goes, so it holds no control
   }
   const issued = await ada.tokens.issue(ADA, { label: 'agent', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   await signin.signOut(issued.token, { requestId: 'logout', sourceIp: null });
-  // The vault ends it (T149), and its change, which the page lists (T164), names the token it ends.
+  // The vault ends it, and its change, which the page lists, names the token it ends.
   assert.deepEqual(await revokesLogged(db.owner), [{ actor: ADA, reason: 'sign_out', targetCredentialId: issued.id }]);
   const { entries } = await root.audit.list({ actor: ADA, detail: '1', sealed: '1' });
   const out = entries.find((entry) => entry.action === 'sign_out')!;
@@ -402,7 +402,7 @@ test("a personal token's label is shown wherever it goes, so it holds no control
 });
 
 /**
- * A person's tokens on the audit pages, a page at a time (T164): their issues, revokes and
+ * A person's tokens on the audit pages, a page at a time: their issues, revokes and
  * sign-outs, which 0.15's log records in place of 0.14's detail entries, are left out and counted, each on the page
  * of its own time, between the entries the pages show, never all on the first, though 0.15's
  * log holds no sign-in of a person's to page by. Asked for, they are listed among the rest. Pages tile both logs:
@@ -476,7 +476,7 @@ test("a person's token issues, revokes and sign-outs are counted on the page of 
  * them (`hidden`, asked for) counts no more than that, and shows nothing older than the last it counts, though an
  * entry it would show lies just below; the pages after count the rest, and show it, every one once. A page that does
  * not ask, as every page of coffre's own, counts nothing and shows the entry at once. Planted as the vault writes them,
- * as only the pages are under test (reviews r2, r3, r4 of W261): a person with nothing but their handles, and a
+ * as only the pages are under test: a person with nothing but their handles, and a
  * service whose runs' sign-outs came after an old sign-in.
  */
 test("token records are counted a page's worth at a time, and an entry below them waits for the page that reaches it", async () => {

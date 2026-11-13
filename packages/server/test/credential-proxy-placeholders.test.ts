@@ -140,7 +140,7 @@ test("DFNS's own SDK, its token a JWT placeholder, reads its organization from i
   // The plan opened the real token for its claims, as a use of the credential, logged; the request opened it again.
   watched.stop();
   // The token used for each placeholder that copies its claims (dfns's, and q's), then for the request, the repeats
-  // riding the first's cover. Its row is slim (R53), naming no credential, claim or host.
+  // riding the first's cover. Its row is slim, naming no credential, claim or host.
   const token = await keyIds(db.owner, 'DFNS_AUTH_TOKEN');
   assert.equal(watched.asked.filter((use) => token.includes(use.secretId) && use.purpose === 'use').length, 3);
 });

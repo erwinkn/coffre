@@ -106,7 +106,7 @@ for (const [what, path, init] of sent) deepAnswers.push(await answer(what, path,
 
 // Then a walk that does run out, had inside each entry point: a genuine stack overflow, as one of a value too deep for
 // it throws, where the vault takes a value the API writes, where sign-in starts a device login, and where MCP runs a
-// connection's call (its tool: a connection's calls have no rate of their own to admit since W331, D177).
+// connection's call (its tool: a connection's calls have no rate of their own to admit).
 function overflow(depth = 0): never {
   return overflow(depth + 1);
 }

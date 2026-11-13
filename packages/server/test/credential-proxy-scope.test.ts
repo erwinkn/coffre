@@ -1,8 +1,8 @@
-// What PR B's first review found, each through the plugin's route with a fake
-// coffre and an egress for the upstream: a code item's `environments` on the
-// stable URL when the vault's one call finds nothing by name, a presigned
-// URL's path held to a request's refusals, and rules a later step drops a
-// header of. No database: what is checked is the plugin's own work.
+// Each through the plugin's route with a fake coffre and an egress for the
+// upstream: a code item's `environments` on the stable URL when the vault's
+// one call finds nothing by name, a presigned URL's path held to a request's
+// refusals, and rules a later step drops a header of. No database: what is
+// checked is the plugin's own work.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -176,14 +176,14 @@ test('legacy methods answer before an empty paths, as on 0.15: a request, and a 
     assert.equal(answer.status, status, methods.join());
     assert.match(answer.body, said, methods.join());
   }
-  // Before the other arguments too, as on 0.15: a presign the methods refuse is a 405 however malformed the rest.
+  // Before the other arguments too: a presign the methods refuse is a 405 however malformed the rest.
   const signer = proxy({ upstream: 'https://s3.eu-west-3.amazonaws.com', inject: s3, methods: ['POST'], paths: [] });
   for (const presign of [{ path: '/a', expiresIn: 0 }, {}, { path: 'a' }, { path: '/a', query: 'x' }, { path: '/a/../b' }]) {
     const answer = await signer.ask('/market/dev', { method: 'POST', headers: { authorization: `Bearer ${HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 'api', ...presign } }) });
     assert.equal(answer.status, 405, JSON.stringify(presign));
     assert.match(answer.body, /api takes POST/, JSON.stringify(presign));
   }
-  // A method that is no presign's stays a 400 first, as on 0.15.
+  // A method that is no presign's is a 400 first.
   const put = await signer.ask('/market/dev', { method: 'POST', headers: { authorization: `Bearer ${HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 'api', path: '/a', method: 'PUT' } }) });
   assert.equal(put.status, 400);
 });

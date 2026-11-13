@@ -186,7 +186,7 @@ test('the longest value round-trips, 64 KiB of UTF-8, however many characters it
   assert.equal(values.EUROS, euros);
   const stored = await db.owner.select({ ciphertext: secretVersions.ciphertext }).from(secretVersions);
   assert.deepEqual(stored.map((row) => row.ciphertext.length), [64 * 1024, 64 * 1024]);
-  // A character short of 64 Ki, but past 64 KiB as UTF-8: refused, as it was not before.
+  // A character short of 64 Ki, but past 64 KiB as UTF-8: refused.
   await assert.rejects(root.secrets.set('market/dev', { EUROS: `${euros}€` }), /at most 64 KiB, as UTF-8/);
   await assert.rejects(root.secrets.set('market/dev', { EUROS: '€'.repeat(64 * 1024 - 1) }), /at most 64 KiB, as UTF-8/);
 });
@@ -247,7 +247,7 @@ test('a granted reader can read, and the read is attributed to them', async () =
 });
 
 test('denied and grantless reads are audited', async () => {
-  // A key's one refusal (D153), its reason in the app's entry.
+  // A key's one refusal, its reason in the app's entry.
   await assert.rejects(reader.secrets.reveal('market/prod/ANYTHING'), { status: 404, code: 'not_available' });
   await assert.rejects(outsider.secrets.reveal('market/dev/X'), { status: 404, code: 'not_available' });
   const rows = await auditRows();
@@ -387,7 +387,7 @@ test('ciphertext relocated between environments cannot be decrypted', async () =
   await withTriggersLifted(db.owner, 'secret_versions', (owner) =>
     owner.update(secretVersions).set(envelope).where(eq(secretVersions.id, prod.id)));
   // The vault unwraps a key only as the secret it was wrapped for: dev's key is not prod's.
-  // A key's one refusal (D153), the vault's reason in its own entry.
+  // A key's one refusal, the vault's reason in its own entry.
   await assert.rejects(root.secrets.reveal('market/prod/DATABASE_URL'), { status: 404, code: 'not_available', reason: undefined });
 });
 

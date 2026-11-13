@@ -99,7 +99,7 @@ const NAMED_KINDS: readonly TokenKind[] = ['browser', 'cli', 'personal', 'servic
 /**
  * What a reveal's body names, and where: one key, by its path (`market/dev/API_KEY`, to reveal) or as a list of one
  * (`market/dev`, `keys: ['API_KEY']`, as `coffre export --keys` runs it); or several (`keys` of two or more), or every
- * key the place holds (`market/dev`, as `coffre export` runs it; `keys` null), its several keys by name (T165). Null
+ * key the place holds (`market/dev`, as `coffre export` runs it; `keys` null), its several keys by name. Null
  * for a body the route refuses: the request goes as ever.
  */
 function namedReveal(body: Uint8Array): { place: { project: string; environment: string }; key: string; purpose: Purpose } | { place: { project: string; environment: string }; keys: string[] | null; purpose: Purpose } | null {
@@ -119,7 +119,7 @@ function namedReveal(body: Uint8Array): { place: { project: string; environment:
   } catch {
     return null;
   }
-  // `dev@me` too (T165): the vault finds its caller's personal config of dev, or dev while they have none.
+  // `dev@me` too: the vault finds its caller's personal config of dev, or dev while they have none.
   if (path.environment === undefined) return null;
   const place = { project: path.project, environment: path.environment };
   if (keys === undefined && path.key !== undefined) return { place, key: path.key, purpose: 'reveal' };
@@ -270,7 +270,7 @@ export async function fetchApi(
       ? (token) => authenticateRequest(request, runtime, crypto.randomUUID(), token, options.sourceIp, recall ? { recall: true } : { shows: 'caller' })
       : options.authenticate;
     // A reveal of one key, by its path or as a list of one, with a coffre credential: the vault's one call by name, which
-    // decides on the caller as they are (`useByName`, T145, PR B). Its body is read first, to know the key; only for a
+    // decides on the caller as they are (`useByName`). Its body is read first, to know the key; only for a
     // credential of a kind it serves by name and not refused for its kind alone, read before anything else is.
     let body: Uint8Array<ArrayBuffer> | null = null;
     let named: ApiContext['named'];
@@ -295,7 +295,7 @@ export async function fetchApi(
       }
     }
     // A key write of values with a coffre credential: the vault's one call, which decides on the caller as they are and
-    // prepares the write, that the route then commits in one transaction of two round trips (`writeAhead`, T179 PR 3).
+    // prepares the write, that the route then commits in one transaction of two round trips (`writeAhead`).
     // Its body is read first, to know the keys; only for a request of the shape it serves, and for no caller asked of
     // otherwise above.
     let written: Written | undefined;
@@ -317,7 +317,7 @@ export async function fetchApi(
       }
     }
     // A member's first add with a coffre credential: the vault's read, which decides on the caller as they are and
-    // prepares the add, that the route then hands back to the vault's write of two round trips (`admitAhead`, T179 PR 5).
+    // prepares the add, that the route then hands back to the vault's write of two round trips (`admitAhead`).
     let admission: Admission | undefined;
     if (body === null && !recall && !shows && options.authenticate === undefined && request.method === 'PUT' && runtime.vault.admitRead !== undefined) {
       const credential = apiCredential(request, runtime.auth);

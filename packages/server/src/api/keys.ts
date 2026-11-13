@@ -117,7 +117,7 @@ export async function openValues(
    */
   use?: UseRecord,
   /**
-   * The use of this request's one key the vault made already, by name (`Vault.useNamed`, T145): nothing is opened
+   * The use of this request's one key the vault made already, by name (`Vault.useNamed`): nothing is opened
    * again, and its outcome is the value's, a plain one's text included, which the vault decided as any.
    */
   decided?: Decided | DecidedMany,
@@ -179,13 +179,13 @@ export type OpenItem = {
   holder?: string; holderAt?: { projectId: string; environmentId: string };
 };
 
-/** How many uses one request has in flight at once, with a vault that has no `useMany`: a whole environment's read takes turns, and leaves the isolate's admission room for others (R44). */
+/** How many uses one request has in flight at once, with a vault that has no `useMany`: a whole environment's read takes turns, and leaves the isolate's admission room for others. */
 export const USES_AT_ONCE = 4;
 
 /**
- * 0.15's read (docs/design/0.15-plan.md, PR 5b; T167): each value a use,
- * logged as its request and decided on the rows as its statement reads them
- * (R53). Several values are one vault call, `useMany`, one statement for
+ * 0.15's read (docs/design/0.15-plan.md): each value a use,
+ * logged as its request and decided on the rows as its statement reads them.
+ * Several values are one vault call, `useMany`, one statement for
  * them all (two, when keys enter the caller's cap's set); a vault without
  * it, mid-deploy, makes them one call a value, four at a time. What goes
  * back is the version the app read, opened from the use's envelope: a use
@@ -193,7 +193,7 @@ export const USES_AT_ONCE = 4;
  * version, its natures) is of the same. All or nothing, as 0.14's unwrap
  * answers: the first refusal, in the request's order, refuses the request,
  * and no value of it goes back. A use the vault could not decide (late,
- * over its isolate's calls in flight) answers 503 with `Retry-After` (R44).
+ * over its isolate's calls in flight) answers 503 with `Retry-After`.
  *
  *   Ada's `coffre run` of 9 keys              1 vault call, 1 statement   9 entries, the values
  *   the same, a reference among them ended    1 vault call                403, nothing handed back
@@ -236,7 +236,7 @@ export async function useValues(
   return values;
 }
 
-/** A request's several values as one vault call (`Vault.useMany`, T167; formal/Batching.tla): every one, or the first refused. */
+/** A request's several values as one vault call (`Vault.useMany`; formal/Batching.tla): every one, or the first refused. */
 async function usedTogether(vault: Vault, asked: WayIn & { purpose: Purpose; keepsSensitive: boolean }, items: readonly OpenItem[]): Promise<string[]> {
   const at = Date.now();
   const outcome = await vault.useMany!({
@@ -256,7 +256,7 @@ async function usedTogether(vault: Vault, asked: WayIn & { purpose: Purpose; kee
 function refusedItem(outcome: Exclude<UseOutcome, { ok: true }>, item: OpenItem, purpose: Purpose): ApiError {
   return 'code' in outcome && outcome.number === null && !ASKED_AGAIN.has(outcome.code)
     ? new UnloggedRefusal(refusedUse(outcome), {
-      // The key the use named, where it is held: a reference's own, not its source's (review r4 of D153).
+      // The key the use named, where it is held: a reference's own, not its source's.
       ...(item.holderAt ?? { projectId: item.secret.projectId, environmentId: item.secret.environmentId }), secretId: item.holder ?? item.secret.secretId,
       metadata: { purpose },
     })
@@ -301,11 +301,11 @@ export type Decided = { secretId: string | null; outcome: Extract<NamedUseOutcom
 function decidedValues({ secretId, outcome }: Decided, items: readonly OpenItem[]): Keyed<string> & { used?: true; stood: true } {
   // Nothing of it going back (a key the place does not hold, a person's sensitive value a list leaves out): its outcome,
   // logged as the vault decided it, refuses nothing more. The vault wrote no use of a key it does not hold: the app's
-  // own entry records the request, as before (review r1).
+  // own entry records the request.
   if (items.length === 0) return { ok: true, values: [], stood: true };
   if (!outcome.ok) throw refusedUse(outcome);
   const values = items.map((item) => {
-    // Another key than the one the vault decided: renamed between the vault's read and the app's. Asked again, the request reads both anew (Fable's review of D153).
+    // Another key than the one the vault decided: renamed between the vault's read and the app's. Asked again, the request reads both anew.
     if ((item.holder ?? item.secret.secretId) !== secretId) throw changed();
     if ('plain' in outcome) {
       if (outcome.versionId !== item.secretVersionId) throw changed();
@@ -319,7 +319,7 @@ function decidedValues({ secretId, outcome }: Decided, items: readonly OpenItem[
 }
 
 /**
- * A request's several keys the vault decided already, by name (`Vault.useNamedMany`, T165, B2's PR 2): each key it
+ * A request's several keys the vault decided already, by name (`Vault.useNamedMany`): each key it
  * covered, with its id and where it is held; whether the caller stands at the place, its chain whole; and, all or
  * nothing, each key's value, or the first refused, or busy. The read decides on the rows the vault answered, and opens
  * nothing again.
@@ -387,7 +387,7 @@ export function refusedUse(outcome: Exclude<UseOutcome, { ok: true }>): ApiError
 }
 
 /**
- * Why a use was not decided, said to its caller (T170): never that coffre cannot reach what it depends on, which
+ * Why a use was not decided, said to its caller: never that coffre cannot reach what it depends on, which
  * hides an isolate's admission full or a deadline lost. The reason stays `busy`, which clients already ask again on
  * (the CLI's `momentary`), as for a change refused busy.
  */

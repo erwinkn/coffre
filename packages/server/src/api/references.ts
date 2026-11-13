@@ -174,11 +174,11 @@ export type ArchivedPlace = { projectId: string; environmentId?: string; secretI
 
 /**
  * The live references that read a secret in `place` from outside it: what
- * archiving it would break, which it is refused while any read (D41). Live
+ * archiving it would break, which it is refused while any read. Live
  * as the lists decide, by the vault's seal and its `reference.end`: a row
  * without a seal is no reference, and blocks nothing. One held inside the
  * place is archived with it, and breaks nobody's run; nor does one held in
- * a key, environment or project archived already (D58): if its holder is
+ * a key, environment or project archived already: if its holder is
  * restored later, it shows its source archived, and reads refuse saying so.
  * Asked under the log's head, with the archive's own write, so that none is
  * made, and no holder restored, meanwhile.
@@ -211,7 +211,7 @@ export function archiveRefused(what: string, readers: readonly Resolved[]): stri
 }
 
 /**
- * Refuse to archive what live references read from elsewhere (D41): under
+ * Refuse to archive what live references read from elsewhere: under
  * the log's head, in the archive's own transaction, so that none is made
  * meanwhile. Restoring is never refused. `what` is the project's or the
  * environment's path; archiving keys, the refusal names those read, as its
@@ -297,7 +297,7 @@ export type Readable = {
 
 /**
  * The key a read of `item` is decided as, as the vault decides it: where it is held, by its own id, a reference's at
- * its holder as any key held there (R71), never at its source; an inherited key at its parent.
+ * its holder as any key held there, never at its source; an inherited key at its parent.
  */
 export function heldKey(item: Pick<Readable, 'secret' | 'holder' | 'holderAt'>): HeldKey {
   return item.holder === undefined || item.holderAt === undefined ? item.secret : { ...item.holderAt, secretId: item.holder };
@@ -335,9 +335,9 @@ export async function readableValues(
    */
   ahead?: readonly SecretRow[],
   /**
-   * A fork's, or a personal config's, one key the vault's call by name used already (T165): `key`, its row in `ahead`,
+   * A fork's, or a personal config's, one key the vault's call by name used already: `key`, its row in `ahead`,
    * and `held`, where it is held, null for the place itself. The vault resolved it through the place's layers and
-   * decided it there, in its one statement: its rows are the read's, and no layer is read again (R42).
+   * decided it there, in its one statement: its rows are the read's, and no layer is read again.
    */
   decided?: Held | { keys: readonly Held[] },
 ): Promise<{ items: Readable[]; unreadable: Unreadable[]; hollow: Hollow[] }> {
@@ -351,7 +351,7 @@ export type Held = { key: string; held: { environmentId: string; slug: string } 
 
 /**
  * `readableValues` of a place with a parent, its keys as the vault's named use resolved and decided them (one, or a
- * named batch's, T165): each key's own layer alone, from the rows the use read, an inherited one read through the place,
+ * named batch's): each key's own layer alone, from the rows the use read, an inherited one read through the place,
  * as `resolveValues` names it. Sorted by name, as `resolveValues` sorts them.
  */
 async function decidedValues(
@@ -516,7 +516,7 @@ export type ListedReference = ReferenceView & {
   readers: string[] | null;
   /** Whether the caller may break it: writing its holder, or managing its source's project's access. */
   canBreak: boolean;
-  /** Whether its holder is archived, itself or with its environment or project: it reads nothing, and blocks no archive of its source (D58). */
+  /** Whether its holder is archived, itself or with its environment or project: it reads nothing, and blocks no archive of its source. */
   holderArchived: boolean;
 };
 

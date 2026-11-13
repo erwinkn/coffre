@@ -1,5 +1,5 @@
-// Reads on every audit list (T166). A read writes no 0.14 `secret.read` entry:
-// its use is the record (R53), which the vault's projector lists once a pair
+// Reads on every audit list. A read writes no 0.14 `secret.read` entry:
+// its use is the record, which the vault's projector lists once a pair
 // seals it (`log_reads`), and the audit lists show each where that entry
 // stood, with who read what, which version, for what and through what, at the
 // places and by the members the list asks for, every one vouched for by the
@@ -158,7 +158,7 @@ test("a reader of some places sees on a place's page the reads at places they re
     assert.deepEqual(reads(await every(bob, { path })), shown, path);
   }
   // A place he does not read lists none of its reads, not even as where a page stopped: no `next` walks prod's reads,
-  // their times and numbers (Fable's review).
+  // their times and numbers.
   const outside = async (paths: readonly string[]) => {
     for (const path of paths) {
       const page = await bob.audit.list({ path, sealed: '1', limit: 1 });
@@ -204,7 +204,7 @@ test("a reader of some places sees the reads at them on each place's page, and o
   const bobs = bearer((await bob.tokens.issue(BOB, { label: 'bob', expiresInMinutes: 60, scope: { market: 'viewer' } })).token);
   await bobs.secrets.reveal('market/prod/OTHER');
   assert.deepEqual(reads(await every(bob, { actor: BOB })), [`bob@acme.example market/prod/OTHER v1 reveal 0.15`], 'his own reads');
-  // However he names himself, and only his (review r6): `bob@acme.example` asks for `token:bob@acme.example` too.
+  // However he names himself, and only his: `bob@acme.example` asks for `token:bob@acme.example` too.
   assert.deepEqual(reads(await every(bob, { actor: 'bob@acme.example' })), [`bob@acme.example market/prod/OTHER v1 reveal 0.15`], 'named bare');
   for (const query of [{}, { actor: ADA }]) {
     assert.deepEqual(reads(await every(bob, query)), [], JSON.stringify(query));
@@ -300,10 +300,10 @@ test('a read the vault does not vouch for is shown forged: edited, renumbered, o
   await db.owner.update(logReadsCursor).set({ through: 1_000_000n });
   const { reads } = await root.audit.list({ sealed: '1', limit: 10 });
   assert.deepEqual([reads?.forged, reads?.behind], [true, true]);
-  // Her report says so too, by the vault's word on the cursor, not its number (review r7).
+  // Her report says so too, by the vault's word on the cursor, not its number.
   const moved = await root.members.get(ADA);
   assert.deepEqual([moved.reads?.forged, moved.reads?.behind], [true, true]);
-  // Or deletes it: no page, report or check takes that for a projection yet to start (review r6).
+  // Or deletes it: no page, report or check takes that for a projection yet to start.
   await db.owner.delete(logReadsCursor);
   const gone = await root.audit.list({ sealed: '1', limit: 10 });
   assert.deepEqual([gone.reads?.forged, gone.reads?.behind], [true, true]);
@@ -423,8 +423,8 @@ test("a read waits to be listed until the projector writes it, and the page says
   const waiting = await root.audit.list({ sealed: '1', limit: 50 });
   assert.equal(waiting.entries.filter((entry) => entry.action === 'secret.read').length, 0);
   assert.equal(waiting.reads?.through, null);
-  // Her report names nothing to rotate yet, and says it is behind, at once: an offboarding never reads it as all there is
-  // (review r4); the removed members' counts the same.
+  // Her report names nothing to rotate yet, and says it is behind, at once: an offboarding never reads it as all there is;
+  // the removed members' counts the same.
   const report = await root.members.get(ADA);
   assert.deepEqual([report.exposed.length, report.reads?.behind], [0, true]);
   await signer!.projected();
@@ -446,7 +446,7 @@ test("a listing stopped behind its newest pair says so once that pair is a few s
   assert.equal(readsListed(standing(8n, now - 100, now - 200), false, { strict: true })?.behind, true);
   // No pair at all: no listing to speak of.
   assert.equal(readsListed({ ...standing(0n, 0, 0), sealed: null, sealedAt: null }, false), null);
-  // The cursor's row gone: forged, behind, whatever it would have said (review r6).
+  // The cursor's row gone: forged, behind, whatever it would have said.
   assert.deepEqual(readsListed({ ...standing(10n, now, now), missing: true }, false), { through: new Date(now).toISOString(), behind: true, forged: true });
 });
 

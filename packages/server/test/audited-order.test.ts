@@ -1,6 +1,6 @@
-// `audited` asks the head, its read, the policy and the work's first statements together, under one Sync (T179): the
+// `audited` asks the head, its read, the policy and the work's first statements together, under one Sync: the
 // policy is read before anything the work writes, even a first write it leaves to `later`, so that a write of its own
-// is never mistaken for a change to the policy (review r8 of #452).
+// is never mistaken for a change to the policy.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -60,7 +60,7 @@ test("a factor lock that fails fails the work with its own error, the head's que
     await holding;
     const work = audited(ctx, async () => 'done', null, ROOT);
     // Heard from the start: the cancel below is the test's own query, on its own connection, and the work's refusal may
-    // reach this process before that query's answer does; left unheard until then, it is an unhandled rejection (T238).
+    // reach this process before that query's answer does; left unheard until then, it is an unhandled rejection.
     // The factor lock's own error, 57014, not the head's 25P02.
     const refused = assert.rejects(work, (error: unknown) => (error as { cause?: { code?: unknown } }).cause?.code === '57014');
     // The work's factor lock waits; cancelled, as a `lock_timeout` ends it, the head's statement behind it fails 25P02.

@@ -63,7 +63,7 @@ beforeEach(async () => {
 });
 
 const ref = (path: string) => ({ ref: path });
-/** A key's one refusal (D153), as `refusal` gives it. */
+/** A key's one refusal, as `refusal` gives it. */
 const NO = '404: not available: no such key, or no access to it';
 const refusal = (call: Promise<unknown>) => call.then(() => 'let through', (error: { status?: number; message?: string }) => `${error.status}: ${error.message}`);
 
@@ -265,7 +265,7 @@ test("a reference held in the place being archived blocks nothing; a forged row 
 
 test('a reference held in an archived place blocks nothing; its holder restored, it shows its source archived, and reads refuse saying so (D58)', async () => {
   await ada.secrets.set('billing/prod', { DATABASE_URL: ref('market/prod/DATABASE_URL'), STRIPE_KEY: ref('market/prod/STRIPE_KEY') });
-  // A key's read is the one "no" (D153), its reason in the app's entry; the environment's, and its list, say why.
+  // A key's read is the one "no", its reason in the app's entry; the environment's, and its list, say why.
   const archivedSource = async () => [await refusal(bo.secrets.reveal('billing/prod/DATABASE_URL')), await refusedIn(db.owner)];
 
   // Its environment archived, nobody reads through it: the source's environment archives.

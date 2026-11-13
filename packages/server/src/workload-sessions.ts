@@ -85,7 +85,7 @@ export type SessionAsk = {
   place: string | null;
   credential: string | null;
   /**
-   * With `place` null, the path the URL's other reading names (`/use/<a>/<b>/<c>/…`, a UI route's, T186 PR C2b): the
+   * With `place` null, the path the URL's other reading names (`/use/<a>/<b>/<c>/…`, a UI route's): the
    * session's one environment is the one it uses unless it reaches none or several, or that one is at this path, when
    * the request is refused as `OtherReading`, before its gate, for the caller to ask again by that reading.
    */
@@ -110,8 +110,8 @@ export type SessionAsk = {
 
 /**
  * A request's counts, as they are, or made once authentication says who sends it and where (`CountsAt`): a limit per
- * workload needs the service (`token:<name>`), and a UI route's limit the place, whose item says it (T186 PR C2b;
- * docs/design/proxy-ui.md, section 3, "Workloads"). Made only for a proof that carries the gate's nonce, just before
+ * workload needs the service (`token:<name>`), and a UI route's limit the place, whose item says it
+ * (docs/design/proxy-ui.md, section 3, "Workloads"). Made only for a proof that carries the gate's nonce, just before
  * the gate takes them: a request refused before costs nothing a function does.
  */
 export type GateCounts = readonly GateCount[] | ((at: CountsAt) => readonly GateCount[] | Promise<readonly GateCount[]>);
@@ -362,7 +362,7 @@ async function sessionRowsFor(runtime: Pick<CoffreRuntime, 'db' | 'chainKey'>, t
   const { credential: row, binding, now } = own;
   if (!checkAuthRow(runtime.chainKey, 'credentials', row) || !live(row, now)) throw unknown();
   if (own.memberStatus !== 'active' || own.memberGeneration !== row.generation) throw unknown();
-  // A binding a removal closed (W331) stands for none of its sessions from then on, renewal included: they end as its
+  // A binding a removal closed stands for none of its sessions from then on, renewal included: they end as its
   // sign-ins do, at the close, not when the removal reaches their batch, which on Workers may be a scheduled run later.
   if (
     binding === null || own.bindingTombstoned || binding.revokedAt !== null || binding.closedAt !== null || binding.policy === null

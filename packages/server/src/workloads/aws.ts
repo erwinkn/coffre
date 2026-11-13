@@ -31,7 +31,7 @@ export type AwsProofInput = { url: string; headers: Record<string, string>; body
 
 /** The one request STS answers this proof by. */
 export const GET_CALLER_IDENTITY = 'Action=GetCallerIdentity&Version=2011-06-15';
-/** `x-amz-date`'s distance from now, either way; STS itself refuses past 15 minutes. Five minutes is Erwin's (#501 D3). */
+/** `x-amz-date`'s distance from now, either way; STS itself refuses past 15 minutes; coffre takes five. */
 export const MAX_SKEW_MS = 5 * 60 * 1000;
 /** The longest header value forwarded; a role's session token is a few kilobytes at most. */
 const MAX_HEADER_BYTES = 8 * 1024;
@@ -254,7 +254,7 @@ export function matchAwsBinding(bindings: readonly BindingRow[], identity: AwsId
   return bindings.find((row) => row.profile === 'aws' && differingClaims('aws', JSON.parse(row.claims), claims).length === 0) ?? null;
 }
 
-/** A service's live `aws` bindings, but those a removal under way closed (W331): they sign nobody in, and shadow none. */
+/** A service's live `aws` bindings, but those a removal under way closed: they sign nobody in, and shadow none. */
 async function awsBindings(ctx: ProofContext): Promise<BindingRow[]> {
   const standing = await memberStanding(ctx.db, ctx.service);
   if (standing === null || standing.status !== 'active') return [];
@@ -286,7 +286,7 @@ export function awsProof(options: AwsProofOptions = {}): ProofKind {
       if (request instanceof ExchangeRefused) return request;
       const live = await awsBindings(ctx);
       if (live.length === 0) return new ExchangeRefused('no_match', `${ctx.service.slice('token:'.length)} has no aws binding`);
-      // Those made on this instance's URL: one made on another shadows none that was (review r2).
+      // Those made on this instance's URL: one made on another shadows none that was.
       const bindings = live.filter((binding) => madeHere(binding, ctx.publicUrl));
       if (bindings.length === 0) return madeElsewhere(live[live.length - 1]!, ctx.publicUrl);
       let identity: AwsIdentity | ExchangeRefused;

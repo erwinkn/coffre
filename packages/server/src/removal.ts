@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { VaultEntry } from '@coffre/core/vault';
 
 /**
- * What one request, or one scheduled run, may spend removing bindings in batches (W331; formal/Unbinding.tla;
+ * What one request, or one scheduled run, may spend removing bindings in batches (formal/Unbinding.tla;
  * `#bindingsByVault` in api/workloads.ts): how many credentials one vault call revokes, and whether it may make one
  * more such call. Past it, the removal answers that it is under way (`RemovalUnderWay`, a 202), its binding closed, for
  * the person's next request, or the next scheduled run, to go on with. Null on Node, where nothing bounds a request's
@@ -23,7 +23,7 @@ export type RemovalBudget = {
  *   towards this limit. Subsequent calls will throw an exception." (developers.cloudflare.com/workers/runtime-apis/
  *   bindings/service-bindings/#limits, 2026-11-06). Counted, not guessed: every call the request made to its vault so
  *   far (`countedVault`), and `after`, those it makes once the removal ends.
- * - CPU, a policy: R27 holds a request to 10 ms at the median, 20 at p99; a removal's call is held to 10, Workers
+ * - CPU, a policy: coffre holds a request to 10 ms at the median, 20 at p99; a removal's call is held to 10, Workers
  *   Free's hard limit an invocation, because one over it is killed (1102) on every try, and its binding could never be
  *   removed. A vault call costs `VAULT_CALL_FIXED_MS` and `VAULT_MS_PER_CREDENTIAL` a credential; the app's request
  *   `APP_REQUEST_FIXED_MS`, and `APP_MS_PER_CREDENTIAL` a credential it names.
@@ -60,7 +60,7 @@ const WORKERS_BATCHES = Math.floor((CPU_MS - APP_REQUEST_FIXED_MS) / (WORKERS_BA
 /**
  * The vault's entry, every call to it counted for the Worker invocation it is made in, of which one makes 32 at most:
  * one counted entry for each entry, so that the vault `versioned` makes of it is the isolate's one, which the isolate's
- * caches key on (`keeping`, the proxy's `GATES`; review r8), while each invocation counts its own calls, the
+ * caches key on (`keeping`, the proxy's `GATES`), while each invocation counts its own calls, the
  * isolate's requests running interleaved (`countingCalls`).
  */
 export function countedEntry(entry: VaultEntry): VaultEntry {
@@ -93,13 +93,13 @@ const INVOCATION = new AsyncLocalStorage<{ calls: number }>();
 /**
  * A removal not yet finished in this request, its binding closed: `left`, what its request has still to do, the
  * credentials to revoke and the bindings to end, of every binding it ends (a replacement of keys, several), so that it
- * falls with each request asked again that does any of it (the client holds it to falling, review r8).
+ * falls with each request asked again that does any of it (the client holds it to falling).
  */
 export class RemovalUnderWay extends Error {
   readonly left: number;
   /**
    * Whether this request made any of the removal's calls: one made inside another, whose calls are spent, made none,
-   * and asking it again would not either, however `left` falls as credentials end on their own (Fable on #520).
+   * and asking it again would not either, however `left` falls as credentials end on their own.
    */
   readonly progressed: boolean;
   constructor(left: number, progressed: boolean) {

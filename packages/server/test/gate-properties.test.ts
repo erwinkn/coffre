@@ -6,7 +6,7 @@ import * as gs from '@hegeldev/hegel/generators';
 import { DURABLE_WINDOW_MS, EPOCH_MS, GateState, SKEW_MS, type Count as Stored } from '../src/gate.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 
-// The gate of docs/design/workload-access.md (section 5.2, PR 1b), against
+// The gate of docs/design/workload-access.md (section 5.2), against
 // a reference written from the design rather than from the code: random
 // sequences of requests, clock steps both ways, restarts, and, for a
 // Durable Object's gate, writes of its counts and evictions; every answer

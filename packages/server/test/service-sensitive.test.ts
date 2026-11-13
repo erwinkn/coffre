@@ -1,5 +1,5 @@
 // A service account reads a sensitive value only on a token or trust binding
-// an Owner of its project issued (R32, `readsSensitive` in @coffre/core):
+// an Owner of its project issued (`readsSensitive` in @coffre/core):
 // nobody who cannot read one gets it through an account they set up, nor
 // through a value made sensitive after they issued its credential. Everyone
 // else's tokens and bindings read every other value, as before, and are told
@@ -108,7 +108,7 @@ async function read(token: string, path: string): Promise<string> {
     return Object.values(values).join();
   } catch (error) {
     const { status, code, reason } = error as { status: number; code?: string; reason?: string };
-    // A key's one refusal says no reason (D153): the app's entry of it does, the newest refusal of a read.
+    // A key's one refusal says no reason: the app's entry of it does, the newest refusal of a read.
     if (code === 'not_available') return `${status} ${await refusedFor()}`;
     return `${status} ${reason ?? ''}`.trim();
   }
@@ -159,7 +159,7 @@ test("a Developer's service account reads every value of backend/dev but its sen
     message: 'backend/dev holds STRIPE_SECRET_KEY, sensitive: a service account reads it only on a token or trust binding an Owner of backend issued',
   });
   // Refused, and logged once each, by the app, naming the key: the app's own refusal, or, the key's read by name (0.15's
-  // log), the vault's, which the app logs reading nothing more of the key (D153).
+  // log), the vault's, which the app logs reading nothing more of the key.
   const refused = await db.owner.select({ author: auditLog.author, actor: auditLog.actor, metadata: auditLog.metadata })
     .from(auditLog).where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'deny'))).orderBy(asc(auditLog.seq));
   assert.deepEqual(refused.map((entry) => {
@@ -199,7 +199,7 @@ test("an Owner's token reads the sensitive values, of the instance or of the pro
   assert.deepEqual(issued.withheld, ['backend/dev']);
   assert.equal(await read(issued.token, 'billing/dev/BILLING_KEY'), 'bk_0123456789');
   assert.equal(await read(issued.token, 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
-  // A token's record says, place by place, whether it reads them: the vault's change (T149, D147).
+  // A token's record says, place by place, whether it reads them: the vault's change.
   const changes = (await db.owner.select({ payload: logChanges.payload }).from(logChanges).orderBy(asc(logChanges.number)))
     .map(({ payload }) => JSON.parse(payload) as { issue?: { by: string }; scope: { sensitive: boolean }[] })
     .flatMap((change) => (change.issue === undefined ? [] : [{ actor: change.issue.by, scope: change.scope }]));
@@ -283,7 +283,7 @@ test("a reference counts toward what a credential will not read while it is its 
   await root.secrets.set('backend/staging', { ARCHIVED: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
   await root.secrets.set('backend/staging', { ARCHIVED: null });
   assert.deepEqual(await withheld(), [], 'archived, it reads nothing');
-  // Their reference rows stay: a read of those rows by the holder's environment counted all three (T214).
+  // Their reference rows stay: a read of those rows by the holder's environment counted all three.
   assert.equal((await db.owner.select().from(secretReferences)).length, 4);
   // Broken, it still counts, on either log: a hint, which reads no reference's end.
   await root.secrets.set('backend/staging', { BROKEN: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
@@ -292,7 +292,7 @@ test("a reference counts toward what a credential will not read while it is its 
 });
 
 test("a reference into another project is read as its holder's own key (R71): an Owner of the holder's project gives a service its sensitive value, a Developer there does not", async () => {
-  // Bo, an Owner of billing and a Developer of backend, refers billing/dev to backend's sensitive key, as a reader of it may (R24).
+  // Bo, an Owner of billing and a Developer of backend, refers billing/dev to backend's sensitive key, as a reader of it may.
   await bo.secrets.set('billing/dev', { LEAK: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
   await bo.members.add('token:bo-ci');
   await bo.access.set('token:bo-ci', { 'billing/dev': 'viewer' });
@@ -332,7 +332,7 @@ test("forking a reference to another project's sensitive value copies it, still 
   assert.equal(made.forked?.references, 0, 'copied, as every key of a fork that asks for no references');
   const listed = (await carla.secrets.list('billing/dev2')).keys.find((key) => key.key === 'LEAK')!;
   assert.deepEqual([listed.reference, listed.sensitivity], [null, 'sensitive']);
-  // R16: nobody reveals it as a person; R32: a service token of billing's that an Owner of billing issued reads it.
+  // Nobody reveals it as a person; a service token of billing's that an Owner of billing issued reads it.
   await assert.rejects(carla.secrets.reveal('billing/dev2/LEAK'), { status: 404, code: 'not_available' });
   await carla.members.add('token:carla-ci');
   await carla.access.set('token:carla-ci', { 'billing/dev2': 'viewer' });

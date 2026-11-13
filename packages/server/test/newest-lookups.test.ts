@@ -1,5 +1,5 @@
 // The server's reads of the newest entries of a kind (or the first, or a page back by `seq`) cost the same however long
-// the run of other entries since (T245, R48), as the vault's do (`packages/vault/test/newest-lookups.test.ts`, which says
+// the run of other entries since, as the vault's do (`packages/vault/test/newest-lookups.test.ts`, which says
 // why): each against a run of its kind, then a long tail of others that the same walk back by `seq` would read. Each read
 // must take the index it names and read at most `PAGES`. `packages/db/test/newest-lookups.test.ts`
 // holds every such read in the sources to being one of these, or the vault's.
@@ -31,7 +31,7 @@ const TAIL = 20_000;
 
 type Rows = { author: 'app' | 'vault'; action: string; decision?: 'allow' | 'deny'; code?: string; key?: string; count?: number; signs?: boolean; actor?: string; subject?: string; metadata?: string };
 
-/** Changes of one object in 0.15's log, by its key (`logObject`), each with `payload`. */
+/** Changes of one object in `log_changes`, by its key (`logObject`), each with `payload`. */
 type Changes = { object: string; count?: number; payload?: string };
 
 type Lookup = {
@@ -39,7 +39,7 @@ type Lookup = {
   head?: Rows[];
   run?: Rows;
   tail: Rows[];
-  /** 0.15's log after the audit log's history, oldest first. */
+  /** `log_changes` after the audit log's history, oldest first. */
   changes?: Changes[];
   /** The indexes its statements on the audit log take: each takes one of them. */
   indexes: string[];
@@ -120,8 +120,8 @@ const LOOKUPS: Lookup[] = [
     },
   },
   {
-    // A credential's first change, its sign-in, behind a long run of another object's changes before it (Sol r7 of
-    // #556): the oldest of the object's, not the oldest of all.
+    // A credential's first change, its sign-in, behind a long run of another object's changes before it: the
+    // oldest of the object's, not the oldest of all.
     name: 'originsOf',
     tail: [],
     changes: [
@@ -135,7 +135,7 @@ const LOOKUPS: Lookup[] = [
     },
   },
   {
-    // Whether a member no row names is one the logs hold (`EXISTS` gates, review r8): of 0.15's changes, by the object's
+    // Whether a member no row names is one the logs hold (`EXISTS` gates): of `log_changes`, by the object's
     // index, behind a long run of another's; of the allowed access entries, by `audit_log_access_idx`, behind a long run
     // about another member and refusals about this one. Members no other case adds a row for.
     name: 'missingMembers',
@@ -149,7 +149,7 @@ const LOOKUPS: Lookup[] = [
     },
   },
   {
-    // Whether a binding has a tombstone (`EXISTS`, review r8): one probe of `audit_log_unbind_idx` keyed by the binding,
+    // Whether a binding has a tombstone (`EXISTS`): one probe of `audit_log_unbind_idx` keyed by the binding,
     // past a long run of other bindings' unbinds.
     name: 'hasTombstone',
     run: { author: 'app', action: 'token.unbind', metadata: JSON.stringify({ bindingId: 'binding:other' }) },
@@ -188,7 +188,7 @@ async function append(entries: Rows): Promise<void> {
   }
 }
 
-/** Appends `count` changes of `object` to 0.15's log, after its newest, as the owner with its triggers lifted. */
+/** Appends `count` changes of `object` to `log_changes`, after its newest, as the owner with its triggers lifted. */
 async function appendChanges({ object, count = RUN, payload = '{}' }: Changes): Promise<void> {
   const uuid = sql`CAST(${object} AS uuid)`;
   for (let left = count; left > 0; left -= 20_000) {

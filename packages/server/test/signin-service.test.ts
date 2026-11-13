@@ -539,7 +539,7 @@ test('signing out revokes that credential only, once, and is audited', async () 
   assert.equal(revoked.revokedBy, DEV);
 
   const rows = await auditRows();
-  // The vault ends it (T149), and its change records the sign-out (D147).
+  // The vault ends it, and its change records the sign-out.
   assert.deepEqual(rows.map((row) => `${row.action} ${row.decision} ${row.actorId}`), [
     `account.link allow ${DEV}`,
     `sign_in allow ${DEV}`,
@@ -553,8 +553,8 @@ test('sign-ins stay in the log, and the audit list shows them only when asked', 
   await signin.completeSignin(profile('github', '9001', ['stranger@example.com']), meta());
   await signin.signOut(kept.credential.token, { requestId: randomUUID(), sourceIp: IP });
 
-  // Asked as every client of this release asks it (`sealed`): the sign-out is the vault's change (T149, D147), which the
-  // page lists in the place of an app entry, and counts where it hides it (T164).
+  // Asked as every client of this release asks it (`sealed`): the sign-out is the vault's change, which the
+  // page lists in the place of an app entry, and counts where it hides it.
   const audit = clientFor(deps, ROOT).audit;
   const all = (await audit.list({ detail: '1', sealed: '1' })).entries;
   assert.deepEqual(all.slice(0, 4).map((entry) => `${entry.log} ${entry.action} ${entry.decision} ${entry.detail}`), [
@@ -568,7 +568,7 @@ test('sign-ins stay in the log, and the audit list shows them only when asked', 
   assert.ok(shown.length > 0);
   assert.deepEqual(shown.map((entry) => entry.seq), all.filter((entry) => !entry.detail).map((entry) => entry.seq));
   // Filtered by the query, so a page of one is not an empty page. Counted when asked (`hidden`), as no page of
-  // coffre's own asks, and not otherwise (T164).
+  // coffre's own asks, and not otherwise.
   assert.equal((await audit.list({ limit: 1, sealed: '1' })).hidden, undefined);
   const first = await audit.list({ limit: 1, sealed: '1', hidden: '1' });
   assert.deepEqual(first.entries.map((entry) => entry.seq), [shown[0].seq]);
@@ -615,7 +615,7 @@ test('people revoke their own credentials; only owners revoke anyone else\'s', a
   );
 
   const rows = (await auditRows()).slice(setup);
-  // Each refusal is the app's entry; each revoke is the vault's change (T149), naming whose credential of what kind (D147).
+  // Each refusal is the app's entry; each revoke is the vault's change, naming whose credential of what kind.
   assert.deepEqual(
     rows.map((row) => [row.action, row.decision, row.actorId, row.metadata.reason ?? null]),
     [
@@ -630,7 +630,7 @@ test('people revoke their own credentials; only owners revoke anyone else\'s', a
     { actor: `user:${LEAD}`, reason: 'revoke', targetCredentialId: devSession.credential.id },
     { actor: `user:${ROOT}`, reason: 'revoke', targetCredentialId: token.id },
   ]);
-  // The audit page shows each as an app entry would, the change in its place (T164).
+  // The audit page shows each as an app entry would, the change in its place.
   const shown = (await clientFor(deps, ROOT).audit.list({ detail: '1', sealed: '1', decision: 'allow' })).entries.filter((entry) => entry.action === 'token.revoke');
   assert.deepEqual(shown.reverse().map(({ log, actorId, metadata }) => [log, actorId, metadata.targetCredentialId, metadata.kind, metadata.principalType, metadata.principalId]), [
     ['0.15', DEV, devOther.credential.id, 'browser', 'user', DEV],
@@ -804,7 +804,7 @@ test('owners issue service tokens that verify as the service', async () => {
     credentialId: issued.id,
     credentialGeneration: 0,
     exchanged: false,
-    // An Admin issued it, no Owner: it reads no sensitive value (R32).
+    // An Admin issued it, no Owner: it reads no sensitive value.
     credentialScope: [{ projectId: reads, environmentId: null, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] }, sensitive: false }],
     personalToken: null,
     handlePlaces: null,
@@ -825,7 +825,7 @@ test('owners issue service tokens that verify as the service', async () => {
   assert.equal(row.createdBy, LEAD);
   assert.equal(row.label, 'deploys');
 
-  // The vault issues them (T149), and its changes record who issued which (D147).
+  // The vault issues them, and its changes record who issued which.
   const created = {
     kind: 'service',
     principalType: 'service',
@@ -839,7 +839,7 @@ test('owners issue service tokens that verify as the service', async () => {
     [`user:${LEAD}`, 'service', issued.id],
     [`user:${ROOT}`, 'service', byRoot.id],
   ]);
-  // The audit page shows it as an app entry would, the change in its place (T164).
+  // The audit page shows it as an app entry would, the change in its place.
   const shown = (await clientFor(deps, ROOT).audit.list({ detail: '1', sealed: '1' })).entries.filter((entry) => entry.action === 'token.create');
   assert.deepEqual(shown.map((entry) => [entry.log, entry.actorId, entry.detail]), [['0.15', ROOT, true], ['0.15', LEAD, true]]);
   assert.deepEqual(Object.fromEntries(Object.keys(created).map((name) => [name, shown[1]!.metadata[name]])), created);
@@ -880,7 +880,7 @@ test('only those who manage a service account issue its tokens, for active servi
   }
   assert.equal(await countRows(credentials), 0);
 
-  // A deployment may hold tokens to fewer days (R76): its maximum, never a day more.
+  // A deployment may hold tokens to fewer days: its maximum, never a day more.
   const shorter = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: { ...CONFIG, serviceTokenMaxDays: 30 } });
   await assert.rejects(shorter.issueServiceToken(lead, SERVICE, { label: null, expiresInDays: 31 }), { status: 400, message: /between 1 and 30 days/ });
   // Planned too (`?dryRun=1`, which MCP's approvals ask first): a plan it offers is one issuing accepts.
@@ -1192,7 +1192,7 @@ test('everything the sign-in service writes keeps the audit chain intact', async
   const verified = await verifyAudit(await contextFor(deps, ROOT));
   assert.equal(verified.ok, true);
   // Every entry, the vault's for the members set up here included; seven of them the app's, the token
-  // issue, revoke and sign-out being the vault's changes (T149).
+  // issue, revoke and sign-out being the vault's changes.
   const [{ n }] = await db.owner.select({ n: count() }).from(auditLog);
   if (verified.ok) assert.equal(verified.entries, n);
   assert.equal((await auditRows()).length, 7);

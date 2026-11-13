@@ -9,7 +9,7 @@ import { environments, secrets, secretVersions } from '@coffre/db/schema';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 /**
- * Personal configs (docs/design/forking.md, R8): `market/dev@me` is your own
+ * Personal configs (docs/design/forking.md): `market/dev@me` is your own
  * fork of dev, whose values only you read, and only while you read dev; no
  * grant or role reaches them, an Owner's included, and the vault binds each
  * value to its owner, so a forged owner opens nothing. A read of `dev@me`
@@ -124,7 +124,7 @@ test('a forged owner opens nothing: the value is bound to its owner, not to the 
   // Written around the app: the config made Bo's. Bo reads dev, so the vault's decision passes, and the unwrap fails.
   await db.owner.update(environments).set({ owner: `user:${BO}` }).where(eq(environments.id, config.id));
   await assert.rejects(bo.secrets.reveal('market/dev@me'), (error: { status: number }) => error.status >= 400);
-  // What dev holds, read through it: refused too, as any read through a row the log does not hold (T159).
+  // What dev holds, read through it: refused too, as any read through a row the log does not hold.
   await assert.rejects(values(bo, 'market/dev@me/STRIPE_KEY'));
   await assert.rejects(bo.secrets.reveal('market/dev@me/DATABASE_URL'));
   // Cleared, as a release before personal configs would see it: a project grant reaches it, and still opens nothing.

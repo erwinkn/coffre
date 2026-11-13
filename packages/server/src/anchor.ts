@@ -49,7 +49,7 @@ export type AuditAnchor = {
   /**
    * The app key it is sealed under, as the log's entries name it
    * (`app:<fingerprint>`): what a rotation of `auditChainKey` re-seals it
-   * from (R41). Until then, one sealed under another key is not the app's.
+   * from. Until then, one sealed under another key is not the app's.
    */
   keyId: string;
   /** The app's MAC over the rest, hex. */

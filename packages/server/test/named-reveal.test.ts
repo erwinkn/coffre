@@ -1,8 +1,8 @@
-// A request of one key is the vault's one call by name (T145, PR B; src/named-use.ts, `useByName`): a reveal of
+// A request of one key is the vault's one call by name (src/named-use.ts, `useByName`): a reveal of
 // `market/dev/API_KEY`, of `market/dev` with `keys: ['API_KEY']`, a handle's /use. The vault resolves the names and
 // decides on the caller as its sealed rows have them; the app checks the credential's row, its MAC over the token's
-// hash and a handle's places among it, on the rows the use answered, before any value leaves. Several keys go as before until PR B2. With
-// 0.15's log whichever log the suite runs, as a deployment of 0.15 keeps it.
+// hash and a handle's places among it, on the rows the use answered, before any value leaves. A request of several
+// keys is not. With 0.15's log whichever log the suite runs, as a deployment of 0.15 keeps it.
 import test, { after, before, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -35,7 +35,7 @@ const PROD_KEY = 'sk_prod_0123456789';
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 const kek = randomBytes(32);
-/** The runtime, and the same with a vault that serves nothing by name: a request as before PR B. */
+/** The runtime, and the same with a vault that serves nothing by name. */
 let runtime: CoffreRuntime;
 let unnamed: CoffreRuntime;
 /** The vault's calls by name, as the runtime makes them, and every call of the vault's, by method. */
@@ -93,7 +93,7 @@ before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
-  // Its throttle off: one vault answers the whole file, a held key `late` under its principal's lock on purpose (D154); the throttle's own answer is the last test's.
+  // Its throttle off: one vault answers the whole file, a held key `late` under its principal's lock on purpose; the throttle's own answer is the last test's.
   deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { sealThrough: sealedNow, heldOutside: nothingHeld, throttled: false }) });
   runtime = runtimeOver(counted(deps.vault, true));
   unnamed = runtimeOver(counted(deps.vault, false));
@@ -218,7 +218,7 @@ test("a writer who moves a handle's environment off the ones it was made for use
 });
 
 test('revoked, someone learns nothing of a key made since, by its path or a list of one, however busy the vault (Probing.tla)', async () => {
-  // The proxy's, a handle's one key, is held to the same in proxy-handle-check.test.ts (review r2 of #406).
+  // The proxy's, a handle's one key, is held to the same in proxy-handle-check.test.ts.
   const token = await personalToken(GONE);
   assert.equal((await reveal(token, { path: 'market/dev/API_KEY' })).status, 200);
   const root = clientFor(deps, ROOT);
@@ -237,12 +237,12 @@ test('revoked, someone learns nothing of a key made since, by its path or a list
       assert.equal(made.status, at === busy ? 503 : 404, JSON.stringify(made.body));
       if (at !== busy) assert.deepEqual(made.body, { error: 'not_available', message: 'not available: no such key, or no access to it' });
       assert.deepEqual(made, never, 'alike');
-      // The app records each request alike, refused (R53); busy, as ever.
+      // The app records each request alike, refused; busy, as ever.
       assert.deepEqual(recorded, await entriesSince(between), 'logged alike');
       if (at !== busy) assert.ok(recorded.some((entry) => entry.includes('deny')), JSON.stringify(recorded));
     }
     // A key made since has no row of the cap's of hers: its use would take her principal's lock, so her standing decides
-    // first and refuses her there, as for the key never made, and the vault's log has no entry of either (T158).
+    // first and refuses her there, as for the key never made, and the vault's log has no entry of either.
     assert.equal((await usesLogged(db.owner)).length - logged, 0);
   }
 });
@@ -311,7 +311,7 @@ test("revoked, with their principal's lock held, someone is answered byte for by
   }
 });
 
-// D154 (R64): the one exception to answering every key alike, pinned so that a change to it is deliberate. A credential
+// The one exception to answering every key alike, pinned so that a change to it is deliberate. A credential
 // is checked twice: the vault checks its own seal over the row (`routeOf`), the app its MAC (APP_KEY) on the rows the
 // vault's named call answered, after that call. A row whose seal holds and whose MAC does not, which only a database
 // writer can make, is decided by the vault first: a held key its caller has not used this window takes the principal's
@@ -348,11 +348,11 @@ test("a credential whose MAC a writer broke, its seal intact, is refused 401 for
   assert.equal((await usesLogged(db.owner)).length - logged, 1, "the held key's use, in the vault's log");
 });
 
-// Reviews r6 and r7 of D153 (formal/Probing.tla, AcceptedFirst): the vault's "authenticated" is the app's. The named
-// call carries what the deployment's config accepts of a credential, and the vault holds the token's to it first: a
-// browser session whose sign-in provider the deployment no longer configures, or any coffre token once it signs in
-// through Cloudflare Access, is answered as a token no credential has, in that one call, alike for every key, its
-// principal's lock held or not: nothing of the key read, no lock waited for, no use made.
+// The vault's "authenticated" is the app's (formal/Probing.tla, AcceptedFirst). The named call carries what the
+// deployment's config accepts of a credential, and the vault holds the token's to it first: a browser session whose
+// sign-in provider the deployment no longer configures, or any coffre token once it signs in through Cloudflare Access,
+// is answered as a token no credential has, in that one call, alike for every key, its principal's lock held or not:
+// nothing of the key read, no lock waited for, no use made.
 async function heldAlike(at: CoffreRuntime, ask: (key: string) => Promise<{ status: number }>, person: string) {
   const asked = async () => {
     const answers = [];
@@ -423,11 +423,11 @@ test("behind Cloudflare Access, no coffre token is a credential: a handle at the
   await heldAlike(access, (key) => proxied(`/use/market/${key === 'API_KEY' ? 'r7-held' : 'r7-never'}/api/v1/thing`, handle, access), PROXIED);
 });
 
-// Review r8 of D153 (formal/Probing.tla, OneClock): the vault judges a credential's end at the use's `at`, and the app's
-// own check after it judges its expiry at that same instant. A token live when its request began is that request's:
-// every key is answered as for a live credential, the held one served and one never made refused as any, never the
-// vault's work for a use followed by the app's 401 (a key held, its use made and logged, then refused) beside a key
-// never made refused at once. Here the clock passes the token's expiry between the vault's call and the app's check.
+// The vault judges a credential's end at the use's `at` (formal/Probing.tla, OneClock), and the app's own check after
+// it judges its expiry at that same instant. A token live when its request began is that request's: every key is
+// answered as for a live credential, the held one served and one never made refused as any, never the vault's work for
+// a use followed by the app's 401 (a key held, its use made and logged, then refused) beside a key never made refused
+// at once. Here the clock passes the token's expiry between the vault's call and the app's check.
 test("a token that expires during its request is that request's, judged at its one instant by the vault and the app alike: every key answered as for a live credential (review r8 of D153)", async () => {
   const EXPIRING = 'expiring@acme.example';
   const root = clientFor(deps, ROOT);
@@ -458,7 +458,7 @@ test("a token that expires during its request is that request's, judged at its o
   assert.equal((await usesLogged(db.owner)).length, logged + 1, 'the held key used, as the vault decided');
 });
 
-// Review r12 of D153: a key revealed while its grant stood, then refused once it is revoked, is refused as a key never
+// A key revealed while its grant stood, then refused once it is revoked, is refused as a key never
 // made is, request after request: the vault's named call never runs the cached form an earlier use's seals would choose
 // (use-named.test.ts holds the form; the matrices its buffers). Byte for byte, in one call by name each.
 test("after a key's reveal and its grant's revoke, it and a key never made are refused alike, request after request (review r12 of D153)", async () => {
@@ -540,7 +540,7 @@ test("the proxy's use of a plain value is answered and logged as before; of a ke
       if (env === 'plain') assert.deepEqual(now, before, `${env}: ${url}`);
       // Its credential's key not held there: no such key, or no access to it, logged as a refusal of it.
       else assert.deepEqual(now, { answer: { status: 404, body: '{"error":"credential_proxy","message":"not available: no such key, or no access to it","reason":"not_available"}' }, entries: ['secret.read deny'] }, `${env}: ${url}`);
-      // Its entry names the credential, its host, and the egress it left through (review r2 of #412).
+      // Its entry names the credential, its host, and the egress it left through.
       if (now!.answer.status === 204) assert.ok(now!.entries.some((entry) => entry.startsWith('credential.use') && entry.includes('"egress":true')), `${env}: ${url}: ${JSON.stringify(now)}`);
     }
   }
@@ -568,7 +568,7 @@ test("the stable URL refuses as its route does before the request's own refusals
   const [before, now] = await both(post);
   assert.deepEqual(now, before);
   assert.equal(now!.answer.status, 409, now!.answer.body);
-  // A body whose stream breaks: the route's refusal still, which never read it (review r3 of #412).
+  // A body whose stream breaks: the route's refusal still, which never read it.
   const broken = (at: CoffreRuntime) => {
     const body = new ReadableStream<Uint8Array>({ pull: (controller) => controller.error(new Error('the stream broke')) });
     const request = new Request(`${ORIGIN}/use/api/v1/thing`, { method: 'POST', headers: { 'x-api-key': handle }, body, duplex: 'half' } as RequestInit);
@@ -600,7 +600,7 @@ test("a service's bearer token on a strict instance (useOnly) is refused by its 
   assert.deepEqual([(await db.owner.select().from(logUses)).length, (await db.owner.select().from(bulkCap)).length], [uses, bulk], 'no use, no row of the cap');
 });
 
-// T165 (B2): a fork's key and `dev@me`'s are the vault's one call by name too (migration 0051): the vault finds the place
+// A fork's key and `dev@me`'s are the vault's one call by name too: the vault finds the place
 // (the fork; the caller's personal config of dev, or dev while they have none) and resolves the key through what it
 // inherits. Answered as before, every refusal of a key one answer, in one call (formal/Probing.tla, Where).
 const FORKER = 'forker@acme.example';
@@ -642,7 +642,7 @@ test("a fork's key, its own or one it inherits, and `dev@me`'s, by its path or a
     assert.deepEqual(calls, ['useNamed'], `${JSON.stringify(body)}: the vault's one call, by name`);
   }
   // Its key read from the vault's rows, by its path or a list of one alike: no layer of the fork read again, which would
-  // be a snapshot transaction of the app's more (reviews r3 and r4 of #453; `readableValues`). The vault's rows
+  // be a snapshot transaction of the app's more (`readableValues`). The vault's rows
   // come with the read ahead, so the fork's key opens what dev's own does, a place with no layer to read.
   let transactions = 0;
   const watching = runtimeOver(counted(deps.vault, true), 'github', new Proxy(deps.db, {
