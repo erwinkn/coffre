@@ -133,7 +133,7 @@ const STEPS = {
   proofs: { job: 'proofs', install: true, run: () => ['pnpm formal:lean'] },
   workers: { job: 'workers', install: true, build: true, postgres: true, browser: true, ports: true, run: () => [`pnpm conformance:workers --browser ${BROWSER} --port "$COFFRE_VALIDATE_PORT"`] },
   node: { job: 'node', install: true, build: true, postgres: true, browser: true, ports: true, run: () => [`pnpm conformance:node --browser ${BROWSER} --port "$COFFRE_VALIDATE_PORT"`] },
-  terraform: { job: 'terraform', install: true, build: true, postgres: true, run: () => ['pnpm test:terraform'] },
+  terraform: { job: 'terraform', install: true, build: true, postgres: true, ports: true, run: () => ['pnpm test:terraform --port "$COFFRE_VALIDATE_PORT"'] },
   // The consumer script starts Postgres itself (ensure-postgres.sh), so it gets the step's.
   consumer: {
     job: 'consumer',

@@ -12,10 +12,13 @@
 #
 #   scripts/terraform-provider.sh            everything
 #   scripts/terraform-provider.sh --unit     gofmt, vet and the unit tests alone: no coffre, no Terraform
+#   scripts/terraform-provider.sh --port <n> everything, the fixture on <n> to <n>+2 instead
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 root="$PWD"
+port=3482
+[ "${1:-}" = --port ] && { port="$2"; shift 2; }
 
 GO_VERSION=1.27.3
 TERRAFORM_VERSION=1.11.4
@@ -91,4 +94,4 @@ tofu="$(unpack "tofu-$TOFU_VERSION.zip" tofu "tofu-$TOFU_VERSION")"
 
 "$root/scripts/ensure-postgres.sh"
 node --conditions=coffre:source "$root/scripts/ensure-database.mjs" coffre
-TF_ACC=1 go test -count=1 -timeout 30m ./internal/acceptance -args -terraform="$terraform" -tofu="$tofu" -repo="$root"
+TF_ACC=1 go test -count=1 -timeout 30m ./internal/acceptance -args -terraform="$terraform" -tofu="$tofu" -repo="$root" -port="$port"
