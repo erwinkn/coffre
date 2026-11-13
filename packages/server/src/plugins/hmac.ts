@@ -57,21 +57,23 @@ export async function hmacVerify(secret: Uint8Array<ArrayBuffer>, message: Uint8
 
 /**
  * A key's bytes, from the value that holds it: its UTF-8, or the bytes its text writes in `encoding`, read as a
- * signature is. Null for text the encoding does not write, never a key half read from it, nor an empty one.
+ * signature is. Null for text the encoding would read only in part, never a key half read from it.
  */
 export function keyBytes(value: string, encoding: Encoding | undefined): Uint8Array<ArrayBuffer> | null {
-  const key = encoding === undefined ? new TextEncoder().encode(value) : decode(value, encoding);
-  return key === null || key.byteLength === 0 ? null : key;
+  return encoding === undefined ? new TextEncoder().encode(value) : decode(value, encoding);
 }
 
 function keyOf(secret: Uint8Array<ArrayBuffer>, usage: 'sign' | 'verify'): Promise<CryptoKey> {
   return crypto.subtle.importKey('raw', secret, { name: 'HMAC', hash: 'SHA-256' }, false, [usage]);
 }
 
-/** The bytes a signature's or key's text says, or null for text its encoding does not write: Buffer's decoders skip what they do not read. */
+/**
+ * The bytes a signature's or key's text says, or null for text its encoding would read only in part: Buffer's
+ * decoders skip what they do not read. Linear in the text, which a stored key makes up to 64 KiB.
+ */
 function decode(text: string, encoding: Encoding): Uint8Array<ArrayBuffer> | null {
-  const bare = text.replace(/=+$/, '');
-  const written = encoding === 'hex' ? /^(?:[0-9a-f]{2})*$/i.test(text)
-    : (encoding === 'base64' ? /^[A-Za-z0-9+/]*={0,2}$/ : /^[A-Za-z0-9_-]*={0,2}$/).test(text) && bare.length % 4 !== 1 && (text.length === bare.length || text.length % 4 === 0);
-  return written ? new Uint8Array(Buffer.from(bare, encoding)) : null;
+  if (encoding === 'hex') return /^(?:[0-9a-f]{2})*$/i.test(text) ? new Uint8Array(Buffer.from(text, 'hex')) : null;
+  if (!(encoding === 'base64' ? /^[A-Za-z0-9+/]*={0,2}$/ : /^[A-Za-z0-9_-]*={0,2}$/).test(text)) return null;
+  const bare = text.endsWith('==') ? text.slice(0, -2) : text.endsWith('=') ? text.slice(0, -1) : text;
+  return bare.length % 4 !== 1 && (text.length === bare.length || text.length % 4 === 0) ? new Uint8Array(Buffer.from(bare, encoding)) : null;
 }

@@ -20,6 +20,7 @@ import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMc
 import { auditLog } from '@coffre/db/schema';
 import { checkPlugins, type PluginContext, type UseAsked } from '../src/plugins.ts';
 import { credentialProxy, form, hmac, privateKey, type CredentialProxyOptions, type Encoding } from '../src/plugins/credential-proxy.ts';
+import { keyBytes } from '../src/plugins/hmac.ts';
 
 const SECRETS = {
   YOUSIGN_WEBHOOK_SECRET: 'ys_whsec_0123456789abcdefABCDEF',
@@ -31,7 +32,7 @@ const SECRETS = {
   // Standard Webhooks secret, the base64 after `whsec_`; Brale's sharedSecret, base64url.
   POLICY_SEAL_KEY: '3f9a0c2e7b14d85a6c0e9f3b2a71d4c8e5f60a1b9c2d3e4f5a6b7c8d9e0f1a2b',
   MONERIUM_WEBHOOK_SECRET: 'MfKQ9r7ZaGw3xYtB2nC5dE8hJk1LmN4p',
-  BRALE_SHARED_SECRET: 'q_-Zx81Lw0Rt5yUi9oPa3sDf7gHj2kL4',
+  BRALE_WEBHOOK_SECRET: 'q_-Zx81Lw0Rt5yUi9oPa3sDf7gHj2kL4',
 };
 /** sumsub-key's maxBytes: the ceiling, `MAX_RAW_MESSAGE_BYTES`. */
 const SUMSUB_BYTES = 12 * 1024 * 1024;
@@ -44,7 +45,7 @@ const options: CredentialProxyOptions = {
     lemonway: hmac('LEMONWAY_WEBHOOK_SECRET', { encoding: 'hex' }),
     absent: hmac('NOT_HELD', { encoding: 'hex' }),
     monerium: hmac('MONERIUM_WEBHOOK_SECRET', { encoding: 'base64', prefix: 'v1,', keyEncoding: 'base64' }),
-    brale: hmac('BRALE_SHARED_SECRET', { encoding: 'hex', keyEncoding: 'base64url' }),
+    brale: hmac('BRALE_WEBHOOK_SECRET', { encoding: 'hex', keyEncoding: 'base64url' }),
   },
   signers: {
     'iframe-token': hmac('IFRAME_TOKEN_SECRET', { encoding: 'base64url' }),
@@ -73,7 +74,7 @@ useMcp(async () => {
     SUMSUB_SECRET_KEY: SECRETS.SUMSUB_SECRET_KEY,
     POLICY_SEAL_KEY: SECRETS.POLICY_SEAL_KEY,
     MONERIUM_WEBHOOK_SECRET: SECRETS.MONERIUM_WEBHOOK_SECRET,
-    BRALE_SHARED_SECRET: SECRETS.BRALE_SHARED_SECRET,
+    BRALE_WEBHOOK_SECRET: SECRETS.BRALE_WEBHOOK_SECRET,
     DFNS_PRIVATE_KEY: generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
   });
   await root.secrets.set('market/bare', { OTHER: 'x' });
@@ -81,7 +82,7 @@ useMcp(async () => {
   await root.secrets.set('market/empty', { YOUSIGN_WEBHOOK_SECRET: '', IFRAME_TOKEN_SECRET: '' });
   // Values their keyEncoding does not write exactly, which a lenient decoder would read in part.
   await root.environments.create('market/garbled');
-  await root.secrets.set('market/garbled', { POLICY_SEAL_KEY: `${SECRETS.POLICY_SEAL_KEY}0`, MONERIUM_WEBHOOK_SECRET: `whsec_${SECRETS.MONERIUM_WEBHOOK_SECRET}`, BRALE_SHARED_SECRET: '====' });
+  await root.secrets.set('market/garbled', { POLICY_SEAL_KEY: `${SECRETS.POLICY_SEAL_KEY}0`, MONERIUM_WEBHOOK_SECRET: `whsec_${SECRETS.MONERIUM_WEBHOOK_SECRET}`, BRALE_WEBHOOK_SECRET: '====' });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
 });
 
@@ -200,10 +201,10 @@ test("a key written as text signs and checks as its own code reads it: the polic
   assert.deepEqual(await Promise.all(header.split(' ').map((entry) => monerium.verify(message, entry))), [false, true]);
   assert.equal(await monerium.verify(`msg_2b1.1761480001.${body}`, `v1,${mac}`), false);
   // Brale: the hex HMAC of the body, keyed with the base64url-decoded sharedSecret.
-  const brale = createHmac('sha256', Buffer.from(SECRETS.BRALE_SHARED_SECRET, 'base64url')).update(body).digest('hex');
+  const brale = createHmac('sha256', Buffer.from(SECRETS.BRALE_WEBHOOK_SECRET, 'base64url')).update(body).digest('hex');
   assert.equal(await used(env, 'brale').verify(body, brale), true);
   // The same value as its UTF-8 bytes is another key: no match.
-  assert.equal(await used(env, 'brale').verify(body, hmacOf(SECRETS.BRALE_SHARED_SECRET, body)), false);
+  assert.equal(await used(env, 'brale').verify(body, hmacOf(SECRETS.BRALE_WEBHOOK_SECRET, body)), false);
   // A value its keyEncoding does not write exactly is a 409 naming the key, never a signature, JSON or raw.
   const garbled = await run(['market/garbled']);
   const asks: [string, RequestInit][] = [
@@ -212,7 +213,7 @@ test("a key written as text signs and checks as its own code reads it: the polic
     ['/use/market/garbled', { method: 'POST', body: JSON.stringify({ verify: { credential: 'monerium', message: 'aGk', signature: `v1,${mac}` } }), headers: { 'content-type': 'application/json' } }],
     ['/use/market/garbled', { method: 'POST', body: JSON.stringify({ verify: { credential: 'brale', message: 'aGk', signature: brale } }), headers: { 'content-type': 'application/json' } }],
   ];
-  const named = ['POLICY_SEAL_KEY is no hex key', 'POLICY_SEAL_KEY is no hex key', 'MONERIUM_WEBHOOK_SECRET is no base64 key', 'BRALE_SHARED_SECRET is no base64url key'];
+  const named = ['POLICY_SEAL_KEY is no hex key', 'POLICY_SEAL_KEY is no hex key', 'MONERIUM_WEBHOOK_SECRET is no base64 key', 'BRALE_WEBHOOK_SECRET is no base64url key'];
   for (const [i, [path, init]] of asks.entries()) {
     const refused = await route(path, { ...init, headers: { ...init.headers as Record<string, string>, authorization: `Bearer ${garbled.env.COFFRE_HANDLE}` } });
     const text = await refused.text();
@@ -438,7 +439,7 @@ test('no byte of a secret leaves coffre: not in an answer, an entry of the log, 
   assert.ok(answered.length > 60, `${answered.length} answers`);
   for (const [key, secret] of Object.entries(SECRETS)) {
     if (key === 'IFRAME_TOKEN_SECRET') continue; // A signer's signatures are its answers; its secret is not.
-    const bytes = key === 'POLICY_SEAL_KEY' ? Buffer.from(secret, 'hex') : key === 'MONERIUM_WEBHOOK_SECRET' ? Buffer.from(secret, 'base64') : key === 'BRALE_SHARED_SECRET' ? Buffer.from(secret, 'base64url') : null;
+    const bytes = key === 'POLICY_SEAL_KEY' ? Buffer.from(secret, 'hex') : key === 'MONERIUM_WEBHOOK_SECRET' ? Buffer.from(secret, 'base64') : key === 'BRALE_WEBHOOK_SECRET' ? Buffer.from(secret, 'base64url') : null;
     for (const form of [secret, ...(bytes === null ? [] : [bytes.toString('hex'), bytes.toString('base64')]), Buffer.from(secret).toString('hex'), Buffer.from(secret).toString('base64'), Buffer.from(secret).toString('base64url'), secret.slice(4, 20)]) {
       assert.ok(!everything.includes(form), `${key} leaked as ${form}`);
     }
@@ -481,6 +482,28 @@ function fake(key: string, secret: string): PluginContext {
 }
 
 const settings = propertySettings(100);
+
+test('a key is read whole, as Buffer.from reads it, and text Buffer.from would read only in part is refused', () => {
+  const read: [string, Encoding][] = [
+    ['00ff', 'hex'], ['00FF', 'hex'], ['0aBc', 'hex'],
+    ['QUJD', 'base64'], ['QUI=', 'base64'], ['QUI', 'base64'], ['QQ==', 'base64'], ['QQ', 'base64'], ['+/+/', 'base64'],
+    ['-_-_', 'base64url'], ['QUI', 'base64url'], ['QUI=', 'base64url'], ['QQ==', 'base64url'],
+  ];
+  for (const [value, encoding] of read) assert.deepEqual(keyBytes(value, encoding), new Uint8Array(Buffer.from(value, encoding)), `${encoding} ${value}`);
+  const halfRead: [string, Encoding][] = [
+    ['0a1', 'hex'], ['0a0g', 'hex'], ['00 ff', 'hex'], ['00ff\n', 'hex'],
+    ['QUJD ', 'base64'], ['QUJD\n', 'base64'], ['QUJDR', 'base64'], ['QQ=', 'base64'], ['QUJD==', 'base64'], ['QR-_', 'base64'], ['whsec_QUJD', 'base64'],
+    ['QR+/', 'base64url'], ['QUJDR', 'base64url'], ['QQ=', 'base64url'],
+  ];
+  for (const [value, encoding] of halfRead) {
+    assert.ok(Buffer.from(value, encoding).length > 0, `Buffer reads some of ${encoding} ${JSON.stringify(value)}`);
+    assert.equal(keyBytes(value, encoding), null, `${encoding} ${JSON.stringify(value)}`);
+  }
+  // A stored value is up to 64 KiB: a run of padding before another character is refused in linear time.
+  const started = performance.now();
+  for (const encoding of ['hex', 'base64', 'base64url'] as const) assert.equal(keyBytes(`${'='.repeat(64 * 1024)}x`, encoding), null);
+  assert.ok(performance.now() - started < 250, `${performance.now() - started} ms`);
+});
 
 test(`whatever the secret, message and scheme, coffre signs as Node's createHmac does, verifies its own, and no other signature, seed ${settings.seed}`, () => hegel.testAsync(async (tc) => {
   // The key as its UTF-8 bytes, or bytes written as text, which Node reads as Buffer.from(value, keyEncoding) does.

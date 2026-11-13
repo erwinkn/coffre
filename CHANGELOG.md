@@ -9,7 +9,7 @@
   'hex', prefix: 'v1:', keyEncoding: 'hex' })`), Standard Webhooks'
   secret, the base64 after `whsec_` (Monerium's), and Brale's base64url
   `sharedSecret`. It holds for a sign as JSON or raw and a verify alike. A
-  value the encoding does not write exactly is a 409 naming the key, and
+  value the encoding would read only in part is a 409 naming the key, and
   nothing is signed or checked with it. Without `keyEncoding`, nothing
   changes.
 - **A key in the path: `path()`.** Telegram's Bot API takes its token in
