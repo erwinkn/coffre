@@ -34,6 +34,7 @@ beforeEach(async () => {
   await emptyDatabase(world.owner);
   world.memory.reads.clear();
   world.memory.logged.clear();
+  world.refused.clear();
   market = project('market');
   const [prod, guarded] = [environment(market, 'prod'), environment(market, 'guarded', { protected: true })];
   const adas = environment(market, 'adas', { parentId: prod.id, owner: ada });
@@ -124,7 +125,16 @@ test('a write is refused to whoever may not write there, with one answer, and wr
   // A deployment whose service accounts are workloads' sessions or nothing takes no service token.
   const useOnly = openLocalVault(world.db, { ...world, workloads: { noReads: false, useOnly: true } }, { wake: world.wake, now: world.now });
   assert.deepEqual(await useOnly.change(writing('api-token', { DATABASE_URL: 'x' })), { refused: 'unauthenticated' });
-  assert.deepEqual([await count('log_pending'), await count('secret_versions'), world.woken.length], [...before, 0]);
+  assert.equal(await count('secret_versions'), before[1], 'nothing of what was asked is written');
+  // Each who stands is logged refused, once in the minute: Ada the first time, in the place as she named it. Not the handle, nor a token nobody holds.
+  const denied = (await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(world.owner, sql`SELECT kept, body, mac FROM log_pending WHERE NOT kept ORDER BY id`)).map((row) => entryOf(world.keys, row)!);
+  assert.deepEqual(denied.map((entry) => [entry.action, entry.actor, entry.detail]), [
+    ['secret.write', bo, { project: 'market', environment: 'prod', refused: 'no_access' }],
+    ['secret.write', ada, { project: 'billing', environment: 'nowhere', refused: 'no_access' }],
+    ['secret.write', cy, { project: 'market', environment: 'guarded', refused: 'no_access' }],
+    ['secret.write', eve, { project: 'market', environment: 'guarded', refused: 'no_access' }],
+  ]);
+  assert.deepEqual([await count('log_pending'), world.woken.length], [before[0]! + 4, 4]);
 
   // And made where they may: the contributor in prod, the developer where it is protected, a grant on the environment alone,
   // an Owner of the instance with no grant at all, a service's token.

@@ -4,7 +4,7 @@ import type { Answers, Presented, SecretsChanges, SecretWrite } from '@coffre/co
 import { environments, projects, secrets } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
-import { callerFrom, callerParts, live } from '../caller.ts';
+import { callerFrom, callerParts, live, refusedTo } from '../caller.ts';
 import { part, put, type Operation, type Parts, type Seen, type Value, type Write } from '../change.ts';
 import type { Fresh } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
@@ -47,6 +47,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
   };
   return {
     read,
+    denied: refusedTo('secret.write', shown, vault.workloads, { project: projectSlug, environment: environmentSlug }),
     decide(seen: Seen<typeof read>, at: number) {
       const caller = callerFrom(seen, shown, vault.workloads, at);
       if (caller === null) return { refused: 'unauthenticated' };

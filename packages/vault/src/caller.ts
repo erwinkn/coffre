@@ -3,7 +3,8 @@ import { addressWithin, checkConstraints, type BindingPolicy, type Constraints }
 import { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { part, type Seen } from './change.ts';
+import { part, type Refusal, type Seen } from './change.ts';
+import type { Said } from './entry.ts';
 import type { Row } from './rows.ts';
 
 /**
@@ -275,5 +276,19 @@ export function callerFrom(seen: Seen<ReturnType<typeof callerParts>>, shown: Sh
     // By the row itself too: an environment of a project the change did not name is as protected as it says.
     may: (permission, environment) =>
       allows(environment.protected ? { ...holds, policy: { ...holds.policy, protected: [...holds.policy.protected, environment.id] } } : holds, permission, { projectId: environment.projectId, environmentId: environment.id, environmentSlug: environment.slug }),
+  };
+}
+
+/**
+ * What the log says of a change refused to a caller who stands (D236): who
+ * asked, on which credential, what, why not, and `about`, the place as the
+ * caller named it. Nothing for one who does not stand: an unknown token is
+ * one answer, and no entry.
+ */
+export function refusedTo(action: string, shown: Shown & { request: string | null }, workloads: Workloads, about: Record<string, string> = {}) {
+  return (seen: Seen<ReturnType<typeof callerParts>>, at: number, refusal: Refusal): Said | null => {
+    const caller = callerFrom(seen, shown, workloads, at);
+    if (caller === null) return null;
+    return { kept: false, action, actor: caller.principal, credential: caller.credential.id, request: shown.request, ip: shown.ip, objects: [`principal:${caller.principal}`, `credential:${caller.credential.id}`], detail: { ...about, refused: refusal.refused } };
   };
 }

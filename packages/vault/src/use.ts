@@ -7,7 +7,7 @@ import { bindings, credentials, dismissedKeys, environments, grants, identities,
 import { sql, type SQL } from 'drizzle-orm';
 
 import { callerOf, ID, live, type Caller, type Workloads } from './caller.ts';
-import { bounded, type Refusal, type Running } from './change.ts';
+import { bounded, keep, type Refusal, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts';
 import { contextOf } from './value.ts';
@@ -95,16 +95,6 @@ const LOGGED_MS = 60_000;
 const TOUCHED_MS = 5 * 60_000;
 /** Parents an environment may have above it, as in 0.14. */
 const MAX_PARENTS = 3;
-/** The most a memory's map holds, whatever the rate: past it, the oldest go. */
-const MOST = 1000;
-
-/** Remember `value`, and forget what is older than `since`, and past `MOST` entries the ones that came first. */
-function keep<V extends { at: number }>(map: Map<string, V>, key: string, value: V, since: number): void {
-  map.delete(key);
-  map.set(key, value);
-  for (const [old, { at }] of map) if (at < since || map.size > MOST) map.delete(old);
-}
-
 const shapeOfAsk = (ask: Ask) => JSON.stringify([ask.token.toString('hex'), ask.project, ask.environment, ask.mine, ask.keys]);
 
 /** The rows this ask read within the vault's memory, if any. */
