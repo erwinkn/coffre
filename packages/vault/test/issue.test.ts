@@ -556,7 +556,7 @@ test('`issue_token` takes the factor lock before any row, and is the vault\'s al
   const lock = body.indexOf('pg_advisory_xact_lock(1717658484, hashtext(p_actor))');
   assert.ok(lock > 0 && lock < body.indexOf('FROM public.principals') && lock < body.indexOf('FROM public.credentials'));
   assert.doesNotMatch(body, /jit/i, 'no planner setting (R69)');
-  // 0.15.0's overload, which called this one with no passkey, is gone (0088).
+  // 0.15.0's overload, which called this one with no passkey, is gone (0092).
   const [{ overloads }] = await db.owner.execute<{ overloads: number }>(sql`SELECT count(*)::int AS overloads FROM pg_proc WHERE proname = 'issue_token'`);
   assert.equal(overloads, 1);
   const [grant] = await db.owner.execute<{ vault: boolean; app: boolean }>(sql`SELECT has_function_privilege('coffre_vault', ${ISSUE_TOKEN}, 'EXECUTE') AS vault, has_function_privilege('coffre_app', ${ISSUE_TOKEN}, 'EXECUTE') AS app`);

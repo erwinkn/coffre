@@ -59,7 +59,7 @@ test("the credential writes that take the fence wait LOCK_WAIT_MS for each lock,
          AND proname IN ('revoke_credential', 'change_bindings', 'sign_in', 'issue_token') ORDER BY proname, pronargs`);
     const waits = rows.map(({ name, config }) => [name, (config ?? []).find((setting) => setting.startsWith('lock_timeout='))]);
     assert.deepEqual(waits, [
-      // One each: 0088 drops the overloads only 0.15.0's vault called.
+      // One each: 0092 drops the overloads only 0.15.0's vault called.
       ['change_bindings', `lock_timeout=${LOCK_WAIT_MS}ms`],
       ['issue_token', `lock_timeout=${HOT_LOCK_TIMEOUT_MS / 1000}s`],
       ['revoke_credential', `lock_timeout=${LOCK_WAIT_MS}ms`],
