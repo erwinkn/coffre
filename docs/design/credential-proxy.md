@@ -1460,10 +1460,11 @@ run` calls the same `credential(name).verify` from
   `keyEncoding` (`hex`, `base64` or `base64url`) the bytes the value
   writes, as `createHmac('sha256', Buffer.from(value, 'hex'))` reads
   Equisafe's `POLICY_SEAL_KEY` (`{ encoding: 'hex', prefix: 'v1:',
-  keyEncoding: 'hex' }`). The value is read as a signature is, so one its
-  encoding would read only in part (an odd hex digit, a `whsec_` left on, a
-  space, wrong padding) is a 409 that names the key, never a key half read from it:
-  Node's own `Buffer.from` skips what it does not read. Standard Webhooks
+  keyEncoding: 'hex' }`). The value is read as a signature is, so one
+  outside its encoding's alphabet or padding (an odd hex digit, a `whsec_`
+  left on, a space, wrong padding) is a 409 that names the key, never the
+  key Node's lenient `Buffer.from` would make of it: that one skips spaces,
+  mixes base64's two alphabets, and reads `whsec_` as key bytes. Standard Webhooks
   sign `<webhook-id>.<webhook-timestamp>.<body>`, which the app joins as
   the message, and send a list of `v1,<base64>` separated by spaces, which
   it splits, asking `verify` of each, and checks the timestamp itself, as

@@ -80,7 +80,7 @@ useMcp(async () => {
   await root.secrets.set('market/bare', { OTHER: 'x' });
   await root.environments.create('market/empty');
   await root.secrets.set('market/empty', { YOUSIGN_WEBHOOK_SECRET: '', IFRAME_TOKEN_SECRET: '' });
-  // Values their keyEncoding does not write exactly, which a lenient decoder would read in part.
+  // Values outside their keyEncoding's alphabet or padding, which a lenient decoder still makes a key of.
   await root.environments.create('market/garbled');
   await root.secrets.set('market/garbled', { POLICY_SEAL_KEY: `${SECRETS.POLICY_SEAL_KEY}0`, MONERIUM_WEBHOOK_SECRET: `whsec_${SECRETS.MONERIUM_WEBHOOK_SECRET}`, BRALE_WEBHOOK_SECRET: '====' });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
@@ -205,7 +205,7 @@ test("a key written as text signs and checks as its own code reads it: the polic
   assert.equal(await used(env, 'brale').verify(body, brale), true);
   // The same value as its UTF-8 bytes is another key: no match.
   assert.equal(await used(env, 'brale').verify(body, hmacOf(SECRETS.BRALE_WEBHOOK_SECRET, body)), false);
-  // A value its keyEncoding does not write exactly is a 409 naming the key, never a signature, JSON or raw.
+  // A value outside its keyEncoding's alphabet or padding is a 409 naming the key, never a signature, JSON or raw.
   const garbled = await run(['market/garbled']);
   const asks: [string, RequestInit][] = [
     ['/use/market/garbled', { method: 'POST', body: JSON.stringify({ sign: { credential: 'policy-seal', message: 'aGk' } }), headers: { 'content-type': 'application/json' } }],
@@ -483,20 +483,20 @@ function fake(key: string, secret: string): PluginContext {
 
 const settings = propertySettings(100);
 
-test('a key is read whole, as Buffer.from reads it, and text Buffer.from would read only in part is refused', () => {
+test('a key is read as Buffer.from reads it, and text outside the alphabet or padding, of which Buffer.from still makes a key, is refused', () => {
   const read: [string, Encoding][] = [
     ['00ff', 'hex'], ['00FF', 'hex'], ['0aBc', 'hex'],
     ['QUJD', 'base64'], ['QUI=', 'base64'], ['QUI', 'base64'], ['QQ==', 'base64'], ['QQ', 'base64'], ['+/+/', 'base64'],
     ['-_-_', 'base64url'], ['QUI', 'base64url'], ['QUI=', 'base64url'], ['QQ==', 'base64url'],
   ];
   for (const [value, encoding] of read) assert.deepEqual(keyBytes(value, encoding), new Uint8Array(Buffer.from(value, encoding)), `${encoding} ${value}`);
-  const halfRead: [string, Encoding][] = [
+  const refused: [string, Encoding][] = [
     ['0a1', 'hex'], ['0a0g', 'hex'], ['00 ff', 'hex'], ['00ff\n', 'hex'],
     ['QUJD ', 'base64'], ['QUJD\n', 'base64'], ['QUJDR', 'base64'], ['QQ=', 'base64'], ['QUJD==', 'base64'], ['QR-_', 'base64'], ['whsec_QUJD', 'base64'],
     ['QR+/', 'base64url'], ['QUJDR', 'base64url'], ['QQ=', 'base64url'],
   ];
-  for (const [value, encoding] of halfRead) {
-    assert.ok(Buffer.from(value, encoding).length > 0, `Buffer reads some of ${encoding} ${JSON.stringify(value)}`);
+  for (const [value, encoding] of refused) {
+    assert.ok(Buffer.from(value, encoding).length > 0, `Buffer makes a key of ${encoding} ${JSON.stringify(value)}`);
     assert.equal(keyBytes(value, encoding), null, `${encoding} ${JSON.stringify(value)}`);
   }
   // A stored value is up to 64 KiB: a run of padding before another character is refused in linear time.

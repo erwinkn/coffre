@@ -274,8 +274,8 @@ export type Hmac = { kind: 'hmac'; key: string; encoding: Encoding; prefix?: str
  * (`credential(name).verify(body, signature)`), or a key of the app's own
  * among `signers`, which also signs (`credential(name).sign(message)`).
  * The key is the environment's value, as its UTF-8 bytes, or the bytes it
- * writes in `keyEncoding`, `hex`, `base64` or `base64url`: a value it would
- * read only in part is a 409, never signed with. The signature
+ * writes in `keyEncoding`, `hex`, `base64` or `base64url`: a value outside
+ * its alphabet or padding is a 409, never signed with. The signature
  * is written in `encoding`, one of the same, after
  * `prefix`: `hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' })`
  * checks Yousign's `x-yousign-signature-256`, and

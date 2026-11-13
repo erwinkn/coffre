@@ -57,7 +57,7 @@ export async function hmacVerify(secret: Uint8Array<ArrayBuffer>, message: Uint8
 
 /**
  * A key's bytes, from the value that holds it: its UTF-8, or the bytes its text writes in `encoding`, read as a
- * signature is. Null for text the encoding would read only in part, never a key half read from it.
+ * signature is. Null for text outside the encoding's alphabet or padding, never the key a lenient decoder makes of it.
  */
 export function keyBytes(value: string, encoding: Encoding | undefined): Uint8Array<ArrayBuffer> | null {
   return encoding === undefined ? new TextEncoder().encode(value) : decode(value, encoding);
@@ -68,8 +68,8 @@ function keyOf(secret: Uint8Array<ArrayBuffer>, usage: 'sign' | 'verify'): Promi
 }
 
 /**
- * The bytes a signature's or key's text says, or null for text its encoding would read only in part: Buffer's
- * decoders skip what they do not read. Linear in the text, which a stored key makes up to 64 KiB.
+ * The bytes a signature's or key's text says, or null for text outside its encoding's alphabet or padding: Buffer's
+ * decoders skip spaces, mix base64's two alphabets and stop at what they cannot read. Linear in the text, which a stored key makes up to 64 KiB.
  */
 function decode(text: string, encoding: Encoding): Uint8Array<ArrayBuffer> | null {
   if (encoding === 'hex') return /^(?:[0-9a-f]{2})*$/i.test(text) ? new Uint8Array(Buffer.from(text, 'hex')) : null;
