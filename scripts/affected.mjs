@@ -27,7 +27,7 @@
 // - A changed file no rule claims selects every step but TLC, the growth sweep and the
 //   upgrade check: a miss fails safe, never as a skip.
 // - `--full` runs everything, as the release's Validate does, and the growth sweep,
-//   which Validate has no job for: a tag's local `--full` is its only gate. The upgrade
+//   which Validate has no job for: before a tag, a local `--full` runs it. The upgrade
 //   check (0.14.5 through 0.15.0 to this revision, minutes, from npm) runs there, and on a
 //   change to its own scripts or to its direct input, the migrations and the migrator
 //   with its precheck; not on the pages and reports it reads, which nearly every change
@@ -65,13 +65,15 @@ const dependencies = any('pnpm-lock.yaml', /(?:^|\/)pnpm-workspace\.yaml$/, /(?:
 const compose = any('docker-compose.yml', 'docker-compose.subnet.yml', 'docker-compose.network.yml')
 // What scripts/check-pins.mjs reads, beside its own sources.
 const pinned = any(/(?:^|\/)package\.json$/, /\.ya?ml$/, /(?:^|\/)Dockerfile[^/]*$/, /\.sh$/, '.github/', 'action/', 'pnpm-workspace.yaml', /(?:^|\/)\.node-version$/)
-// The upgrade check's own scripts, the migrator and its precheck (`migrate.ts`), the CLI's
+// The upgrade check's own scripts and command, the migrator and its precheck (`migrate.ts`), the CLI's
 // `coffre migrate` it runs this checkout's migrations through, the vault's upgrade step,
 // and the migrations: the files that select it short of --full.
-const UPGRADE_CHECK = ['scripts/upgrade-check.sh', 'scripts/upgrade-check.mjs', 'scripts/compat/release.sh',
+const UPGRADE_CHECK = ['package.json#upgrade:check', 'scripts/upgrade-check.sh', 'scripts/upgrade-check.mjs', 'scripts/compat/release.sh',
   'packages/db/src/migrate.ts', 'packages/db/src/online-indexes.ts', 'packages/cli/src/migrate.ts', 'packages/vault/src/upgrade.ts']
-// The growth sweep's own files: its runner, the requests it makes and the growths it knows.
-const SWEEP = ['scripts/growth-sweep.sh', 'scripts/growth-sweep.mjs', 'scripts/growth-sweep-known.txt', 'packages/server/test/growth.sweep.ts']
+// The growth sweep's own files (its command, its runner, the requests it makes and the growths it knows) and the
+// Postgres it starts and reads the plans from.
+const SWEEP = ['package.json#sweep:growth', 'scripts/ensure-postgres.sh', 'docker-compose.yml', 'docker-compose.subnet.yml',
+  'docker-compose.network.yml', 'scripts/growth-sweep.sh', 'scripts/growth-sweep.mjs', 'scripts/growth-sweep-known.txt', 'packages/server/test/growth.sweep.ts']
 const upgrades = (f) => UPGRADE_CHECK.includes(f) || f.startsWith('packages/db/src/migrations/')
 const lintable = (f) => /^packages\/[^/]+\/(?:src|test|scripts)\/.+\.tsx?$/.test(f)
 
@@ -145,7 +147,7 @@ export function plan({ root, files, changed, read = (f) => readFileSync(join(roo
       ...files.filter((f) => /^packages\/[^/]+\/(?:package\.json|tsdown\.config\.ts|vite\.config\.ts)$/.test(f)),
       ...under('examples/'),
     ]),
-    // Its own files, the migrations and the source it runs; not the test helpers it shares with the suite.
+    // Its own files, its Postgres, the migrations and the source it runs; not the test helpers it shares with the suite.
     sweep: new Set([...SWEEP, ...[...inputs('package.json#sweep:growth')].filter((f) => tracked.has(f) && (f.endsWith('.sql') || f.includes('/src/')))]),
     // The matrices, the worlds and scripts they run, and the vault's use path: what use.ts runs in the vault, not in core.
     matrices: new Set([

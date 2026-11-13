@@ -1068,6 +1068,8 @@ test('readiness costs the same however long the log, and however far it ran past
   assert.equal((await ready()).ok, true);
 });
 
+const logLength = async () => (await db.owner.select({ n: sql<number>`count(*)::int` }).from(auditLog))[0]!.n;
+
 /**
  * The vault's checkpoint walks the log on from the last one, up to a walk
  * of entries, a batch a statement, in no transaction: on Workers, a
@@ -1098,7 +1100,6 @@ test("a checkpoint's transactions read the same however far its walk goes", asyn
     if ((JSON.parse(newest!.metadata) as { scrub: unknown }).scrub === null) return null;
     return { statements: vaultPool.held.statements - before.statements, rows: vaultPool.held.rows - before.rows, walked: all.vault.rows };
   };
-  const logLength = async () => (await db.owner.select({ n: sql<number>`count(*)::int` }).from(auditLog))[0]!.n;
   const measured = async (count: number) => (await held(count)) ?? (await held(count))
     ?? assert.fail(`two measured checkpoints in a row ended a lap of the rehash, the log ${await logLength()} entries long`);
   const short = await measured(10);
@@ -1117,10 +1118,14 @@ test("a checkpoint's transactions read the same however far its walk goes", asyn
  * backlog as after a short one.
  */
 test("a beat's transactions read the same however far its walk goes", async () => {
-  // An empty anchor store, as before the file's first beat, is re-anchored: the beat that ends it logs
-  // `audit.reanchor`, a transaction more. Beaten first, so that no measured beat ends it.
-  assert.equal(await beat(), true);
-  await append(1);
+  // The file's anchor store starts empty, so the beats re-anchor, a walk of the log each, and the beat that ends
+  // it logs `audit.reanchor`, a transaction more. Beaten until it has, so that no measured beat ends it.
+  const reanchored = async () => (await db.owner.select({ seq: auditLog.seq }).from(auditLog)
+    .where(eq(auditLog.action, 'audit.reanchor')).limit(1)).length > 0;
+  for (let beats = 0; !(await reanchored()); beats++) {
+    if (beats === 10) assert.fail(`ten beats left the re-anchor unended, the log ${await logLength()} entries long`);
+    assert.equal(await beat(), true);
+  }
   const held = async (count: number) => {
     assert.equal(await beat(), true);
     await append(count);
