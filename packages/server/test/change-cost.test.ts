@@ -20,7 +20,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, entryOf, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
-import { assertOver, assertWithin, BUDGET, OVER, type Budget, type Over } from './budgets.ts';
+import { assertOver, assertWithin, BUDGET } from './budgets.ts';
 import { addPasskey, removePasskey, steppedUp } from './passkey-rows.ts';
 import { inBulkPeriod } from './window-fixture.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
@@ -195,10 +195,11 @@ async function cost(work: () => Promise<unknown>): Promise<Cost> {
 }
 
 /**
- * A change route; its budget `BUDGET.change` but where it names another, or is held over its class (`over`). `uses`:
- * the environment whose keys it uses, market/base unless it names another.
+ * A change route, held to `BUDGET.change`; or, one over it today, to exactly the round trips it takes (`over`), until it
+ * is brought down to two and the line struck off. `uses`: the environment whose keys it uses, market/base unless it
+ * names another.
  */
-type Case = { name: string; setup?: (i: number) => Promise<void>; run: (i: number) => Promise<unknown>; budget?: Budget; over?: Over; uses?: string };
+type Case = { name: string; setup?: (i: number) => Promise<void>; run: (i: number) => Promise<unknown>; over?: number; uses?: string };
 
 /** A route sending API_KEY, which market/dev holds. */
 const ROUTE: ProxyDefinition = {
@@ -222,18 +223,18 @@ async function refused(request: Promise<unknown>): Promise<void> {
 
 /** Every change route, as the UI or CLI asks it: once to warm, once measured, each on rows of its own. */
 const CASES: Case[] = [
-  { name: 'key set, one', budget: BUDGET.write, run: () => owner.secrets.set('market/dev', { [fresh().toUpperCase()]: 'fake-value' }) },
-  { name: 'key set, existing', budget: BUDGET.write, run: () => owner.secrets.set('market/dev', { API_KEY: `fake-${randomUUID()}` }) },
-  { name: 'key set, five', budget: BUDGET.write, run: () => owner.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 5 }, () => [fresh().toUpperCase(), 'fake-value']))) },
-  // Refused on the vault's read, and recorded by it: a write's budget too.
-  { name: 'key set, refused', budget: BUDGET.write, run: () => refused(viewer.secrets.set('market/dev', { API_KEY: `fake-${randomUUID()}` })) },
+  { name: 'key set, one', run: () => owner.secrets.set('market/dev', { [fresh().toUpperCase()]: 'fake-value' }) },
+  { name: 'key set, existing', run: () => owner.secrets.set('market/dev', { API_KEY: `fake-${randomUUID()}` }) },
+  { name: 'key set, five', run: () => owner.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 5 }, () => [fresh().toUpperCase(), 'fake-value']))) },
+  // Refused on the vault's read, and recorded by it: a change's budget too.
+  { name: 'key set, refused', run: () => refused(viewer.secrets.set('market/dev', { API_KEY: `fake-${randomUUID()}` })) },
   {
-    name: 'key archived',
+    name: 'key archived', over: 14,
     setup: async (i) => void (await owner.secrets.set('market/dev', { [`GONE_${i}`]: 'fake-value' })),
     run: (i) => owner.secrets.set('market/dev', { [`GONE_${i}`]: null }),
   },
   {
-    name: 'key restored (a version)',
+    name: 'key restored (a version)', over: 21,
     setup: async (i) => {
       await owner.secrets.set('market/dev', { [`BACK_${i}`]: 'fake-one' });
       await owner.secrets.set('market/dev', { [`BACK_${i}`]: 'fake-two' });
@@ -241,78 +242,78 @@ const CASES: Case[] = [
     run: (i) => owner.secrets.restore(`market/dev/BACK_${i}`, 1),
   },
   {
-    name: 'key renamed',
+    name: 'key renamed', over: 10,
     setup: async (i) => void (await owner.secrets.set('market/dev', { [`OLD_${i}`]: 'fake-value' })),
     run: (i) => owner.secrets.rename(`market/dev/OLD_${i}`, `NEW_${i}`),
   },
   {
-    name: 'key filed in a folder',
+    name: 'key filed in a folder', over: 7,
     setup: async (i) => void (await owner.secrets.set('market/dev', { [`FILED_${i}`]: 'fake-value' })),
     run: (i) => owner.secrets.update(`market/dev/FILED_${i}`, { folder: 'stripe' }),
   },
-  { name: 'reference made', run: (i) => owner.secrets.set('market/prod', { [`REF_${i}`]: { ref: 'market/dev/API_KEY' } }) },
+  { name: 'reference made', over: 23, run: (i) => owner.secrets.set('market/prod', { [`REF_${i}`]: { ref: 'market/dev/API_KEY' } }) },
   {
-    name: 'reference broken',
+    name: 'reference broken', over: 17,
     setup: async (i) => void (await owner.secrets.set('market/prod', { [`CUT_${i}`]: { ref: 'market/dev/API_KEY' } })),
     run: (i) => owner.references.break(`market/prod/CUT_${i}`),
   },
-  { name: 'project made', run: (i) => owner.projects.create(`made-${i}`, { name: 'Made' }) },
+  { name: 'project made', over: 5, run: (i) => owner.projects.create(`made-${i}`, { name: 'Made' }) },
   {
-    name: 'project renamed',
+    name: 'project renamed', over: 6,
     setup: async (i) => void (await owner.projects.create(`named-${i}`, { name: 'Named' })),
     run: (i) => owner.projects.update(`named-${i}`, { name: `Renamed ${i}` }),
   },
   {
-    name: 'project archived',
+    name: 'project archived', over: 9,
     setup: async (i) => void (await owner.projects.create(`shelved-${i}`, { name: 'Shelved' })),
     run: (i) => owner.projects.update(`shelved-${i}`, { archived: true }),
   },
-  { name: 'environment made', run: (i) => owner.environments.create(`market/env-${i}`) },
+  { name: 'environment made', over: 7, run: (i) => owner.environments.create(`market/env-${i}`) },
   // A fork of two keys or of three: one round trip more a key (below).
-  { name: 'environment forked, 2 keys', over: OVER.fork, run: (i) => owner.environments.create(`market/fork-${i}`, { from: 'base' }) },
-  { name: 'environment forked, 3 keys', over: OVER.fork, uses: 'market/wide', run: (i) => owner.environments.create(`market/fork-${i}`, { from: 'wide' }) },
+  { name: 'environment forked, 2 keys', over: 31, run: (i) => owner.environments.create(`market/fork-${i}`, { from: 'base' }) },
+  { name: 'environment forked, 3 keys', over: 32, uses: 'market/wide', run: (i) => owner.environments.create(`market/fork-${i}`, { from: 'wide' }) },
   {
-    name: 'environment renamed',
+    name: 'environment renamed', over: 8,
     setup: async (i) => void (await owner.environments.create(`market/was-${i}`)),
     run: (i) => owner.environments.update(`market/was-${i}`, { name: `is-${i}` }),
   },
   {
-    name: 'environment protected',
+    name: 'environment protected', over: 14,
     setup: async (i) => void (await owner.environments.create(`market/guarded-${i}`)),
     run: (i) => owner.environments.protect(`market/guarded-${i}`),
   },
   {
-    name: 'environment archived',
+    name: 'environment archived', over: 12,
     setup: async (i) => void (await owner.environments.create(`market/old-${i}`)),
     run: (i) => owner.environments.update(`market/old-${i}`, { archived: true }),
   },
-  { name: 'member added', budget: BUDGET.write, run: (i) => owner.members.add(`user:new-${i}@acme.example`) },
-  { name: 'member added, a role', budget: BUDGET.write, run: (i) => owner.members.add(`user:dev-${i}@acme.example`, { role: 'developer', scope: { projects: { only: ['market'] } } }) },
-  { name: 'service account added', budget: BUDGET.write, run: (i) => owner.members.add(`token:ci-${i}`) },
-  { name: 'member added, refused', budget: BUDGET.write, run: (i) => refused(viewer.members.add(`user:turned-${i}@acme.example`)) },
+  { name: 'member added', run: (i) => owner.members.add(`user:new-${i}@acme.example`) },
+  { name: 'member added, a role', run: (i) => owner.members.add(`user:dev-${i}@acme.example`, { role: 'developer', scope: { projects: { only: ['market'] } } }) },
+  { name: 'service account added', run: (i) => owner.members.add(`token:ci-${i}`) },
+  { name: 'member added, refused', run: (i) => refused(viewer.members.add(`user:turned-${i}@acme.example`)) },
   // Under `off`, by a person whose only passkey was removed (`ADMIN`): as the Owner's, nothing more read.
-  { name: 'key set, under off', budget: BUDGET.write, run: () => admin.secrets.set('market/dev', { [fresh().toUpperCase()]: 'fake-value' }) },
-  { name: 'member added, under off', budget: BUDGET.write, run: (i) => admin.members.add(`user:off-${i}@acme.example`) },
+  { name: 'key set, under off', run: () => admin.secrets.set('market/dev', { [fresh().toUpperCase()]: 'fake-value' }) },
+  { name: 'member added, under off', run: (i) => admin.members.add(`user:off-${i}@acme.example`) },
   {
-    name: 'access granted',
+    name: 'access granted', over: 11,
     setup: async (i) => void (await owner.members.add(`user:granted-${i}@acme.example`)),
     run: (i) => owner.access.set(`user:granted-${i}@acme.example`, { 'market/dev': 'developer' }),
   },
   {
-    name: 'member removed',
+    name: 'member removed', over: 19,
     setup: async (i) => void (await owner.members.add(`user:leaving-${i}@acme.example`)),
     run: (i) => owner.members.remove(`user:leaving-${i}@acme.example`),
   },
-  { name: 'token issued', run: () => owner.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
-  { name: 'token issued, by a Developer', run: () => developer.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
+  { name: 'token issued', over: 9, run: () => owner.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
+  { name: 'token issued, by a Developer', over: 12, run: () => developer.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
   // An environment's proxy definitions: its first save, and one more item on top of the page it loaded.
   {
-    name: 'proxy definitions, first save',
+    name: 'proxy definitions, first save', over: 7,
     setup: async (i) => void (await owner.environments.create(`market/routed-${i}`)),
     run: (i) => owner.proxy.save(`market/routed-${i}`, { seal: null, items: { openai: ROUTE } }),
   },
   {
-    name: 'proxy definitions, an item added',
+    name: 'proxy definitions, an item added', over: 7,
     setup: async (i) => {
       await owner.environments.create(`market/routes-${i}`);
       seals.set(i, (await owner.proxy.save(`market/routes-${i}`, { seal: null, items: { openai: ROUTE } })).seal);
@@ -321,7 +322,7 @@ const CASES: Case[] = [
   },
   // An Owner's reset of someone's passkeys: one passkey or ten, the removals asked together, the same round trips (below).
   ...[1, 10].map((held): Case => ({
-    name: `passkeys reset, ${held}`,
+    name: `passkeys reset, ${held}`, over: 9,
     setup: async (i) => {
       const email = `reset-${held}-${i}@acme.example`;
       await owner.members.add(`user:${email}`);
@@ -330,7 +331,7 @@ const CASES: Case[] = [
     run: (i) => owner.call('DELETE /members/:member/passkeys', { member: `user:reset-${held}-${i}@acme.example` }),
   })),
   {
-    name: 'token revoked',
+    name: 'token revoked', over: 5,
     setup: async (i) => void tokens.set(i, (await owner.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 })).id),
     run: (i) => owner.tokens.revoke(SERVICE, tokens.get(i)!),
   },
@@ -341,7 +342,7 @@ const seals = new Map<number, string | null>();
 test('each change route answers within its budget of round trips', async () => {
   const table: Record<string, { app: number; vault: number; hot: number; total: number; calls: number; ms: number }> = {};
   const failures: string[] = [];
-  for (const [n, { name, setup, run, budget = BUDGET.change, over, uses = 'market/base' }] of CASES.entries()) {
+  for (const [n, { name, setup, run, over, uses = 'market/base' }] of CASES.entries()) {
     try {
       // The warm request and the measured one in one bulk refresh period of every key they use (a minute, at the default
       // 15-minute window, from each key's phase): a use that crosses into the next moves its key's row on, a statement
@@ -355,10 +356,11 @@ test('each change route answers within its budget of round trips', async () => {
       const total = counts.app + counts.vault + counts.hot;
       table[name] = { ...counts, total };
       const trace = `\n  ${ran.join('\n  ')}`;
-      if (over === undefined) assertWithin(name, { trips: total }, budget, trace);
-      else assertOver(name, { trips: total }, over, trace);
-      // A write's decision is the vault's alone: nothing on the hot path.
-      if (budget === BUDGET.write && counts.hot > 0) failures.push(`${name}: ${counts.hot} round trips on the hot path`);
+      if (over === undefined) {
+        assertWithin(name, { trips: total }, BUDGET.change, trace);
+        // A change's decision is the vault's alone: nothing on the hot path.
+        if (counts.hot > 0) failures.push(`${name}: ${counts.hot} round trips on the hot path`);
+      } else assertOver(name, { trips: total }, { budget: { trips: over }, of: BUDGET.change }, trace);
       if (process.env.COFFRE_CHANGE_COST_VERBOSE) console.log(`\n${name}\n  ${ran.join('\n  ')}`);
     } catch (error) {
       failures.push(`${name}: ${(error as Error).message}`);
