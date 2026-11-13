@@ -1,7 +1,7 @@
 # Instance roles with scopes
 
 This note says who holds what across an instance's projects. It
-replaces the grants on every project of 0.4 ([instance-grants.md](instance-grants.md)).
+replaces the grants on every project of 0.4.
 
 - **A person has one instance role**, with a **scope**: what they hold in every project the
   scope takes in, the ones made later too.
