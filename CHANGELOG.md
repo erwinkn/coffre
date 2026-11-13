@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.7 (2026-11-13)
+
 - **An HMAC key written as text: `keyEncoding`.** An `hmac()` signer's or
   verifier's key was its value's UTF-8 bytes. With `keyEncoding: 'hex'`,
   `'base64'` or `'base64url'` it is the bytes the value writes: Equisafe's
