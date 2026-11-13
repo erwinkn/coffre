@@ -275,11 +275,11 @@ test('each function is made once, by its own file, which the baseline names once
 // reason in a comment at the function; a count that grows is refused the same way. A function that is gone, or is down to 10 or fewer,
 // leaves the list, and a count that falls is updated here.
 const OVER_TEN: Record<string, number[]> = {
-  change_bindings: [54, 53],
-  sign_in: [48, 35],
+  change_bindings: [54],
+  sign_in: [48],
   use_credential: [31],
   use_route: [31],
-  issue_token: [29, 28],
+  issue_token: [29],
   use_named_batch: [29],
   use_id_batch: [19],
   revoke_credential: [16],
