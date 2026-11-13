@@ -156,7 +156,8 @@ than long.
 |---|---|---|---|
 | `USE_DEADLINE_MS` | 3 s | `packages/core/src/vault.ts` | a policy choice; held in Postgres too (`deadline_max()`), so no use is decided later than 3 s after its time |
 | `HOT_LOCK_TIMEOUT_MS`, `HOT_STATEMENT_TIMEOUT_MS` | 1 s, 2 s | same | the hot login's settings, inside the deadline, so a statement cannot run on after its Worker gave up |
-| `LOCK_WAIT_MS` | 500 ms | same | every other lock wait (app writes, vault decisions, the migrator): half a use's |
+| `LOCK_WAIT_MS` | 500 ms | same | every other wait for a lock a use queues for (app writes, vault decisions, the migrator): half a use's |
+| `sign_in`, `issue_token` | 1 s | `lock_timeout` in `0082_flat_history.sql` | they take only the issue lock, which no use asks for, so their wait holds up no use |
 | `CALL_DEADLINE_MS` | 5 s | `packages/vault/src/vault.ts` | a vault read call, start to answer; a write's lock waits retry within it |
 | `KEY_BUDGET_MS` | 5 s | same | every key operation of one call, with no lock held |
 | `READ_LOCK_TIMEOUT_MS` | 3 s | same | a read's decision statements; longer is a queue holding a connection |
@@ -174,7 +175,7 @@ Why half a use's wait: Postgres grants a lock in the order it was asked, so a wr
 the fence exclusive, or a DDL statement for a table, holds back every use that asks after it.
 Example: a write queues for the fence; a use arrives 100 ms later and queues behind it. The write
 gives up at 500 ms, so the use gets the fence with half its own 1 s to spare instead of being
-refused `busy`.
+refused `busy`. So a wait on the fence never grows toward the issue writers' 1 s.
 
 The 60 s statement timeout is a ceiling, not a design value: it becomes a read call's 5 s once no
 runtime statement grows with history (`scripts/growth-sweep-known.txt` empty). Transactions with a
@@ -236,7 +237,8 @@ splits it into named shares:
   `CACHES_BYTES`. Past its slice, a cache drops its least recently used entry, one at a time; it
   never clears all at once. Settled values only, never a pending promise.
 - **Bodies.** The proxy reads a body whole up to `BODY_READ_WHOLE_BYTES`, 1 MiB; a larger one
-  streams, up to 5 GiB (`MAX_STREAM_BYTES`, S3's single-request limit). A burst of large bodies is
+  streams, up to 5 GiB (`MAX_STREAM_BYTES`, S3's single-request limit). Each byte read whole is
+  charged twice (its bytes, and its chunks or a copy), so eight 1 MiB bodies at once fill `BODIES_BYTES`. A burst of large bodies is
   refused fast, 503 with `Retry-After`, rather than ending the isolate. Node's WebSocket messages
   are held to the same 1 MiB.
 - **Field bodies.** A body the proxy fills a form or JSON field of is at most 64 KiB
@@ -349,8 +351,9 @@ the revoke. A batch is the smallest of:
   `capped` shows in the audit API, the UI and `coffre verify`, never on the hot path.
 - **The vault's `about()`, asked once an isolate** (`packages/server/src/asked-once.ts`). The first
   request makes the call; others arriving meanwhile poll it on their own timers rather than await
-  its promise. One takes over after `TAKE_OVER_MS`, 3 s; a request that waited `WAIT_MS`, 6 s, in
-  all answers 503 `starting`.
+  its promise. One takes over after `TAKE_OVER_MS`, 3 s; a request that joined and waited `WAIT_MS`,
+  6 s, in all answers 503 `starting`. The first request awaits its own call as long as it takes,
+  bounded only by the vault's own deadlines.
 - **The credential proxy's upstream request** has no time bound of coffre's own: it ends, response
   body included, when the app's request does (its caller hangs up, or its own timeout aborts), as it
   would without coffre in the path. On Workers this needs `enable_request_signal`, which the
@@ -383,6 +386,10 @@ it a source, or say why it cannot.
 | `USES_AT_ONCE` | 4 uses a request | `packages/server/src/api/keys.ts` | its reason, leaving admission room, predates admission's 1,250 places |
 | Node's alarm file | rewritten past 1,000,000 bytes, keeping 30 days | `packages/vault/src/checkpointer-node.ts` | a compaction trigger, not a bound: 30 days can stay above 1 MB, and then every append rewrites the whole file |
 | `MAX_DEFINITION_BYTES` | 8,192 bytes a proxy definition | `packages/core/src/proxy.ts` | no reason written; an editable definition past it is refused far below the 1 MiB body bound |
+| `MAX_KEYS` | 32 sign-in keys | `packages/core/src/schemas.ts` | a choice; `SIGN_IN_BODY_BYTES` is derived from it |
+| `FETCH_DEADLINE_MS` | 5 s | `packages/server/src/workloads/transport.ts` | a choice |
+| `ASK_BOUND_MS` | 2 s | `packages/vault/src/checkpointer-workers.ts` | a choice |
+| `HANDSHAKE_MS` | 70 s a tunnel's upgrade | `packages/cli/src/tunnels.ts` | its comment derives it from coffre's 15 s wait for a turn and 45 s to admit, but the 15 s only lets 4 admissions run at once: a queued connection still waits its turn, so the 5th to 8th can wait one 45 s wave and then 45 s of their own, 90 s, after the CLI closed at 70 s. The turn queue needs a bound of its own first |
 | `TOUCH_INTERVAL_MS` | 5 minutes, three copies | `workload-sessions.ts`, `api/signin.ts`, `mcp/service.ts` in `packages/server/src` | one constant, and the write claimed once |
 
 ## Platform facts
