@@ -226,6 +226,18 @@ test('a row found wrong while the alert failed, and right by the next check, is 
   await vault.owner.execute(sql`DELETE FROM principals WHERE id = ${bo}`);
   await minute();
   assert.deepEqual([alerts.map((alert) => alert.findings), (await host.status()).standing], [[[finding], [finding]], [finding]]);
+
+  // Put right and wrong again, twice over while alerts fail: it waits as one finding.
+  down.alert = true;
+  for (let times = 0; times < 2; times += 1) {
+    await vault.owner.insert(principals).values(row!);
+    await minute();
+    await vault.owner.execute(sql`DELETE FROM principals WHERE id = ${bo}`);
+    await minute();
+  }
+  down.alert = false;
+  await minute();
+  assert.deepEqual(alerts.map((alert) => alert.findings), [[finding], [finding], [finding]]);
 });
 
 test('a row said, then found right by a check whose alert failed, is said again when it is wrong again', async (t) => {
@@ -433,6 +445,20 @@ test('a signer whose runs fail is said to be stopped, once, and again if it stop
   vault.tick(CHECK_MS - TICK_MS);
   await seconds(2 + (STOPPED_MS - CHECK_MS) / TICK_MS);
   assert.deepEqual(alerts.map((alert) => alert.findings.map((each) => each.found)), [['stopped'], ['stopped']]);
+
+  // Its database back while alerts fail: the check completes, what it found waits, and the next stop is news all the same.
+  down.database = false;
+  down.alert = true;
+  await forge(1);
+  await minute();
+  down.database = true;
+  vault.tick(CHECK_MS - TICK_MS);
+  await seconds(2 + (STOPPED_MS - CHECK_MS) / TICK_MS);
+  down.alert = false;
+  await seconds(1);
+  assert.deepEqual(alerts.map((alert) => alert.findings.map((each) => each.found)), [['stopped'], ['stopped'], ['forged', 'stopped']]);
+  await seconds(60);
+  assert.equal(alerts.length, 3);
 });
 
 test('that it is stopped, gone to the log with findings piled up behind an alert that cannot be sent, is not marked as said: it is said once alerts go again', async (t) => {

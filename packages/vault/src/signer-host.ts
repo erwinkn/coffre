@@ -33,7 +33,7 @@ export type Storage = {
   transactionSync<T>(run: () => T): T;
   /** Resolves once everything written is on disk. */
   sync(): Promise<void>;
-  /** One alarm at a time: setting it replaces the one set before. Null once it fires, until it is set again. */
+  /** One alarm at a time: setting it replaces the one set before. Null once it fires, its handler running or not, until it is set again. */
   getAlarm(): Promise<number | null>;
   setAlarm(at: number): Promise<void>;
 };
@@ -219,11 +219,14 @@ export class SignerHost {
   async #tell(signer: Signer, now: number): Promise<void> {
     const stopped = this.#stopped(signer, now);
     const said = this.#on.storage.kv.get(STOPPED) === true;
+    // A check completed: the next time it stops is news, whether an alert goes through now or not.
+    if (said && stopped.length === 0) await this.#mark(false);
+    const news = said ? [] : stopped;
     let reached = true;
     await signer.take(async (found) => {
-      const news: Alerted[] = said ? found : [...found, ...stopped];
-      if (news.length === 0) return true;
-      const alert = alertOf(news);
+      const all: Alerted[] = [...found, ...news];
+      if (all.length === 0) return true;
+      const alert = alertOf(all);
       try {
         await this.#send(alert);
       } catch (error) {
@@ -233,9 +236,13 @@ export class SignerHost {
       }
       return reached;
     });
-    if (!reached || said === stopped.length > 0) return;
-    if (said) this.#on.storage.kv.delete(STOPPED);
-    else this.#on.storage.kv.put(STOPPED, true);
+    if (reached && news.length > 0) await this.#mark(true);
+  }
+
+  /** That it said the signer is stopped, or no longer: on disk before anything else. */
+  async #mark(said: boolean): Promise<void> {
+    if (said) this.#on.storage.kv.put(STOPPED, true);
+    else this.#on.storage.kv.delete(STOPPED);
     await this.#on.storage.sync();
   }
 

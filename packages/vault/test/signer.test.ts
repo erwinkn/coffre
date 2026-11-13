@@ -212,6 +212,11 @@ test('a check names a thousand rows at most, the first by name, however many are
   const last = { found: 'row', of: planted.map(named).sort()[1000]! };
   assert.deepEqual(await run(), [last]);
   assert.deepEqual(signer.standing, [...first.slice(1), last]);
+  // Told that what it found reached nobody, it forgets what stands: the next check finds them all again.
+  await signer.take(() => false);
+  assert.deepEqual(signer.standing, []);
+  vault.tick(60_000);
+  assert.deepEqual(await run(), [...first.slice(1), last]);
 });
 
 test('a change that replaced a MAC the mirror does not hold is false history', async () => {

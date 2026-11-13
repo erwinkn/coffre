@@ -367,9 +367,9 @@ export class Signer {
           // Before this run's entries: the log read is the one the last run signed, and must end as that one did.
           ...TREES.filter((tree) => snapshot.ends![tree].size !== this.#trees[tree].size || snapshot.ends![tree].last !== this.#last[tree]).map((of) => ({ found: 'cut' as const, of })),
         ];
-        // Found when it turns wrong, once: what the last check found wrong too is no news.
-        const stood = new Set(this.#stands.map(({ found, of }) => `${found} ${of}`));
-        for (const { found, of } of stands) if (!stood.has(`${found} ${of}`)) this.#find(changes, found, of);
+        // Found when it turns wrong, once: what the last check found wrong too is no news, nor what still waits to be said.
+        const known = new Set([...this.#stands, ...this.#found].map(({ found, of }) => `${found} ${of}`));
+        for (const { found, of } of stands) if (!known.has(`${found} ${of}`)) this.#find(changes, found, of);
         if (stands.length > 0 || this.#stands.length > 0) changes.set('stands', stands.length > 0 ? stands : undefined);
         this.#stands = stands;
         this.#checked = snapshot.at;
