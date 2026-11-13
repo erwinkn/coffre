@@ -140,8 +140,9 @@ and its I/O belongs to it; the isolate keeps state between calls (the vault's
 prepared state, config caches). Keep only settled values there, never a
 pending promise: a call that awaits another call's in-flight work is
 cancelled as hung on Cloudflare when that call goes, which local workerd
-does not reproduce. Concurrent first calls each do their own reads
-(`packages/vault/test/isolate.test.ts`).
+does not reproduce. The vault makes its prepared state from its
+configuration alone, with no I/O, and remembers a use's rows only once it
+has read them (`packages/vault/test/workers.test.ts`).
 
 **One connection per call.** On Workers, each app request and each vault
 call has one Postgres client through Hyperdrive (`HyperdrivePool` in

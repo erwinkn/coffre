@@ -1,5 +1,6 @@
 import { derivedSigningKey, KekRegistry, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 
+import type { Workloads } from './caller.ts';
 import type { SignerAlert } from './signer-host.ts';
 
 /** At most `count` distinct data keys unwrapped per principal in any `windowMs`. */
@@ -21,6 +22,11 @@ export const DEFAULT_BULK_LIMIT: BulkLimit = { count: 1000, windowMs: 15 * 60_00
  */
 export const MAX_BULK_WINDOW_MINUTES = 24 * 60;
 
+/** How long an instance remembers a use's rows unless told (`memorySeconds`): what a revocation waits at most. */
+export const DEFAULT_MEMORY_SECONDS = 2;
+/** The longest it remembers them: up to a thousand reads, each with the values it opened, sit in an isolate for as long. */
+export const MAX_MEMORY_SECONDS = 600;
+
 /** The vault as it runs: keys decoded, emails checked. */
 export type ResolvedVaultConfig = {
   keks: KekRegistry;
@@ -37,6 +43,8 @@ export type ResolvedVaultConfig = {
    */
   signingKeys: readonly Uint8Array[];
   bulkLimit: BulkLimit;
+  memorySeconds: number;
+  workloads: Workloads;
 };
 
 /**
@@ -76,6 +84,21 @@ export type VaultConfig = {
    * window is a day at most: the releases it counts are kept a day and an hour (`prune_vault_releases`).
    */
   bulkLimit?: { count: number; windowMinutes: number };
+  /**
+   * How long an instance remembers the rows a use read, and the values it
+   * opened from them, in seconds: 2 unless set, 0 for never, ten minutes
+   * at most. A revocation takes effect within it (docs/design/0.16.md, "The
+   * vault's short memory").
+   */
+  memorySeconds?: number;
+  /**
+   * For a deployment with workloads, what the app's `workloads` says of
+   * them, which the vault decides on: `noReads`, no binding lists values
+   * its sessions are handed back; `useOnly`, a service account is a
+   * key-bound session or nothing. Left out, the vault takes no workload's
+   * session.
+   */
+  workloads?: { noReads?: boolean; useOnly?: boolean };
   /**
    * Where the signer's alerts go: what it found in the database that the
    * vault did not write, or that it has stopped checking (docs/design/0.16.md,
@@ -171,6 +194,8 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
     owners: checkOwners(config.owners ?? config.bootstrapOwners ?? config.rootAdmins ?? []),
     signingKeys: signingKeys(config.signingKey, keks),
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
+    memorySeconds: checkMemory(config.memorySeconds ?? DEFAULT_MEMORY_SECONDS),
+    workloads: config.workloads === undefined ? null : { noReads: config.workloads.noReads === true, useOnly: config.workloads.useOnly === true },
   };
 }
 
@@ -204,6 +229,11 @@ function checkBulkLimit({ count, windowMinutes }: { count: number; windowMinutes
     throw new Error(`bulkLimit needs a whole count of at least 1 and a window above 0 minutes, a day (${MAX_BULK_WINDOW_MINUTES}) at most`);
   }
   return { count, windowMs: windowMinutes * 60_000 };
+}
+
+function checkMemory(seconds: number): number {
+  if (!(seconds >= 0 && seconds <= MAX_MEMORY_SECONDS)) throw new Error(`memorySeconds is 0 to ${MAX_MEMORY_SECONDS} seconds`);
+  return seconds;
 }
 
 function isHumanEmail(value: string): boolean {

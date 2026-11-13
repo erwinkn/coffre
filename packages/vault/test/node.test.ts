@@ -10,39 +10,42 @@ import { isUnavailable } from '@coffre/db/dialect';
 
 import { failureOf } from '../src/failure.ts';
 import { connectVault, serveVault } from '../src/node.ts';
-import { openTestDatabase } from './database.ts';
+import { openTestVault } from './database.ts';
 
 // The vault as a process of its own, which the server reaches over a Unix
 // socket (src/node.ts).
 
+/** A use by a token nobody holds: a call that reads and is refused. */
+const NOBODY = { token: '00'.repeat(32), proof: null, request: null, ip: null, project: 'market', environment: 'prod', mine: false, keys: null, purpose: 'reveal' as const, upstream: null };
+
 /** One call as `connectVault` makes it, on `agent`: the socket it went on. */
-function about(socket: string, agent: Agent): Promise<Socket> {
+function call(socket: string, agent: Agent): Promise<Socket> {
   return new Promise((resolve, reject) => {
-    const req = request({ socketPath: socket, agent, method: 'POST', path: '/about', headers: { 'content-type': 'application/json' } }, (res) => {
+    const req = request({ socketPath: socket, agent, method: 'POST', path: '/use', headers: { 'content-type': 'application/json' } }, (res) => {
       res.resume();
       res.on('end', () => (res.statusCode === 200 ? resolve(req.socket as Socket) : reject(new Error(`status ${res.statusCode}`))));
     });
     req.on('error', reject);
-    req.end('[]');
+    req.end(JSON.stringify([NOBODY]));
   });
 }
 
 test('the vault leaves an idle connection open for the server to reuse: it never races the next call by ending it', async () => {
-  const db = await openTestDatabase();
+  const db = await openTestVault();
   const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-socket-'));
   const vault = await serveVault({
     socket: join(dir, 'vault.sock'),
-    database: db.vault,
+    database: db.db,
     kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') },
     owners: ['root@acme.example'],
-  });
+  }, { wake: () => {} });
   const agent = new Agent({ keepAlive: true });
   try {
-    const first = await about(vault.socket, agent);
+    const first = await call(vault.socket, agent);
     // Past Node's default, five seconds and one more, when it ended the connection.
     await new Promise((resolve) => setTimeout(resolve, 6_500));
     assert.equal(first.destroyed, false, 'the vault ended the idle connection');
-    assert.equal(await about(vault.socket, agent), first, 'the next call went on a new connection');
+    assert.equal(await call(vault.socket, agent), first, 'the next call went on a new connection');
   } finally {
     agent.destroy();
     await vault.close();
@@ -72,15 +75,15 @@ test("the vault's database not answering crosses the socket as the outage it is,
     await new Promise<void>((resolve) => server.listen(socket, resolve));
     try {
       const vault = connectVault(socket);
-      const busy = await vault.about().then(() => assert.fail('answered'), (error: unknown) => error);
+      const busy = await vault.use(NOBODY).then(() => assert.fail('answered'), (error: unknown) => error);
       assert.equal(isUnavailable(busy), true);
-      const bug = await vault.about().then(() => assert.fail('answered'), (error: unknown) => error);
+      const bug = await vault.use(NOBODY).then(() => assert.fail('answered'), (error: unknown) => error);
       assert.equal(isUnavailable(bug), false);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
     // No vault there at all, its socket file gone with it: unreachable, as a refused connection is.
-    const gone = await connectVault(join(dir, 'nobody.sock')).about().then(() => assert.fail('answered'), (error: unknown) => error);
+    const gone = await connectVault(join(dir, 'nobody.sock')).use(NOBODY).then(() => assert.fail('answered'), (error: unknown) => error);
     assert.match(String((gone as Error).message), /is unreachable/);
     assert.equal(isUnavailable(gone), true);
   } finally {

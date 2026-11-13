@@ -119,5 +119,5 @@ export async function value(vault: TestVault, of: Fresh<typeof secrets>, text: s
 
 export const ask = (label: string, place: string, keys: readonly string[] | null, more: Partial<Ask> = {}): Ask => {
   const [projectSlug, environmentSlug] = place.split('/') as [string, string];
-  return { token: tokenOf(label), project: projectSlug, environment: environmentSlug, mine: false, keys, purpose: 'reveal', credential: null, proof: null, request: 'req-1', ip: '192.0.2.7', ...more };
+  return { token: tokenOf(label), project: projectSlug, environment: environmentSlug, mine: false, keys, purpose: 'reveal', upstream: null, proof: null, request: 'req-1', ip: '192.0.2.7', ...more };
 };
