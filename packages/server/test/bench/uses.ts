@@ -61,7 +61,7 @@ const use = async (phase: Phase, due: number, cold = false) => {
   const own = cold ? postgresClient(far.url, { max: 1 }) : pool;
   try {
     const rows = await own.unsafe<{ use: { state: string | null } }[]>(
-      'SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6) AS use',
+      'SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, false, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL) AS use',
       [row.credential, row.secret, row.requestId.toString(), String(row.at), mac(row), String(row.at + 3000)],
     );
     const state = rows[0]!.use.state;

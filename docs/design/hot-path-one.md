@@ -299,6 +299,16 @@ account for.
 - **Seal cache:** each shape has a probing form and a cached form. That makes
   four statements, generated from one template, and the migration holds all
   four.
+- **Two statements since 0.16 (T274, migration 0086).** The full statement
+  reads what the four read and answers every call alone: it probes only when
+  the isolate's seals are no longer the log's, and reads a reference's rows
+  only for a key with no version of its own. The lean statement, 0.15's
+  cached plain form, runs in front of it for the common use and hands off
+  with `whole`. One rule decides both: `use_state`, a SQL function the
+  planner inlines. The lean statement is there for cost alone. Postgres sets
+  up every node of a plan on each run, whether the node reads or not, at
+  about 3 µs a node. Run alone on a cached use, the full plan's 78 nodes cost
+  about 22% more Postgres CPU than the lean plan's 49.
 
 ### The answer: JSON, not a typed row (reversible)
 

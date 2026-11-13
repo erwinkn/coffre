@@ -40,7 +40,7 @@ test('T187: a use reads and locks the same at a handful of days and at a hundred
   const id = await w.key();
   const today = new Date(Math.floor(Date.now() / DAY) * DAY);
   const day = (offset: number) => new Date(today.getTime() + offset * DAY).toISOString().slice(0, 10);
-  const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13)';
+  const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, NULL, NULL, false, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL)';
   // Each call its own `at`, now, and its deadline the longest a use may ask, 3 s on: a deadline past `at` + 3 s is `late`.
   const args = async (cover: { number: string; at: number; request: string } | null) => {
     const [newest] = await rows<{ number: string; mac: Buffer }>(db.owner, sql`SELECT number, mac FROM log_changes ORDER BY number DESC LIMIT 1`);

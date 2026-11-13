@@ -124,7 +124,7 @@ test('R48: a route use is one statement on a warm map, its buffers the same at 1
       ] as never[];
       const call = 'use_route($1::bytea, $2::text, $3::text, $4::text, $5::text, $6::smallint, $7::boolean, $8::text[], $9::jsonb, $10::uuid, $11::smallint, $12::text, $13::uuid, '
         + '$14::bigint, $15::smallint, $16::bigint, $17::bytea, $18::uuid[], $19::uuid[], $20::bigint[], $21::bytea[], $22::bigint[], $23::bigint[], $24::bigint[], $25::boolean[], '
-        + '$26::integer, $27::integer, $28::text, $29::boolean, $30::boolean)';
+        + '$26::integer, $27::integer, $28::text, $29::boolean, $30::boolean, NULL::text)';
       const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ${call}`, args);
       const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Actual Rows': number } }[] })['QUERY PLAN'][0]!.Plan;
       least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);

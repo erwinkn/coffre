@@ -130,6 +130,9 @@ export type TestDatabase = {
   close(): Promise<void>;
 };
 
+/** What a file does to each database it opens, once open (`lean-twin.ts`). */
+export const onOpen: ((db: TestDatabase) => Promise<void>)[] = [];
+
 /**
  * The database as its owner and as the vault; `connect` opens one more as the vault, as a second instance would, with
  * up to `connections` at once (10 unless set). `connections`, each pool's own: a matrix that runs beside the others,
@@ -153,7 +156,7 @@ export async function openTestDatabase({ connections: pools }: { connections?: n
   };
   const owner = await open(OWNER_URL, undefined, opened);
   suiteOwner = owner;
-  return {
+  const db: TestDatabase = {
     owner,
     vault: await open(VAULT_URL, undefined, opened),
     connect: (connections) => open(VAULT_URL, connections),
@@ -168,6 +171,8 @@ export async function openTestDatabase({ connections: pools }: { connections?: n
       }
     },
   };
+  for (const hook of onOpen) await hook(db);
+  return db;
 }
 
 /**

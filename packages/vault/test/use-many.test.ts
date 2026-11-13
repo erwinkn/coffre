@@ -1,5 +1,5 @@
 // A request's several keys as one vault call, `useMany`, one
-// statement (`use_batch`, migration 0048) rather than a call a key.
+// statement (`use_id_batch`, migration 0086) rather than a call a key.
 // Each case is named for what formal/Batching.tla holds of it;
 // every key's use is `use_credential`'s, whose own guarantees use.test.ts holds.
 // Every run's live answers are held to the replay of the log.
@@ -66,7 +66,7 @@ async function counted(options: { batch?: number; before?: (n: number) => Promis
         statements += 1;
         const send = () => (value as (...a: unknown[]) => unknown).apply(target, args);
         // A hook before a batch's nth statement: what lands between its rounds.
-        if (options.before === undefined || !String(args[0]).includes('use_batch(')) return send();
+        if (options.before === undefined || !String(args[0]).includes('use_id_batch(')) return send();
         return options.before(++batches).then(send);
       };
     },

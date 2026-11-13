@@ -113,7 +113,7 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
       const requestId = newRequestId();
       const mac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
       // Named, as the app asks: its config accepting the credential (0045's `p_signin`), so that the call reads its names.
-      const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12, $13, $14, p_signin => $15)';
+      const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12, $13, $14, false, false, NULL, $15, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL)';
       const argsOf = (request: string, macOf: Buffer) => [w.credentialId, id, request, String(at), macOf, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null,
         cached ? 1000 : null, cached ? String(15 * 60_000) : null, named ? names!.token_hash : null, named ? names!.project : null, named ? 'dev' : null, named ? names!.key : null,
         named ? true : null] as never[];
@@ -174,7 +174,7 @@ test("D153: a named use reads what it names by index, its buffers the same at 1k
       const argsOf = (request: string, macOf: Buffer) =>
         [mapped ? w.credentialId : null, mapped ? id : null, request, String(at), macOf, String(at + 3000), names!.token_hash, names!.project, 'dev', names!.key] as never[];
       const args = argsOf(requestId, mac);
-      const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $7, $8, $9, $10, p_signin => true)';
+      const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $7, $8, $9, $10, false, false, NULL, true, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL)';
       // What is measured reads the names: the key resolved by them, never the early answer for a credential not accepted.
       // A request of its own, beside the one measured: each use's entry is its request's.
       if (i === 0) {
@@ -249,7 +249,7 @@ test("T165: a named use at a fork, and at `dev@me`, walks the place's chain and 
       const mac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
       const args = [requestId, String(at), mac, String(at + 3000), names!.token_hash, names!.project, environment, key] as never[];
       const call = `use_credential(NULL, NULL, $1, $2, 4::smallint, NULL, $3, $4, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $5, $6, $7, $8,
-        p_signin => true, p_roles => '${GATE_ROLES.replaceAll("'", "''")}'::jsonb, p_forks => true)`;
+        false, false, NULL, true, NULL, '${GATE_ROLES.replaceAll("'", "''")}'::jsonb, 0::smallint, NULL, true, NULL, false, NULL)`;
       if (i === 0) {
         const [row] = await client.unsafe(`SELECT ${call}::text AS use`, args) as unknown as { use: string }[];
         const answered = JSON.parse(row!.use) as { state: string | null; n_standing: boolean | null };
@@ -329,7 +329,7 @@ test("T165 (PR 2): a named batch's first statement reads no key without standing
   const buffers = (environment: string, asked: readonly string[] | null, stands: boolean): Promise<number> => {
     const n = asked?.length ?? 0;
     const list = <T>(value: T) => (asked === null ? null : Array.from({ length: n }, () => value));
-    return least(`use_named_batch($1, $2, $3, false, '{}', true, '{}', ${roles}, $4, 4::smallint, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 0::smallint, NULL, 100)`,
+    return least(`use_named_batch($1, $2, $3, false, '{}', true, '{}', ${roles}, $4, 4::smallint, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 0::smallint, NULL, 100, NULL)`,
       (at, read) => [names!.token_hash, names!.project, environment, String(at), String(at + 3000), read, asked === null ? null : [...asked],
         list(null), list(null), list(null), list('0'), list(read), list(null), list(null), list(null), list(null), list(null), list(null), list(null)],
       (answer) => {
@@ -342,7 +342,7 @@ test("T165 (PR 2): a named batch's first statement reads no key without standing
   const lone = (environment: string, key: string | null): Promise<number> =>
     least(`use_credential(NULL::uuid, NULL::uuid, 0::bigint, $1::bigint, 4::smallint, NULL::uuid, $2::bytea, $3::bigint,
         NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint, NULL::bytea, NULL::integer, NULL::bigint, $4::bytea, $5::text, $6::text, $7::text,
-        false, false, '{}'::text[], true, '{}'::text[], ${roles}, 0::smallint, NULL::text, true)`,
+        false, false, '{}'::text[], true, '{}'::text[], ${roles}, 0::smallint, NULL::text, true, NULL::text, false, NULL::text)`,
       (at, read) => [String(at), read, String(at + 3000), names!.token_hash, names!.project, environment, key],
       (answer) => assert.equal((JSON.parse(answer) as { n_standing: boolean | null }).n_standing, true, answer.slice(0, 300)));
   // A batch is its gate and a lone named use of each key, in one statement, and its listing: the lone use's own buffers
@@ -423,7 +423,7 @@ test("T220: a reference's use reads its newest reference by its holder, its buff
   const { id: holder, reference } = await referring(1);
   const object: Input = { kind: 'secret', id: holder, projectId: w.project, environmentId: w.dev, version: '', nature: 'secret', key: null, digest: null, source, reference };
   await change({ kind: 'secret', id: holder }, { op: 'genesis', value: object }, object, seal('secrets', 'id', holder));
-  const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6)';
+  const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, false, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL)';
   /**
    * A probing use of `key`'s buffers, the least of five runs on a connection of its own (the R48 test says why),
    * after one that checks what it read of the key: `read`, its source and reference.

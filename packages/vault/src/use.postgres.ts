@@ -55,13 +55,14 @@ async function useText(db: Queryable, call: UseCall): Promise<string> {
     ${call.way}::smallint, ${call.principal}::text,
     ${call.names?.forks === true}::boolean,
     ${call.route ?? null}::text,
-    p_passkeys => ${call.names?.accepts.passkeys ?? null}::text
+    false,
+    ${call.names?.accepts.passkeys ?? null}::text
   )::text AS use`);
   return row!.use;
 }
 
 /**
- * A batch of uses by ids on Postgres: one call of `use_batch` (0048), one statement and one round trip, its
+ * A batch of uses by ids on Postgres: one call of `use_id_batch` (0086), one statement and one round trip, its
  * own transaction, each key's use `use_credential`'s, in order. `lock`: the principal whose lock the batch takes
  * exclusive before its first key (StrongestFirst), its keys decided. It answers a JSON array of `use_credential`'s rows.
  */
@@ -73,7 +74,7 @@ export async function callBatch(db: Queryable, calls: readonly UseCall[], lock: 
     throw new Error("a batch's uses are one request's, by ids: one way in, time, purpose and deadline");
   }
   const list = <T>(of: (call: UseCall) => T) => sql.param(calls.map(of));
-  const [row] = await rowsOf<{ uses: string }>(db, sql`SELECT use_batch(
+  const [row] = await rowsOf<{ uses: string }>(db, sql`SELECT use_id_batch(
     ${first.credential}::uuid, ${list((call) => call.secretId)}::uuid[], ${list((call) => call.requestId)}::bigint[], ${String(first.at)}::bigint, ${first.purpose}::smallint,
     ${list((call) => call.place)}::uuid[], ${list((call) => call.mac)}::bytea[], ${String(first.deadline)}::bigint,
     ${list((call) => call.cover?.number ?? null)}::bigint[], ${list((call) => (call.cover === undefined ? null : String(call.cover.at)))}::bigint[], ${list((call) => call.cover?.requestId ?? null)}::bigint[],
@@ -120,10 +121,10 @@ export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readon
   return { gate: rowFrom(read.gate), keys: read.keys, rows: read.rows.map((one) => (one === null ? null : rowFrom(one))), byIds: read.by_ids, aheads: read.aheads };
 }
 
-/** `use_batch`'s JSON array, each element as `rowOf` reads one, the array read again exactly if any needs it. */
+/** `use_id_batch`'s JSON array, each element as `rowOf` reads one, the array read again exactly if any needs it. */
 export function rowsOfBatch(text: string): UseRow[] {
   let rows = JSON.parse(text) as Record<string, unknown>[];
-  if (!Array.isArray(rows)) throw new Error('use_batch answered no array');
+  if (!Array.isArray(rows)) throw new Error('use_id_batch answered no array');
   if (rows.some(inexact)) rows = exactly(text) as Record<string, unknown>[];
   return rows.map(rowFrom);
 }

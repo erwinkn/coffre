@@ -31,7 +31,7 @@ import { eventRow } from '../src/note.ts';
 import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, useMany, type UsePath } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
-import { APP_URL, HOT_URL, openTestDatabase, OWNER_URL, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
+import { APP_URL, HOT_URL, onOpen, openTestDatabase, OWNER_URL, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, DAY, emptyLog, failing, FENCE, genesis, heldKeks, isolate, KEK, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, timingOut, until, useDatabases, world } from './use-world.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 import { environments, grants, projects, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
@@ -443,7 +443,7 @@ test("T204, review r1: a log of the previous release's uses and 0074's replays a
 /** A use's call as the vault makes it once it has decided the use (`p_decided`): the one that takes the principal's lock. */
 async function call(tx: Queryable, w: { credentialId: string }, secretId: string, at: number): Promise<{ state: string | null }> {
   const [row] = await rows<{ use: { state: string | null } }>(tx, sql`SELECT use_credential(${w.credentialId}, ${secretId}, ${newRequestId()}, ${at},
-    4::smallint, NULL, ${randomBytes(16)}, ${at + 3000}, p_decided => true) AS use`);
+    4::smallint, NULL, ${randomBytes(16)}, ${at + 3000}, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL) AS use`);
   return row!.use;
 }
 
@@ -596,23 +596,25 @@ test('a use on a server whose bytes are written `escape` is decided as on any: t
   }
 });
 
-test('a session\'s first call does its planning\'s cold work before it takes the fence (T131)', async () => {
+test('a session\'s first call does its planning\'s cold work before it takes the fence (T131)', async (t) => {
+  // A twin (`lean-twin.ts`) plans each statement once per copy of `use_credential`: this file alone holds the count.
+  if (onOpen.length > 0) return t.skip('a twin plans its copies\' statements too');
   const w = await world();
   const id = await w.key();
-  // The indexes the four statements' plans choose among, which a session opens when it first plans them: its cold work,
+  // The indexes the two statements' plans choose among, which a session opens when it first plans them: its cold work,
   // tens of milliseconds on a new connection, which no use may do holding the fence a barrier waits for.
   const opened = ['bulk_cap_pkey', 'checkpoint_fence_pkey', 'credentials_token_hash_key', 'environments_pkey', 'grants_on_project',
     'log_config_pkey', 'principals_pkey', 'secret_versions_pkey', 'secrets_pkey'];
   const fence = postgresSession(OWNER_URL);
-  // Whether a fresh session's first call, cut short at the fence, has parsed the four statements and opened those indexes.
+  // Whether a fresh session's first call, cut short at the fence, has parsed the two statements and opened those indexes.
   const beforeFence = async (planned: boolean) => {
     const fresh = postgresSession(OWNER_URL);
     try {
       await fresh.unsafe(`SET lock_timeout = '200ms'`);
-      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0082', false)`);
+      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0086', false)`);
       const at = Date.now();
       await assert.rejects(
-        fresh.unsafe(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6)`, [w.credentialId, id, newRequestId(), String(at), randomBytes(16), String(at + 3000)]),
+        fresh.unsafe(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, false, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL)`, [w.credentialId, id, newRequestId(), String(at), randomBytes(16), String(at + 3000)]),
         { code: '55P03' },
       );
       // The contexts name a statement by its first 1,024 bytes, and an index by its name.
@@ -626,21 +628,22 @@ test('a session\'s first call does its planning\'s cold work before it takes the
   try {
     await fence.unsafe('BEGIN');
     await fence.unsafe('SELECT pg_advisory_xact_lock(1668244070, 0)');
-    // The call never held the fence, and yet it has planned each of the four statements: their dry runs, before it.
-    assert.deepEqual(await beforeFence(false), { parsed: 4, indexes: opened });
+    // The call never held the fence, and yet it has planned both statements (two since 0086, V2a; four before): their
+    // dry runs, before it.
+    assert.deepEqual(await beforeFence(false), { parsed: 2, indexes: opened });
     // Told its statements are planned, the same call does none of that before the fence: it would all be under it.
     assert.deepEqual(await beforeFence(true), { parsed: 0, indexes: [] });
     await fence.unsafe('ROLLBACK');
     // Under the fence, a call plans warm (about 2 ms) until the plan cache settles on a plan, by a session's sixth call
-    // of a form (docs/design/planner-defaults.md). A fresh session's first call is answered, and says the plans are made.
+    // of a statement (docs/design/planner-defaults.md). A fresh session's first call is answered, and says the plans are made.
     const fresh = postgresSession(OWNER_URL);
     try {
       const again = Date.now();
-      const [answer] = await fresh.unsafe<{ use: { state: string | null } }[]>(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, p_decided => true) AS use`,
+      const [answer] = await fresh.unsafe<{ use: { state: string | null } }[]>(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL) AS use`,
         [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
       assert.equal(answer!.use.state, null);
       const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-      assert.equal(setting!.planned, '0082');
+      assert.equal(setting!.planned, '0086');
     } finally {
       await fresh.end();
     }

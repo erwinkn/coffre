@@ -98,7 +98,7 @@ BEGIN
                WHERE proname = 'use_covered' AND pronamespace = 'public'::regnamespace) THEN
         RAISE EXCEPTION 'FAIL: a use''s cover may be probed by a plan for any values';
     END IF;
-    IF EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('use_credential', 'use_batch', 'use_named_batch', 'use_route') AND pronamespace = 'public'::regnamespace
+    IF EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('use_credential', 'use_id_batch', 'use_named_batch', 'use_route') AND pronamespace = 'public'::regnamespace
                  AND prosrc ~* '(FROM|JOIN)\s+public\.log_uses\M') THEN
         RAISE EXCEPTION 'FAIL: a use function reads log_uses in a statement the hot login plans for any values';
     END IF;
@@ -229,9 +229,9 @@ BEGIN
         RAISE EXCEPTION 'FAIL: coffre_vault_hot holds what the vault does not, or not what it does';
     END IF;
     -- W268's gate and its helpers run inside use_credential, as its owner: no login calls them itself (a personal
-    -- config's, 0051's, and the cover's probe, 0057's, too).
+    -- config's, 0051's, the cover's probe, 0057's, and a route's read and the use's rule, 0086's, too).
     IF EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN (VALUES ('coffre_app'), ('coffre_vault'), ('coffre_vault_hot'), ('coffre_backup')) AS login (name)
-                WHERE p.proname IN ('use_stands', 'use_admits', 'use_stands_personal', 'use_scope_holds', 'use_covered') AND p.pronamespace = 'public'::regnamespace
+                WHERE p.proname IN ('use_stands', 'use_admits', 'use_stands_personal', 'use_scope_holds', 'use_covered', 'use_route_read', 'use_state') AND p.pronamespace = 'public'::regnamespace
                   AND has_function_privilege(login.name, p.oid, 'EXECUTE')) THEN
         RAISE EXCEPTION 'FAIL: a login may call the named use''s gate itself';
     END IF;
@@ -284,7 +284,7 @@ DECLARE
     r use_row;
     t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
 BEGIN
-    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 1, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 2000, p_decided => true));
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 1, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 2000, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.state IS DISTINCT FROM 'unconfigured' OR r.number IS NOT NULL OR EXISTS (SELECT 1 FROM log_uses) THEN
         RAISE EXCEPTION 'FAIL: a use without a policy answered % and wrote %', r.state, r.number;
     END IF;
@@ -350,7 +350,7 @@ DECLARE
                            FROM (SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint AS c) n) k);
     tag bytea := decode(repeat('ab', 16), 'hex');
 BEGIN
-    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 7, t, 258::smallint, '22222222-2222-2222-2222-222222222222', tag, t + 2000, p_decided => true));
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 7, t, 258::smallint, '22222222-2222-2222-2222-222222222222', tag, t + 2000, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.state IS NOT NULL OR r.number IS NULL OR r.c_principal <> 'token:deploy' OR r.newest <> (SELECT max(number) FROM log_changes)
        OR r.inputs <> r.newest OR r.c_seal IS DISTINCT FROM r.c_last OR r.m_seal IS DISTINCT FROM r.m_last OR r.s_seal IS DISTINCT FROM r.s_last
        OR r.e2_seal IS DISTINCT FROM r.e2_last OR r.p_seal IS DISTINCT FROM r.p_last OR r.r_seal IS DISTINCT FROM r.r_last
@@ -366,7 +366,7 @@ BEGIN
         RAISE EXCEPTION 'FAIL: the use''s entry or its key''s bulk row (its refresh period''s start) is not as asked';
     END IF;
     BEGIN
-        PERFORM use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 7, t, 258::smallint, NULL, tag, t + 2000, p_decided => true);
+        PERFORM use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 7, t, 258::smallint, NULL, tag, t + 2000, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL);
         RAISE EXCEPTION 'FAIL: a replayed use decided again';
     EXCEPTION WHEN unique_violation THEN NULL;
     END;
@@ -374,37 +374,37 @@ BEGIN
 
     -- A repeat on its cover writes nothing; one whose cover has no entry writes its own.
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 8, t + 1, 258::smallint, '22222222-2222-2222-2222-222222222222', tag, t + 2000,
-        (SELECT number FROM log_uses), t, 7, p_decided => true));
+        (SELECT number FROM log_uses), t, 7, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.state IS NOT NULL OR r.number IS NOT NULL OR r.covered IS DISTINCT FROM (SELECT number FROM log_uses) THEN
         RAISE EXCEPTION 'FAIL: a covered repeat answered % % %', r.state, r.number, r.covered;
     END IF;
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 9, t + 1, 258::smallint, '22222222-2222-2222-2222-222222222222', tag, t + 2000,
-        (SELECT number FROM log_uses), t, 6, p_decided => true));
+        (SELECT number FROM log_uses), t, 6, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.covered IS NOT NULL OR r.number IS NULL THEN RAISE EXCEPTION 'FAIL: a cover with no entry covered'; END IF;
     -- A cover is its own credential's and secret's: another secret's entry, its key's row fresh, covers nothing, in either form.
-    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 13, t + 1, 1::smallint, NULL, tag, t + 2000, p_decided => true));
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 13, t + 1, 1::smallint, NULL, tag, t + 2000, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.number IS NULL THEN RAISE EXCEPTION 'FAIL: the other secret''s use wrote no entry'; END IF;
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 14, t + 1, 258::smallint, NULL, tag, t + 2000,
-        r.number, t + 1, 13, p_decided => true));
+        r.number, t + 1, 13, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.covered IS NOT NULL OR r.number IS NULL THEN RAISE EXCEPTION 'FAIL: one secret''s entry covered another''s use'; END IF;
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 15, t + 1, 258::smallint, NULL, tag, t + 2000,
-        (SELECT number FROM log_uses WHERE request_id = 13), t + 1, 13, r.newest, r.newest_mac, r.cap_count, r.cap_window, p_decided => true));
+        (SELECT number FROM log_uses WHERE request_id = 13), t + 1, 13, r.newest, r.newest_mac, r.cap_count, r.cap_window, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.covered IS NOT NULL OR r.number IS NULL OR r.c_last IS NOT NULL THEN RAISE EXCEPTION 'FAIL: one secret''s entry covered another''s use, from the cache'; END IF;
 
     -- The seal cache: the newest change named exactly skips the probes; a wrong MAC probes again.
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 10, t + 2, 258::smallint, NULL, tag, t + 2000,
-        NULL, NULL, NULL, r.newest, r.newest_mac, r.cap_count, r.cap_window, p_decided => true));
+        NULL, NULL, NULL, r.newest, r.newest_mac, r.cap_count, r.cap_window, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.state IS NOT NULL OR r.number IS NULL OR r.c_last IS NOT NULL OR r.inputs IS NOT NULL OR r.c_seal IS NULL THEN
         RAISE EXCEPTION 'FAIL: the cached form read %', r;
     END IF;
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 11, t + 2, 258::smallint, NULL, tag, t + 2000,
-        NULL, NULL, NULL, r.newest, decode(repeat('00', 16), 'hex'), r.cap_count, r.cap_window, p_decided => true));
+        NULL, NULL, NULL, r.newest, decode(repeat('00', 16), 'hex'), r.cap_count, r.cap_window, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.state IS NOT NULL OR r.c_last IS NULL OR r.inputs IS NULL THEN
         RAISE EXCEPTION 'FAIL: a stale cache was trusted';
     END IF;
 
     -- The cap at one key: the other key is asked for, logged, and not let in.
-    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 12, t + 3, 1::smallint, NULL, tag, t + 2000, p_decided => true));
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 12, t + 3, 1::smallint, NULL, tag, t + 2000, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.state IS NOT NULL OR r.number IS NULL OR r.in_set OR r.others <> 1
        OR EXISTS (SELECT 1 FROM bulk_cap WHERE secret = '44444444-4444-4444-4444-444444444442') THEN
         RAISE EXCEPTION 'FAIL: the cap let a second key in: %', r;
@@ -423,16 +423,16 @@ DECLARE
     before bigint;
     last bigint;
 BEGIN
-    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 20, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 3001, p_decided => true));
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 20, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 3001, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.state <> 'late' THEN RAISE EXCEPTION 'FAIL: a deadline past deadline_max was taken'; END IF;
     -- A use from a clock running ahead: a proof would not find it from its window.
     last := (SELECT b.last FROM bulk_cap b WHERE b.principal = 'token:deploy' AND b.secret = '44444444-4444-4444-4444-444444444441');
-    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 23, t + 61000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 63000, p_decided => true));
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 23, t + 61000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 63000, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.state IS DISTINCT FROM 'ahead' OR r.number IS NOT NULL OR r.covered IS NOT NULL OR EXISTS (SELECT 1 FROM log_uses WHERE request_id = 23)
        OR (SELECT b.last FROM bulk_cap b WHERE b.principal = 'token:deploy' AND b.secret = '44444444-4444-4444-4444-444444444441') IS DISTINCT FROM last THEN
         RAISE EXCEPTION 'FAIL: a use stamped ahead of the database wrote something';
     END IF;
-    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 21, t - 2000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t - 1, p_decided => true));
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 21, t - 2000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t - 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.state <> 'late' THEN RAISE EXCEPTION 'FAIL: a use past its deadline was taken'; END IF;
     before := (SELECT at_floor FROM checkpoint_fence);
     SELECT * INTO barrier FROM close_one();
@@ -441,7 +441,7 @@ BEGIN
        OR barrier.at_floor < t - 3000 OR barrier.at_floor <> (SELECT at_floor FROM checkpoint_fence) THEN
         RAISE EXCEPTION 'FAIL: the barrier closed at % with floor %', barrier.upto, barrier.at_floor;
     END IF;
-    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 22, barrier.at_floor - 1, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 1000, p_decided => true));
+    r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 22, barrier.at_floor - 1, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 1000, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, true, false, NULL, NULL, NULL, NULL, 0::smallint, NULL, false, NULL, false, NULL));
     IF r.state <> 'late' OR EXISTS (SELECT 1 FROM log_uses WHERE request_id IN (20, 21, 22)) THEN
         RAISE EXCEPTION 'FAIL: a use below the floor was written';
     END IF;
