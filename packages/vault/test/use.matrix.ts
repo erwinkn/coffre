@@ -1,8 +1,7 @@
-// No key a caller may not know of shows through the use by name (T158; formal/Probing.tla, SameAnswer; reviews r1 to
-// r4 of #412 and d1 to d4 of #416, each of which found a path the tests before it left out): the matrix of what a
-// caller without standing at a place can make the vault do, generated, every cell its own world and isolate.
+// No key a caller may not know of shows through the use by name (formal/Probing.tla, SameAnswer): the matrix of what
+// a caller without standing at a place can make the vault do, generated, every cell its own world and isolate.
 //
-// A row is what the caller sees and shapes: what the isolate's map holds for the request's names (D150: anything at
+// A row is what the caller sees and shapes: what the isolate's map holds for the request's names (anything at
 // all; Probing.tla's `Maps`), how they lost their standing (a grant revoked; a grant's end passed, which no change
 // records; their credential revoked by 0.14's code mid-upgrade, around the log; a Contributor, who may use and not
 // read, asking to read), the place (live, its environment archived, its project archived) and the request's admission
@@ -17,11 +16,11 @@
 // every statement slow (`delayOf`), so that a lock waited for, or a statement more, shows as busy; and with the cap's
 // window passed since the requests before, or not, so that a key's use would take that lock, or not.
 //
-// No decision is kept for a later use to take the principal's lock on (D153, review r1): a row that would end one
+// No decision is kept for a later use to take the principal's lock on: a row that would end one
 // another way than by a change of the log's (a grant's end, a write around the log, another permission) holds a use
 // to deciding again, as every other does.
 //
-// A use of a key fresh in the set writes its request's entry, refused, in the statement that reads it (R53): that row
+// A use of a key fresh in the set writes its request's entry, refused, in the statement that reads it: that row
 // differs, which no caller sees, and costs no wait.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -60,22 +59,22 @@ after(() => db.close());
 const KEYS = [
   'held', 'made since', 'used before', 'deleted', 'never made',
   // Used before, as above, then its value gone, or its row put back: what the use decides of the key's own rows comes
-  // after the standing (review d5 of #416; `standingRefusal`, Lean's `refused_by_standing`).
+  // after the standing (`standingRefusal`, Lean's `refused_by_standing`).
   'a reference, its source deleted since', 'a reference, ended since', 'its row put back since',
   // Its source pointed elsewhere by a writer around the log, no change of the log's: its rows not as sealed, nor as the
-  // isolate's seals of them say (review r2 of D153): refused by name, never routed to the app's path.
+  // isolate's seals of them say: refused by name, never routed to the app's path.
   'a reference repointed around the log',
   // Its source's environment archived since: the key reads nothing until it is back, the vault's refusal by name, never
-  // the app's path (review r4 of D153).
+  // the app's path.
   'a reference, its source archived since',
 ] as const;
 /** The keys a use of theirs, while they stood, left fresh in their set: a use of one in its period writes its request's entry. */
 const USED = new Set<Key>(['used before', 'a reference, its source deleted since', 'a reference, ended since', 'its row put back since', 'a reference repointed around the log', 'a reference, its source archived since']);
 /** What their asking left the map: the names' ids as a read of them found them then. */
 const ASKED = ['never', 'while standing', 'after', 'renamed, its slug reused'] as const;
-/** The map set as it should never be (D150), whatever their asking would have left it. */
+/** The map set as it should never be, whatever their asking would have left it. */
 const SET = ['another place', 'another place, no key', 'an archived place', 'a place never made', 'a key gone', "another place's key", 'a key never made', 'another credential'] as const;
-/** How they lost their standing, or not: then the keys they may not have are the ones to answer alike (D153). */
+/** How they lost their standing, or not: then the keys they may not have are the ones to answer alike. */
 const LOST = ['revoked', 'lapsed', 'revoked around the log', 'may not read', 'token revoked', 'they stand'] as const;
 /** The place: live, archived, or its row's seal replaced around the log, which a token revoked still sees past (401). */
 const PLACES = ['live', 'environment archived', 'project archived', 'its seal replaced'] as const;
@@ -90,7 +89,7 @@ type Key = (typeof KEYS)[number];
 
 /**
  * Each statement's delay: 1.6 s, so that a statement more, or a lock's 1 s, passes the 3 s deadline. A
- * refusal is one statement, whatever the map holds (D153).
+ * refusal is one statement, whatever the map holds.
  */
 const delayOf = () => 1600;
 /** How long a grant that lapses stands: past the requests made while it does, cells side by side. */
@@ -104,11 +103,11 @@ const usable = (row: Row, key: Key) => row.lost === 'they stand' && row.map !== 
 /** What ended their standing, or refuses them though they stand, is no change of the log's: a cover made before holds. */
 const unrecorded = (row: Row) => row.lost === 'lapsed' || row.lost === 'revoked around the log' || (row.lost === 'they stand' && row.place === 'its seal replaced');
 /**
- * The one write a cell may make, its request's entry (R53), refused: never for a caller who does not stand there, whose
- * key is never read (W268, NoKeyBeforeStanding); for one who does, a place whose seal a writer replaced, the statement
+ * The one write a cell may make, its request's entry, refused: never for a caller who does not stand there, whose
+ * key is never read (NoKeyBeforeStanding); for one who does, a place whose seal a writer replaced, the statement
  * stands them on its rows, which it does not check the seals of: a key fresh in their set, which takes no lock, used
  * in its statement, as asked, at a live place, by the ids its names name now, which the map holds (their asking's, a
- * place not renamed since; a map not read yet makes no use in its first call, D153). Not a repeat that rides the cover
+ * place not renamed since; a map not read yet makes no use in its first call). Not a repeat that rides the cover
  * of a use the same isolate made while they stood, no change of the log's since (their grant's end, a write around the
  * log, a seal replaced around it), which is answered on it, writing none (CoveredRefusalAnswered): the keys their asking
  * used, while standing, and, as they still stand, after. Nor a key that reads an archived place, which the call answers
@@ -118,7 +117,7 @@ const writes = (row: Row, key: Key) => row.lost === 'they stand' && key !== 'a r
   && (row.map === 'while standing' || row.map === 'after') && (USED.has(key) || (row.map === 'while standing' && key === 'held'))
   && !(unrecorded(row) && ((row.map === 'while standing' && (key === 'held' || key === 'used before')) || (row.map === 'after' && row.lost === 'they stand' && key === 'used before')));
 /**
- * What the caller is told of a cell's answer: the vault's reason for a refusal is the audit log's (D153), and every one
+ * What the caller is told of a cell's answer: the vault's reason for a refusal is the audit log's, and every one
  * is the app's one `not_available`; a busy answer, a credential ended, a use allowed, and what the app answers itself
  * (`not served`), are each their own.
  */
@@ -200,7 +199,7 @@ async function cell(row: Row, key: Key) {
   if (key === 'a reference repointed around the log') {
     await run(db.owner, sql`UPDATE secret_references SET source_secret_id = ${await w.key('another source')} WHERE id = ${reference!.row}`);
   }
-  // Their place renamed, its slug taken by a new one, their grant left on the old one (review d4 of #416): the map holds
+  // Their place renamed, its slug taken by a new one, their grant left on the old one: the map holds
   // the old place, and the key's state there, for the names the new one has now.
   let named = w.dev;
   if (row.map === 'renamed, its slug reused') {
@@ -237,7 +236,7 @@ async function cell(row: Row, key: Key) {
           code: codeOf(answer), route: routeOf(answer), calls: measured.statements() - before,
           entries: (await entries()) - beforeEntries, capRows: (await capRows()) - beforeCap,
           // Its last statement's form (`p_known`, the 12th argument, set is the cached form, which an isolate's history
-          // would choose: Fable's review and review r12 of D153), and, weighed once the row's cells have all answered
+          // would choose), and, weighed once the row's cells have all answered
           // (`weigh`), the buffers it reads inside.
           cached: last !== null && last.args[11] != null, sent: last, buffers: null as number | null, keyBlocks: null as number | null, blocks: null as Weighed['blocks'] | null,
           // Standing, a refused key's request again from an isolate with no history (no map, seals or covers), on the same
@@ -258,7 +257,7 @@ async function cell(row: Row, key: Key) {
      * request, whose call must read what this one does; without standing, a request for a key this world never made, its
      * world's own baseline, which a refusal of no key read costs exactly as (each cell is a world of its own, whose rows
      * sit where theirs fell: CI read 3 or 4 blocks more of `projects` and `credentials` in one world than another). Asked
-     * once the principal's lock is let go (review r3 of #453): a twin waiting on it too would answer busy as its cell
+     * once the principal's lock is let go: a twin waiting on it too would answer busy as its cell
      * does, and hide a lock every key's refusal took.
      */
     twin: async (result: { coldAnswer: { code: string; route: string } | null; cold: HotCall | null }): Promise<void> => {
@@ -279,7 +278,7 @@ async function cell(row: Row, key: Key) {
 }
 
 /**
- * The isolate's map of the request's names set as the row says (D150): its credential, its place and its key's id,
+ * The isolate's map of the request's names set as the row says: its credential, its place and its key's id,
  * whatever their asking would have left it. Rows whose map is their asking's set nothing.
  */
 function setMap(row: Row, at: {
@@ -309,17 +308,16 @@ function setMap(row: Row, at: {
 
 /**
  * How many more shared buffers one refusal may read than another it is held alike to: a run's noise (a page split, a
- * heap page a world's rows spilled to). A key's own rows read before the standing was decided cost 30 to 90 more (W259:
- * 42 to 136 a refusal, W268's gate brought it to one figure), a form chosen by the isolate's history 10 to 34 (Fable's
- * review, review r12 of D153).
+ * heap page a world's rows spilled to). A key's own rows read before the standing is decided would cost 30 to 90 more,
+ * a form chosen by the isolate's history 10 to 34.
  */
 const BUFFER_SLACK = 6;
 
 /**
  * Standing only, how many more blocks of the key's own relations a refusal may fetch than the same request from an
- * isolate with no history (D155): the versions a key's history left dead, which a call that reads the key may find
+ * isolate with no history: the versions a key's history left dead, which a call that reads the key may find
  * pruned or not yet (CI read 17 beside 15 for a key deleted, once in four runs of the same code). They show only a
- * caller who may know of the key (R6). Without standing no key is read, and the blocks are held exactly alike.
+ * caller who may know of the key. Without standing no key is read, and the blocks are held exactly alike.
  */
 const KEY_BLOCK_SLACK = 3;
 
@@ -339,8 +337,8 @@ const ROWS: Row[] = shardOf(import.meta.url, [
 
 /**
  * The most rows a batch makes and asks side by side: the width the matrix's timings were taken at, on CI's runners beside
- * the other matrices (T198: a cell's first statement, its call's 3 s deadline), and that its cells are made within their
- * keys' minute at (T204). A wider batch makes more worlds before any is asked.
+ * the other matrices (a cell's first statement, its call's 3 s deadline), and that its cells are made within their
+ * keys' minute at. A wider batch makes more worlds before any is asked.
  */
 const WIDEST = 3;
 
@@ -366,24 +364,23 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
   let widestKeyBlocks = 0;
   /**
    * Each cell's buffers, and its cold twin's, weighed in turn once a batch's cells have all answered, in one session:
-   * weighed while the others still ran, a cell read what their writes left half done (W268: a row of no key read spread
+   * weighed while the others still ran, a cell read what their writes left half done (a row of no key read spread
    * 7); each in a session of its own, on plans made anew, one now and then read hundreds more.
    */
   const weigh = async <T extends { sent: HotCall | null; buffers: number | null; keyBlocks: number | null; blocks: Weighed['blocks'] | null; cold: HotCall | null; coldBuffers: number | null; coldKeyBlocks: number | null; coldBlocks: Weighed['blocks'] | null; early: boolean; turns: { asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null }>(results: T[]) => {
     // The rows the batch deleted (the window passed: its principals' rows of the cap's) dead to every session of this
-    // database first (T225, `deletesSettled`), then gone (`removeDeleted`): left in, they were read by whichever of a
-    // cell's call, twin or control first knew them dead, a block or three of `bulk_cap` more (T240). Then weighed with
+    // database first (`deletesSettled`), then gone (`removeDeleted`): left in, they were read by whichever of a
+    // cell's call, twin or control first knew them dead, a block or three of `bulk_cap` more. Then weighed with
     // the horizon held where it is, so that a transaction of another database (another file's, in CI) ending meanwhile
-    // moves no other table's row from maybe seen to dead (`horizonHeld`, T238).
+    // moves no other table's row from maybe seen to dead (`horizonHeld`).
     const watcher = postgresClient(OWNER_URL, { max: 1 });
     try {
       await deletesSettled(watcher, t.signal);
       await removeDeleted(watcher, 'bulk_cap', t.signal);
       // The statistics as the batch left them, before it is weighed, and none changing while it is (autovacuum is off on
       // this database's tables, `before`): an ANALYZE mid-batch would make the session plan anew, and one cell of a row
-      // read hundreds of buffers above the rest (CI, W268). The key's relations as they are, but for the rows taken out
-      // above: vacuumed, their all-visible pages would let a probe skip the heap and hide work of a key's history (review
-      // r4 of W268).
+      // read hundreds of buffers above the rest in CI. The key's relations as they are, but for the rows taken out
+      // above: vacuumed, their all-visible pages would let a probe skip the heap and hide work of a key's history.
       await run(db.owner, sql`ANALYZE`);
       // Each cell is a world of its own, whose own rows its setup wrote over a few times: their tables vacuumed, the key's
       // own relations not (`WORLD_TABLES`).
@@ -401,7 +398,7 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
           await session.end();
         }
         // Each in a new session of its own, at the server's planner settings: what a connection's first calls read, before
-        // its plan cache settles, for a key as for every other (T207, Sol's review r2).
+        // its plan cache settles, for a key as for every other.
         for (const r of results) if (r.early) r.turns = await weighedInTurn(r.sent);
       });
     } finally {
@@ -413,7 +410,7 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
   /** A row's answers, as each of its cells' differs from its first's, or its first is allowed, or busy as asked. */
   const judge = (row: Row, all: ({ key: Key } & Awaited<ReturnType<Awaited<ReturnType<typeof cell>>['measure']>>)[]) => {
     const label = labelOf(row);
-    // The keys they may not have: each answered alike (D153).
+    // The keys they may not have: each answered alike.
     const results = all.filter((result) => !usable(row, result.key));
     const [first] = results;
     for (const result of results) {
@@ -427,7 +424,7 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
     // The same form of the statement for each, the probe's (a named call never runs the cached form).
     if (results.some((r) => r.cached)) differing.push(`${label}: the cached form for ${results.filter((r) => r.cached).map((r) => r.key).join(', ')}`);
     if (row.lost !== 'they stand') {
-      // No standing: no key read (W268, NoKeyBeforeStanding). Each refusal fetches of the key's own relations exactly what
+      // No standing: no key read (NoKeyBeforeStanding). Each refusal fetches of the key's own relations exactly what
       // its world's refusal of a key never made does, and as many blocks of them as every other key's; and all it reads,
       // beside that baseline, alike for every key, whatever it is or was: held, gone, a reference in any state, or never
       // made (BUFFER_SLACK, the run's noise).
@@ -438,7 +435,7 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
       }
       // And at each of a new session's first calls, plans made for each call's own values and their making included: as
       // many blocks of the key's relations as its world's twin, of a key never made, and as that twin asked with no id,
-      // cover or seal the isolate kept, at the same call (T207, Sol's reviews r2 and r4; `turnsApart`: held to its own
+      // cover or seal the isolate kept, at the same call (`turnsApart`: held to its own
       // world's, as a first call's dry run reads the caller's own rows).
       for (const r of results) if (r.turns !== null) for (const line of turnsApart(r.key, r.turns.asked, r.turns)) differing.push(`${label}: ${line}`);
       const keyBlocks = new Set(results.flatMap((r) => (r.keyBlocks === null ? [] : [r.keyBlocks])));
@@ -455,9 +452,9 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
       }
       widest = Math.max(widest, fewest === null || most === null ? 0 : most.beyond - fewest.beyond);
     } else {
-      // Standing, a key's refusal may cost what its shape does, a key they may know of (R6); never what the isolate's
+      // Standing, a key's refusal may cost what its shape does, a key they may know of; never what the isolate's
       // history holds: each as many buffers as the same request from an isolate with none, on the same world, weighed
-      // beside it, answering as it does. A use the map's ids made logs its request (R53), which one from no map does not:
+      // beside it, answering as it does. A use the map's ids made logs its request, which one from no map does not:
       // those apart.
       for (const r of results) {
         if (r.coldAnswer !== null && (told(r.code) !== told(r.coldAnswer.code) || r.route !== r.coldAnswer.route)) {
@@ -466,8 +463,8 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
         if (r.buffers === null || r.coldBuffers === null || r.entries !== 0) continue;
         widestHistory = Math.max(widestHistory, Math.abs(r.buffers - r.coldBuffers));
         if (Math.abs(r.buffers - r.coldBuffers) > BUFFER_SLACK) differing.push(`${label}: ${r.key}, buffers ${r.buffers} beside ${r.coldBuffers} from an isolate with no history`);
-        // A warm call riding a cover reads the cover's entry (R53), which a call from no history has none of: `log_uses`
-        // apart for it, every other relation of the key's held alike (review r6 of W268), within `KEY_BLOCK_SLACK`.
+        // A warm call riding a cover reads the cover's entry, which a call from no history has none of: `log_uses`
+        // apart for it, every other relation of the key's held alike, within `KEY_BLOCK_SLACK`.
         const covered = r.sent?.args[8] != null;
         const [warmKey, coldKey] = covered ? [keyBlocksOf(r.blocks ?? {}, ['log_uses']), keyBlocksOf(r.coldBlocks ?? {}, ['log_uses'])] : [r.keyBlocks!, r.coldKeyBlocks!];
         widestKeyBlocks = Math.max(widestKeyBlocks, Math.abs(warmKey - coldKey));
@@ -502,11 +499,11 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
         // Rows a few at a time, each with its own world per cell, made side by side, then asked side by side.
         // Made and asked within a minute of their keys' making: within each key's period. The cap's period (a minute, at
         // the 15-minute window): a key fresh in the set stays so within it, and one passed moves it on, which decides first
-        // and writes no entry. Each cell's keys are made as their periods start (T204, `freshKeyId`).
+        // and writes no entry. Each cell's keys are made as their periods start (`freshKeyId`).
         const cells = await each(batch, async (row) => ({ row, cells: await each(KEYS, (key) => cell(row, key)) }));
         const measured = await past(batch[0]!, async () => {
           // Every cell's principal's lock held by another connection while the cells are asked: all of the batch's on one, a
-          // connection a cell being 30 of Postgres's 100, beside the other matrices' processes (#453, 53300 in CI).
+          // connection a cell being 30 of Postgres's 100, beside the other matrices' processes (53300 in CI).
           // Their twins after, the locks let go.
           const askAll = () => each(cells, async ({ row, cells: keys }) => ({ row, results: await each(keys, async (c) => ({ key: c.key, twin: c.twin, ...(await c.measure()) })) }));
           const answered = await holding(db, principalLocks(cells.flatMap(({ cells: keys }) => keys.map((c) => c.principal))), askAll);

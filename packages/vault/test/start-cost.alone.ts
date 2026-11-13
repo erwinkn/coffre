@@ -1,7 +1,7 @@
-// A fresh isolate's start costs the same however long the log grows (R48, T206): the reads each step of its start
+// A fresh isolate's start costs the same however long the log grows: the reads each step of its start
 // begins with, asked together before it knows which it needs, read as many pages at a handful of days and entries as
-// at a hundred days and 100,000 entries more. One of them, the vault's first entry under its key, had no index until
-// 0.16 and walked the log from its start; now one step of `audit_log_vault_key_idx` (T245), whether the key wrote or not.
+// at a hundred days and 100,000 entries more. One of them, the vault's first entry under its key, is one
+// step of `audit_log_vault_key_idx`, whether the key wrote or not.
 //
 // It runs alone, after the suite (scripts/test-suite.sh): another test's migration in the cluster makes the next call
 // of every backend plan everything again (use-days.alone.ts), which reads the catalog, not the log.

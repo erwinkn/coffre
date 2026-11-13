@@ -127,7 +127,7 @@ function overload(offered: readonly number[], capacity: number) {
 }
 
 test('after an overload, a load under capacity is let through in full within two windows; during it, most of the excess is refused, not late', () => {
-  // W363's Cloudflare run, scaled to one isolate: 2.5 times what it answers, for two minutes, then half of it.
+  // A load measured on Cloudflare, scaled to one isolate: 2.5 times what it answers, for two minutes, then half of it.
   const burst = 120;
   const seconds = overload([...Array(burst).fill(250), ...Array(60).fill(50)], 100);
   const during = seconds.slice(10, burst);

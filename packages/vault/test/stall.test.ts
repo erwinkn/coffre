@@ -1,4 +1,4 @@
-// T169: a checkpointer whose database stalls under a tick, on Node and
+// A checkpointer whose database stalls under a tick, on Node and
 // Postgres. Its tick stalls within its bound and another opens; meanwhile
 // a use answers as ever, a change committed answers unsealed within its
 // bound (the app's 503), `sealing()` (readiness) says it does not seal;

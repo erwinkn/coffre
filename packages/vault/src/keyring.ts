@@ -5,11 +5,10 @@ import { authentic, rotationOf, type LogMacKey } from './log-entry.ts';
 import { chainOf } from './rotations.ts';
 
 /**
- * The vault's keys of 0.15's log held to its rotations (T168;
- * formal/Rotation.tla's BoundaryChecked; docs/design/audit-tree.md, "A
- * rotation"): R41's rule, one for every reader that takes a key's word for
- * something the log holds. The checkpointer and the verifier hold to it
- * (each with checks of its own around it), and so do the reads' projector,
+ * The vault's keys of 0.15's log held to its rotations (formal/Rotation.tla's
+ * BoundaryChecked; docs/design/audit-tree.md, "A rotation"): one rule for
+ * every reader that takes a key's word for something the log holds. The
+ * checkpointer and the verifier hold to it (each with checks of its own around it), and so do the reads' projector,
  * `coffre verify log`'s check of the reads and the vault's `vouch`, through
  * this. The current key vouches for anything. A key it replaced vouches only
  * for what is numbered below its rotation: a pair whose `upto`, an entry or

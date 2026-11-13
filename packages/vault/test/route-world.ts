@@ -1,4 +1,4 @@
-// The world route uses run in (use-route.test.ts, use-route-cost.test.ts; T186 PR C): a sealed world whose handle's
+// The world route uses run in (use-route.test.ts, use-route-cost.test.ts): a sealed world whose handle's
 // token is known, members who save UI definitions as the vault's `proxy.save` makes them, and the changes of their
 // standing and of a key's nature, each as the vault logs it.
 import { randomUUID } from 'node:crypto';
@@ -117,7 +117,7 @@ export async function routeWorld(db: TestDatabase) {
   /**
    * The time of the world's uses, fixed by the first: all of a test's uses fall in one refresh period of the cap (a minute),
    * as `use-world`'s do (`onePeriod`). A clock read for each would let a cold and a warm use land either side of a minute's
-   * turn, where the key's bulk row belongs to an earlier period and the warm use decides again (T236).
+   * turn, where the key's bulk row belongs to an earlier period and the warm use decides again.
    */
   let period: number | null = null;
   /** A route use of `route` at dev's place reading, as the handle asks it. */

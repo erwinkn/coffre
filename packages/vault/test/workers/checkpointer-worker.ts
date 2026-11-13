@@ -8,7 +8,7 @@ type Env = {
   VAULT_HYPERDRIVE: { connectionString: string };
   VAULT_KEY: string;
   SIGNING_KEY: string;
-  /** The signing keys a deploy replaced (T168), a JSON array; the log's keys under each, for the witness. */
+  /** The signing keys a deploy replaced, a JSON array; the log's keys under each, for the witness. */
   PREVIOUS_SIGNING_KEYS?: string;
   PREVIOUS_LOG_KEYS?: string;
   WITNESS_KEY: string;

@@ -1,8 +1,8 @@
-// A page's check of 0.15's log (verifier.ts) costs a tick's worth of entries, however long the log (R25, R27, R48). At
+// A page's check of 0.15's log (verifier.ts) costs a tick's worth of entries, however long the log. At
 // 1,000 uses a second, with 5k and 50k sealed below: the newest pair and the entries above it, 250 at a moment picked
 // at random (half a 500 ms tick), 500 just before the tick, 1,000 when it is late, and `ABOVE_NEWEST`, the most it
 // reads (sized from a Worker's CPU, bench/verifier.ts). Its statements are the same whatever lies below. Its CPU, in the vault's process, is logged, and held only to
-// R27's p99 bound (20 ms) at a tick's worth: CI's machines are slower than a developer's. Measured on one
+// a p99 bound of 20 ms at a tick's worth: CI's machines are slower than a developer's. Measured on one
 // (docs/design/0.15-plan.md, "As built: PR 8").
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -101,10 +101,10 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
     await close();
   }
   console.log(`a page's check: ${JSON.stringify(measured)}`);
-  // The same statements, however much lies below: none of them reads history (R48).
+  // The same statements, however much lies below: none of them reads history.
   const counts = new Set(Object.values(measured).map((m) => m.statements));
   assert.equal(counts.size, 1, JSON.stringify(measured));
-  // R27's p99 bound, at a tick's worth: CI's slower machines included.
+  // The p99 bound, at a tick's worth: CI's slower machines included.
   for (const [where, { cpuMs }] of Object.entries(measured)) if (/ (250|500) above$/.test(where)) assert.ok(cpuMs < 20, `${where}: ${cpuMs} ms`);
 });
 

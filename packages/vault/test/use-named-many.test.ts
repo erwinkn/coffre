@@ -1,4 +1,4 @@
-// A request's several keys as it names them (T165, B2's PR 2; migration 0055, `use_named_batch`;
+// A request's several keys as it names them (migration 0055, `use_named_batch`;
 // formal/ProbingMany.tla): the vault's one call decides the caller's standing at the place first, from
 // rows no key decides, and reads nothing of any key without it; for one who stands, it resolves each key's name, the
 // request's names or every key the place holds, decides them all (a sealed key not mapped on the batch by ids' first
@@ -220,8 +220,8 @@ test('AllDecidedFirst: a key refused (a reference ended) refuses the batch at it
 });
 
 test('the first key refused answers, whatever the map holds: a sealed key not mapped, before one refused on the first statement', async () => {
-  // Review r2 of T165 PR 2: cold, the sealed key was left to the batch by ids, and the reference after it, refused on the
-  // statement's rows, answered for the batch; warm, the sealed key, by its ids on the statement, did.
+  // Cold, the batch resolves the sealed key by its ids, after the statement has refused the reference on its rows;
+  // warm, the statement refuses the sealed key by its ids. Either way the sealed key answers for the batch.
   const w = await named({ caller: 'person' });
   const id = await w.key('hidden', true);
   const hidden = await w.nameOf(id);

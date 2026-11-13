@@ -9,7 +9,7 @@ import { configObject, credentialObject, environmentObject, memberStanding, prin
 import type { GrantRow, Member } from './store.ts';
 
 /**
- * A key write in five round trips (T179 PR 3; docs/design/two-trips.md, "A key write", "The read and its hold";
+ * A key write in five round trips (docs/design/two-trips.md, "A key write", "The read and its hold";
  * formal/Writing.tla): the vault's side. Its one statement (`write_request`, migration 0061) reads everything the
  * decision weighs, in one snapshot under the fence shared, and numbers the request; the Worker decides on that read and
  * nothing else (DecideOnRead), and the app's transaction holds the same read again under the fence before it writes
@@ -18,7 +18,7 @@ import type { GrantRow, Member } from './store.ts';
  * Served only for what this path holds whole: a patch of new values in an environment of its own (no fork, no
  * personal config) over keys that are live values or none, by a credential the vault's seals bear out. Anything else
  * is `unserved`, and the request goes down today's path, which answers it, logged, as ever; but a refusal of the
- * decision's own (`WriteRefused`, PR 6), which the vault records (refusal.ts) and the app answers as that path would.
+ * decision's own (`WriteRefused`), which the vault records (refusal.ts) and the app answers as that path would.
  *
  *   Ada's PATCH market/dev { API_KEY: "sk-…" }   write_request   the read, the number          one round trip
  *                                                 the Worker      decides, wraps, prepares       none
@@ -192,7 +192,7 @@ export type Unserved =
   | 'credential' // no credential of the token, one its config does not accept, or one of a kind this path leaves out
   | 'forged' // the caller's own credential, not as its log has it: a row put back, or its newest change's MAC broken (401, never today's path)
   | 'ended' // the caller's own credential revoked or expired at the vault's clock (401, as today's path answers it, never sent there)
-  | 'tampered' // a newest change whose MAC does not hold (T190)
+  | 'tampered' // a newest change whose MAC does not hold
   | 'stale' // a row its object's newest change does not seal (StaleFirst), or 0.14's access entry the log does not account for
   | 'place' // no such place, or one this path leaves out (archived, deleted, a fork, a personal config)
   | 'shape' // a key this path leaves out: archived, a reference, a value replaced since it was listed
@@ -208,7 +208,7 @@ export type WriteDecided = {
 };
 
 /**
- * A refusal the decision made on the read (T179 PR 6): the first code of the rules that refused, and who asked, as the
+ * A refusal the decision made on the read: the first code of the rules that refused, and who asked, as the
  * decision weighed them (the credential, the member, their reader), for the vault to answer and record it.
  */
 export type Refused = { refused: RefusalCode; message: string; credential: CredentialInput; principal: PrincipalInput; reader: Reader };
@@ -218,7 +218,7 @@ export type WriteRefused = Refused & { environment: EnvironmentInput };
 
 /**
  * The decision, on the read alone (DecideOnRead), in the order the use path takes: every newest change held to its MAC
- * (T190, ChangeMacChecked) and each row to its newest change's seal (StaleFirst), before anything a row says; then what
+ * (ChangeMacChecked) and each row to its newest change's seal (StaleFirst), before anything a row says; then what
  * the app would refuse of the credential (AcceptedFirst: its config's `accepts`, its kind, its end at the vault's
  * clock); then the place and the keys this path serves; then 0.14's rules for `secret.write` at the place
  * (`keyRefusals`, on the reader its principal, credential, roles and place make: `readerOf`), and a key's sensitivity,
@@ -228,7 +228,7 @@ export type WriteRefused = Refused & { environment: EnvironmentInput };
 export type ReadObject = { held: Held<Input>; ref: Ref };
 
 /**
- * Each object's newest change held to its MAC (T190: its seal is only what a writer could not have written once it
+ * Each object's newest change held to its MAC (its seal is only what a writer could not have written once it
  * holds), and each row to its seal: the vault's over the row, and the one its object's newest change left (StaleFirst).
  */
 export function holds(keys: { macs: readonly LogMacKey[] }, { held }: ReadObject): boolean {
@@ -238,7 +238,7 @@ export function holds(keys: { macs: readonly LogMacKey[] }, { held }: ReadObject
 /**
  * The caller's member row under its 0.4 MAC (`#sealed`), as today's path checks it before its seal (`#integrity`):
  * the MAC covers columns the 0.15 object does not, so a row edited there alone (its `created_by`) passes `holds` and
- * `stands` and fails only this (review r1 of #474). No row: nothing to check, which the decision refuses on its own.
+ * `stands` and fails only this. No row: nothing to check, which the decision refuses on its own.
  */
 export function memberHolds(keys: { members: MemberSealed }, { legacy }: Pick<CallerInputs['principal'], 'legacy'>): boolean {
   return legacy === null || keys.members(legacy.row, legacy.grants);
@@ -278,8 +278,8 @@ export function callerFirst(
   if (!holds(keys, own) || !stands(keys, own)) return 'forged';
   // ... then revoked or expired, as the log has it: answered 401 here, as today's path answers it, and never sent down
   // that path, which reads the row again and would take one a database writer put back meanwhile (formal/Writing.tla,
-  // WToday). Before any other object's refusal, which goes down that path: a missing place's too (Fable's review of
-  // #469: a session put back, writing to an environment that is not there, was answered 404 by today's path).
+  // WToday). Before any other object's refusal, which goes down that path: a missing place's too (else a session put
+  // back, writing to an environment that is not there, is answered 404 by today's path).
   if (credential.row.revoked || (credential.row.expiresAt !== null && request.at >= credential.row.expiresAt)) return 'ended';
   return { own, row: credential.row };
 }

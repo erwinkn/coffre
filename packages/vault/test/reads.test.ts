@@ -1,5 +1,5 @@
-// The reads' projection (T166, reads.ts): what the projector derives each read from, two projectors at once, and the
-// whole log's check of what it listed, against a database writer and a projector stopped part way (review r3 of #434).
+// The reads' projection (reads.ts): what the projector derives each read from, two projectors at once, and the
+// whole log's check of what it listed, against a database writer and a projector stopped part way.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -83,7 +83,7 @@ test("a change a read is derived from, edited since its seal, stops the projecti
   assert.deepEqual((await rows<{ principal: string }>(db.owner, sql`SELECT principal FROM log_reads`)).map((row) => row.principal), [w.principal]);
   // The check walks that change's range again, and its tree says the same.
   assert.match((await checked()).join('\n'), /does not hold to the pair that sealed it|does not hold to its MAC/);
-  // A use from now on reads that change as the credential's newest, and refuses it: its MAC fails (T190).
+  // A use from now on reads that change as the credential's newest, and refuses it: its MAC fails.
   assert.equal((await (await isolate()).use(ask(w, key))).ok, false);
 });
 

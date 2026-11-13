@@ -1,4 +1,4 @@
-// The weighing's own footing (`scripts/matrix-weigh.ts`): what the matrices and `use-route.test.ts`'s T200 hold a
+// The weighing's own footing (`scripts/matrix-weigh.ts`): what the matrices and `use-route.test.ts` hold a
 // call and its twin to the same buffers on.
 import test from 'node:test';
 import assert from 'node:assert/strict';

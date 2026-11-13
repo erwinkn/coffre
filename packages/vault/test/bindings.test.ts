@@ -1,4 +1,4 @@
-// A service's trust bindings are the vault's to make and end (T149, PR 3a; credentials.ts; migration 0037): a binding a
+// A service's trust bindings are the vault's to make and end (credentials.ts; migration 0037): a binding a
 // person makes is weighed as a service token's issue is and sealed, a change of the log; one ended takes every live
 // credential it issued with it, in one statement; and a sign-in takes only a binding the vault sealed (formal/Lifecycle.tla's
 // BindingSealed, its bind and unbind).
@@ -26,7 +26,7 @@ const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
 const CI = 'token:ci';
 const ISSUER = 'https://token.actions.githubusercontent.com';
-/** The instance's public URL its bindings are made on, which their seals cover (PR 3b). */
+/** The instance's public URL its bindings are made on, which their seals cover. */
 const ORIGIN = 'https://secrets.acme.example';
 const APP_KEY = 'app:0123456789abcdef';
 
@@ -93,7 +93,7 @@ async function read(id: string): Promise<{ columns: SignInInput['binding']['colu
   };
 }
 
-/** An object's newest change as the app reads it beside the bindings (T192, `SignInInput.newest`), or none. */
+/** An object's newest change as the app reads it beside the bindings (`SignInInput.newest`), or none. */
 async function newestOf(object: { kind: 'principal' | 'binding'; id: string }): Promise<LoggedChange | null> {
   const [row] = await db.owner.select().from(logChanges).where(eq(logChanges.object, objectKey(object))).orderBy(desc(logChanges.number)).limit(1);
   if (row === undefined) return null;
@@ -109,7 +109,7 @@ async function newestAsRead(id: string): Promise<NonNullable<SignInInput['newest
 }
 
 /**
- * `w`'s vault on a connection that counts the vault's own reads of newest changes (`loggedChanges`, T190) and runs
+ * `w`'s vault on a connection that counts the vault's own reads of newest changes (`loggedChanges`) and runs
  * `before` as `sign_in`'s statement goes out.
  */
 async function watchedVault(w: World, before: () => Promise<void> = async () => {}): Promise<{ vault: World['vault']; reads: () => number }> {
@@ -134,7 +134,7 @@ async function watchedVault(w: World, before: () => Promise<void> = async () => 
   return { vault, reads: () => reads };
 }
 
-/** A CI run's sign-in through binding `id`, as the app asks it; with the newest changes it read beside the binding, when given (T192). */
+/** A CI run's sign-in through binding `id`, as the app asks it; with the newest changes it read beside the binding, when given. */
 async function signIn(w: World, id: string, newest?: SignInInput['newest']): Promise<{ outcome: Awaited<ReturnType<NonNullable<World['vault']['signIn']>>>; credential: string }> {
   const { columns, seal } = await read(id);
   const credential = randomUUID();
@@ -242,7 +242,7 @@ test("a sign-in handed the account's and the binding's newest changes, as the ap
   assert.ok(outcome.ok, JSON.stringify(outcome));
   assert.equal(watched.reads(), 0, 'the vault read no change itself');
   assert.deepEqual(await ops({ kind: 'credential', id: credential }), ['credential.issue']);
-  // Handed none (an app of an earlier release), it reads them itself, as T190 made it.
+  // Handed none (an app of an earlier release), it reads them itself.
   const asBefore = await signIn({ ...w, vault: watched.vault }, made.id);
   assert.ok(asBefore.outcome.ok, JSON.stringify(asBefore.outcome));
   assert.equal(watched.reads(), 1);
@@ -261,7 +261,7 @@ test("the app's word refuses nothing: a newest change handed with its seal or MA
     // The binding's change handed as the account's: its MAC is over the binding's object, not the account's.
     { ...honest, member: honest.binding },
     { member: null, binding: honest.binding },
-    // A number past Postgres's bigint, which no MAC covers: none, never an error at its cast (review r4).
+    // A number past Postgres's bigint, which no MAC covers: none, never an error at its cast.
     { ...honest, member: { ...honest.member!, number: '9999999999999999999' } },
   ];
   for (const [i, newest] of handed.entries()) {
@@ -292,8 +292,8 @@ test("an account removed, its row put back, its removal's seal column written to
   const forge = async () => { await db.owner.update(logChanges).set({ seal: row!.seal }).where(eq(logChanges.number, BigInt(removal.number))); };
   const signedIn = (await db.owner.select().from(credentialsTable)).length;
   for (const newest of [await newestAsRead(made.id), undefined]) {
-    // Then, as `sign_in`'s statement goes out, the removal's seal column made the row's: before T192, `sign_in` compared
-    // the row with that column, and made a credential for an account removed.
+    // Then, as `sign_in`'s statement goes out, the removal's seal column made the row's: a `sign_in` that compared the row
+    // with that column would make a credential for the removed account.
     const watched = await watchedVault(w, forge);
     assert.deepEqual((await signIn({ ...w, vault: watched.vault }, made.id, newest)).outcome, { ok: false, refused: 'unbound' });
     assert.equal((await db.owner.select().from(credentialsTable)).length, signedIn, 'no credential made');
@@ -314,7 +314,7 @@ test("an account removed, its row put back with its removal's own seal, still ge
     .where(eq(principals.principal, CI));
   const signedIn = (await db.owner.select().from(credentialsTable)).length;
   // The gap: the vault does not check the row's columns (and grants) against that seal at sign-in, so a credential is
-  // made. Closing it means the app reads the row and its grants too; R64 leaves it, as the row fails closed below.
+  // made. Closing it means the app reads the row and its grants too; it stays open, as the row fails closed below.
   assert.equal((await signIn(w, made.id, await newestAsRead(made.id))).outcome.ok, true);
   assert.equal((await db.owner.select().from(credentialsTable)).length, signedIn + 1);
   // Every decision that reads the account checks its row against its seal (`use.ts`'s `viewOf`), and refuses it.

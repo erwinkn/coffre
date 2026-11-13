@@ -16,7 +16,7 @@ export async function callUse(db: Queryable, call: UseCall): Promise<UseRow> {
 }
 
 /**
- * A route's named call on Postgres (T205; 0071): one call of `use_credential`, a handle's that names its route and no
+ * A route's named call on Postgres (0071): one call of `use_credential`, a handle's that names its route and no
  * key, one statement and one round trip. It answers the key's row and what it read of the route beside it, none where
  * it read none (`RouteNamedRows`).
  */
@@ -61,7 +61,7 @@ async function useText(db: Queryable, call: UseCall): Promise<string> {
 }
 
 /**
- * A batch of uses by ids on Postgres (T167, B2): one call of `use_batch` (0048), one statement and one round trip, its
+ * A batch of uses by ids on Postgres: one call of `use_batch` (0048), one statement and one round trip, its
  * own transaction, each key's use `use_credential`'s, in order. `lock`: the principal whose lock the batch takes
  * exclusive before its first key (StrongestFirst), its keys decided. It answers a JSON array of `use_credential`'s rows.
  */
@@ -86,7 +86,7 @@ export async function callBatch(db: Queryable, calls: readonly UseCall[], lock: 
 }
 
 /**
- * A request's several keys by name on Postgres (T165, B2's PR 2): one call of `use_named_batch` (0055), one statement
+ * A request's several keys by name on Postgres: one call of `use_named_batch` (0055), one statement
  * and one round trip, its own transaction: the gate's named call with no key, then, for one who stands there, each key,
  * the keys `calls` name or, `calls` null, every key the place holds, at most `limit`: a key by its ids when its call has
  * them (a use by ids, which the statement makes only when they are its name's now, its value sealed), else by its name
@@ -160,7 +160,7 @@ function rowFrom(row: Record<string, unknown>): UseRow {
     const value = row[name];
     if (typeof value === 'string') row[name] = Buffer.from(value.slice(2), 'hex');
   }
-  // Each newest change's MAC, last of its columns (0059, T190). Its time, a JSON number, is a time in ms: one a writer
+  // Each newest change's MAC, last of its columns (0059). Its time, a JSON number, is a time in ms: one a writer
   // put past 2^53 reads inexactly, and its MAC then does not hold, which refuses the input, as any edit does.
   const changes = row.changes as Record<string, unknown> | null | undefined;
   if (changes != null) for (const [input, columns] of Object.entries(changes)) changes[input] = changeFrom(columns);
@@ -174,7 +174,7 @@ function changeFrom(columns: unknown): ChangeColumns | null {
 }
 
 /**
- * A route use on Postgres (T186 PR C): one call of `use_route` (0058), one statement and one round trip, its own
+ * A route use on Postgres: one call of `use_route` (0058), one statement and one round trip, its own
  * transaction: the gate, the route's levels, its editor and its keys, read; each key's use by ids when the call has
  * them and they are the names' now. It answers one JSON object (`RouteRows`). A handle's gate holds its credential to
  * `accepts`, the passkey policy included (0073, `p_passkeys`), as any named call's.

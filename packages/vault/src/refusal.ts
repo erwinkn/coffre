@@ -7,7 +7,7 @@ import { entryMac, type LogMacKey } from './log-entry.ts';
 export { callRefusal } from './refusal.postgres.ts';
 
 /**
- * A refusal's record (T179 PR 6; docs/design/two-trips.md, "As built: PR 6"; formal/Writing.tla, `Refuse`): what a
+ * A refusal's record (docs/design/two-trips.md, "As built: PR 6"; formal/Writing.tla, `Refuse`): what a
  * key write or a member's first add the vault's decision refused on its read leaves in 0.15's log, in place of the 0.14
  * deny entry today's path writes. A row of `log_changes`, so that the checkpoints seal it, the trees hold it and
  * retention keeps it as they do every change, but a change of nothing: its object is the request's own
@@ -19,7 +19,7 @@ export { callRefusal } from './refusal.postgres.ts';
  *          the Worker: refused, `no_grant`; the record prepared (the ticket)
  *   app    the rows' auth_mac, in memory; 403 as today's path answers it, once …
  *   vault  log_refusal: the record, under the fence shared, as a use's               one round trip
- *          the seal wait (R51, as a change's)
+ *          the seal wait (as a change's)
  *
  * Its payload, canonical (keys sorted, so it starts `{"code":"`, as no other change's does: change-records.ts):
  *

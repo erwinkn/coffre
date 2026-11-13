@@ -1,4 +1,4 @@
-// What a tick costs the checkpointer at R44's 1,000 entries a second and a
+// What a tick costs the checkpointer at 1,000 entries a second and a
 // 500 ms tick (docs/design/audit-tree.md, "Numbers"): 500 entries, one in a
 // hundred a change, MACs checked, leaves hashed, both trees grown, two notes
 // signed. With the signer's memory held in a variable, then in a file synced

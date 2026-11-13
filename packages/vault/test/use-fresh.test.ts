@@ -1,4 +1,4 @@
-// T143: a use on a database just migrated, before the checkpointer has made any day of uses. The suite's template is
+// A use on a database just migrated, before the checkpointer has made any day of uses. The suite's template is
 // only migrated (setup-test-database.sh), so this file's database is a new instance's.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';

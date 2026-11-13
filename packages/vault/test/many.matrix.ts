@@ -1,4 +1,4 @@
-// A request's several keys by name (T165, B2's PR 2; migration 0055; formal/ProbingMany.tla): what forks.matrix.ts
+// A request's several keys by name (migration 0055; formal/ProbingMany.tla): what forks.matrix.ts
 // holds of one key, for a batch of two, mixed. The vault's one call decides the caller's standing at the place first,
 // from rows no key decides, then resolves each key's name, the request's names or every key the place holds, decides
 // them all, and only then makes the rest by ids.
@@ -66,7 +66,7 @@ const CELLS: readonly (readonly [State, State])[] = [
   ['inherited, its row put back since', 'never made'],
   ['its own', 'inherited'],
   ['removed here', 'inherited, made since'],
-  // A plain value, which no use is made of: decided on the batch's first statement, its text handed back (T165, PR 2).
+  // A plain value, which no use is made of: decided on the batch's first statement, its text handed back.
   ["dev's, plain", 'its own'],
 ];
 type Row = { where: (typeof WHERE)[number]; lost: (typeof LOST)[number]; map: (typeof MAPS)[number]; ask: (typeof ASKS)[number]; window: (typeof WINDOWS)[number] };
@@ -219,7 +219,7 @@ test(`several keys by name, mixed: no batch tells what a caller may not have, in
   // A cell made and never asked, a row failed beside it, holds its pool until the file ends them all.
   try {
     for (const row of ROWS) {
-      // Each cell's keys are made as their periods start (T204, `freshKeyId`): made and asked within a minute, each within one.
+      // Each cell's keys are made as their periods start (`freshKeyId`): made and asked within a minute, each within one.
       const made = await each(CELLS, (states) => cell(row, states));
       const measureAll = () => each(made, async (c) => ({ states: c.states, ...(await c.measure()) }));
       const results = await holding(db, principalLocks(made.map((c) => c.principal)), measureAll);

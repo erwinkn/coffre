@@ -1,6 +1,6 @@
 // The vault's entrypoint in workerd, as a deployment configures it: its hot
 // path's Hyperdrive and its checkpointer's Durable Object, which seals each
-// change before it answers (R51). Called over a service binding to itself,
+// change before it answers. Called over a service binding to itself,
 // as the app calls it.
 import { versioned, type VaultEntry } from '@coffre/core/vault';
 import { checkpointer, checkpointerStatus, postgres, startCheckpointer, vault } from '../../src/cloudflare.ts';

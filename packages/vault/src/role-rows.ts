@@ -3,7 +3,7 @@ import { INSTANCE_ROLES, ROLES, type RoleDefinition } from '@coffre/core/access'
 import { canonical, roleObject, roleRef, sealed, type Op, type Ref, type RolesInput, type RoleTable, type SealKeys } from './inputs.ts';
 
 /**
- * A row of `roles` (T178, 0.16), with the seal its object's newest change
+ * A row of `roles`, with the seal its object's newest change
  * left: null for a change that left none (a deletion), undefined for an
  * object the log has no change of.
  */

@@ -1,8 +1,8 @@
-// T190: a use trusts the seal its input's newest change records only once that change's MAC holds (R64, D154). A
+// A use trusts the seal its input's newest change records only once that change's MAC holds. A
 // database writer with no key puts an input's row back as the vault once sealed it, then writes the row's old seal into
 // the newest change's `seal` column, or edits what else the use reads of that change (the cap in the policy's payload,
-// the 0.14 entry the member's accounts for). Before T190 the use took the column on trust and served; now the change's
-// MAC, which covers every column but its number, does not hold, and the use is refused `stale` whatever path it takes:
+// the 0.14 entry the member's accounts for). The change's MAC, which
+// covers every column but its number, then does not hold, and the use is refused `stale` whatever path it takes:
 // by ids, probing or from the isolate's cache, as a batch, by name, as a named batch. The change path is held to the
 // same check: a change to a row put back so would seal the writer's row under a new, authentic change (laundered).
 // What no per-use check sees: an entry deleted or replayed whole (its MAC still holds), which the checkpoints catch

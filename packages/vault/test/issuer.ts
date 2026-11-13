@@ -1,4 +1,4 @@
-// A CI platform's issuer for the vault's tests (T149, PR 3b): its key, which a binding names by `KEYS` or carries
+// A CI platform's issuer for the vault's tests: its key, which a binding names by `KEYS` or carries
 // uploaded, and the ID tokens it signs for a run.
 import { generateKeyPairSync, randomBytes, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';
 

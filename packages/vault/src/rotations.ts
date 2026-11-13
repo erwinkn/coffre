@@ -11,7 +11,7 @@ export const UNBOUNDED = (1n << 63n) - 1n;
 
 /**
  * The rotations of 0.15's log that count, and the number below which each
- * replaced key vouches (T168; formal/Rotation.tla's and Keyring.tla's
+ * replaced key vouches (formal/Rotation.tla's and Keyring.tla's
  * ChainRule; docs/design/audit-tree.md, "A rotation"). A rotation is an
  * entry like any other: it counts only where the key whose MAC it carries,
  * the key it moves the log to, vouches at its number. So the bounds are a
@@ -25,7 +25,7 @@ export const UNBOUNDED = (1n << 63n) - 1n;
  * Without the chain, a rotation would count on its MAC alone: someone who
  * holds two replaced keys A and B, and writes the database, deletes A→B and
  * plants A→B under B's MAC past B's own rotation into C, and A vouches up
- * to it (Fable's review r6 of #444). With it, she moves a bound only where
+ * to it. With it, she moves a bound only where
  * a key she holds vouches anyway.
  *
  * Bounds are found a round at a time, as Keyring.tla's `Bounds`: each round

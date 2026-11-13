@@ -1,5 +1,5 @@
-// What a change waits for its seal (R51) on Workers, with every round trip of the checkpointer's connection to Postgres
-// held `SEAL_BENCH_RTT_MS` (20 by default, what each costs through Hyperdrive on Cloudflare, T112): the checkpointer's
+// What a change waits for its seal on Workers, with every round trip of the checkpointer's connection to Postgres
+// held `SEAL_BENCH_RTT_MS` (20 by default, what each costs through Hyperdrive on Cloudflare): the checkpointer's
 // Durable Object in workerd, its alarm ticking, its Hyperdrive behind the proxy that holds each Sync (postgres-proxy.ts).
 //
 // Not part of the suite. On the suite's Postgres, as a test file:

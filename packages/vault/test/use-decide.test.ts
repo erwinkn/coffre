@@ -11,7 +11,7 @@ import { purposeCode, purposeOf, WAYS, PURPOSES, replay, type LoggedUse } from '
 import { readerOf, type UseCode } from '../src/decide.ts';
 import { ADA, ask, BO, CI, credential, DEV, FORK, key, market, PROD, SEAL_KEYS, World, WRAPPED } from './world.ts';
 
-// The 0.15 decision on sealed inputs, and its replay (docs/design/sealed-inputs.md). Every
+// The decision on sealed inputs, and its replay (docs/design/sealed-inputs.md). Every
 // case holds the replay of the log to the live answer too.
 
 /** Each use's live answer, against the replay's of the same log. */
@@ -262,7 +262,7 @@ test('bulkStep refreshes a hot key once a refresh, not on every use, from its ph
 
 test("T204, review r1: the replay moves a key on as the statement that decided its use did, phased or not", () => {
   // Count 1 over 15 minutes. T is a period's start for every key under the previous release's statement; A's use
-  // there, at T + phase, wrote T, whatever A's phase, its last included (review r2). 0074's statement, 1,023,001 ms
+  // there, at T + phase, wrote T, whatever A's phase, its last included. 0074's statement, 1,023,001 ms
   // after T, counts against B only the keys moved on past T + 1 (window, refresh, deadline and the minute ahead back):
   // not A, whose row says T.
   const limit = { count: 1, windowMs: 15 * 60_000 };
@@ -276,7 +276,7 @@ test("T204, review r1: the replay moves a key on as the statement that decided i
     bulkStep(live, 'token:p', a, T + phase, limit, false);
     assert.equal(live.get(a), T, `phase ${phase}`);
     assert.deepEqual(bulkStep(live, 'token:p', b, T + 1_023_001, limit, true), { inSet: false, others: 0 });
-    // Replayed as if 0074's had decided A too, A's row would say T + phase, and B be refused: what r1 found.
+    // Replayed as if 0074's had decided A too, A's row would say T + phase, and B be refused.
     const wrong = new Map<string, number>();
     bulkStep(wrong, 'token:p', a, T + phase, limit, true);
     assert.equal(wrong.get(a), T + phase, `phase ${phase}`);
@@ -388,7 +388,7 @@ test("the roles object holds an Owner's edits only: a role as it ships is no edi
 
 test('the bulk rows are outside the seals: erased, they let a request the replay refuses bulk_limit through, which no check names yet', () => {
   // A database writer who erases a principal's bulk rows resets its cap, and no input reads stale: the cap is a rate,
-  // not a right, and T138 holds the bulk rows to the replay's once modelled (docs/design/sealed-inputs.md).
+  // not a right, and no check holds the bulk rows to the replay yet (docs/design/sealed-inputs.md).
   const w = market({ count: 2, windowMs: 60_000 });
   assert.deepEqual(liveAndReplayed(w, [ask(1, 1), ask(1, 4)]), [null, null]);
   w.bulk.clear();

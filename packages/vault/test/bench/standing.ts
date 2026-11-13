@@ -1,5 +1,5 @@
-// How often a named use costs a second statement for its decision (T158, D153; formal/Probing.tla, DecideBeforeLock
-// and DecideEachLock; docs/design/0.15-plan.md, "As built: D153"). A use whose key would take its principal's lock, to
+// How often a named use costs a second statement for its decision (formal/Probing.tla, DecideBeforeLock and
+// DecideEachLock; docs/design/0.15-plan.md, "As built: D153"). A use whose key would take its principal's lock, to
 // enter the cap's set or move on in it, asks `decide` first, each time, and is made by a second call once the vault
 // allowed it: nothing is kept for a later use. Two cases, each counted exactly (`use_credential` statements beyond one
 // a use):
@@ -79,7 +79,7 @@ async function sidecar(isolates: number, changesPerSecond: number): Promise<stri
   await run(db.owner, sql`UPDATE credentials SET token_hash = ${tokenHash} WHERE id = ${w.credentialId}`);
   const [project] = await rows<{ slug: string }>(db.owner, sql`SELECT slug FROM projects WHERE id = ${w.project}`);
   const { pool, counts } = counted();
-  // Each isolate prepared on its own, with its own cache of names, seals and covers (review d2 of #416), and
+  // Each isolate prepared on its own, with its own cache of names, seals and covers, and
   // admission wide enough that no use is refused before its call: what is counted is calls.
   const vaults: Vault[] = [];
   for (let i = 0; i < isolates; i += 1) {

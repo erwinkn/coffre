@@ -57,7 +57,7 @@ export function personalRefusal(
   // Held elsewhere, a reference into or out of one; or not its owner's.
   if (elsewhere || own === undefined || principal !== own.owner || own.parentId === null) return 'personal';
   const parent = placeIn({ projectId: secret.projectId, environmentId: own.parentId }, environments);
-  // Its owner reads what they wrote while they read or use the environment it configures (R8).
+  // Its owner reads what they wrote while they read or use the environment it configures.
   const gone = own.deleted || (environments.get(own.parentId)?.deleted ?? true);
   const refused = refuses(reader, 'secret.use', parent, gone) === null ? null : refuses(reader, 'secret.read', parent, gone);
   if (refused !== null) return refused;
@@ -112,7 +112,7 @@ export function keyRefusals(
       if (refused.every((code) => code !== null)) return refused[0] ?? 'no_grant';
     }
     // Through a reference, the holder's grants decide, its source's never: a reference takes its value and nature
-    // (a sensitive one stays use-only) from its source, and its permissions from where it lives (R20, R71). Its maker
+    // (a sensitive one stays use-only) from its source, and its permissions from where it lives. Its maker
     // held what the source's nature asks when it was made (`reference`).
     return refuses(reader, permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!));
   };
@@ -128,12 +128,12 @@ export function keyRefusals(
  * sensitive value is only ever used for a person, never handed back, by
  * whatever credential of theirs asks; and handed back to a service account
  * only on a credential an Owner of the project it is held in issued
- * (`readsSensitive`, R32): each secret is that place, a reference's
- * holder's as any key held there, whatever project its source is in (R71).
+ * (`readsSensitive`): each secret is that place, a reference's
+ * holder's as any key held there, whatever project its source is in.
  * And a fork copies one, for anyone, a service account too, only where its
  * app says it keeps it sensitive (an app of 0.9, mid-deploy, would write
  * the copy as a secret its people read): one read through a reference as
- * any, the fork being of the holder's project (R71).
+ * any, the fork being of the holder's project.
  */
 export function sensitiveRefusals(
   codes: readonly (RefusalCode | null)[],
@@ -164,7 +164,7 @@ export function sensitiveRefusals(
  * A workload is handed back, for any purpose but the proxy's use, only a
  * value its credential lists where the key is held (`useOnly`): each
  * secret is that place and key, a fork's parent's, or a reference's own at
- * its holder, as any key held there (R71). A copy too, kept sensitive or
+ * its holder, as any key held there. A copy too, kept sensitive or
  * not: it would land where the workload may read it. The vault opens no
  * plain value, so every key here is a secret or a sensitive one.
  */
@@ -184,7 +184,7 @@ export function useOnlyRefusals(
  * holds one, nor reads one. Making one hands its source's value to whoever
  * reads the holder, whatever its nature becomes: its maker writes the holder,
  * reads the source there, as any direct access, and, for a sensitive one,
- * which nobody reads, uses it there too (R24). A workload refers only to a
+ * which nobody reads, uses it there too. A workload refers only to a
  * value it is handed back, a plain one or one it lists (`useOnly`): it
  * would otherwise move a value it uses to a place whose keys it reads.
  */
@@ -204,10 +204,10 @@ export function referenceRefusal(
     ?? (nature !== 'plain' && useOnly(reader.live, source) ? 'use_only' : null);
 }
 
-// --- a use, on sealed inputs (0.15) ---------------------------------------------
+// --- a use, on sealed inputs ----------------------------------------------------
 
 /**
- * A use as its log entry records it (plan, PR 3; the request, not the
+ * A use as its log entry records it (the request, not the
  * outcome): on which credential, which key, through which environment,
  * why, and when. `place` is 0.14's `through`: a fork an inherited value is
  * read in, which decides nothing but names the read; null when the key is
@@ -217,7 +217,7 @@ export function referenceRefusal(
 export type UseRequest = {
   /**
    * Its way in, by id: a credential's, or, with `way`, an MCP connection's or a Cloudflare binding's; behind Cloudflare
-   * Access, the person's object's key (`objectKey`), the only id a person has (T147).
+   * Access, the person's object's key (`objectKey`), the only id a person has.
    */
   credential: string;
   /** What `credential` is the id of (`Way`): a credential, absent. */
@@ -229,13 +229,13 @@ export type UseRequest = {
   /** Its time, ms since the epoch: what expiry is decided at, live and replayed. */
   at: number;
   /**
-   * A named use, which hands a plain value back as its text and logs no entry of it (T145). Any other use, by ids and
+   * A named use, which hands a plain value back as its text and logs no entry of it. Any other use, by ids and
    * so any one the log records, opens a wrapped key or nothing: a plain value is `bad_claim` to it, live and replayed
-   * alike (review r1 of D153).
+   * alike.
    */
   plain?: true;
   /**
-   * A route use's (T186; docs/design/proxy-ui.md, section 4): the UI route it was of, which its entry names. Decided for
+   * A route use's (docs/design/proxy-ui.md, section 4): the UI route it was of, which its entry names. Decided for
    * the caller as any use, then for the route's editor (proxy.ts, `editorRefusal`), on the route as the place's object
    * held it at the use's number. A route use hands a plain value back as a named one does, logging no entry of it.
    */
@@ -245,7 +245,7 @@ export type UseRequest = {
 export type { UseCode };
 
 /**
- * What a use came in on (T147; formal/WaysIn.tla): a credential; an MCP connection; a Cloudflare service binding; or,
+ * What a use came in on (formal/WaysIn.tla): a credential; an MCP connection; a Cloudflare service binding; or,
  * behind Cloudflare Access, which signs a browser in with no row of coffre's, the person alone.
  */
 export type Way = 'credential' | UseWay;
@@ -257,8 +257,8 @@ export type WayInput = CredentialInput | ConnectionInput | BindingInput;
 export type Read<T extends Input> = { row: T | null; seal: Buffer | null; newest: Buffer | null };
 
 /**
- * Everything a use reads, in one snapshot: what the use's statement returns
- * (PR 5), or what a replay built from the log; its seals checked once
+ * Everything a use reads, in one snapshot: what the use's statement returns,
+ * or what a replay built from the log; its seals checked once
  * `checked` (`checkSeals`). `principal` and `bulk` are read for the
  * credential's principal, and null with no credential row; `source` for a
  * reference, null otherwise; `environments`, by id, every one
@@ -314,8 +314,8 @@ export function checkSeals(
 }
 
 /**
- * A use's way in, its seal checked against its own object, and read as the credential it stands for (T147;
- * formal/WaysIn.tla, WayReadInUse, AccountReadInUse), so that every rule after weighs it as one:
+ * A use's way in, its seal checked against its own object, and read as the credential it stands for
+ * (formal/WaysIn.tla, WayReadInUse, AccountReadInUse), so that every rule after weighs it as one:
  *
  *   a credential          itself
  *   an MCP connection     its person's credential, of no scope, as a session is: what its person holds, to its end
@@ -396,7 +396,7 @@ export function credentialEnded(credential: CredentialInput, account: PrincipalI
 function standingAt(view: CheckedView, request: UseRequest, place: string): UseCode | null {
   const sought = view.environments.get(place)?.row ?? null;
   if (sought === null) return 'missing';
-  // A personal config is weighed with its parent, as its owner reads it while they read the parent (R8).
+  // A personal config is weighed with its parent, as its owner reads it while they read the parent.
   const parents = standingParents(view, place).flatMap((read) => (read.row === null ? [] : [read.row]));
   return placeRefusal(view.principal!.row, view.credential.row!, view.roles.row ?? noEdits(), sought, parents, request);
 }
@@ -428,11 +428,11 @@ function gateColumns(roles: Readonly<Record<string, { permissions: readonly Perm
 
 /**
  * Why the caller of a named use has no standing at the place it names, or null if they have: `standingRefusal` on its
- * rows as read, before their seals are checked, which only the vault can (D150 fallback D, W268; formal/Probing.tla,
+ * rows as read, before their seals are checked, which only the vault can (formal/Probing.tla,
  * StandingFirst). The named statement decides this first, from rows no key decides (the credential, its account and
- * grants, the roles, the place), and reads the key only for a caller who stands (`use_stands`, 0045). A named place is a live environment: one of its own, a fork, weighed as any (R18), or a personal config,
- * weighed with `parents`, its parent, as its owner reads it while they read or use the parent (`personalRefusal`, R8;
- * `use_stands_personal`, 0051, T165). Its seals checked and current, this is `standingRefusal` at that place:
+ * grants, the roles, the place), and reads the key only for a caller who stands (`use_stands`, 0045). A named place is a live environment: one of its own, a fork, weighed as any, or a personal config,
+ * weighed with `parents`, its parent, as its owner reads it while they read or use the parent (`personalRefusal`;
+ * `use_stands_personal`, 0051). Its seals checked and current, this is `standingRefusal` at that place:
  * `use-stands.test.ts` holds the statement's gate to it.
  */
 export function namedStanding(
@@ -464,7 +464,7 @@ export function decideUse(keys: SealKeys, view: UseView, request: UseRequest): U
  */
 export function useEnvironments(view: Pick<UseView<boolean>, 'secret' | 'source' | 'environments'>, request: Pick<UseRequest, 'place'>): string[] {
   const secret = view.secret.row;
-  // A key the place does not hold: the place it was sought in, where the caller's standing decides (T145).
+  // A key the place does not hold: the place it was sought in, where the caller's standing decides.
   if (secret === null) return request.place === null ? [] : [request.place];
   const value = secret.source === null ? secret : view.source?.row ?? null;
   const ids = [...(request.place === null ? [] : [request.place]), secret.environmentId];
@@ -486,9 +486,9 @@ function sealRefusal(inputs: readonly Checked<Input>[]): UseCode | null {
 
 /**
  * Why the caller may not act where a use's key is held, or, for a key the place does not hold, where it was sought
- * (T145; formal/Probing.tla, MissingByStanding), or null: `decideChecked`'s first step (T158, review d5 of #416). The
+ * (formal/Probing.tla, MissingByStanding), or null: `decideChecked`'s first step. The
  * credential first, its row's seal and its account's, then whether it reaches at all, which no place or key decides
- * (the app's 401: review r1 of D153); then the seals of what the standing reads (the roles, the policy, the key's row,
+ * (the app's 401); then the seals of what the standing reads (the roles, the policy, the key's row,
  * which says where it is held, that place and a personal config's parent), then 0.14's rules there.
  */
 export function standingRefusal(view: CheckedView, request: UseRequest): UseCode | null {
@@ -507,8 +507,8 @@ export function standingRefusal(view: CheckedView, request: UseRequest): UseCode
  * and of the request alone, so that the replay of the log decides the same
  * (docs/design/sealed-inputs.md).
  *
- * 1. **The caller's standing, before anything of the key's own** (T158;
- *    review d5 of #416; `standingRefusal`): the seals of what it reads (the
+ * 1. **The caller's standing, before anything of the key's own**
+ *    (`standingRefusal`): the seals of what it reads (the
  *    credential, the principal, the roles, the policy, the key's row, which
  *    says where it is held, and that environment, or the one it was sought
  *    in), then the credential
@@ -517,7 +517,7 @@ export function standingRefusal(view: CheckedView, request: UseRequest): UseCode
  *    it), then 0.14's rules there for the request's permission
  *    (`standingAt`). A caller refused there is refused the same for every
  *    key, held, gone or never made; and the app answers every refusal alike
- *    besides (D153).
+ *    besides.
  * 2. **Seals,** every other input's, before anything its rows say: `tampered`
  *    for a row whose seal is not the vault's, `stale` for one that is not
  *    its object's newest. A row put back from before a change can make a
@@ -533,10 +533,10 @@ export function standingRefusal(view: CheckedView, request: UseRequest): UseCode
  *    the key's own.
  *    Permission is decided at the key's own environment (a reference's
  *    holder's), whatever it is read through.
- * 4. **0.14's rules, unchanged:** `keyRefusals`, then `useOnlyRefusals`,
+ * 4. **0.14's rules:** `keyRefusals`, then `useOnlyRefusals`,
  *    then `sensitiveRefusals`, on the reader its principal, credential,
  *    roles and environments make (`readerOf`), each at the key's own
- *    environment and by its own id, a reference's too (R71). Nothing is
+ *    environment and by its own id, a reference's too. Nothing is
  *    `vet`ted: a reference's end is its holder's row, sealed (`ended` above).
  * 5. **The bulk cap,** on what the use read of it, with the policy's count.
  *
@@ -572,7 +572,7 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
   if (secret.source === null && secret.version === '') return 'ended';
   // A reference reads a key's own value: one to another reference is none the change path makes.
   if (value.source !== null && secret.source !== null) return 'bad_claim';
-  // A use opens a wrapped key, or hands back a plain value's text, which its digest binds (T145): any other is no value.
+  // A use opens a wrapped key, or hands back a plain value's text, which its digest binds: any other is no value.
   if (value.key === null && value.digest === null) return 'bad_claim';
   const rows = new Map(ids.flatMap((id) => {
     const row = view.environments.get(id)!.row;
@@ -593,7 +593,7 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
   const environmentRows = new Map([...rows].map(([id, { projectId, slug, owner, parentId, deleted, archived, projectArchived }]) => [id, { projectId, slug, owner, parentId, deleted, archived: archived || projectArchived }]));
   const permission: Permission = request.purpose === 'use' ? 'secret.use' : 'secret.read';
   const byPlace = keyRefusals(reader, { principal: credential.principal, permission, secrets: [place], at: [at], environments: environmentRows, needs: [null] });
-  // Listed, and its sensitive value given a service, where the key is held: a reference's holder, as any key there (R71).
+  // Listed, and its sensitive value given a service, where the key is held: a reference's holder, as any key there.
   const listed = useOnlyRefusals(byPlace, reader, { action: 'secret.read', purpose: request.purpose, secrets: [{ ...at, secretId: secret.id }] });
   const [code] = sensitiveRefusals(listed, reader, {
     action: 'secret.read', principal: credential.principal, purpose: request.purpose, keepsSensitive: request.keepsSensitive,

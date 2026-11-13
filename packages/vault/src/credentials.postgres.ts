@@ -6,8 +6,8 @@ import { sql } from 'drizzle-orm';
 import type { Answer, BindingsCall, IssueCall, RevokeCall, SignInCall } from './credentials.ts';
 
 /**
- * `sign_in` (migration 0075, 0037's with the pins; 0079's since, W331, D177: the binding's row shared, no count): one
- * statement, its own transaction, its answer one JSON value. Its `p_rate` and `p_window` it reads no more: null here,
+ * `sign_in` (migration 0075 added the pins; 0079 shares the binding's row and keeps no count): one
+ * statement, its own transaction, its answer one JSON value. Its `p_rate` and `p_window` it leaves unread: null here,
  * and dropped a release after. `p_frozen` is false: nothing writes a freeze (`/freezes` is not built), so its read of
  * the log is skipped, and 0.16's migration drops it.
  */

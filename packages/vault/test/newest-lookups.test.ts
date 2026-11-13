@@ -1,8 +1,8 @@
 // Every runtime read of the vault's that asks the audit log for the newest entry of a kind (or the first, or a page back
-// from the newest) costs the same however long the run of other entries since (T245, R48), held here against the worst
+// from the newest) costs the same however long the run of other entries since, held here against the worst
 // history for it: a run of the kind's entries, then a long tail of others that the same walk back by `seq` would read.
 // Postgres's statistics then hold the kind common, and it takes any index that yields `seq` order with the rest as a
-// filter, expecting to meet the kind at once: before each kind had an index of its own (`KINDS`), the newest rotation
+// filter, expecting to meet the kind at once: without each kind's own index (`KINDS`), the newest rotation
 // read 641 pages behind 20,000 checkpoints, the newest checkpoint 3,731 behind 100,000 unwraps (Postgres 16). Each read
 // here must take the index it names and read at most `PAGES`. `packages/db/test/newest-lookups.test.ts`
 // holds every such read in the sources and the database's functions to being one of these, or the server's
@@ -49,7 +49,7 @@ type Lookup = {
   head?: Rows[];
   run?: Rows;
   tail: Rows[];
-  /** 0.15's log after the audit log's history, oldest first: a run of changes of each object (`Changes`). */
+  /** `log_changes` after the audit log's history, oldest first: a run of changes of each object (`Changes`). */
   changes?: Changes[];
   /** The indexes its statements on the logs take: each takes one of them. */
   indexes: string[];
@@ -57,7 +57,7 @@ type Lookup = {
   ask: (vault: Database, run: { first: bigint; newest: bigint }) => Promise<void>;
 };
 
-/** Changes of one object in 0.15's log, by its key (`objectKey`), each sealed. */
+/** Changes of one object in `log_changes`, by its key (`objectKey`), each sealed. */
 type Changes = { object: string; count?: number };
 
 const ZERO = Buffer.alloc(32);
@@ -192,7 +192,7 @@ const LOOKUPS: Lookup[] = [
     },
   },
   {
-    // An object's newest change, a long run of another's since (0.15's log, `changesOf`).
+    // An object's newest change, a long run of another's since (`log_changes`, `changesOf`).
     name: 'newestChange, loggedChanges',
     tail: [],
     changes: [{ object: objectKey(SECRET) }, others()],
@@ -238,7 +238,7 @@ const LOOKUPS: Lookup[] = [
     ask: async (vault, { newest }) => assert.equal((await vaultPage(vault, undefined, 32))[0]?.seq, newest),
   },
   {
-    // What a fresh isolate's start asks (`#start`, T206): its key's first entry, past the vault's entries under the
+    // What a fresh isolate's start asks (`#start`): its key's first entry, past the vault's entries under the
     // keys before it and every rotation between them, which its old `NOT EXISTS` gate walked (4,741 pages past 40,000).
     name: 'firstVaultEntryUnder',
     head: [{ ...unwraps(), key: 'vault:old' }, { author: 'vault', action: 'key.rotate', key: 'vault:old', count: TAIL }],
@@ -282,7 +282,7 @@ async function append(entries: Rows): Promise<void> {
   }
 }
 
-/** Appends `count` changes of `object` to 0.15's log, after its newest, as the owner with its triggers lifted. */
+/** Appends `count` changes of `object` to `log_changes`, after its newest, as the owner with its triggers lifted. */
 async function appendChanges({ object, count = RUN }: Changes): Promise<void> {
   const uuid = sql`CAST(${object} AS uuid)`;
   for (let left = count; left > 0; left -= 20_000) {
@@ -308,7 +308,7 @@ async function startOver(): Promise<void> {
 type Statement = { text: string; values: unknown[] };
 type Node = { 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Index Name'?: string; Plans?: Node[] };
 
-/** Each statement on the logs (0.14's, 0.15's changes) `work` sends, through a client of the vault's login. */
+/** Each statement on the logs (`audit_log`, `log_changes`) `work` sends, through a client of the vault's login. */
 async function sent(work: (vault: Database) => Promise<unknown>): Promise<Statement[]> {
   const seen: Statement[] = [];
   const client = postgresClient(VAULT_URL, { max: 1 });
@@ -316,7 +316,7 @@ async function sent(work: (vault: Database) => Promise<unknown>): Promise<Statem
   const wrapped = new WeakSet<object>();
   // Each client's statements, once however often it is handed out: the pool's, a transaction's, on the
   // connection its BEGIN holds (`Session.transaction`, @coffre/db), and a savepoint's inside it, a client of
-  // its own (Drizzle's nested `tx.transaction`), so a read there is measured as any other (review r9 of #556).
+  // its own (Drizzle's nested `tx.transaction`), so a read there is measured as any other.
   const kept = (on: Asks) => {
     if (wrapped.has(on)) return on;
     wrapped.add(on);
@@ -397,7 +397,7 @@ test("a lookup is held by every read it sends of the logs, one inside a transact
 });
 
 /**
- * The database's functions' lookups of 0.14's log (a use's, a sign-in's, an issue's): each of these kinds, as they write
+ * The database's functions' lookups of `audit_log` (a use's, a sign-in's, an issue's): each of these kinds, as they write
  * it, and the history that is worst for it. PL/pgSQL plans a statement for its values for a session's first five
  * calls, then for any values, so each is held to its index under both plans, its variable a parameter.
  */

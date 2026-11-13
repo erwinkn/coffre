@@ -1,4 +1,4 @@
-// A bulk-cap period in tests (T218, after T202; T204). A use writes its key's row in the cap's current refresh period
+// A bulk-cap period in tests. A use writes its key's row in the cap's current refresh period
 // (`bulk.ts`), and one the key already has in its period writes nothing. A period turning over between a test's calls
 // makes the next use write its row again: a statement and a round it did not take before. Each principal's key has
 // periods of its own (`phaseOf`), so a test that counts the statements of several uses, the first of which enters the
