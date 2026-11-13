@@ -5,10 +5,10 @@ import assert from 'node:assert/strict';
 import type { CoffreClient } from '@coffre/client';
 import { LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 
 import { auditLog, environments, projects, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const LEAD = 'user:lead@acme.example';
@@ -83,12 +83,8 @@ async function projectId(slug: string): Promise<string> {
 
 /** The app's entries of `action`, oldest first, with their metadata. */
 async function entries(action: string) {
-  const rows = await db.owner
-    .select({ decision: auditLog.decision, metadata: auditLog.metadata, operationId: auditLog.operationId, projectId: auditLog.projectId })
-    .from(auditLog)
-    .where(eq(auditLog.action, action))
-    .orderBy(asc(auditLog.seq));
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  const rows = await loggedEntries(db.owner, [action]);
+  return rows.map(({ decision, metadata, operationId, projectId }) => ({ decision, metadata, operationId, projectId }));
 }
 
 test('only instance owners delete, and only what is archived; each refusal is logged', async () => {
@@ -175,6 +171,20 @@ test('deleting a project erases its values, revokes its grants, hides it and fre
   assert.ok(history.some((row) => row.action === 'project.delete'));
   assert.ok(history.every((row) => row.project === `market~deleted-${today()}`));
 
+  assert.equal((await root.audit.verify()).ok, true);
+});
+
+test('a project with no environment, deleted, is an event of its own: no change records it', async () => {
+  await root.projects.create('empty');
+  await root.projects.update('empty', { archived: true });
+  const id = await projectId('empty');
+  const { deletion } = await root.projects.delete('empty');
+  assert.equal(deletion.tombstone, `empty~deleted-${today()}`);
+  const logged = await entries('project.delete');
+  assert.deepEqual(logged.map(({ operationId: _, ...entry }) => entry), [
+    { decision: 'allow', projectId: id, metadata: { path: 'empty', tombstone: `empty~deleted-${today()}`, keys: 0, versions: 0, grants: 0, references: 0 } },
+  ]);
+  assert.equal(typeof logged[0]!.operationId, 'string');
   assert.equal((await root.audit.verify()).ok, true);
 });
 
@@ -465,11 +475,7 @@ test('a key decided on before its place is deleted, and released after, is refus
   const outcome = await read();
   assert.equal(meanwhile, null);
   assert.deepEqual(outcome.ok ? outcome.keys : outcome.refusal.code, 'deleted');
-  const reads = await db.owner
-    .select({ decision: auditLog.decision, code: auditLog.code })
-    .from(auditLog)
-    .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.secretVersionId, id)))
-    .orderBy(asc(auditLog.seq));
+  const reads = (await loggedEntries(db.owner, ['secret.read'])).filter((entry) => entry.secretVersionId === id).map(({ decision, code }) => ({ decision, code }));
   assert.deepEqual(reads, [{ decision: 'allow', code: null }, { decision: 'deny', code: 'deleted' }]);
   assert.equal((await root.audit.verify()).ok, true);
 });
@@ -503,11 +509,7 @@ test('with a key in memory, a deletion asked while a read decides waits for it: 
   armed = true;
   assert.equal((await read()).ok, true);
   await deletion;
-  const order = await db.owner
-    .select({ action: auditLog.action, decision: auditLog.decision })
-    .from(auditLog)
-    .where(and(eq(auditLog.decision, 'allow'), inArray(auditLog.action, ['secret.read', 'environment.delete'])))
-    .orderBy(asc(auditLog.seq));
+  const order = (await loggedEntries(db.owner, ['secret.read', 'environment.delete'])).filter((entry) => entry.decision === 'allow');
   assert.deepEqual(order.map((entry) => entry.action), ['secret.read', 'secret.read', 'environment.delete']);
   assert.equal((await root.audit.verify()).ok, true);
 });

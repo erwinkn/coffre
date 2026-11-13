@@ -242,6 +242,19 @@ test('a sensitive value made a secret in place says both levels', () => {
 test('places are created, changed, archived and restored', () => {
   assert.equal(said(entry({ action: 'project.create', project: 'billing' })), 'created project billing');
   assert.equal(said(entry({ action: 'environment.archive', ...dev })), 'archived environment market/dev');
+  // Re-slugged in the same change: one entry, the archive's, which names the slug it had.
+  assert.equal(said(entry({ action: 'environment.archive', ...dev, metadata: { environmentSlug: 'dev', from: 'staging' } })), 'archived environment market/dev, renamed from staging');
+});
+
+test('a key brought back by the write that gives it a value or a reference says so, in one entry', () => {
+  assert.equal(
+    said(entry({ action: 'secret.write', ...prod, key: 'OLD', version: 3, metadata: { unarchived: true } })),
+    'changed market/prod/OLD, now version 3, bringing it back from the archive',
+  );
+  assert.equal(
+    said(entry({ action: 'secret.reference', ...prod, key: 'OLD', metadata: { key: 'OLD', source: 'market/dev/OLD', unarchived: true } })),
+    'made market/prod/OLD a reference to market/dev/OLD, bringing it back from the archive',
+  );
 });
 
 test('every other action has a sentence', () => {

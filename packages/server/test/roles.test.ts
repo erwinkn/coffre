@@ -12,14 +12,14 @@ import assert from 'node:assert/strict';
 import { createClient, type CoffreClient, type RoleView } from '@coffre/client';
 import { ROLES, UNWRITTEN_FORK_MS } from '@coffre/core/access';
 import { defineSignin, github } from '@coffre/core/identity';
-import { asc, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { lockLogHead } from '@coffre/db/log';
 import { auditLog, credentials } from '@coffre/db/schema';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -116,7 +116,7 @@ async function refusal(call: Promise<unknown>): Promise<{ status: number; reason
 }
 
 async function actions(): Promise<string[]> {
-  const rows = await db.owner.select({ action: auditLog.action, decision: auditLog.decision }).from(auditLog).orderBy(asc(auditLog.seq));
+  const rows = await loggedEntries(db.owner);
   return rows.map((row) => `${row.action} ${row.decision}`);
 }
 
@@ -140,7 +140,7 @@ test('protecting prod narrows a Developer there to use and write, while a servic
   assert.equal(await status(ada.secrets.set('market/prod', { API_KEY: 'rotated' })), 200, 'she sets values she does not read');
   // CI, a Viewer of prod, reads it as it always did: the protected column is a person's.
   assert.deepEqual((await ci.secrets.reveal('market/prod')).values, { API_KEY: 'rotated' });
-  const entry = (await db.owner.select().from(auditLog).where(eq(auditLog.action, 'policy.change')))[0]!;
+  const entry = (await loggedEntries(db.owner, ['policy.change']))[0]!;
   assert.equal(entry.author, 'vault');
   assert.equal(entry.actor, MAYA);
   // The log lists it, beside what people did, not as a technical detail.

@@ -4,11 +4,13 @@ import type { Transaction } from '@coffre/db';
 import { dismissedKeys, secrets } from '@coffre/db/schema';
 
 import { dismissalsAcross, dismissalsIn, keysAcross, lock, update, upsert, type ResolvedPath } from '../db/queries.ts';
-import { allowed, audited, denied, Refusal, type ApiContext } from './context.ts';
+import { AppChanges, retrying } from './changes.ts';
+import { allowed, audited, denied, eventsOf, Refusal, type ApiContext } from './context.ts';
 import { ApiError, conflict, notFound } from './errors.ts';
 import { inheritedRows, resolveKeys } from './inheritance.ts';
 import { projectPlaces } from './render.ts';
-import { checkEnvironment } from './secrets.ts';
+import { formatMember } from './paths.ts';
+import { checkEnvironment, onlyPrepared } from './secrets.ts';
 
 /**
  * Missing keys: those the project's other environments have and this one
@@ -120,8 +122,10 @@ export type DismissalOutcome = 'dismissed' | 'restored' | 'unchanged';
 
 /**
  * Dismiss keys (`true`) or restore them (`null`), as a merge patch: "Dismiss
- * all" is one call, one operation, an entry per key. Shared by the team:
- * stored, logged, and listed until restored.
+ * all" is one call, one operation, an event per key. Shared by the team:
+ * stored, recorded, and listed until restored. No change records a
+ * dismissal: each is an event, prepared from the dismissals read before
+ * the transaction, which must find them still (`onlyPrepared`).
  */
 export async function setDismissals(
   ctx: ApiContext,
@@ -130,30 +134,37 @@ export async function setDismissals(
 ): Promise<{ operationId: string; keys: Record<string, DismissalOutcome> }> {
   const here = live(place);
   const operationId = randomUUID();
-  return audited(ctx, async (tx, log) => {
-    // Under the head, as every write to a place: one archived or deleted since the router found it takes no dismissal.
-    await checkEnvironment(tx, place, here);
-    if (place.environment!.parentId !== null) await refuseOwnRemovals(ctx, tx, place, Object.keys(patch).filter((key) => patch[key] === true), operationId);
-    const before = new Set((await dismissalsIn(tx, here.environmentId)).map((row) => row.key));
-    const now = new Date();
-    const by = ctx.caller.principal.id;
-    const keys: Record<string, DismissalOutcome> = {};
-    for (const [key, value] of Object.entries(patch)) {
-      if ((value === true) === before.has(key)) {
-        keys[key] = 'unchanged';
-        continue;
+  // Each key the patch changes, from the dismissals as they are, with its entry.
+  const changing = (dismissed: readonly { key: string }[]) => {
+    const before = new Set(dismissed.map((row) => row.key));
+    return Object.entries(patch).flatMap(([key, value]) => ((value === true) === before.has(key) ? [] : [{
+      key, dismissed: value === true, entry: allowed(ctx, value === true ? 'missing.dismiss' : 'missing.restore', { ...here, operationId, metadata: { key } }),
+    }]));
+  };
+  return retrying(async () => {
+    const prepared = changing(await dismissalsIn(ctx.db, here.environmentId)).map(({ entry }) => entry);
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), [], eventsOf(ctx, ...prepared));
+    return audited(ctx, async (tx, log) => {
+      // Under the head, as every write to a place: one archived or deleted since the router found it takes no dismissal.
+      await checkEnvironment(tx, place, here);
+      if (place.environment!.parentId !== null) await refuseOwnRemovals(ctx, tx, place, Object.keys(patch).filter((key) => patch[key] === true), operationId);
+      const now = new Date();
+      const by = ctx.caller.principal.id;
+      const keys: Record<string, DismissalOutcome> = Object.fromEntries(Object.keys(patch).map((key) => [key, 'unchanged']));
+      for (const { key, dismissed, entry } of changing(await dismissalsIn(tx, here.environmentId))) {
+        if (dismissed) {
+          await upsert(tx, dismissedKeys, [{ environmentId: here.environmentId, key, dismissedAt: now, dismissedBy: by, restoredAt: null, restoredBy: null }], {
+            target: ['environmentId', 'key'],
+            columns: ['dismissedAt', 'dismissedBy', 'restoredAt', 'restoredBy'],
+          });
+        } else {
+          await update(tx, dismissedKeys, { environmentId: here.environmentId, key }, { restoredAt: now, restoredBy: by });
+        }
+        keys[key] = dismissed ? 'dismissed' : 'restored';
+        log.push(entry);
       }
-      if (value === true) {
-        await upsert(tx, dismissedKeys, [{ environmentId: here.environmentId, key, dismissedAt: now, dismissedBy: by, restoredAt: null, restoredBy: null }], {
-          target: ['environmentId', 'key'],
-          columns: ['dismissedAt', 'dismissedBy', 'restoredAt', 'restoredBy'],
-        });
-      } else {
-        await update(tx, dismissedKeys, { environmentId: here.environmentId, key }, { restoredAt: now, restoredBy: by });
-      }
-      keys[key] = value === true ? 'dismissed' : 'restored';
-      log.push(allowed(ctx, value === true ? 'missing.dismiss' : 'missing.restore', { ...here, operationId, metadata: { key } }));
-    }
-    return { operationId, keys };
+      onlyPrepared(log, prepared);
+      return { operationId, keys };
+    }, changes);
   });
 }

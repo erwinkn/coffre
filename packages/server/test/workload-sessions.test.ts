@@ -12,7 +12,7 @@ import { bodyDigest, createProof, generateProofKey, thumbprint, type ProofKey } 
 import { github, hashToken, signin, type Gate, type GateAdmission, type RateLimiter } from '@coffre/core/identity';
 import { isCredentialScope, type ScopeGrant } from '@coffre/core/access';
 import type { Database } from '@coffre/db';
-import { desc, eq, Placeholder, sql } from 'drizzle-orm';
+import { eq, Placeholder, sql } from 'drizzle-orm';
 
 import { allowed, audited } from '../src/api/context.ts';
 import { resolveConfig } from '../src/config.ts';
@@ -22,7 +22,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, decisionInputs, holdSomething, openTestDatabase, resetDatabase, signInsLogged, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, decisionInputs, holdSomething, loggedEntries, openTestDatabase, resetDatabase, signInsLogged, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, environments, logChanges, secrets, serviceBindings } from '@coffre/db/schema';
 import { answer, type Pages } from './start-fixture.ts';
 
@@ -233,8 +233,7 @@ async function sessionRow(held: Session) {
 }
 
 async function entries(action: string) {
-  const rows = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, action));
-  return rows.map((row) => JSON.parse(row.metadata) as Record<string, unknown>);
+  return (await loggedEntries(db.owner, [action])).map((entry) => entry.metadata);
 }
 
 // --- the exchange -------------------------------------------------------------
@@ -513,8 +512,8 @@ test("a session issues no credential and changes no one's access, in any mode: a
   assert.deepEqual([onto.status, onto.body.reason], [403, 'workload_cannot_issue']);
   assert.equal((await isProtected('dev')).protected, false, 'unchanged');
   // Each refusal is logged, as the router's are.
-  const logged = await db.owner.select({ decision: auditLog.decision, metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, 'environment.update'));
-  assert.equal(logged.filter((entry) => entry.decision === 'deny' && JSON.parse(entry.metadata).reason === 'workload_cannot_issue').length, 3);
+  const logged = await loggedEntries(db.owner, ['environment.update']);
+  assert.equal(logged.filter((entry) => entry.decision === 'deny' && entry.metadata.reason === 'workload_cannot_issue').length, 3);
   const fresh = await call(held, 'PUT', '/api/projects/market/staging', { body: { from: 'prod' } });
   assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
   assert.equal((await isProtected('staging')).protected, true);
@@ -906,8 +905,8 @@ test("bindingRoute: a Cloudflare call is its service's, through its cloudflare b
 
 /** The newest entries `author` wrote, newest first. */
 async function newest(author: 'app' | 'vault', count = 5) {
-  const rows = await db.owner.select().from(auditLog).where(eq(auditLog.author, author)).orderBy(desc(auditLog.seq)).limit(count);
-  return rows.map((row) => ({ action: row.action, decision: row.decision, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  const rows = (await loggedEntries(db.owner)).filter((entry) => entry.author === author).slice(-count).reverse();
+  return rows.map((row) => ({ action: row.action, decision: row.decision, metadata: row.metadata }));
 }
 
 test("a Cloudflare call uses its service's values: the vault's read names no credential, the use it appends names the binding", async () => {

@@ -86,7 +86,7 @@ async function stored(id: string): Promise<(Row & { seal: Buffer | null }) | nul
 async function prepare(w: World, after: Row, before: Row | null = null, seal?: Buffer | null): Promise<PreparedChange[]> {
   const read = before === null ? null : await stored(before.id);
   const change: ObjectChange = {
-    kind: 'credential', id: after.id, before: before === null ? null : { columns: columns(before), seal: (seal === undefined ? read?.seal ?? null : seal)?.toString('base64') ?? null }, after: columns(after),
+    kind: 'credential', entry: null, id: after.id, before: before === null ? null : { columns: columns(before), seal: (seal === undefined ? read?.seal ?? null : seal)?.toString('base64') ?? null }, after: columns(after),
   };
   const outcome = await w.vault.prepare!({ actor: ROOT, changes: [change] });
   assert.ok(outcome.ok, JSON.stringify(outcome));
@@ -169,7 +169,7 @@ test('a revoke undone in the database, its old seal put back, is refused at the 
   // The writer puts back the live row, with the seal the vault made over it once: valid, but not the newest change's.
   await db.owner.update(credentials).set({ revokedAt: null, seal: live }).where(eq(credentials.id, row.id));
   // Prepared now, from the row put back, the change is not held to the revoke's checked seal: read it again.
-  const outcome = await w.vault.prepare!({ actor: ROOT, changes: [{ kind: 'credential', id: row.id, before: { columns: columns(row), seal: live!.toString('base64') }, after: columns(renewed) }] });
+  const outcome = await w.vault.prepare!({ actor: ROOT, changes: [{ kind: 'credential', entry: null, id: row.id, before: { columns: columns(row), seal: live!.toString('base64') }, after: columns(renewed) }] });
   assert.equal(outcome.ok ? null : outcome.refusal.code, 'moved');
   // The one prepared before: its seal is the row's again (ChangeCAS passes); under the fence, the change finds it is
   // not the newest, and fails.
@@ -232,7 +232,7 @@ test('app_change_strict, with the COMMIT: its number answers after it; a change 
   // inner refusal through as stale, the put-back error, not as moved, which would read again. The revoke
   // prepared from the issue, before the renewal, is held to that seal again; one prepared now is not (moved).
   await db.owner.update(credentials).set({ expiresAt: row.expiresAt, seal: issued }).where(eq(credentials.id, row.id));
-  const outcome = await w.vault.prepare!({ actor: ROOT, changes: [{ kind: 'credential', id: row.id, before: { columns: columns(row), seal: issued!.toString('base64') }, after: columns(revoked) }] });
+  const outcome = await w.vault.prepare!({ actor: ROOT, changes: [{ kind: 'credential', entry: null, id: row.id, before: { columns: columns(row), seal: issued!.toString('base64') }, after: columns(revoked) }] });
   assert.equal(outcome.ok ? null : outcome.refusal.code, 'moved');
   await assert.rejects(commit(revoked, revoke), (error: unknown) => isStaleChange(error) && !isMovedChange(error));
   assert.equal((await stored(row.id))!.revokedAt, null, 'nothing written');
@@ -244,7 +244,7 @@ test('a row the vault never sealed is refused as tampered before anything is wri
   await write(row, await prepare(w, row), false);
   // The writer widens the token's scope and keeps its seal: the vault's seal is not over it.
   const widened = { ...row, scope: JSON.stringify([{ projectId: null, environmentId: null, role: 'owner', permissions: { normal: [], protected: [] }, sensitive: true }]) };
-  const outcome = await w.vault.prepare!({ actor: ROOT, changes: [{ kind: 'credential', id: row.id, before: { columns: columns(widened), seal: (await stored(row.id))!.seal!.toString('base64') }, after: { ...columns(widened), revoked: true } }] });
+  const outcome = await w.vault.prepare!({ actor: ROOT, changes: [{ kind: 'credential', entry: null, id: row.id, before: { columns: columns(widened), seal: (await stored(row.id))!.seal!.toString('base64') }, after: { ...columns(widened), revoked: true } }] });
   assert.equal(outcome.ok ? null : outcome.refusal.code, 'tampered');
   // A row from before the cutover, unsealed, with no change: its change only checks that, logging nothing (the cutover seals it).
   const old = token();
@@ -360,8 +360,9 @@ test('an issue never waits for a use, nor a use for an issue; the barrier waits 
     const [issued] = await issuing.unsafe('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL) AS number', [
       c!.kind, c!.id, c!.requestId, c!.at, c!.actor, c!.payload, null, Buffer.from(c!.seal!, 'base64'), Buffer.from(c!.mac!, 'base64'),
     ]);
-    // It holds the issue lock, shared, and not the fence.
-    assert.deepEqual(await advisoryHeld(issuing), ['1 ShareLock']);
+    // It holds the issue lock, shared, and the change lock (where it took 0.14's head, ChangeLockFirst), not the
+    // fence. A use takes neither: the fence alone.
+    assert.deepEqual(await advisoryHeld(issuing), ['1 ShareLock', '2 ExclusiveLock']);
     // A use meanwhile takes the fence at once.
     await use.unsafe(`SET lock_timeout = '200ms'`);
     await use.unsafe('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
@@ -416,7 +417,7 @@ test('an issue of a row a savepoint inserted takes the fence: its xmin is the sa
     await issuing.unsafe('SELECT app_change($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL)', [
       c!.kind, c!.id, c!.requestId, c!.at, c!.actor, c!.payload, null, Buffer.from(c!.seal!, 'base64'), Buffer.from(c!.mac!, 'base64'),
     ]);
-    assert.deepEqual(await advisoryHeld(issuing), ['0 ExclusiveLock', '1 ShareLock']);
+    assert.deepEqual(await advisoryHeld(issuing), ['0 ExclusiveLock', '1 ShareLock', '2 ExclusiveLock']);
     await issuing.unsafe('COMMIT');
   } finally {
     await issuing.end();
@@ -434,7 +435,7 @@ test('a 0.14 row\'s call (no request, no op) takes the fence, even on a row its 
     await app.unsafe('UPDATE credentials SET revoked_at = now() WHERE id = $1', [row.id]);
     const [called] = await app.unsafe('SELECT app_change($1, $2, NULL, $3, $4, NULL, NULL, NULL, NULL, NULL) AS number', ['credential', row.id, Date.now(), ROOT]);
     assert.equal(called!.number, '0', 'it logs nothing');
-    assert.deepEqual(await advisoryHeld(app), ['0 ExclusiveLock', '1 ShareLock']);
+    assert.deepEqual(await advisoryHeld(app), ['0 ExclusiveLock', '1 ShareLock', '2 ExclusiveLock']);
     await app.unsafe('ROLLBACK');
   } finally {
     await app.end();

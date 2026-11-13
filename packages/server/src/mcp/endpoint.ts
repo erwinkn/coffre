@@ -10,8 +10,8 @@ import { isMcpScope, MCP_SCOPE_INFO, scopeString, type McpScope } from '@coffre/
 import { isStackOverflow } from '@coffre/core/vault';
 import { z } from 'zod';
 
-import { allowed, audited, denied, type McpVia } from '../api/context.ts';
-import type { AuditEntry } from '../db/audit.ts';
+import { allowed, denied, type McpVia } from '../api/context.ts';
+import { eventOf, noteEvent, type AuditEntry } from '../db/audit.ts';
 import type { AuthenticatedIdentity } from '../auth.ts';
 import { ApiError, NESTED_TOO_DEEPLY } from '../api/errors.ts';
 import { fetchApi } from '../fetch-api.ts';
@@ -255,8 +255,10 @@ function elicitsUrl(capabilities: Record<string, unknown>): boolean {
 const WAIT_MS = 25_000;
 
 /**
- * One tool's call: held to its scopes, run as API calls in its person's
- * name, and logged with the client.
+ * One tool's call: held to its scopes, and run as API calls in its person's
+ * name, whose routes record what they change or refuse, with the client
+ * (`via`); a call that reads, and returns no value, records nothing, as a
+ * page view does not. A refusal of the call's own is an event.
  * A refusal the API gives is the tool's result, an error the model reads; a
  * scope the connection lacks is a 403 that starts the client's step-up,
  * whose body is such a result too, for a client that does not. A
@@ -286,22 +288,13 @@ async function call(
   const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes: connection.scopes };
   const writer = { caller: connection.caller, requestId, sourceIp, provenance: connection.id, via };
   const names = tool.names(args.data as never);
-  const log = (entry: AuditEntry) =>
-    audited(runtime, async (_tx, entries) => {
-      entries.push(entry);
-    });
   const metadata = { tool: tool.name, names };
   const entry = (action: string, more: Record<string, unknown>) => allowed(writer, action, { metadata: { ...metadata, ...more } });
-  // A read-only tool's call that went through is detail, as a sign-in is; everything else shows.
-  const done = (decision: 'allow' | 'deny', reason?: string, more: Record<string, unknown> = {}) =>
-    log(
-      decision === 'allow'
-        ? entry(tool.readOnly ? 'mcp.read' : 'mcp.call', more)
-        : denied(writer, 'mcp.call', reason ?? 'refused', { metadata: { ...metadata, ...more } }),
-    );
+  // A connection's call names no credential: `via` and the connection's id, in the entry's metadata, say what it came in on.
+  const deny = (reason: string) => noteEvent(runtime.vault, eventOf(denied(writer, 'mcp.call', reason, { metadata }), null));
 
   if (!connection.scopes.includes(tool.scope)) {
-    await done('deny', 'insufficient_scope');
+    await deny('insufficient_scope');
     return insufficientScope(runtime, connection, tool, id, tool.scope);
   }
 
@@ -328,10 +321,9 @@ async function call(
   });
   try {
     if (tool.change !== undefined) {
-      return await change(runtime, connection, tool, args.data, params.data, { api, answer, client, done, entry, id });
+      return await change(runtime, connection, tool, args.data, params.data, { api, answer, client, deny, entry, id });
     }
     const result = await tool.run({ api, connection, publicUrl: runtime.publicUrl }, args.data as never);
-    await done('allow');
     return answer({
       content: [{ type: 'text', text: result.text ?? JSON.stringify(result.structured, null, 2) }],
       structuredContent: result.structured,
@@ -339,7 +331,7 @@ async function call(
   } catch (error) {
     const refused = refusalOf(error);
     if (refused === null) throw error;
-    await done('deny', refused.code);
+    // Recorded where it was refused, by the route or the vault, with the client: the call only answers it.
     // The API's own table refused: the challenge names the scope its route needs, which its reason says.
     if (refused.code === 'insufficient_scope') return insufficientScope(runtime, connection, tool, id, refused.reason !== undefined && isMcpScope(refused.reason) ? refused.reason : tool.scope);
     return answer(toolError(refused.message));
@@ -350,7 +342,8 @@ type ChangeCall = {
   api: CoffreClient;
   answer: (result: Record<string, unknown>) => Response;
   client: ClientSays;
-  done: (decision: 'allow' | 'deny', reason?: string, more?: Record<string, unknown>) => Promise<void>;
+  /** The call refused for `reason`, an event. */
+  deny: (reason: string) => Promise<void>;
   /** The call's entry, allowed, for what `approvals` writes with it. */
   entry: (action: string, more: Record<string, unknown>) => AuditEntry;
   id: JsonRpcId;
@@ -371,7 +364,7 @@ async function change(
   tool: Tool,
   args: unknown,
   params: z.infer<typeof CallParams>,
-  { api, answer, client, done, entry, id }: ChangeCall,
+  { api, answer, client, deny, entry, id }: ChangeCall,
 ): Promise<Response> {
   const { approvals } = runtime.mcp!;
   const prompt = (row: ApprovalRow, ask: boolean) =>
@@ -393,7 +386,7 @@ async function change(
     const state = client.era === 'modern' ? openState(runtime.chainKey, params.requestState) : null;
     // The state names the approval, its connection and its call: another call, or another connection's, gets nothing from it.
     if (state === null || state.connectionId !== connection.id || state.digest !== callDigest(tool.name, args)) {
-      await done('deny', 'request_state');
+      await deny('request_state');
       return rpc(id, { error: { code: CODE.invalidParams, message: 'Invalid params: this requestState is not for this call' } });
     }
     const found = state.expiresAt.getTime() > Date.now() ? await approvals.find(state.approvalId) : null;
@@ -409,7 +402,7 @@ async function change(
     // A new approval's call is logged with it; a call that rejoins one is not logged again.
     const asked = await approvals.ask(connection, tool, args, (approvalId) => entry('mcp.call', { approvalId }));
     if ('full' in asked) {
-      await done('deny', 'too_many_approvals');
+      await deny('too_many_approvals');
       return answer(toolError(`${MAX_PENDING} changes are waiting for the person already: ask them to decide those on coffre first.`));
     }
     row = asked.row;

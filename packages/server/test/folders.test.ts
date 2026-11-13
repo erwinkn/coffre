@@ -2,10 +2,9 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
-import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog } from '@coffre/db/schema';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedSince, logMark, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const DEVELOPER = 'developer@acme.example';
@@ -16,7 +15,7 @@ let deps: FixtureDeps;
 let root: CoffreClient;
 let developer: CoffreClient;
 let reader: CoffreClient;
-let firstSeq: bigint;
+let mark: number;
 
 before(async () => {
   db = await openTestDatabase();
@@ -40,18 +39,12 @@ beforeEach(async () => {
   await root.access.set(`user:${DEVELOPER}`, { 'market/prod': 'developer', acme: 'viewer' });
   await root.access.set(`user:${READER}`, { 'market/prod': 'viewer' });
   await root.secrets.set('market/prod', { DATABASE_URL: 'postgres://db', STRIPE_KEY: 'sk_live', PORT: '8080' });
-  const [head] = await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead);
-  firstSeq = head.nextSeq;
+  mark = await logMark(db.owner);
 });
 
 /** The app's entries of `action` since the setup. */
 async function logged(action: string) {
-  const rows = await db.owner
-    .select({ actor: auditLog.actor, decision: auditLog.decision, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, action), gte(auditLog.seq, firstSeq)))
-    .orderBy(asc(auditLog.seq));
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  return (await loggedSince(db.owner, mark, [action])).filter((entry) => entry.author === 'app');
 }
 
 const folderOf = async (client: CoffreClient, slug: string) =>

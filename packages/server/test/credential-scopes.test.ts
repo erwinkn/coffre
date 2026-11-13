@@ -19,7 +19,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { auditLog, credentials, environments, logChanges, secrets, secretVersions, serviceBindings, principals } from '@coffre/db/schema';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -204,13 +204,9 @@ test('nobody makes a token or a binding past the account or past what they could
   await ada.members.add('token:ci-empty');
   await assert.rejects(ada.tokens.issue('token:ci-empty', { expiresInDays: 30 }), { status: 400 });
 
-  const refusals = await db.owner
-    .select({ actor: auditLog.actor, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'deny')))
-    .orderBy(asc(auditLog.seq));
+  const refusals = (await loggedEntries(db.owner, ['token.create'])).filter((entry) => entry.decision === 'deny');
   assert.deepEqual(
-    refusals.map((row) => [row.actor, JSON.parse(row.metadata).reason, JSON.parse(row.metadata).path ?? null]),
+    refusals.map((row) => [row.actor, row.metadata.reason, row.metadata.path ?? null]),
     [
       [ADA, 'not_service_manager', null],
       [ADA, 'not_service_manager', null],
@@ -219,8 +215,8 @@ test('nobody makes a token or a binding past the account or past what they could
       [`user:${ROOT}`, 'beyond_account', 'market/prod'],
     ],
   );
-  const binds = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog).where(and(eq(auditLog.action, 'token.bind'), eq(auditLog.decision, 'deny')));
-  assert.deepEqual(binds.map((row) => [JSON.parse(row.metadata).reason, JSON.parse(row.metadata).path]), [['beyond_account', 'market/prod']]);
+  const binds = (await loggedEntries(db.owner, ['token.bind'])).filter((entry) => entry.decision === 'deny');
+  assert.deepEqual(binds.map((row) => [row.metadata.reason, row.metadata.path]), [['beyond_account', 'market/prod']]);
   assert.deepEqual((await db.owner.select().from(credentials)).length, 0, 'no token was made');
 });
 
@@ -380,5 +376,5 @@ test("a token's dry run says what it would reach, checked as issuing it is, and 
   assert.deepEqual(await ada.tokens.preview(CI, { expiresInDays: 30, scope: { 'market/dev': 'viewer' } }), { scope: { 'market/dev': 'viewer' }, withheld: [] });
   await assert.rejects(ada.tokens.preview(CI, { expiresInDays: 30, scope: { 'market/prod': 'viewer' } }), { status: 403 });
   assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
-  assert.deepEqual(await db.owner.select().from(auditLog).where(eq(auditLog.action, 'token.create')).then((rows) => rows.filter((row) => row.decision === 'allow')), []);
+  assert.deepEqual((await loggedEntries(db.owner, ['token.create'])).filter((row) => row.decision === 'allow'), []);
 });

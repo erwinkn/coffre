@@ -1,5 +1,7 @@
 import { deriveLogKey, GENESIS_HASH, verifyEntries, type ChainVerification, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import type { PreparedChange } from '@coffre/core/vault';
+import { randomUUID } from 'node:crypto';
+
+import type { NoteInput, PreparedChange, Vault } from '@coffre/core/vault';
 import { type Queryable, type Transaction } from '@coffre/db';
 import { appendEntries, MOVES_FROM, type Appended, type ChangeNumbers, type HeldHead } from '@coffre/db/log';
 import { and, eq, inArray, min } from 'drizzle-orm';
@@ -80,6 +82,55 @@ export async function appendAudit(
     log015,
     { final },
   );
+}
+
+/**
+ * An entry as the vault's chain takes it (0.16): an event (`NoteInput`), its fields the entry's by today's names,
+ * its reason, a refusal's, also its `code`. `id` is drawn once per event, and sent unchanged if the event is sent again.
+ * `credential`, the one the request came in on; null for none.
+ *
+ *   denied(ctx, 'settings.change', 'requires_instance_admin')
+ *     → { action: 'settings.change', allowed: false, code: 'requires_instance_admin', detail: { reason: … }, … }
+ */
+export function eventOf(entry: AuditEntry, credential: string | null, id: string = randomUUID()): NoteInput {
+  const reason = entry.metadata?.reason;
+  return {
+    id,
+    action: entry.action,
+    allowed: entry.decision === 'allow',
+    code: entry.decision === 'deny' && typeof reason === 'string' ? reason : null,
+    actor: actorOf(entry.actorType, entry.actorId),
+    subject: entry.subject ?? null,
+    places: { projectId: entry.projectId ?? null, environmentId: entry.environmentId ?? null, secretId: entry.secretId ?? null, versionId: null },
+    credential,
+    requestId: entry.requestId ?? null,
+    operationId: entry.operationId ?? null,
+    sourceIp: entry.sourceIp ?? null,
+    detail: entry.metadata ?? {},
+  };
+}
+
+/** Whether two events say the same, their ids aside: what each would write, compared by value, keys in any order. */
+export function sameEvent(a: NoteInput, b: NoteInput): boolean {
+  return canonicalJson({ ...a, id: null }) === canonicalJson({ ...b, id: null });
+}
+
+/** JSON with every object's keys sorted, undefined left out, as the vault's canonical form of a payload. */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) => (v !== null && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date)
+    ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)))
+    : v));
+}
+
+/**
+ * Write `event` at once, the vault signing it (`Vault.note`): what an app's decision that changes nothing leaves, a
+ * refusal (0.16). Not best-effort, as the append it replaces was not: the vault writing none throws, and the
+ * request answers that, not its refusal. A retry sends the same event, its id unchanged.
+ */
+export async function noteEvent(vault: Pick<Vault, 'note'>, event: NoteInput): Promise<void> {
+  if (vault.note === undefined) throw new Error('this vault writes no event (note): the app records nothing without one');
+  const outcome = await vault.note(event);
+  if (!outcome.ok) throw new Error(`the vault wrote no event ${event.action}: ${outcome.refusal.message}`);
 }
 
 const logKeys = new WeakMap<Buffer, LogKey>();

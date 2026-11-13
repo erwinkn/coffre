@@ -33,7 +33,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, holdSomething, loggedEntries, openTestDatabase, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, environments } from '@coffre/db/schema';
 import { answer, type Pages } from './start-fixture.ts';
 import { pinnedGates } from './window-fixture.ts';
@@ -231,8 +231,7 @@ async function use(held: Session, method: string, path: string, init: { headers?
 }
 
 async function entries(action: string) {
-  const rows = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, action));
-  return rows.map((row) => JSON.parse(row.metadata) as Record<string, unknown>);
+  return (await loggedEntries(db.owner, [action])).map((entry) => entry.metadata);
 }
 
 test('only the headers the proof signs go upstream, with the real key in place of none; the session token goes nowhere', async () => {

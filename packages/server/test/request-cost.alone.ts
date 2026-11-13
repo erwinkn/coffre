@@ -21,7 +21,7 @@ import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { appendEntries, type NewEntry } from '@coffre/db/log';
 import { ACCESS_ACTIONS, useOfCode } from '@coffre/core/vault';
 import { localVault, spoken } from '@coffre/vault/node';
-import { desc, eq, gt, sql, type SQL } from 'drizzle-orm';
+import { desc, eq, sql, type SQL } from 'drizzle-orm';
 
 import { Accesses } from '../src/accesses.ts';
 import { SigninService } from '../src/api/signin.ts';
@@ -40,7 +40,7 @@ import { credentialProxy, header, hmac } from '../src/plugins/credential-proxy.t
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testAnchor, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, loggedSince, logMark, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testAnchor, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { assertOver, assertWithin, BUDGET, OVER, overBudget, type Budget } from './budgets.ts';
 import { inBulkPeriod, inOnePeriod, pastBulkTurn } from './window-fixture.ts';

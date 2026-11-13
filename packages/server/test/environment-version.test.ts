@@ -2,10 +2,9 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
-import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog } from '@coffre/db/schema';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedSince, logMark, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 /**
  * An environment's version (`GET /api/projects/:project/:environment/version`):
@@ -48,15 +47,8 @@ beforeEach(async () => {
 
 /** The log from now on: what a call wrote to it, read once the call is over. */
 async function logFromHere(): Promise<() => Promise<{ author: string; action: string; decision: string; metadata: Record<string, unknown> }[]>> {
-  const [head] = await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead);
-  return async () => {
-    const rows = await db.owner
-      .select({ author: auditLog.author, action: auditLog.action, decision: auditLog.decision, metadata: auditLog.metadata })
-      .from(auditLog)
-      .where(gte(auditLog.seq, head.nextSeq))
-      .orderBy(asc(auditLog.seq));
-    return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
-  };
+  const mark = await logMark(db.owner);
+  return async () => (await loggedSince(db.owner, mark)).map(({ author, action, decision, metadata }) => ({ author, action, decision, metadata }));
 }
 
 const versionOf = async (path: string, as = maintainer) => (await as.environments.version(path)).version;

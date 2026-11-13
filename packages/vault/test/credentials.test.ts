@@ -73,7 +73,7 @@ async function world() {
   const made = await vault.changeBindings!({
     actor: ROOT, via: null, actorAccess: null, connection: null, reason: 'replaced', ends: [], live: [], reads: [], revokedAt: Date.now(), revokedBy: 'root@acme.example',
     make: {
-      id: binding, principal: CI, generation: 0, profile: 'github', issuer: ISSUER, origin: ORIGIN, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
+      entry: null, id: binding, principal: CI, generation: 0, profile: 'github', issuer: ISSUER, origin: ORIGIN, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
       scope, policy: null, revoked: false, jwks: null, label: 'deploys', createdBy: 'root@acme.example', createdAt: Date.now(), authMac: randomBytes(32).toString('base64'),
     },
     policy: { seq: null, protected: [] }, appKey: APP_KEY,
@@ -354,18 +354,18 @@ test("a revoke is one change of the log, from the row's seal, the app's MAC writ
   assert.deepEqual(await w.vault.revokeCredential!(input), { ok: false, refused: 'moved' });
 });
 
-test("a revoke takes 0.14's head first, which 0.14's use of the credential holds from its check to its commit: it writes no 0.14 entry, so no use of 0.14's goes on past it (EntryLessHead, PR 9b)", async () => {
+test('a revoke takes the change lock first, and waits for a change that holds it (ChangeLockFirst)', async () => {
   const w = await world();
   const made = await signedIn(w);
   const holder = postgresSession(OWNER_URL);
   try {
-    // 0.14's use, on an isolate still serving: the credential checked under the head (credentialStill), not yet committed.
+    // Another change in flight, under the change lock, not yet committed.
     await holder.unsafe('BEGIN');
-    await holder.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
+    await holder.unsafe('SELECT pg_advisory_xact_lock(1668244070, 2)');
     let revoked = false;
     const revoking_ = w.vault.revokeCredential!(revoking(made)).then((outcome) => ((revoked = true), outcome));
     await sleep(200);
-    assert.equal(revoked, false, "the revoke waits for 0.14's head");
+    assert.equal(revoked, false, 'the revoke waits for the change lock');
     await holder.unsafe('COMMIT');
     assert.ok((await revoking_).ok);
   } finally {

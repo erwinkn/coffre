@@ -20,7 +20,7 @@ import {
 } from '@coffre/core/identity';
 import { allows, DEFAULT_POLICY, ownsInstance, DEVICE_TTL_SECONDS, HANDLE_POLICY, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
 import type { Access, ObjectChange, Settings, Vault } from '@coffre/core/vault';
-import type { Database, Transaction } from '@coffre/db';
+import { later, type Database, type Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { KeyRetired } from '@coffre/db/log';
 import { credentials, deviceLogins, identities, mcpConnections } from '@coffre/db/schema';
@@ -32,11 +32,11 @@ import type { AuditEntry } from '../db/audit.ts';
 import { MAX_BODY_NODES } from '../http.ts';
 import { passkeyName, providerName } from '../passkey-names.ts';
 import {
-  findBinding,
   findCredential,
   findDeviceAuthorizations,
   openDeviceSources,
   findIdentity,
+  stampIdentity,
   passkeyCredentialTaken,
   signinMembers,
   insert,
@@ -64,6 +64,7 @@ import {
   liveConnections,
   touchPasskey,
   insertPasskey,
+  approvalsToDeny,
   denyApprovals,
   passkeysOf,
   personCredentials,
@@ -79,8 +80,8 @@ import { CeremonyStates, challenge, creationOptions, requestOptions, responseCre
 import { passkeyChecked, PasskeyRequired, passkeyStands, sourceStands } from '../passkey-check.ts';
 import { callerFrom, projectsReached, type Caller, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
-import { AppChanges, COFFRE_ACTOR, connectionRevokes, deploymentOwners, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultIssuesTokens, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
-import { allowed, audited, credentialStill, denied, POLICY_CHANGED, Refusal, requireInstance, traceOf, withRefusals, type ApiContext, type SessionOf } from './context.ts';
+import { AppChanges, COFFRE_ACTOR, connectionRevokes, deploymentOwners, credentialChange, ObjectMoved, type Entry, retrying, revokedByVault, revokes, vaultIssuesTokens, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
+import { allowed, audited, credentialStill, denied, entryOf, eventsOf, POLICY_CHANGED, Refusal, requireInstance, traceOf, vaultDecided, withRefusals, type ApiContext, type SessionOf } from './context.ts';
 import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
 import { ApiError, badRequest, forbidden, notFound, TouchRequired } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
@@ -568,22 +569,58 @@ export class SigninService {
       }
       // What the session names: the passkey touched, or the one added (section 3.2).
       const passkeyId = factor === null ? null : factor.kind === 'touch' ? factor.passkey.id : factor.id;
+      let attempts = 0;
       return retrying(async () => {
+      // The account's identity as read before, then again on each retry: a racing first sign-in of the same account
+      // binds it meanwhile, and this one signs in on that binding rather than plan another.
+      attempts += 1;
+      const held = attempts === 1 ? previous : await findIdentity(this.#deps.db, this.#deps.chainKey, { ...profile, issuerHash });
       // The session, and, binding a new account, the credentials of an earlier membership it revokes (`revokePriorMembership`);
       // a first passkey, everything of the person's no passkey stands behind (section 6.1).
       const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + this.#deps.signin.browserSessionHours * 3_600_000), generation: standing.generation };
-      const changes = await AppChanges.prepare(this.#deps.vault, formatMember(principal), async () => {
-        const at = new Date();
-        const prior = previous === null ? await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, priorCredentials(principal, standing.generation, at)) : [];
-        const apps = previous === null ? await priorConnections(this.#deps.db, this.#deps.chainKey, principal, standing.generation, at) : [];
-        const session = this.#replacing(factor, principal);
-        const [unbacked, replaced] = await Promise.all([
-          factor?.kind === 'enroll' ? this.#unbacked(this.#deps.db, principal, standing.generation, at) : { credentials: [], connections: [] },
-          session === null ? [] : liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, session),
-        ]);
-        const ending = new Map([...prior, ...unbacked.credentials, ...replaced].map((row) => [row.id, row]));
-        return [this.#issueChange('browser', principal, plan), ...revokes([...ending.values()]), ...connectionRevokes([...apps, ...unbacked.connections])];
+      const at = new Date();
+      const priorRead = held === null ? await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, priorCredentials(principal, standing.generation, at)) : [];
+      const appsRead = held === null ? await priorConnections(this.#deps.db, this.#deps.chainKey, principal, standing.generation, at) : [];
+      const replacing = this.#replacing(factor, principal);
+      const [unbackedRead, replacedRead, approvals] = await Promise.all([
+        factor?.kind === 'enroll' ? this.#unbacked(this.#deps.db, principal, standing.generation, at) : { credentials: [], connections: [] },
+        replacing === null ? [] : liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, replacing),
+        factor?.kind === 'enroll' ? approvalsToDeny(this.#deps.db, this.#deps.chainKey, principalOf(principal), at, { unbacked: true }) : [],
+      ]);
+      const ending = new Map([...priorRead, ...unbackedRead.credentials, ...replacedRead].map((row) => [row.id, row]));
+      // What no change records is an event, signed with the changes: the account linked, the first passkey added,
+      // with what it ended, as read here. The transaction logs what it finds: an entry unlike its prepared event is no
+      // event of it, and goes to the old log (`AppChanges.entries`).
+      const plannedIdentity = randomUUID();
+      const linked = (id: string) => ({ ...base, actorId: preparedId, action: 'account.link', decision: 'allow' as const, metadata: { ...account, identityId: id, matchedEmail: match!.email } });
+      const added = (enroll: Extract<Factor, { kind: 'enroll' }>, ended: { credentials: number; connections: number; approvals: number }) => ({
+        ...base,
+        actorId: preparedId,
+        action: 'passkey.add',
+        decision: 'allow' as const,
+        metadata: {
+          passkeyId: enroll.id, name: enroll.row.name, aaguid: enroll.row.aaguid === null ? null : Buffer.from(enroll.row.aaguid).toString('hex'), synced: enroll.row.synced, ended,
+        },
       });
+      // The sign-in's own entry rides the session's issue (#569: on the issue its `targetCredentialId` names), the revokes
+      // of what it replaces silent: of the identity read here, or the one planned, which the transaction holds it to.
+      const identityExpected = held?.id ?? plannedIdentity;
+      const signedIn: AuditEntry = {
+        ...base,
+        actorId: preparedId,
+        decision: 'allow',
+        metadata: { ...account, identityId: identityExpected, targetCredentialId: plan.id, ...(passkeyId === null ? {} : { passkeyId }) },
+      };
+      const changes = await AppChanges.prepare(
+        this.#deps.vault,
+        formatMember(principal),
+        [this.#issueChange('browser', principal, plan, entryOf({ credentialId: null }, signedIn)), ...revokes([...ending.values()]), ...connectionRevokes([...appsRead, ...unbackedRead.connections])],
+        eventsOf({ credentialId: null }, ...[
+          // With no person matched, the transaction refuses `deactivated` before it links anything.
+          held === null && match !== null ? linked(plannedIdentity) : null,
+          factor?.kind === 'enroll' ? added(factor, { credentials: ending.size, connections: appsRead.length + unbackedRead.connections.length, approvals: approvals.length }) : null,
+        ].filter((entry) => entry !== null)),
+      );
       return audited(this.#deps, async (tx, log) => {
         // Under the head, which every change to the person's passkeys holds too: the provider alone signs in nobody who
         // holds a live passkey, while the policy is not `off`, and a touch only with a passkey still live (passkeys.md,
@@ -594,7 +631,8 @@ export class SigninService {
           if (error instanceof AuthRowTampered) throw new SigninRefused('tampered');
           throw error;
         });
-        const [member, backed] = await Promise.all([
+        const now = new Date();
+        const reading = Promise.all([
           this.#stillMember(tx, principal, standing, known?.accessSeq),
           factor?.kind === 'enroll'
             ? none().then(({ ever, live }) => ever === factor.state.passkeysEver && live === 0)
@@ -603,6 +641,11 @@ export class SigninService {
               ? none().then(({ live }) => live === 0)
               : this.#issuedBacked(tx, { principal: principalOf(principal), generation: standing.generation, passkeyId }),
         ]);
+        // A returning person's identity, stamped with this sign-in in the same Sync, after the reads: the row its
+        // statement answers is the identity read again under the change lock (below), one statement where a read and an
+        // update were two. A refusal rolls the stamp back.
+        const stamped = held === null ? null : stampIdentity(tx, this.#deps.chainKey, held.id, { lastSignInAt: now, ...(profile.emails[0] === undefined ? {} : { email: profile.emails[0] }) });
+        const [member, backed] = await reading;
         if (!member) throw refuse('deactivated', preparedId);
         // Whoever answered passed the provider but not the factor: no entry, as section 3.1 promises such a visitor
         // writes nothing, and the reason in the process log (section 11; review r1 of #497).
@@ -612,7 +655,6 @@ export class SigninService {
           console.warn('a sign-in the provider alone answered was refused: its person holds a passkey', { principal: preparedId, reason: 'passkey_required', requestId: meta.requestId });
           throw new SigninRefused('passkey_required');
         }
-        const now = new Date();
         // The touch taken: its replay mark and counter move, or nothing is issued (section 7.3). Not taken, this sign-in's
         // challenge is spent for that passkey (a commit whose answer was lost, or a newer sign-in's), or its counter
         // stood still: no touch of it answers this challenge again, so the sign-in ends, its cookie cleared, rather than
@@ -620,7 +662,12 @@ export class SigninService {
         if (factor?.kind === 'touch' && (await touchPasskey(tx, { id: factor.passkey.id, principal: principalOf(principal), generation: standing.generation, issuedAt: new Date(factor.state.issuedAt), signCount: factor.signCount })) === 0) {
           return passkeyRefused(meta, preparedId, 'state_mismatch', 'replayed, overtaken by a newer challenge, or a counter that did not move');
         }
-        const bound = await findIdentity(tx, this.#deps.chainKey, { ...profile, issuerHash });
+        // The account's identity as it is now: the row the stamp answered, while it is still this person's at this
+        // generation; otherwise read again, as anything of the account may have moved (unlinked, linked anew, another's).
+        const fresh = stamped === null ? null : await stamped;
+        const bound = fresh !== null && memberOf(fresh.principal).id === preparedId && fresh.generation === standing.generation
+          ? fresh
+          : await findIdentity(tx, this.#deps.chainKey, { ...profile, issuerHash });
         let principalId: string;
         let identityId: string;
         let generation: number;
@@ -635,12 +682,8 @@ export class SigninService {
           identityId = bound.id;
           if (principalId !== preparedId || bound.generation !== standing.generation) throw refuse('deactivated', principalId);
           generation = standing.generation;
-          await update(
-            tx,
-            identities,
-            { id: identityId },
-            { lastSignInAt: now, ...(profile.emails[0] === undefined ? {} : { email: profile.emails[0] }) },
-          );
+          // Stamped already, unless it is another row than the one read before the transaction.
+          if (bound !== fresh) await update(tx, identities, { id: identityId }, { lastSignInAt: now, ...(profile.emails[0] === undefined ? {} : { email: profile.emails[0] }) });
         } else {
           // The audit head serializes bindings to the same person.
           if (match === null) throw refuse('deactivated', preparedId);
@@ -662,14 +705,8 @@ export class SigninService {
             throw refuse('account_mismatch', principalId, providers);
           }
 
-          identityId = await this.#bind(tx, principalId, profile, principalId, generation);
-          log.push({
-            ...base,
-            actorId: principalId,
-            action: 'account.link',
-            decision: 'allow',
-            metadata: { ...account, identityId, matchedEmail: match.email },
-          });
+          identityId = await this.#bind(tx, principalId, profile, principalId, generation, plannedIdentity);
+          log.push(linked(identityId));
         }
 
         if (factor?.kind === 'enroll') {
@@ -682,21 +719,13 @@ export class SigninService {
             if ((await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: row.id, authMac: row.authMac }, { revokedAt: now, revokedBy: principalId })) > 0) ended.connections.push(row.id);
           }
           ended.approvals.push(...await denyApprovals(tx, this.#deps.chainKey, principalOf(principal), now, { unbacked: true }));
-          log.push({
-            ...base,
-            actorId: principalId,
-            action: 'passkey.add',
-            decision: 'allow',
-            metadata: {
-              passkeyId: factor.id, name: factor.row.name, aaguid: factor.row.aaguid === null ? null : Buffer.from(factor.row.aaguid).toString('hex'), synced: factor.row.synced,
-              ended: { credentials: ended.credentials.length, connections: ended.connections.length, approvals: ended.approvals.length },
-            },
-          });
+          log.push(added(factor, { credentials: ended.credentials.length, connections: ended.connections.length, approvals: ended.approvals.length }));
         }
         changes?.expectRevoked(ended.credentials);
         changes?.expectRevoked(ended.connections, 'connection');
 
         // At the plan's generation, which its change sealed: `generation` is the same, held to it above.
+        // Its row with the COMMIT, nothing awaiting it (`later`): written in the transaction's last Sync with its change.
         const credential = await this.#issue(tx, 'browser', principal, {
           ...plan,
           identityId,
@@ -705,13 +734,10 @@ export class SigninService {
           // The passkey touched or added, now; the provider alone, none.
           passkeyId,
           confirmedAt: passkeyId === null ? null : now,
-        });
-        log.push({
-          ...base,
-          actorId: principalId,
-          decision: 'allow',
-          metadata: { ...account, identityId, targetCredentialId: credential.id, ...(passkeyId === null ? {} : { passkeyId }) },
-        });
+        }, { final: true });
+        // Its entry, carried by the issue, names the identity prepared: another (unlinked and linked anew meanwhile) is a
+        // write meanwhile, read again.
+        if (identityId !== identityExpected) throw new ObjectMoved();
         return { ok: true as const, principal, credential, ...(replaced.length > 0 ? { replaced: true as const } : {}) };
       }, changes, factor?.kind === 'enroll' ? principalOf(principal) : null);
       });
@@ -966,8 +992,10 @@ export class SigninService {
         const standing = await this.#standing(principal);
         return retrying(async () => {
           const plan = { id: randomUUID(), expiresAt: session.expiresAt, generation: standing.generation };
+          // The step's entry rides the new session's issue (#569), the old session's revoke silent.
+          const checked = entryOf({ credentialId: null }, check('allow', { passkeyId: passkey.id, issued: plan.id }));
           const changes = await AppChanges.prepare(this.#deps.vault, formatMember(principal), async () => [
-            this.#issueChange('browser', principal, plan),
+            this.#issueChange('browser', principal, plan, checked),
             ...revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.id(session.id))),
           ]);
           return audited(this.#deps, async (tx, log) => {
@@ -990,7 +1018,6 @@ export class SigninService {
             const credential = await this.#issue(tx, 'browser', principal, {
               ...plan, identityId: session.identityId, label: session.label, createdBy: principal.id, passkeyId: passkey.id, confirmedAt: now,
             });
-            log.push(check('allow', { passkeyId: passkey.id, issued: credential.id }));
             return { ok: true as const, principal, credential, replaced: true as const };
           }, changes);
         });
@@ -1042,7 +1069,15 @@ export class SigninService {
     const { state, passkeyId, signCount } = touch;
     const moved = await touchPasskey(tx, { id: passkeyId, principal: state.principal, generation: state.generation, issuedAt: new Date(state.issuedAt), signCount });
     if (moved === 0) throw touchFailed(ctx, state.act, 'replay', passkeyId);
-    log.push(allowed(ctx, 'passkey.check', { metadata: { purpose: state.act.kind, passkeyId } }));
+    log.push(this.touchEntry(ctx, touch));
+  }
+
+  /**
+   * The `passkey.check` entry `touched` logs for `touch`: no change records a touch, so it is an event, which the act
+   * prepares beside its own before its transaction (`eventsOf`, `AppChanges.prepare`).
+   */
+  touchEntry(ctx: Toucher, touch: ActTouch): AuditEntry {
+    return allowed(ctx, 'passkey.check', { metadata: { purpose: touch.state.act.kind, passkeyId: touch.passkeyId } });
   }
 
   // --- managing passkeys (docs/design/passkeys.md, sections 3.6 and 3.7) ---------------------------------------
@@ -1127,6 +1162,12 @@ export class SigninService {
         const verified = await verifyRegistration(answer.response, expected);
         if (!verified.ok) throw fail(verified.reason);
         const standing = await this.#standing(member);
+        // No change records a passkey added: its event does, signed before the transaction.
+        const passkeyId = randomUUID();
+        const name = passkeyName(verified.aaguid, state.passkeysEver);
+        const aaguid = verified.aaguid === null ? null : Buffer.from(verified.aaguid);
+        const added = allowed(ctx, 'passkey.add', { metadata: { passkeyId, name, aaguid: aaguid === null ? null : aaguid.toString('hex'), synced: verified.backupEligible } });
+        const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [], eventsOf(ctx, added));
         return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
           const [caller, rows] = await Promise.all([this.#currentCaller(tx, ctx, standing), passkeysOf(tx, this.#deps.chainKey, principal)]);
           if (caller === null) throw fail('session_ended');
@@ -1139,7 +1180,7 @@ export class SigninService {
           if (rows.length !== state.passkeysEver) throw new ApiError('conflict', 'your passkeys changed meanwhile: add it again', 'state_mismatch');
           addable(rows.filter((row) => row.generation === state.generation && row.removedAt === null).length);
           const row = {
-            id: randomUUID(),
+            id: passkeyId,
             principal,
             generation: state.generation,
             userHandle: Buffer.from(state.userHandle, 'base64url'),
@@ -1150,15 +1191,15 @@ export class SigninService {
             // Its own challenge is spent: nothing issued before it is answered with it.
             lastChallengeAt: new Date(state.issuedAt),
             transports: verified.transports,
-            aaguid: verified.aaguid === null ? null : Buffer.from(verified.aaguid),
+            aaguid,
             synced: verified.backupEligible,
-            name: passkeyName(verified.aaguid, state.passkeysEver),
+            name,
             createdBy: member.id,
           };
           await insertPasskey(tx, this.#deps.chainKey, row);
-          log.push(allowed(ctx, 'passkey.add', { metadata: { passkeyId: row.id, name: row.name, aaguid: row.aaguid === null ? null : row.aaguid.toString('hex'), synced: row.synced } }));
+          log.push(added);
           return { passkey: passkeyView({ ...row, createdAt: new Date(), lastUsedAt: null }) };
-        }, null, principal);
+        }, changes, principal);
       });
     } catch (error) {
       if (error instanceof AuthRowTampered) throw tamperedPasskeys();
@@ -1171,11 +1212,14 @@ export class SigninService {
   /** A passkey of the person's renamed (section 3.6): no check, since a name grants nothing and sits outside every MAC. */
   async renamePasskey(ctx: Asker, member: PrincipalRef, id: string, name: string): Promise<{ passkey: { id: string; name: string } }> {
     if (!ownPasskeys(ctx, member)) throw forbidden('a person renames their own passkeys');
+    // No change records a rename: its event does, signed before the transaction.
+    const renamed = allowed(ctx, 'passkey.rename', { metadata: { passkeyId: id, name } });
+    const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [], eventsOf(ctx, renamed));
     return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
       if ((await renamePasskeyRow(tx, { id, principal: principalOf(member), generation: ctx.caller.generation }, name)) === 0) throw notFound('no such passkey');
-      log.push(allowed(ctx, 'passkey.rename', { metadata: { passkeyId: id, name } }));
+      log.push(renamed);
       return { passkey: { id, name } };
-    });
+    }, changes);
   }
 
   /**
@@ -1201,15 +1245,27 @@ export class SigninService {
         const standing = await this.#standing(member);
         if (standing.status !== 'active') throw notFound('no such member');
         const credentialEnded = () => new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'passkey.reset', 'credential_ended', { metadata: { principalType: 'user', principalId: member.id } }));
+        // No change records the passkeys removed, nor the terminal codes denied: its event does, which names them and
+        // what it ended, as read here. The transaction logs what it finds under the change lock: an entry unlike its
+        // prepared event goes to the old log (`AppChanges.entries`).
+        const reset = (passkeys: string[], ended: ReturnType<typeof countsOf>) => allowed(asker, 'passkey.reset', {
+          metadata: { principalType: 'user', principalId: member.id, passkeys, ended },
+        });
         return await retrying(async () => {
-          const changes = await AppChanges.prepare(this.#deps.vault, formatMember(caller.principal), async () => {
-            const at = new Date();
-            const [held, connected] = await Promise.all([
-              liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, personCredentials(member, at)),
-              liveConnections(this.#deps.db, this.#deps.chainKey, principal, at),
-            ]);
-            return [...revokes(held), ...connectionRevokes(connected)];
-          });
+          const at = new Date();
+          const [held, connected, approvals, kept] = await Promise.all([
+            liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, personCredentials(member, at)),
+            liveConnections(this.#deps.db, this.#deps.chainKey, principal, at),
+            approvalsToDeny(this.#deps.db, this.#deps.chainKey, principal, at, { unbacked: false }),
+            passkeysOf(this.#deps.db, this.#deps.chainKey, principal),
+          ]);
+          const liveRead = kept.filter((row) => row.generation === standing.generation && row.removedAt === null).map((row) => row.id);
+          const changes = await AppChanges.prepare(
+            this.#deps.vault,
+            formatMember(caller.principal),
+            [...revokes(held), ...connectionRevokes(connected)],
+            eventsOf(ctx, reset(liveRead, { credentials: held.length, connections: connected.length, approvals: approvals.length })),
+          );
           return audited({ ...this.#deps, caller }, async (tx, log) => {
             // Read together, one round trip: the Owner's access as it was weighed, the session they asked on still live and
             // still backed by the passkey it names, the person still the member they were, and their passkeys.
@@ -1233,9 +1289,7 @@ export class SigninService {
               this.#endEverything(tx, member, now, caller.principal.id, changes),
             ]);
             if (moved.some((count) => count === 0)) throw new ObjectMoved();
-            log.push(allowed(asker, 'passkey.reset', {
-              metadata: { principalType: 'user', principalId: member.id, passkeys: live.map((row) => row.id), ended: countsOf(ended) },
-            }));
+            log.push(reset(live.map((row) => row.id), countsOf(ended)));
             return { reset: live.length, ended: countsOf(ended) };
           }, changes, principal);
         });
@@ -1306,14 +1360,23 @@ export class SigninService {
         const standing = await this.#standing(principal);
         return retrying(async () => {
           const plan = { id: randomUUID(), expiresAt: session.expiresAt, generation: standing.generation };
-          const changes = await AppChanges.prepare(this.#deps.vault, formatMember(principal), async () => {
-            const at = new Date();
-            const [held, connected] = await Promise.all([
-              liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, personCredentials(principal, at)),
-              liveConnections(this.#deps.db, this.#deps.chainKey, state.principal, at),
-            ]);
-            return [this.#issueChange('browser', principal, plan), ...revokes(held), ...connectionRevokes(connected)];
-          });
+          const at = new Date();
+          const [held, connected, approvals, kept] = await Promise.all([
+            liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, personCredentials(principal, at)),
+            liveConnections(this.#deps.db, this.#deps.chainKey, state.principal, at),
+            approvalsToDeny(this.#deps.db, this.#deps.chainKey, state.principal, at, { unbacked: false }),
+            passkeysOf(this.#deps.db, this.#deps.chainKey, state.principal),
+          ]);
+          // No change records the passkey removed: its event does, which names it and what the removal ended, as read
+          // here; the transaction finds them so under the change lock, or reads and prepares again.
+          const removed = (name: string, ended: ReturnType<typeof countsOf>) => entry('passkey.remove', 'allow', { name, touched: touched?.passkey.id ?? null, ended, issued: plan.id });
+          const asked = kept.find((row) => row.id === state.passkeyId && row.removedAt === null);
+          const changes = await AppChanges.prepare(
+            this.#deps.vault,
+            formatMember(principal),
+            [this.#issueChange('browser', principal, plan, null), ...revokes(held), ...connectionRevokes(connected)],
+            asked === undefined ? [] : eventsOf({ credentialId: null }, removed(asked.name, { credentials: held.length, connections: connected.length, approvals: approvals.length })),
+          );
           return audited(this.#deps, async (tx, log) => {
             const [member, rows] = await Promise.all([this.#stillMember(tx, principal, standing), passkeysOf(tx, this.#deps.chainKey, state.principal)]);
             if (!member || standing.generation !== state.generation) throw new Refusal(new SigninRefused('session_ended'), entry('passkey.remove', 'deny', { reason: 'session_ended' }));
@@ -1343,7 +1406,7 @@ export class SigninService {
             const credential = await this.#issue(tx, 'browser', principal, {
               ...plan, identityId: session.identityId, label: session.label, createdBy: principal.id, passkeyId, confirmedAt: passkeyId === null ? null : now,
             });
-            log.push(entry('passkey.remove', 'allow', { name: target.name, touched: touched?.passkey.id ?? null, ended: countsOf(ended), issued: credential.id }));
+            log.push(removed(target.name, countsOf(ended)));
             return { ok: true as const, principal, credential, replaced: true as const };
           }, changes, state.principal);
         });
@@ -1393,6 +1456,10 @@ export class SigninService {
     // An account linked through a personal token would sign in with all its person holds, for good.
     if (ctx.caller.principal.type !== 'user' || ctx.caller.credentialScope !== null) throw forbidden('only people link sign-in accounts, signed in as themselves');
     const access = await this.#standing(ctx.caller.principal);
+    // No change records an account linked: its event does, signed before the transaction.
+    const identityId = randomUUID();
+    const linked = allowed(ctx, 'account.link', { metadata: { ...account, identityId } });
+    const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [], eventsOf(ctx, linked));
     return audited(this.#deps, async (tx, log) => {
       const standing = await this.#currentCaller(tx, ctx, access);
       if (standing === null) {
@@ -1408,14 +1475,13 @@ export class SigninService {
           denied(ctx, 'account.link', 'already_linked', { metadata: account }),
         );
       }
-      const identityId = await this.#bind(tx, ctx.caller.principal.id, profile, ctx.caller.principal.id, standing.generation);
-      log.push(allowed(ctx, 'account.link', { metadata: { ...account, identityId } }));
+      await this.#bind(tx, ctx.caller.principal.id, profile, ctx.caller.principal.id, standing.generation, identityId);
+      log.push(linked);
       return { ok: true as const };
-    }).catch(refusalOrThrow);
+    }, changes).catch(refusalOrThrow);
   }
 
-  async #bind(tx: Transaction, principalId: string, profile: SignedInAccount, createdBy: string, generation: number): Promise<string> {
-    const id = randomUUID();
+  async #bind(tx: Transaction, principalId: string, profile: SignedInAccount, createdBy: string, generation: number, id: string = randomUUID()): Promise<string> {
     const row = {
       id,
       provider: profile.provider,
@@ -1529,9 +1595,12 @@ export class SigninService {
     kind: CredentialKind,
     principal: PrincipalRef,
     options: CredentialOptions,
+    /** `final`: nothing in the transaction reads the row after: it goes with the COMMIT (`later`), what it fails with failing the transaction. */
+    { final = false }: { final?: boolean } = {},
   ): Promise<IssuedCredential> {
     const { row, issued } = this.#credential(kind, principal, options);
-    await insert(tx, credentials, row);
+    if (final) later(tx, tx.insert(credentials).values(row));
+    else await insert(tx, credentials, row);
     return issued;
   }
 
@@ -1589,14 +1658,14 @@ export class SigninService {
       case 'access': throw new ApiError('conflict', 'your access changed while this ran: try again', ACCESS_CHANGED);
       // The account it is for is not the member it was weighed as: removed, or admitted again since.
       case 'gone':
-        throw held.refusal?.() ?? new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'token.create', 'credential_ended', { metadata: details }));
+        throw held.refusal?.() ?? vaultDecided(ctx, new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), 'token.create', 'credential_ended', { metadata: details });
       // The issuer's credential, or their membership, ended: a person's own token says their session did, as before.
       case 'ended':
         throw kind === 'service'
-          ? new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'token.create', 'credential_ended', { metadata: details }))
-          : new Refusal(forbidden('that session has ended'), denied(ctx, 'token.create', 'session_ended', { metadata: details }));
+          ? vaultDecided(ctx, new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), 'token.create', 'credential_ended', { metadata: details })
+          : vaultDecided(ctx, forbidden('that session has ended'), 'token.create', 'session_ended', { metadata: details });
       case 'refused':
-        throw new Refusal(forbidden(outcome.why ?? 'not allowed to issue this token'), denied(ctx, 'token.create', 'vault_refused', { metadata: { ...details, why: outcome.why ?? null } }));
+        throw vaultDecided(ctx, forbidden(outcome.why ?? 'not allowed to issue this token'), 'token.create', 'vault_refused', { metadata: { ...details, why: outcome.why ?? null } });
       case 'policy': throw new ApiError('conflict', "the instance's roles or protected environments changed while this ran: try again", POLICY_CHANGED);
       case 'busy': throw new ApiError('unavailable', 'coffre is busy: try again shortly', 'busy', '1');
       case 'retired': throw new KeyRetired('the app\'s key is one it rotated from: a newer deployment replaces this one');
@@ -1604,9 +1673,9 @@ export class SigninService {
   }
 
   /** The change issuing a credential makes to 0.15's log: the object of the row `#credential` writes, from the same options. */
-  #issueChange(kind: CredentialKind, principal: PrincipalRef, options: { id: string; expiresAt: Date; scope?: CredentialScope; generation: number }): ObjectChange {
+  #issueChange(kind: CredentialKind, principal: PrincipalRef, options: { id: string; expiresAt: Date; scope?: CredentialScope; generation: number }, entry: Entry | null): ObjectChange {
     const scope = options.scope === undefined ? null : storedScope(options.scope);
-    return credentialChange(null, { id: options.id, principal: principalOf(principal), kind, scope, revokedAt: null, expiresAt: options.expiresAt, generation: options.generation });
+    return credentialChange(null, { id: options.id, principal: principalOf(principal), kind, scope, revokedAt: null, expiresAt: options.expiresAt, generation: options.generation }, entry);
   }
 
   /** A credential's row, signed, and what its holder is given: written by whoever issues it. */
@@ -1692,15 +1761,15 @@ export class SigninService {
       // Decided by the use this request made, on the sealed rows (a token still to be sealed asks, as it seals from the answer).
       else if (row !== null && request.standing !== undefined && !unsealed) access = request.standing;
       else if (row !== null) ({ access, recalled } = await accessFor(this.#deps, row.principal, recall && { generation: row.generation }));
-      // A token or binding an older release made after this configuration sealed its own: sealed on its first use, with the account's grants the vault just answered.
+      // A token an older release made after this configuration sealed its own: sealed on its first use, with the account's
+      // grants the vault just answered. One a binding issued carries its binding's scope, which is never sealed: refused.
       if (row !== null && access !== null && this.#unsealed(row, access, asked)) {
-        const binding = issuingBinding(row.createdBy);
-        const issued = binding === null ? row : await findBinding(db, chainKey, row.principal, binding);
-        if (issued !== null) {
-          await sealCredentials(db, chainKey, this.#deps.vault, access, policySeq, [{ kind: binding === null ? 'token' : 'binding', id: binding ?? row.id, principal: row.principal, createdBy: issued.createdBy, scope: issued.scope }]);
+        if (issuingBinding(row.createdBy) !== null) row = null;
+        else {
+          await sealCredentials(db, chainKey, this.#deps.vault, access, policySeq, [{ kind: 'token', id: row.id, principal: row.principal, createdBy: row.createdBy, scope: row.scope }]);
+          row = await findCredential(db, chainKey, { tokenHash }, undefined, checked);
+          if (row !== null && this.#unsealed(row, access, asked)) throw new Error('its scope could not be sealed');
         }
-        row = await findCredential(db, chainKey, { tokenHash }, undefined, checked);
-        if (row !== null && this.#unsealed(row, access, asked)) throw new Error('its scope could not be sealed');
       }
     } catch (error) {
       if (error instanceof AuthRowTampered) throw error;
@@ -1789,13 +1858,24 @@ export class SigninService {
         if (tries === 2) throw new ObjectMoved();
       }
     }
+    // A row 0.14 made, which the log never held: its revoke writes no change, so its entry is an event, signed with it.
+    const signedOut = (row: { id: string; principal: string; kind: string; createdBy: string }): AuditEntry => {
+      const member = memberOf(row.principal);
+      return {
+        actorType: member.type,
+        actorId: member.id,
+        action: 'sign_out',
+        decision: 'allow',
+        requestId: meta.requestId,
+        sourceIp: meta.sourceIp,
+        // A run's credential signing itself out is the run's act, too; a personal token's, the token's.
+        metadata: { targetCredentialId: row.id, kind: row.kind, ...(issuingBinding(row.createdBy) !== null || row.kind === 'personal' || row.kind === 'handle' ? { credentialId: row.id } : {}) },
+      };
+    };
     await retrying(async () => {
+    const read = await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.tokenHash(tokenHash));
     // Its actor, the session's own principal: a sign-out acts for whoever holds the token.
-    const changes = await AppChanges.prepare(
-      this.#deps.vault,
-      (read) => (read[0]?.kind === 'credential' ? read[0].after.principal : COFFRE_ACTOR),
-      async () => revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.tokenHash(tokenHash))),
-    );
+    const changes = await AppChanges.prepare(this.#deps.vault, read[0]?.principal ?? COFFRE_ACTOR, revokes(read), read[0] === undefined ? [] : eventsOf({ credentialId: null }, signedOut(read[0])));
     await audited(this.#deps, async (tx, log) => {
       const row = await findCredential(tx, this.#deps.chainKey, { tokenHash });
       if (row === null) return changes?.expectRevoked([]);
@@ -1808,17 +1888,7 @@ export class SigninService {
         { revokedAt: new Date(), revokedBy: member.id },
       );
       changes?.expectRevoked(revoked === 0 ? [] : [row.id]);
-      if (revoked === 0) return;
-      log.push({
-        actorType: member.type,
-        actorId: member.id,
-        action: 'sign_out',
-        decision: 'allow',
-        requestId: meta.requestId,
-        sourceIp: meta.sourceIp,
-        // A run's credential signing itself out is the run's act, too; a personal token's, the token's.
-        metadata: { targetCredentialId: row.id, kind: row.kind, ...(issuingBinding(row.createdBy) !== null || row.kind === 'personal' || row.kind === 'handle' ? { credentialId: row.id } : {}) },
-      });
+      if (revoked > 0) log.push(signedOut(row));
     }, changes);
     });
   }
@@ -1833,8 +1903,13 @@ export class SigninService {
   async revokeCredential(ctx: Asker, credentialId: string, of: { member: string; managed: boolean } | 'own handle' | null = null): Promise<{ revoked: true }> {
     const byVault = (await vaultMakesCredentials(this.#deps.vault)) ? await this.#revokedByVault(this.#deps.vault as CredentialsVault, ctx, credentialId, of) : null;
     if (byVault !== null) return byVault;
+    // A row 0.14 made, which the log never held: its revoke writes no change, so its entry is an event, signed with it.
+    const revokedEntry = (row: { kind: string; principal: string }) => allowed(ctx, 'token.revoke', {
+      metadata: { targetCredentialId: credentialId, kind: row.kind, principalType: memberOf(row.principal).type, principalId: memberOf(row.principal).id },
+    });
     return retrying(async () => {
-    const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), async () => revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.id(credentialId))));
+    const read = await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.id(credentialId));
+    const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), revokes(read), read[0] === undefined ? [] : eventsOf(ctx, revokedEntry(read[0])));
     // Whether the caller manages the token's account (`of`) was weighed with the policy they were loaded with (`audited`).
     return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
       const row = await findCredential(tx, this.#deps.chainKey, { id: credentialId });
@@ -1858,11 +1933,7 @@ export class SigninService {
       );
       if (revoked === 0) throw unknown();
       changes?.expectRevoked([credentialId]);
-      log.push(
-        allowed(ctx, 'token.revoke', {
-          metadata: { targetCredentialId: credentialId, kind: row.kind, principalType: memberOf(row.principal).type, principalId: memberOf(row.principal).id },
-        }),
-      );
+      log.push(revokedEntry(row));
       return { revoked: true as const };
     }, changes);
     });
@@ -1906,8 +1977,21 @@ export class SigninService {
   /** Unbind one of your sign-in accounts, ending the sessions it opened. */
   async unlinkIdentity(ctx: Asker, identityId: string): Promise<{ unlinked: true }> {
     const { principal } = ctx.caller;
+    // No change records the account unbound, only the sessions it ends: its event does, naming the account and how many
+    // it ended, as read here; the transaction finds them so under the change lock, or reads and prepares again.
+    const unlinked = (row: { provider: string; subject: string }, sessionsEnded: number) => allowed(ctx, 'account.unlink', { metadata: { identityId, ...row, sessionsEnded } });
     return retrying(async () => {
-    const changes = await AppChanges.prepare(this.#deps.vault, formatMember(principal), async () => revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.identity(identityId))));
+    const [held, [seen]] = await Promise.all([
+      liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, credentialsBy.identity(identityId)),
+      members(this.#deps.db, this.#deps.chainKey, { member: principal }, new Date()),
+    ]);
+    const known = seen?.identities.find((candidate) => candidate.id === identityId);
+    const changes = await AppChanges.prepare(
+      this.#deps.vault,
+      formatMember(principal),
+      revokes(held),
+      known === undefined ? [] : eventsOf(ctx, unlinked({ provider: known.provider, subject: known.subject }, held.length)),
+    );
     return audited(this.#deps, async (tx, log) => {
       const now = new Date();
       const [self] = await members(tx, this.#deps.chainKey, { member: principal }, now);
@@ -1924,8 +2008,7 @@ export class SigninService {
       }
       const ended = await revokeCredentialsWhere(tx, this.#deps.chainKey, credentialsBy.identity(identityId), { revokedAt: now, revokedBy: principal.id });
       changes?.expectRevoked(ended);
-      const row = { provider: identity.provider, subject: identity.subject };
-      log.push(allowed(ctx, 'account.unlink', { metadata: { identityId, ...row, sessionsEnded: ended.length } }));
+      log.push(unlinked({ provider: identity.provider, subject: identity.subject }, ended.length));
       return { unlinked: true as const };
     }, changes);
     });
@@ -2016,7 +2099,9 @@ export class SigninService {
         const credential = await this.#issuedByVault(ctx, caller, 'service', service, { ...plan, identityId: null, label: input.label, createdBy: ctx.caller.principal.id, passkeyId: ctx.passkeyId }, details, { accessSeq, refusal });
         if (credential !== null) return { ...credential, scope: byPath, withheld };
       }
-      const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [this.#issueChange('service', service, plan)]);
+      // Its entry rides its issue.
+      const created = entryOf(ctx, allowed(ctx, 'token.create', { metadata: { ...details, targetCredentialId: plan.id, expiresAt: plan.expiresAt.toISOString(), scope } }));
+      const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [this.#issueChange('service', service, plan, created)]);
       // Its scope was weighed with the policy and the issuer as the vault answered: committed only while still so (`audited`, `issuerStill`).
       return audited({ ...this.#deps, caller }, async (tx, log) => {
         await issuerStill(tx, caller, accessSeq);
@@ -2033,11 +2118,6 @@ export class SigninService {
           createdBy: ctx.caller.principal.id,
           passkeyId: ctx.passkeyId,
         });
-        log.push(
-          allowed(ctx, 'token.create', {
-            metadata: { ...details, targetCredentialId: credential.id, expiresAt: credential.expiresAt, scope },
-          }),
-        );
         return { ...credential, scope: byPath, withheld };
       }, changes);
     });
@@ -2109,7 +2189,9 @@ export class SigninService {
         const credential = await this.#issuedByVault(ctx, ctx.caller, 'personal', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id, passkeyId: ctx.passkeyId }, details, { accessSeq: null });
         if (credential !== null) return { ...credential, scope: byPath };
       }
-      const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('personal', person, plan)]);
+      // Its entry rides its issue.
+      const created = entryOf(ctx, allowed(ctx, 'token.create', { metadata: { ...details, targetCredentialId: plan.id, expiresAt: plan.expiresAt.toISOString(), scope } }));
+      const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('personal', person, plan, created)]);
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
       return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         const standing = await this.#currentCaller(tx, ctx, access);
@@ -2124,11 +2206,6 @@ export class SigninService {
           // The session's passkey, copied: the token holds at most what the session does, and never passes a fresh check.
           passkeyId: ctx.passkeyId,
         });
-        log.push(
-          allowed(ctx, 'token.create', {
-            metadata: { ...details, targetCredentialId: credential.id, expiresAt: credential.expiresAt, scope },
-          }),
-        );
         return { ...credential, scope: byPath };
       }, changes);
     });
@@ -2179,7 +2256,9 @@ export class SigninService {
         const credential = await this.#issuedByVault(ctx, ctx.caller, 'handle', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id, places: madeFor, passkeyId: ctx.passkeyId }, details, { accessSeq: null });
         if (credential !== null) return { ...credential, scope: byPath };
       }
-      const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('handle', person, plan)]);
+      // Its entry rides its issue.
+      const created = entryOf(ctx, allowed(ctx, 'token.create', { metadata: { ...details, targetCredentialId: plan.id, expiresAt: plan.expiresAt.toISOString(), scope } }));
+      const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('handle', person, plan, created)]);
       // Its scope was weighed with the policy as the caller was loaded: committed only while still so (`audited`).
       return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
         const standing = await this.#currentCaller(tx, ctx, access);
@@ -2195,11 +2274,6 @@ export class SigninService {
           places: madeFor,
           passkeyId: ctx.passkeyId,
         });
-        log.push(
-          allowed(ctx, 'token.create', {
-            metadata: { ...details, targetCredentialId: credential.id, expiresAt: credential.expiresAt, scope },
-          }),
-        );
         return { ...credential, scope: byPath };
       }, changes);
     });
@@ -2260,9 +2334,8 @@ export class SigninService {
 
   /**
    * A credential for a CI run, which a trust binding vouched for
-   * (`WorkloadService.exchange`): its row, which the exchange writes as it
-   * spends the token (`exchangeToken`), under the log's head, its member
-   * checked under it. It names its binding in `created_by`, under its MAC,
+   * (`WorkloadService.exchange`): its row, which the vault's sign-in writes
+   * as it spends the token, its member checked under it. It names its binding in `created_by`, under its MAC,
    * and dies with it. Its label is a copy of its binding's, whatever its
    * length: an accepted consequence of the 2026-11-06 decision (no length of
    * a label's own), since only an Owner's binding sets it and its bytes land
@@ -2369,6 +2442,17 @@ export class SigninService {
     // unknown below, with no authenticator asked first.
     const touch = approve && code !== null ? await this.touchFor(ctx, { kind: 'device', code }, answer) : null;
     const access = await this.#standing(ctx.caller.principal);
+    // No change records a terminal approved or denied, nor the touch: events, prepared from the code as read now. The
+    // transaction logs what it finds under the change lock: an entry unlike its prepared event goes to the old log
+    // (`AppChanges.entries`).
+    const decision = (row: Pick<typeof deviceLogins.$inferSelect, 'id' | 'clientLabel' | 'clientIp'>) => allowed(ctx, action, {
+      metadata: { deviceAuthorizationId: row.id, clientLabel: row.clientLabel, clientIp: row.clientIp, ...(touch === null ? {} : { passkeyId: touch.passkeyId }) },
+    });
+    const [seen] = code === null ? [] : (await findDeviceAuthorizations(this.#deps.db, this.#deps.chainKey, { userCode: code })).filter(isOpen(new Date()));
+    const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [], eventsOf(ctx, ...[
+      touch === null ? null : this.touchEntry(ctx, touch),
+      seen === undefined ? null : decision(seen),
+    ].filter((entry) => entry !== null)));
     return audited(this.#deps, async (tx, log) => {
       const standing = await this.#currentCaller(tx, ctx, access);
       if (standing === null) {
@@ -2398,13 +2482,9 @@ export class SigninService {
         );
       }
       if (touch !== null) await this.touched(tx, log, ctx, touch);
-      log.push(
-        allowed(ctx, action, {
-          metadata: { deviceAuthorizationId: row.id, clientLabel: row.clientLabel, clientIp: row.clientIp, ...(touch === null ? {} : { passkeyId: touch.passkeyId }) },
-        }),
-      );
+      log.push(decision(row));
       return { decided: true as const };
-    });
+    }, changes);
   }
 
   /** The CLI's poll. An approved code is exchanged for a CLI session exactly once. */
@@ -2416,7 +2496,25 @@ export class SigninService {
     const principal = memberOf(prepared.principal!) as PrincipalRef & { type: 'user' };
     const standing = await this.#standing(principal);
     const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + this.#deps.signin.cliSessionDays * 86_400_000), generation: standing.generation };
-    const changes = await AppChanges.prepare(this.#deps.vault, prepared.principal!, [this.#issueChange('cli', principal, plan)]);
+    // A code spent and refused at once records its refusal in the same transaction, which no change does: an event,
+    // prepared with the session's change for either reason.
+    const refused = (reason: 'passkey_required' | 'membership_changed'): AuditEntry => ({
+      actorType: 'user', actorId: principal.id, action: 'sign_in', decision: 'deny',
+      requestId: meta.requestId, sourceIp: meta.sourceIp,
+      metadata: { kind: 'cli', deviceAuthorizationId: prepared.id, reason },
+    });
+    // The sign-in's entry rides the session's issue, which commits only once kept (below), of the code as read: its id, label
+    // and address are the code's from its making on.
+    const signedIn: AuditEntry = {
+      actorType: 'user',
+      actorId: principal.id,
+      action: 'sign_in',
+      decision: 'allow',
+      requestId: meta.requestId,
+      sourceIp: meta.sourceIp,
+      metadata: { kind: 'cli', targetCredentialId: plan.id, deviceAuthorizationId: prepared.id, clientLabel: prepared.clientLabel, clientIp: prepared.clientIp },
+    };
+    const changes = await AppChanges.prepare(this.#deps.vault, prepared.principal!, [this.#issueChange('cli', principal, plan, entryOf({ credentialId: null }, signedIn))], eventsOf({ credentialId: null }, refused('passkey_required'), refused('membership_changed')));
     try {
       return await audited(this.#deps, async (tx, log): Promise<DevicePoll> => {
         const now = new Date();
@@ -2436,7 +2534,11 @@ export class SigninService {
         const principalId = memberOf(row.principal!).id;
         // An approval given before the person was last added is void: someone
         // removed and re-added in between starts with nothing from before.
-        if (standing.status !== 'active' || principalId !== principal.id || standing.generation !== row.generation) return { status: 'denied' };
+        if (standing.status !== 'active' || principalId !== principal.id || standing.generation !== row.generation) {
+          // Voided: the person removed and admitted again since the approval. The code is spent all the same, so its refusal is recorded.
+          log.push(refused('membership_changed'));
+          return { status: 'denied' };
+        }
         // Under the head, as every change to the person's passkeys: the approval's passkey still live, or, naming none, a
         // person who holds none (section 6.1). Asked together, one round trip.
         const [member, backed] = await Promise.all([
@@ -2444,11 +2546,7 @@ export class SigninService {
           this.#issuedBacked(tx, { principal: row.principal!, generation: standing.generation, passkeyId: row.passkeyId }),
         ]);
         if (!member || !backed) {
-          log.push({
-            actorType: 'user', actorId: principal.id, action: 'sign_in', decision: 'deny',
-            requestId: meta.requestId, sourceIp: meta.sourceIp,
-            metadata: { kind: 'cli', deviceAuthorizationId: row.id, reason: member ? 'passkey_required' : 'membership_changed' },
-          });
+          log.push(refused(member ? 'passkey_required' : 'membership_changed'));
           return { status: 'denied' };
         }
 
@@ -2463,22 +2561,6 @@ export class SigninService {
           passkeyId: row.passkeyId,
           confirmedAt: row.passkeyId === null ? null : row.decidedAt,
         });
-        const entry: AuditEntry = {
-          actorType: 'user',
-          actorId: principalId,
-          action: 'sign_in',
-          decision: 'allow',
-          requestId: meta.requestId,
-          sourceIp: meta.sourceIp,
-          metadata: {
-            kind: 'cli',
-            targetCredentialId: credential.id,
-            deviceAuthorizationId: row.id,
-            clientLabel: row.clientLabel,
-            clientIp: row.clientIp,
-          },
-        };
-        log.push(entry);
         return { status: 'approved', principal, credential };
       }, changes);
     } catch (error) {

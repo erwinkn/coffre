@@ -206,11 +206,12 @@ export async function exchangeWorkloadToken(
   }
   const refused = await admission(workloads, 'exchange', sourceIp);
   if (refused !== null) return refused;
+  const requestId = crypto.randomUUID();
   try {
     const body = validate(exchangeBody, asked(await readLimitedJson(request, SIGN_IN_BODY_BYTES)));
-    return jsonResponse(await workloads.exchange(body, { requestId: crypto.randomUUID(), sourceIp }));
+    return jsonResponse(await workloads.exchange(body, { requestId, sourceIp }));
   } catch (error) {
-    if (error instanceof UnknownKey) await unknownKeyAlert(runtime, error, sourceIp);
+    if (error instanceof UnknownKey) await unknownKeyAlert(runtime, error, sourceIp, requestId);
     if (error instanceof ExchangeRefused) return refuseExchange(error);
     return errorResponse(error);
   }
@@ -246,17 +247,18 @@ export async function exchangeWorkloadSession(request: Request, runtime: CoffreR
   if (runtime.gates === undefined) return errorResponse(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session', 'no_gate'));
   const refused = await admission(workloads, 'workload', sourceIp);
   if (refused !== null) return refused;
+  const requestId = crypto.randomUUID();
   try {
     const body = validate(sessionBody, await readLimitedJson(request, SIGN_IN_BODY_BYTES));
     const header = request.headers.get('dpop');
     if (header === null) return refuseExchange(new ExchangeRefused('dpop', "a DPoP header, a proof signed by the key the session will be bound to, comes with the sign-in"));
     const proof = await verifyProof(header, { method: request.method, url: signedUrl(request, runtime.publicUrl), skewSeconds: EXCHANGE_SKEW_SECONDS });
     if (!proof.ok) return refuseExchange(new ExchangeRefused('dpop', `the DPoP proof does not hold: ${proof.message}`));
-    const made = await workloads.signIn(body, { requestId: crypto.randomUUID(), sourceIp, jkt: proof.jkt, dpop: header });
+    const made = await workloads.signIn(body, { requestId, sourceIp, jkt: proof.jkt, dpop: header });
     const nonce = await gateNonce(runtime, body.service);
     return jsonResponse(made, 'pending' in made ? 202 : 200, nonce === null ? {} : { 'dpop-nonce': nonce });
   } catch (error) {
-    if (error instanceof UnknownKey) await unknownKeyAlert(runtime, error, sourceIp);
+    if (error instanceof UnknownKey) await unknownKeyAlert(runtime, error, sourceIp, requestId);
     if (error instanceof ExchangeRefused) return refuseExchange(error);
     return errorResponse(error);
   }
@@ -284,8 +286,9 @@ export async function renewWorkloadSession(request: Request, runtime: CoffreRunt
   const token = dpopToken(request);
   if (workloads === null || token === null) return errorResponse(new ApiError('unauthenticated', "this takes a workload's session, Authorization: DPoP coffre_wl_…, with its key's proof"));
   try {
-    const session = await standingSession(request, runtime, token, sourceIp, { place: null, credential: null });
-    return jsonResponse(await workloads.renew(session, { requestId: crypto.randomUUID(), sourceIp }), 200, { 'dpop-nonce': session.nonce });
+    const requestId = crypto.randomUUID();
+    const session = await standingSession(request, runtime, token, sourceIp, requestId, { place: null, credential: null });
+    return jsonResponse(await workloads.renew(session, { requestId, sourceIp }), 200, { 'dpop-nonce': session.nonce });
   } catch (error) {
     if (error instanceof SessionRefused) return error.response;
     if (error instanceof ExchangeRefused) return refuseExchange(error);
@@ -303,8 +306,9 @@ export async function logout(request: Request, runtime: CoffreRuntime, sourceIp:
   if (session !== null) {
     try {
       // Its key's proof is all it takes to end one's own session: no pending approval or moved address keeps it alive.
-      await standingSession(request, runtime, session, sourceIp, { place: null, credential: null, children: true, ending: true });
-      if (runtime.signin !== null) await runtime.signin.signOut(session, { requestId: crypto.randomUUID(), sourceIp });
+      const requestId = crypto.randomUUID();
+      await standingSession(request, runtime, session, sourceIp, requestId, { place: null, credential: null, children: true, ending: true });
+      if (runtime.signin !== null) await runtime.signin.signOut(session, { requestId, sourceIp });
       return jsonResponse({ signedOut: true });
     } catch (error) {
       if (error instanceof SessionRefused) return error.response;

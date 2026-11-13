@@ -385,7 +385,7 @@ TunnelRecheck(p) ==
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* What ends a session or stops its uses, each one transaction under the   *)
-(* head, which commits its entry with its rows.                            *)
+(* change lock, which commits its entry with its rows.                     *)
 (***************************************************************************)
 
 Entry(kind, p) == [kind |-> kind, id |-> l[p].id, target |-> None, s |-> None, w |-> None, gen |-> 0, time |-> now]

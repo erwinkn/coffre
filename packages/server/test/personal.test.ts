@@ -6,7 +6,7 @@ import { issuedGrant } from '@coffre/core/access';
 import { and, eq, isNotNull } from 'drizzle-orm';
 
 import { environments, secrets, secretVersions } from '@coffre/db/schema';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 /**
  * Personal configs (docs/design/forking.md): `market/dev@me` is your own
@@ -252,6 +252,24 @@ test("your own personal config's log is found by dev@me", async () => {
   assert.ok(entries.some((entry) => entry.action === 'secret.write'));
 });
 
+test('a key moved aside may take the name the rename frees, unless an environment above still passes it down: dev renames FOO_2 to FOO, and her own FOO becomes FOO_2', async () => {
+  await root.secrets.set('market/dev', { FOO_2: 'dev' });
+  await ada.secrets.set('market/dev@me', { FOO: 'ada-own' });
+  await root.secrets.update('market/dev/FOO_2', { key: 'FOO' });
+  const read = await values(ada, 'market/dev@me');
+  assert.deepEqual([read.FOO, read.FOO_2, read.FOO_3], ['dev', 'ada-own', undefined]);
+
+  // Not while an environment above the renamed one still passes the old name down: prod's FOO_2, under feature's own.
+  await root.secrets.set('market/prod', { FOO_2: 'prod' });
+  await root.environments.create('market/feature', { from: 'prod', inherit: true });
+  await root.secrets.set('market/feature', { FOO_2: 'feature' });
+  await root.access.set(`user:${ADA}`, { 'market/feature': 'viewer', 'market/prod': 'viewer' });
+  await ada.secrets.set('market/feature@me', { FOO: 'ada-feature' });
+  await root.secrets.update('market/feature/FOO_2', { key: 'FOO' });
+  const feature = await values(ada, 'market/feature@me');
+  assert.deepEqual([feature.FOO, feature.FOO_2, feature.FOO_3], ['feature', 'prod', 'ada-feature']);
+});
+
 test('a key moved aside onto a name the personal config removed is no longer removed there', async () => {
   await root.secrets.set('market/dev', { OLD: 'old' });
   await ada.secrets.set('market/dev@me', { NEXT: 'ada-own' });
@@ -262,6 +280,17 @@ test('a key moved aside onto a name the personal config removed is no longer rem
   await root.secrets.set('market/dev', { NEXT_2: 'dev-next-2' });
   await ada.secrets.inherit('market/dev@me/NEXT_2', true);
   assert.equal((await values(ada, 'market/dev@me')).NEXT_2, 'dev-next-2');
+});
+
+test("a key moved aside onto the old name ends its removal there, and the removal follows the renamed key: logged once each", async () => {
+  await root.secrets.set('market/dev', { FOO_2: 'dev' });
+  await ada.secrets.set('market/dev@me', { FOO: 'ada-own' });
+  await ada.environments.dismiss('market/dev@me', { FOO_2: true });
+  await root.secrets.update('market/dev/FOO_2', { key: 'FOO' });
+  const read = await values(ada, 'market/dev@me');
+  assert.deepEqual([read.FOO, read.FOO_2], [undefined, 'ada-own']);
+  const removals = (await loggedEntries(db.owner, ['missing.restore', 'missing.dismiss'])).filter((entry) => entry.metadata.renamed !== undefined);
+  assert.deepEqual(removals.map(({ action, metadata }) => [action, metadata.key, metadata.renamed]), [['missing.restore', 'FOO_2', 'FOO'], ['missing.dismiss', 'FOO', 'FOO_2']]);
 });
 
 test('an archived key moved aside leaves the removal of its new name as it was: it serves nothing', async () => {

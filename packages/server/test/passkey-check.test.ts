@@ -18,7 +18,7 @@ import { AuthRowTampered } from '../src/auth-rows.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { passkeyStands } from '../src/passkey-check.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, deviceLogins, passkeys } from '@coffre/db/schema';
 import * as rows from './passkey-rows.ts';
 import { touching } from './passkey-rows.ts';
@@ -161,7 +161,7 @@ test('the check reads the passkey\'s MAC only where its answer depends on the ro
 test('the provider alone signs in nobody who holds a live passkey, unless the policy is off', async () => {
   await addPasskey(ADA);
   const account = { provider: 'github', subject: 'ada', emails: [ADA], name: null };
-  const entries = async () => (await db.owner.select({ seq: auditLog.seq }).from(auditLog)).length;
+  const entries = async () => (await loggedEntries(db.owner)).length;
   const logged = await entries();
   const refused = await deployment('optional').signin.completeSignin(account, meta());
   assert.deepEqual(refused, { ok: false, reason: 'passkey_required' });

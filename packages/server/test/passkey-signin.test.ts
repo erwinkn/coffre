@@ -18,7 +18,7 @@ import { CEREMONY_TTL_SECONDS, CeremonyStates, creationOptions, remainingMs, req
 import { SigninService } from '../src/api/signin.ts';
 import { coffreRoute } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, deviceLogins, identities, passkeys, principals } from '@coffre/db/schema';
 import * as rows from './passkey-rows.ts';
 import { assertion, Browser, enroll, me, ORIGIN, provider, register, signinDeployment, touch } from './signin-browser.ts';
@@ -136,7 +136,7 @@ test("an Owner the deployment names, never admitted, passes the provider and sto
   assert.equal(session.passkeyId, added!.id);
   assert.ok(session.confirmedAt !== null, 'a touch confirmed it');
   assert.equal(Buffer.from(added!.userHandle).toString('base64url'), step.body.options.user.id, 'the handle create() was given is the row\'s');
-  const actions = (await db.owner.select().from(auditLog)).map((entry) => entry.action);
+  const actions = (await loggedEntries(db.owner)).map((entry) => entry.action);
   for (const action of ['account.link', 'passkey.add', 'sign_in']) assert.ok(actions.includes(action), action);
 
   // Again, with the passkey added there.
@@ -318,8 +318,8 @@ test('a first passkey ends everything of the person\'s no passkey stood behind, 
   assert.equal(denied!.decision, 'denied');
   const live = await db.owner.select().from(credentials).where(and(eq(credentials.principal, `user:${ADA}`), isNull(credentials.revokedAt)));
   assert.deepEqual(live.map(({ id }) => id), [(await sessionRow(browser)).id], 'the new session alone is left');
-  const [added] = (await db.owner.select().from(auditLog)).filter((entry) => entry.action === 'passkey.add');
-  assert.deepEqual((JSON.parse(added!.metadata) as { ended: unknown }).ended, { credentials: 1, connections: 0, approvals: 1 });
+  const [added] = await loggedEntries(db.owner, ['passkey.add']);
+  assert.deepEqual((added!.metadata as { ended: unknown }).ended, { credentials: 1, connections: 0, approvals: 1 });
 });
 
 test('an enrollment state adds a first passkey once, ever: again after a reset, within its five minutes, it adds nothing (sections 3.2, 13.13, 13.29)', async () => {
@@ -390,7 +390,7 @@ test('a session no passkey stands behind steps up with a touch: a new session, c
   assert.equal(await me(stale), 'unauthenticated', 'the session it came in on ended');
   const again = await assertion(key, step.body.options);
   assert.deepEqual(await stale.answer({ state: step.body.state, response: again }), { status: 401, body: { error: 'session_ended' } });
-  const checks = (await db.owner.select().from(auditLog)).filter((entry) => entry.action === 'passkey.check');
+  const checks = await loggedEntries(db.owner, ['passkey.check']);
   assert.deepEqual(checks.map(({ decision }) => decision), ['allow']);
 });
 

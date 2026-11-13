@@ -20,13 +20,13 @@ import type { Database, Transaction } from '@coffre/db';
 import { mcpConnections } from '@coffre/db/schema';
 
 import { callerFrom, newestPolicySeq, type Caller } from '../api/caller.ts';
-import { allowed, audited, denied, Refusal, requireInstance, type ApiContext } from '../api/context.ts';
+import { allowed, audited, denied, entryOf, eventsOf, Refusal, requireInstance, type ApiContext } from '../api/context.ts';
 import { AppChanges, connectionChange, connectionRevokes, retrying } from '../api/changes.ts';
 import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
 import { answerDigest } from '../api/ceremony.ts';
 import type { SigninService, TouchAnswer } from '../api/signin.ts';
 import { AuthRowTampered } from '../auth-rows.ts';
-import type { AuditEntry } from '../db/audit.ts';
+import { eventOf, noteEvent, type AuditEntry } from '../db/audit.ts';
 import {
   findConnection,
   type PasskeyRead,
@@ -228,14 +228,14 @@ export class McpService {
   /**
    * The person's answer. Approved: a connection with its code, logged as
    * `mcp.connect`, and the redirect that carries the code. Denied: the
-   * refusal logged, and the redirect that says so. Every parameter is
+   * refusal, an event, and the redirect that says so. Every parameter is
    * checked again: nothing is kept between the page and this.
    */
   async decide(
     asker: Asker,
     request: AuthorizationRequest,
     answer: { approve: boolean; scopes: string[]; touch?: TouchAnswer },
-    touches: Pick<SigninService, 'touchFor' | 'touched'>,
+    touches: Pick<SigninService, 'touchFor' | 'touched' | 'touchEntry'>,
   ): Promise<{ redirect: string }> {
     const { principal } = asker.caller;
     // A personal token connecting one would make a connection with all its person holds.
@@ -248,9 +248,7 @@ export class McpService {
     const back = (params: Record<string, string>) => ({ redirect: this.#redirect(redirectUri, request.state, params) });
 
     if (!answer.approve) {
-      await audited(this.#deps, async (_tx, log) => {
-        log.push(denied(asker, 'mcp.connect', 'person_denied', { metadata: { ...shown, asked: scopeString(asked) } }));
-      });
+      await noteEvent(this.#deps.vault, eventOf(denied(asker, 'mcp.connect', 'person_denied', { metadata: { ...shown, asked: scopeString(asked) } }), asker.credentialId));
       return back({ error: 'access_denied', error_description: 'the person did not approve the connection' });
     }
 
@@ -264,9 +262,11 @@ export class McpService {
     const made = new Date();
     const expiresAt = new Date(made.getTime() + this.#deps.signin.cliSessionDays * 86_400_000);
     // With 0.15's log, a connection is an object of it, made by a change with its row (T147): every use through it decides on it.
+    // Its `mcp.connect` rides that change; the touch, which no change records, an event signed with it.
+    const connected = allowed(asker, 'mcp.connect', { metadata: { connectionId: id, ...shown, asked: scopeString(asked), scopes: scopeString(scopes) } });
     const changes = await AppChanges.prepare(this.#deps.vault, member, [
-      connectionChange(null, { id, principal: member, generation: asker.caller.generation, expiresAt, revokedAt: null }),
-    ]);
+      connectionChange(null, { id, principal: member, generation: asker.caller.generation, expiresAt, revokedAt: null }, entryOf(asker, connected)),
+    ], touch === null ? [] : eventsOf(asker, touches.touchEntry(asker, touch)));
     await audited(this.#deps, async (tx, log) => {
       const now = made;
       // Under the head, the session it comes from still live and what it names still backed (passkeys.md, section 6.1): a
@@ -299,7 +299,6 @@ export class McpService {
         // The passkey touched to connect it, else the session's, which every call through it holds live (section 5.2).
         passkeyId: touch?.passkeyId ?? asker.passkeyId,
       });
-      log.push(allowed(asker, 'mcp.connect', { metadata: { connectionId: id, ...shown, asked: scopeString(asked), scopes: scopeString(scopes) } }));
     }, changes);
     return back({ code });
   }
@@ -420,36 +419,38 @@ export class McpService {
       if (row === null || row.revokedAt !== null || row.expiresAt <= row.now) throw unknown();
       return row;
     };
-    // With 0.15's log, its end is a change (T147), prepared from the row as read, which the transaction holds it to; a
-    // connection that is none is refused in the transaction, as ever.
+    /** Its `mcp.disconnect`, by whom: its person, or an owner. */
+    const disconnected = (row: Awaited<ReturnType<typeof found>>) => {
+      const own = row.principal === principalOf(principal);
+      const member = memberOf(row.principal);
+      return allowed(asker, 'mcp.disconnect', {
+        metadata: {
+          connectionId: id,
+          clientId: row.clientId,
+          clientName: row.clientName,
+          reason: own ? 'person' : 'owner',
+          ...(own ? {} : { principalType: member.type, principalId: member.id }),
+        },
+      });
+    };
+    // With 0.15's log, its end is a change, prepared from the row as read, which the transaction holds it to, and
+    // carrying its entry; a connection that is none is refused in the transaction, as ever.
     return retrying(async () => {
       const changes = await AppChanges.prepare(this.#deps.vault, principalOf(principal), async () => {
         try {
-          return connectionRevokes([await found(this.#deps.db)]);
+          const row = await found(this.#deps.db);
+          return connectionRevokes([row]).map((change) => ({ ...change, entry: entryOf(asker, disconnected(row)) }));
         } catch (error) {
           if (error instanceof Refusal) return [];
           throw error;
         }
       });
-      return audited(this.#deps, async (tx, log) => {
+      return audited(this.#deps, async (tx) => {
         const row = await found(tx);
-        const own = row.principal === principalOf(principal);
-        if (!own) requireInstance(asker, 'mcp.disconnect', { metadata: { connectionId: id } }, "disconnect other people's apps");
+        if (row.principal !== principalOf(principal)) requireInstance(asker, 'mcp.disconnect', { metadata: { connectionId: id } }, "disconnect other people's apps");
         const ended = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id, revokedAt: null }, { revokedAt: new Date(), revokedBy: principal.id });
         if (ended === 0) throw unknown();
         changes?.expectRevoked([id], 'connection');
-        const member = memberOf(row.principal);
-        log.push(
-          allowed(asker, 'mcp.disconnect', {
-            metadata: {
-              connectionId: id,
-              clientId: row.clientId,
-              clientName: row.clientName,
-              reason: own ? 'person' : 'owner',
-              ...(own ? {} : { principalType: member.type, principalId: member.id }),
-            },
-          }),
-        );
         return { disconnected: true as const };
       }, changes);
     });
@@ -495,8 +496,16 @@ export class McpService {
     const granted = parseScopes(row.scopes).scopes;
     const superseded = async (db: Database | Transaction) => (await liveConnections(db, this.#deps.chainKey, row.principal, row.now))
       .filter((earlier) => earlier.id !== row.id && earlier.clientId === row.clientId && earlier.refreshHash !== null && supersedes(granted, parseScopes(earlier.scopes).scopes));
+    // No change records a code redeemed: its event, signed with the ends.
+    const redeemedEntry = this.#entry(row, 'mcp.token', meta, { grant: 'authorization_code' });
     await retrying(async () => {
-      const changes = await AppChanges.prepare(this.#deps.vault, row.principal, async () => connectionRevokes(await superseded(this.#deps.db)));
+      // Each end carries its own `mcp.disconnect`.
+      const changes = await AppChanges.prepare(this.#deps.vault, row.principal, async () => {
+        const earlier = await superseded(this.#deps.db);
+        return connectionRevokes(earlier).map((change, i) => ({
+          ...change, entry: entryOf({ credentialId: null }, this.#entry(earlier[i]!, 'mcp.disconnect', meta, { reason: 'superseded', supersededBy: row.id })),
+        }));
+      }, [eventOf(redeemedEntry, null)]);
       await audited(this.#deps, async (tx, log) => {
         await this.#standing(tx, row);
         // Only an unredeemed code: of two racing, one gets the tokens.
@@ -506,13 +515,12 @@ export class McpService {
           refreshHash: hashSecret(refresh),
         });
         if (redeemed === 0) throw new OAuthError('invalid_grant', 'that code was used already');
-        log.push(this.#entry(row, 'mcp.token', 'allow', meta, { grant: 'authorization_code' }));
+        log.push(redeemedEntry);
         const ends: string[] = [];
         for (const earlier of await superseded(tx)) {
           const ended = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: earlier.id, revokedAt: null }, { revokedAt: row.now, revokedBy: 'coffre' });
           if (ended === 0) continue;
           ends.push(earlier.id);
-          log.push(this.#entry(earlier, 'mcp.disconnect', 'allow', meta, { reason: 'superseded', supersededBy: row.id }));
         }
         changes?.expectRevoked(ends, 'connection');
       }, changes);
@@ -544,6 +552,9 @@ export class McpService {
     }
     await this.#stillMember(row);
     const refresh = secret(REFRESH_PREFIX);
+    // No change records a refresh: its event, signed before the transaction.
+    const refreshed = this.#entry(row, 'mcp.token', meta, { grant: 'refresh_token', scopes: scopeString(scopes) });
+    const changes = await AppChanges.prepare(this.#deps.vault, row.principal, [], [eventOf(refreshed, null)]);
     await audited(this.#deps, async (tx, log) => {
       await this.#standing(tx, row);
       const rotated = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: row.id, refreshHash: row.refreshHash, revokedAt: null }, {
@@ -551,8 +562,8 @@ export class McpService {
         refreshHash: hashSecret(refresh),
       });
       if (rotated === 0) throw new OAuthError('invalid_grant', 'that refresh token was replaced already');
-      log.push(this.#entry(row, 'mcp.token', 'allow', meta, { grant: 'refresh_token', scopes: scopeString(scopes) }));
-    });
+      log.push(refreshed);
+    }, changes);
     return this.#answer(row, scopes, refresh, row.now);
   }
 
@@ -728,24 +739,25 @@ export class McpService {
 
   /** End a connection, and log why: `mcp.disconnect`, in its person's name. */
   async #end(row: ConnectionRow, reason: string, meta: Meta, by = 'coffre'): Promise<void> {
-    // With 0.15's log, a change (T147), from the row as read; ended meanwhile by another, none.
+    // With 0.15's log, a change, from the row as read, carrying its entry; ended meanwhile by another, none.
+    const entry = entryOf({ credentialId: null }, this.#entry(row, 'mcp.disconnect', meta, { reason }));
     await retrying(async () => {
-      const changes = await AppChanges.prepare(this.#deps.vault, row.principal, row.revokedAt === null ? connectionRevokes([row]) : []);
-      await audited(this.#deps, async (tx, log) => {
+      const changes = await AppChanges.prepare(this.#deps.vault, row.principal, row.revokedAt === null ? connectionRevokes([row]).map((change) => ({ ...change, entry })) : []);
+      await audited(this.#deps, async (tx) => {
         const ended = await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: row.id, revokedAt: null }, { revokedAt: new Date(), revokedBy: by });
-        if (ended > 0) log.push(this.#entry(row, 'mcp.disconnect', 'allow', meta, { reason }));
-        else changes?.drop();
+        if (ended === 0) changes?.drop();
       }, changes);
     });
   }
 
-  #entry(row: ConnectionRow, action: string, decision: 'allow' | 'deny', meta: Meta, metadata: Record<string, unknown>): AuditEntry {
+  /** An entry of the token endpoint's, allowed, in the connection's person's name: `mcp.token`, or a connection's end. */
+  #entry(row: ConnectionRow, action: string, meta: Meta, metadata: Record<string, unknown>): AuditEntry {
     const member = memberOf(row.principal);
     return {
       actorType: member.type,
       actorId: member.id,
       action,
-      decision,
+      decision: 'allow',
       requestId: meta.requestId,
       sourceIp: meta.sourceIp,
       metadata: { connectionId: row.id, clientId: row.clientId, clientName: row.clientName, ...metadata },

@@ -92,7 +92,7 @@ test("the app's own change to that credential, a renewal by a minute: `prepare` 
   const { vault } = await isolate();
   const outcome = await vault.prepare!({
     actor: ROOT,
-    changes: [{ kind: 'credential', id: w.credentialId, before: { columns, seal: sealOf(SEAL, ref, credential).toString('base64') }, after: { ...columns, expiresAt: credential.expiresAt! + 60_000 } }],
+    changes: [{ kind: 'credential', entry: null, id: w.credentialId, before: { columns, seal: sealOf(SEAL, ref, credential).toString('base64') }, after: { ...columns, expiresAt: credential.expiresAt! + 60_000 } }],
   });
   assert.equal(!outcome.ok && outcome.refusal.code, 'tampered', JSON.stringify(outcome));
   await refusedEverywhere(w, id, use);
@@ -112,7 +112,7 @@ test("a renewal of a credential whose row was put back over an authentic revoke:
   const before = await reports();
   const outcome = await vault.prepare!({
     actor: ROOT,
-    changes: [{ kind: 'credential', id: w.credentialId, before: { columns, seal: sealOf(SEAL, ref, credential).toString('base64') }, after: { ...columns, expiresAt: credential.expiresAt! + 60_000 } }],
+    changes: [{ kind: 'credential', entry: null, id: w.credentialId, before: { columns, seal: sealOf(SEAL, ref, credential).toString('base64') }, after: { ...columns, expiresAt: credential.expiresAt! + 60_000 } }],
   });
   // Without it, `prepare` sealed the renewal from the put-back row, and the writer, making the revoke's seal column
   // the old one before the app's `app_change`, had it commit: the revoked credential live a minute more, under an
@@ -134,9 +134,9 @@ test("the same renewal behind an entry that changes nothing of the credential as
     actor: ROOT,
     changes: [
       // The credential as its revoke left it, its seal the newest change's: no call.
-      { kind: 'credential', id: w.credentialId, before: { columns: { ...columns, revoked: true }, seal: sealOf(SEAL, ref, revoked).toString('base64') }, after: { ...columns, revoked: true } },
+      { kind: 'credential', entry: null, id: w.credentialId, before: { columns: { ...columns, revoked: true }, seal: sealOf(SEAL, ref, revoked).toString('base64') }, after: { ...columns, revoked: true } },
       // Then the renewal, from the row put back: the one call, from a seal that is not the newest change's.
-      { kind: 'credential', id: w.credentialId, before: { columns, seal: sealOf(SEAL, ref, credential).toString('base64') }, after: { ...columns, expiresAt: credential.expiresAt! + 60_000 } },
+      { kind: 'credential', entry: null, id: w.credentialId, before: { columns, seal: sealOf(SEAL, ref, credential).toString('base64') }, after: { ...columns, expiresAt: credential.expiresAt! + 60_000 } },
     ],
   });
   // Held by its first entry alone, the renewal was prepared from the put-back seal, for a forged seal column to let through.

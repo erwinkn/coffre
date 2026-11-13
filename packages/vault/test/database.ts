@@ -114,7 +114,7 @@ async function unsealedPlaces(owner: Database): Promise<{ id: string; projectId:
 export async function sealPlaces(owner: Database, made: readonly { id: string; projectId: string; slug: string; parentId?: string | null }[]): Promise<void> {
   if (placeKeys === null || made.length === 0) return;
   const changes: ObjectChange[] = made.map(({ id, projectId, slug, parentId = null }) => ({
-    kind: 'environment', id, before: null, after: { id, projectId, slug, owner: null, parentId, protected: null, archived: false, projectArchived: false },
+    kind: 'environment', entry: null, id, before: null, after: { id, projectId, slug, owner: null, parentId, protected: null, archived: false, projectArchived: false },
   }));
   const calls = prepareChanges(placeKeys, Date.now(), 'user:root@acme.example', changes, new Map());
   const numbers = await owner.transaction((tx) => appChanges(tx, calls));
@@ -306,7 +306,7 @@ export async function changePlace(owner: Database, id: string, set: { slug?: str
   };
   const before = { columns, seal: row.seal === null ? null : Buffer.from(row.seal).toString('base64') };
   const after = { ...columns, slug: set.slug ?? columns.slug, archived: set.archived ?? columns.archived };
-  const calls = prepareChanges(placeKeys, Date.now(), 'user:root@acme.example', [{ kind: 'environment', id, before, after }], new Map());
+  const calls = prepareChanges(placeKeys, Date.now(), 'user:root@acme.example', [{ kind: 'environment', entry: null, id, before, after }], new Map());
   const numbers = await owner.transaction(async (tx) => {
     await write(tx);
     return appChanges(tx, calls);

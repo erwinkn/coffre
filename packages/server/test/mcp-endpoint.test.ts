@@ -11,8 +11,8 @@ import { z } from 'zod';
 import { serveApi } from '../src/api/router.ts';
 import { decodeHeaderValue } from '../src/mcp/endpoint.ts';
 import { TOOL_BY_NAME, type Tool } from '../src/mcp/tools.ts';
-import { clientFor, contextFor } from './api-fixture.ts';
-import { auditLog } from '@coffre/db/schema';
+import { clientFor, contextFor, loggedEntries } from './api-fixture.ts';
+import { auditLog, mcpConnections } from '@coffre/db/schema';
 import { callRaw, CLAUDE_CODE, client, connect, db, deps, DEV, entries, envelope, ORIGIN, raw, type Result, ROOT, route, sent, useMcp } from './mcp-fixture.ts';
 
 useMcp(async () => {
@@ -66,17 +66,16 @@ for (const mode of ['modern', 'legacy'] as const) {
       assert.equal(sent[0], 'POST initialize -', sent.join('\n'));
       assert.ok(sent.slice(1).every((line) => line.endsWith(' 2025-11-25')), sent.join('\n'));
     }
-    // Each call in the log, under the client: the reads as detail, the refusal shown, and the API's own entries name the connection.
-    const reads = await entries('mcp.read');
-    assert.deepEqual(reads.map((entry) => entry.metadata.tool), ['list_projects', 'list_secrets', 'whoami']);
-    assert.ok(reads.every((entry) => entry.actor === `user:${DEV}` && (entry.metadata.via as { clientName: string }).clientName === 'Claude Code'));
-    const refusal = await entries('mcp.call');
-    assert.deepEqual(refusal.map((entry) => [entry.decision, entry.metadata.tool, entry.metadata.names]), [['deny', 'list_secrets', ['billing/prod']]]);
-    // The API's own entry for that refusal names the connection too, as every entry a call writes does.
-    const connection = (refusal[0]!.metadata.via as { connectionId: string }).connectionId;
-    const all = (await db.owner.select().from(auditLog).orderBy(auditLog.seq)).map((row) => ({ action: row.action, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+    // A read's call records nothing of its own, as a page view does not; the refusal is the API's, which recorded
+    // it, under the client, as every entry a call writes names it, and the call does not record it again.
+    assert.deepEqual(await entries('mcp.read'), []);
+    assert.deepEqual(await entries('mcp.call'), []);
+    const [row] = await db.owner.select().from(mcpConnections);
+    const connection = row!.id;
+    const all = (await loggedEntries(db.owner)).map((row) => ({ action: row.action, decision: row.decision, metadata: row.metadata }));
     const api = all.filter((entry) => !entry.action.startsWith('mcp.') && entry.metadata.credentialId === connection);
     assert.ok(api.length > 0, 'the API wrote no entry naming the connection');
+    assert.equal(api.filter((entry) => entry.decision === 'deny').length, 1, `the API's refusal of billing/prod, once: ${JSON.stringify(api)}`);
     assert.ok(api.every((entry) => (entry.metadata.via as { clientName: string }).clientName === 'Claude Code'), JSON.stringify(api));
   });
 }
@@ -169,8 +168,14 @@ test("a tool beyond the connection's scopes answers 403 insufficient_scope, nami
     TOOL_BY_NAME.delete('test_reveal');
     TOOL_BY_NAME.delete('test_sneaky');
   }
+  // The endpoint's own refusals, by tool; the API's, test_sneaky's, its router's, by route: the call records none again.
   const refused = await entries('mcp.call');
-  assert.deepEqual(refused.map((entry) => [entry.metadata.tool, entry.code ?? entry.metadata.reason]), [['test_reveal', 'insufficient_scope'], ['test_sneaky', 'insufficient_scope'], ['test_reveal', 'insufficient_scope']]);
+  assert.deepEqual(refused.map((entry) => [entry.metadata.tool ?? null, entry.code ?? entry.metadata.reason, entry.metadata.needed ?? null]), [
+    ['test_reveal', 'insufficient_scope', null],
+    [null, 'insufficient_scope', 'reveal'],
+    ['test_reveal', 'insufficient_scope', null],
+  ]);
+  assert.match(String(refused[1]!.metadata.route), /^[A-Z]+ \//);
   assert.deepEqual(await entries('secret.read'), [], 'no value was read');
 });
 

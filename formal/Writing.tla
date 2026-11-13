@@ -21,8 +21,8 @@
 (*                  value's key and seals the app's change, the read's     *)
 (*                  digest in it; the app checks the caller's rows'        *)
 (*                  `auth_mac`, as read, in memory.                        *)
-(*               3. the app's statement: 0.14's head, the issue lock and   *)
-(*                  the fence, then the hold (`hold_inputs`: the read      *)
+(*               3. the app's statement: the change lock, the issue lock   *)
+(*                  and the fence, then the hold (`hold_inputs`: the read  *)
 (*                  again, its digest against the change's), then the      *)
 (*                  rows, the change, the commit. A hold that fails rolls  *)
 (*                  it all back, and the write asks again from 1.          *)
@@ -32,32 +32,32 @@
 (*                  and its seal, from the read; the app checks the        *)
 (*                  caller's rows' `auth_mac`, as read (round 6), in       *)
 (*                  memory, and hands the add back;                        *)
-(*               3. one statement: the rows, the head, the issue lock, the *)
-(*                  fence, the hold, the write; a hold that fails writes   *)
-(*                  nothing and the vault reads again;                     *)
+(*               3. one statement: the rows, the change lock, the issue    *)
+(*                  lock, the fence, the hold, the write; a hold that      *)
+(*                  fails writes nothing and the vault reads again;        *)
 (*               4. the seal wait, then the answer.                        *)
 (* Each asks again at most MaxTries times in all, then answers 409.        *)
 (*                                                                         *)
 (* As built, an add's write is one transaction of two statements, sent as  *)
-(* one Sync (0.16.0, the contraction: no `member.add` entry, so no head    *)
-(* read before a MAC): the members' rows and 0.14's head, a lock with      *)
+(* one Sync (0.16.0, the contraction: no `member.add` entry, so nothing    *)
+(* read before a MAC): the members' rows and the change lock, a lock with  *)
 (* nothing read under it, then the hold (`admit_hold`: the issue lock      *)
-(* shared, the fence, the read again), the rows, COMMIT. The head and the  *)
-(* rows taken a statement early only add order: a change that takes either *)
-(* waits for the add, and one that takes neither (a session's revoke, a    *)
-(* database writer) is what the hold, after the fence, weighs. AWrite is   *)
-(* the second statement; whether the first's locks can close a cycle is    *)
-(* WriteLocks.tla's (AddLocks). TwoTrips is the shape, as for a key write. *)
-(* The read holds the adder's session too (`cred`): ended, or not as its   *)
-(* log has it, the add answers 401 there and then, as a key write's does.  *)
-(* An add the vault leaves to today's path (refused, an object not as its  *)
-(* log has it, or a case it does not serve: PR 5 serves only an admin's    *)
-(* first add) goes there as a key write does, with the caller the first    *)
-(* try authenticated (Auth). Today's add (`admit`, `setAccess`) decides    *)
-(* and writes in one transaction under the members' rows and 0.14's head,  *)
-(* which every change of what it weighs takes but a session's revoke: one  *)
-(* step (AToday), its caller's session not weighed again                   *)
-(* (TodayCallerStandsAtDecision, as a key write's).                        *)
+(* shared, the fence, the read again), the rows, COMMIT. The change lock   *)
+(* and the rows taken a statement early only add order here: a change that *)
+(* takes either waits for the add, and one that takes neither (a session's *)
+(* revoke, a database writer) is what the hold, after the fence, weighs.   *)
+(* AWrite is the second statement; whether the first's locks can close a   *)
+(* cycle is WriteLocks.tla's (AddLocks). TwoTrips is the shape, as for a   *)
+(* key write. The read holds the adder's session too (`cred`): ended, or   *)
+(* not as its log has it, the add answers 401 there and then, as a key     *)
+(* write's does. An add the vault leaves to today's path (refused, an      *)
+(* object not as its log has it, or a case it does not serve: PR 5 serves  *)
+(* only an admin's first add) goes there as a key write does, with the     *)
+(* caller the first try authenticated (Auth). Today's add (`admit`,        *)
+(* `setAccess`) decides and writes in one transaction under the members'   *)
+(* rows and the change lock, which every change of what it weighs takes    *)
+(* but a session's revoke: one step (AToday), its caller's session not     *)
+(* weighed again (TodayCallerStandsAtDecision, as a key write's).          *)
 (*                                                                         *)
 (* A refusal's record (PR 6). A try the decision refuses on its read is    *)
 (* answered there: once the app has checked the caller's rows, the vault   *)
@@ -70,39 +70,51 @@
 (* serve goes as every write went before: the vault decides on the rows as *)
 (* they are, each object's row held to its newest change, and that change  *)
 (* to its MAC once T190 is in it (TodayChangeMacChecked), and wraps the    *)
-(* key; then the app's transaction, under 0.14's head and the fence,       *)
+(* key; then the app's transaction, under the change lock and the fence,   *)
 (* writes on that decision (WToday, then WTodayCommit). A change between   *)
-(* the two does not stop it, but for the roles' or the policy's, which the *)
-(* commit holds to as the caller was loaded with (TodayPolicyHeld,         *)
-(* `policyStill`; review r3 of #469): a grant revoked, a session ended     *)
-(* (TodayStandsAtCommit, EXPECTED broken: the window every write has had   *)
-(* since 0.14; review r1). A write goes there from its vault step (an      *)
-(* object but the caller's credential not as the log has it) or from its   *)
-(* decision (refused), on its first try or on a later one, after a try the *)
-(* vault served and the app's hold abandoned: that try's request number    *)
-(* stays, a gap the checkpointer seals past (0.16.0 writes no `key.wrap`   *)
-(* on the two-trip path; today's path writes its own). The caller's own    *)
-(* credential, not as its log has it or ended, answers 401 and never goes  *)
-(* there: the credential's own check holds its row to its MAC alone, and   *)
-(* would take one a database writer put back meanwhile. Nor is it weighed  *)
-(* there again (review r2 of #469): today's path goes on with the caller   *)
-(* the app authenticated, on the first try's read or by that check (Auth), *)
-(* and a session revoked after does not stop the write                     *)
+(* the two does not stop it, but for the policy's, which the commit holds  *)
+(* to as the caller was loaded with (TodayPolicyHeld, `policyStill`;       *)
+(* review r3 of #469). The policy has no revision of its own since 0.16:   *)
+(* it is what the request read of it, object by object, the roles, the     *)
+(* policy row and the environment's protection, each by the number of its  *)
+(* newest change in the log, compared as a digest (before, one number      *)
+(* stood for all three, the seq of the newest `policy.change`). A digest   *)
+(* that leaves one out lets its change past (TodayUnheld). And the numbers *)
+(* are the log's, never the seal a row stores: a row a database writer put *)
+(* back stores the seal it had when the caller was loaded                  *)
+(* (TodayPolicyOnLog). What the commit does not hold: a grant revoked, a   *)
+(* session ended (TodayStandsAtCommit, EXPECTED broken: the window every   *)
+(* write has had since 0.14; review r1). A write goes there from its vault *)
+(* step (an object but the caller's credential not as the log has it) or   *)
+(* from its decision (refused), on its first try or on a later one, after  *)
+(* a try the vault served and the app's hold abandoned: that try's request *)
+(* number stays, a gap the checkpointer seals past (0.16.0 writes no       *)
+(* `key.wrap` on the two-trip path; today's path writes its own). The      *)
+(* caller's own credential, not as its log has it or ended, answers 401    *)
+(* and never goes there: the credential's own check holds its row to its   *)
+(* MAC alone, and would take one a database writer put back meanwhile. Nor *)
+(* is it weighed there again (review r2 of #469): today's path goes on     *)
+(* with the caller the app authenticated, on the first try's read or by    *)
+(* that check (Auth), and a session revoked after does not stop the write  *)
 (* (TodayCallerStandsAtDecision, EXPECTED broken, as today's front door to *)
 (* its wrap; WritingCaller).                                               *)
 (*                                                                         *)
 (* Every other change (a revoke, a role or policy change, an archive, a    *)
 (* demotion, a rename) is one atomic step here, as each is one statement   *)
-(* or one transaction under the head and the fence in the code. One step   *)
-(* is one statement, or the part of one between two lock waits (READ      *)
+(* or one transaction under the change lock and the fence in the code: the *)
+(* change lock from its first statement, so that no other change comes     *)
+(* between what it reads and what it writes, and the fence for its last. A *)
+(* key write keeps the change lock too (WriteLocks.tla's             *)
+(* WriteTakesChangeLock: without it, it would wait for the key's row with  *)
+(* the fence held), so it never runs inside another change either. One     *)
+(* step is one statement, or the part of one between two lock waits (READ  *)
 (* COMMITTED: each statement reads afresh, so a hold sent as a statement   *)
-(* after the locks reads after them). Locks: 0.14's head (held across      *)
+(* after the locks reads after them). Locks: the change lock (held across  *)
 (* steps by the app's statement only when its hold runs before the fence)  *)
 (* and the fence; from a hold to its COMMIT, both (`held`), which a        *)
 (* database writer ignores. A session's revoke takes the fence, not the    *)
-(* head: 0047's `revoke_credential` takes the head too, and keeps it in    *)
-(* 0.16.0 while 0.14.5 may serve beside it (Migration015's EntryLessHead;  *)
-(* WriteLocks.tla checks its locks), which only adds order: the revoke     *)
+(* change lock: `revoke_credential` takes it too in the code               *)
+(* (WriteLocks.tla checks its locks), which only adds order: the revoke    *)
 (* here is the stronger adversary.                                         *)
 (*                                                                         *)
 (* Objects have seals: a counter per object, its newest change's number    *)
@@ -122,7 +134,11 @@
 (*   rol      an Owner redefines the roles (`role.define`): Ada's no       *)
 (*            longer writes, an admin's no longer adds;                    *)
 (*   pol      an Owner changes the instance policy (its own object);       *)
-(*   arc      a maintainer archives env, or protects it (env's object);    *)
+(*   arc      a maintainer archives env (env's object);                    *)
+(*   prv      an Owner protects env, which Ada's role does not write: the  *)
+(*            same object as its archival in the code, one seal; apart     *)
+(*            here, as the check that reads archival at today's commit     *)
+(*            (`checkEnvironment`) does not read it;                       *)
 (*   par      a maintainer archives env's fork parent;                     *)
 (*   rep      the parent's key Ada's regenerate replaces is written;       *)
 (*   mrk      the parent's key whose level Ada's override inherits is      *)
@@ -188,7 +204,7 @@ CONSTANTS
     \* roles from its isolate's cache, as they were when the isolate began.
     DecideOnRead,
     \* The write's hold runs once its statement holds the fence. Without, it
-    \* runs under 0.14's head, and the statement then waits for the fence.
+    \* runs under the change lock, and the statement then waits for the fence.
     HoldAfterFence,
     \* The read takes each object's number from the log's newest change of
     \* it. Without, from the seal its row stores.
@@ -221,10 +237,18 @@ CONSTANTS
     \* Without, one whose seal wait failed after its COMMIT goes down it too.
     FallBackUncommitted,
     \* Today's commit holds to the policy the caller was loaded with: the
-    \* newest change of the roles and of the policy, as the front door read
-    \* them (`audited`'s `policyStill`, 409 `policy_changed`). Without, a
-    \* roles change between today's decision and its commit does not stop it.
+    \* roles, the policy row and the environment's protection, each by the
+    \* number of its newest change, as the front door read them (`audited`'s
+    \* `policyStill`, 409 `policy_changed`). Without, a roles change between
+    \* today's decision and its commit does not stop it.
     TodayPolicyHeld,
+    \* The parts of the policy that digest skips: normally none. Each left
+    \* out in turn stands for a `policyStill` that compares one too few.
+    TodayUnheld,
+    \* That digest takes each number from the log's newest change of its
+    \* object, as the hold's read does (ReadOnLog). Without, from the seal
+    \* its row stores: a row put back reads as the caller was loaded with.
+    TodayPolicyOnLog,
     \* The add's decision holds the caller's session to the generation of
     \* the membership it was issued under (`credentialEnded`): a session of
     \* a membership removed and restored since is ended, 401, before its row
@@ -247,7 +271,7 @@ Writers == {"w1", "w2"}
 Adders == {"bob", "cy"}
 \* What each change moves: one object, turned against the writer or the adder.
 Moves == [rev |-> "member", end |-> "cred", rol |-> "roles", pol |-> "policy",
-          arc |-> "env", par |-> "parent", rep |-> "parentKey", mrk |-> "parentKey",
+          arc |-> "env", prv |-> "protected", par |-> "parent", rep |-> "parentKey", mrk |-> "parentKey",
           dem |-> "bob", cls |-> "settings", plc |-> "place", prt |-> "prot"]
 \* What each rename moves: a name's resolution, no seal.
 Renames == [ren |-> "keyName", phn |-> "chain", del |-> "me",
@@ -255,13 +279,11 @@ Renames == [ren |-> "keyName", phn |-> "chain", del |-> "me",
 \* What a token resolves to, by its hash.
 Token == "tok"
 
-\* What a key write reads: Ada's session, her member object, the roles, the
-\* policy, the environment, its fork parent, the parent's keys weighed, the
-\* key itself; and what the key's name, the fork chain and `env@me` resolve
-\* to, and whether the key is still a value of its own (`shape`: made a
-\* reference, it is one the two-trip path does not write, and the request
-\* goes down today's path, on any try).
-WriteObjects == {"cred", "member", "roles", "policy", "env", "parent", "parentKey", "key"}
+\* What a key write reads: Ada's session, her member object, the roles, the policy, the environment and its protection,
+\* its fork parent, the parent's keys weighed, the key itself; and what the key's name, the fork chain and `env@me`
+\* resolve to, and whether the key is still a value of its own (`shape`: made a reference, it is one the two-trip path
+\* does not write, and the request goes down today's path, on any try).
+WriteObjects == {"cred", "member", "roles", "policy", "env", "protected", "parent", "parentKey", "key"}
 WriteNames == {"keyName", "chain", "me", "shape", Token}
 \* What an add reads: the adder's session and object, the roles, the policy,
 \* the services setting, the grant's place, the project's other
@@ -271,7 +293,7 @@ WriteNames == {"keyName", "chain", "me", "shape", Token}
 \* Forge, where one revoke ends either's.)
 AddObjects == {"cred", "bob", "roles", "policy", "settings", "place", "prot", "svc"}
 AddNames == {"slug", "envs", "scope", Token}
-Movable == {"cred", "member", "roles", "policy", "env", "parent", "parentKey",
+Movable == {"cred", "member", "roles", "policy", "env", "protected", "parent", "parentKey",
             "bob", "settings", "place", "prot"}
 Objects == Movable \cup {"key", "svc"}
 NameParts == WriteNames \cup AddNames
@@ -293,8 +315,8 @@ VARIABLES
     gen,        \* Bob's membership's generation: his session's is 0
     next,       \* the log's next number
     sealedTo,   \* the checkpointer has sealed every number below this
-    head,       \* who holds 0.14's head across steps, or None
-    held,       \* who holds the head and the fence from its hold to its COMMIT
+    changeLock,       \* who holds the change lock across steps, or None
+    held,       \* who holds the change lock and the fence from its hold to its COMMIT
     pc, l, tries,
     trips,      \* round trips each process made on its path
     requests,   \* ghost: each write's request, as decided live and by the replay
@@ -303,7 +325,7 @@ VARIABLES
     answered,   \* ghost: each change answered, with its number
     refusals    \* ghost: each refusal's record, as the vault wrote it
 
-vars == <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held,
+vars == <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, changeLock, held,
           pc, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* An object's row as stored: put back to its first state by a database
@@ -379,11 +401,12 @@ Init ==
     /\ svc = FALSE /\ kver = 0
     /\ seal = [o \in Objects |-> 0]
     /\ putBack = {} /\ forged = {} /\ gen = 0
-    /\ next = 1 /\ sealedTo = 1 /\ head = None /\ held = None
+    /\ next = 1 /\ sealedTo = 1 /\ changeLock = None /\ held = None
     /\ pc = [p \in Procs |-> CASE p \in Writers -> "w.vault"
                                 [] p \in Adders -> "a.read"
                                 [] p = "ck" -> "ck"
                                 [] p = "dbw" -> "tamper"
+                                [] p = "unp" -> "unprotect"
                                 [] p = "fsg" -> "forge"
                                 [] p = "sub" -> "substitute"
                                 [] p = "rfl" -> "refile"
@@ -425,19 +448,18 @@ Truth == [o \in Parts("write") |->
              ELSE [num |-> seal[o], val |-> IF o = "key" THEN kver ELSE ok[o]]]
 Request(p, r) == [p |-> p, n |-> next, live |-> Decide(p, r), replay |-> Decide(p, Truth)]
 
-\* Who the request is by, as the app authenticated it: on the first try,
-\* from that try's read (the two-trip path's rows, AppChecks) or, the try
-\* not served, by the credential's own check just after (at WDecide, for a
-\* try the Worker refuses: Fable's review of #469); on a later try, kept: each later try the vault
-\* serves is checked to be the same credential (`Written.again`), and
-\* today's path, after one, goes on with the caller the first checked
-\* (review r2 of #469). Only the token's resolution is kept: the caller's
-\* standing is the read's, and no step after rechecks it on today's path.
-\* With it, the policy the caller was loaded with: the newest change of the
-\* roles and of the policy (`Caller.policySeq`), which today's commit holds
-\* to (TodayPolicyHeld).
-PolicyObjects == {"roles", "policy"}
-Auth(p) == IF tries[p] = 1 THEN [tok |-> names[Token], pol |-> [o \in PolicyObjects |-> seal[o]]]
+\* Who the request is by, as the app authenticated it: on the first try, from that try's read (the two-trip path's rows,
+\* AppChecks) or, the try not served, by the credential's own check just after (at WDecide, for a try the Worker
+\* refuses: Fable's review of #469); on a later try, kept: each later try the vault serves is checked to be the same
+\* credential (`Written.again`), and today's path, after one, goes on with the caller the first checked (review r2 of
+\* #469). Only the token's resolution is kept: the caller's standing is the read's, and no step after rechecks it on
+\* today's path. With it, the policy the caller was loaded with: the roles, the policy row and the environment's
+\* protection, each by the number of its newest change in the log as the front door read it (0.16: their digest; before
+\* it, `Caller.policySeq`, one number for the three), which today's commit holds to (TodayPolicyHeld). Not by the seal
+\* its row stores (TodayPolicyOnLog), which a row put back brings back with it.
+PolicyObjects == {"roles", "policy", "protected"}
+PolicyNumber(o) == IF TodayPolicyOnLog THEN seal[o] ELSE RowSeal(o)
+Auth(p) == IF tries[p] = 1 THEN [tok |-> names[Token], pol |-> [o \in PolicyObjects |-> PolicyNumber(o)]]
                            ELSE l[p].auth
 
 \* The vault's statement: the read under the fence shared, the request
@@ -462,7 +484,7 @@ WVault(p) ==
                         /\ Goto(p, "w.decide")
                    ELSE /\ UNCHANGED <<next, requests>>
                         /\ Goto(p, "w.rest")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, head, held, tries, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, changeLock, held, tries, writes, admits, answered, refusals>>
 
 \* Without one statement under the fence: the rest of the read, and the
 \* request numbered, in a later step. A change between the two tears what
@@ -475,7 +497,7 @@ WRest(p) ==
           /\ requests' = requests \cup {Request(p, r)}
     /\ next' = next + 1
     /\ Goto(p, "w.decide")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, head, held, tries, trips, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, changeLock, held, tries, trips, writes, admits, answered, refusals>>
 
 \* A refusal decided on the read, recorded (PR 6): once the app has checked
 \* the caller's rows the read answered (RefusalAfterAuth), the vault writes
@@ -513,7 +535,7 @@ WDecide(p) ==
                   ELSE /\ l' = [l EXCEPT ![p].wrap = tries[p]] /\ Goto(p, "w.app")
           \/ ~unserved /\ ~allowed /\ RefusalLogged /\ RefuseOrAnswer(p)
           \/ (unserved \/ (~allowed /\ ~RefusalLogged)) /\ Today(p, "w.today")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, changeLock, held, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* The write itself: the key's next version, its change numbered.
 Commit(p) ==
@@ -522,24 +544,24 @@ Commit(p) ==
     /\ l' = [l EXCEPT ![p].n = next]
     /\ writes' = writes \cup {Committed(p, "key", WriteStands(p))}
 
-\* The app's statement, to its hold. One round trip. The code takes the
-\* head, then the fence, then holds; from the hold to COMMIT it keeps both,
-\* so no change that takes either comes between (`held`). A database writer
-\* takes neither, so the write's rows and its COMMIT are a step of their own
+\* The app's statement, to its hold. One round trip. The code takes the change
+\* lock, then the fence, then holds; from the hold to COMMIT it keeps both, so
+\* no change that takes either comes between (`held`). A database writer takes
+\* neither, so the write's rows and its COMMIT are a step of their own
 \* (WCommit), after the hold, with only such a writer between (round 7).
 WApp(p) ==
     /\ pc[p] = "w.app"
-    /\ head = None /\ held = None
+    /\ changeLock = None /\ held = None
     /\ trips' = [trips EXCEPT ![p] = @ + 1]
     /\ IF Holds(p)
          THEN IF HoldAfterFence
                 THEN /\ held' = p /\ Goto(p, "w.commit")
-                     /\ UNCHANGED <<head, tries>>
-                \* Its hold under 0.14's head, then a wait for the fence.
-                ELSE /\ head' = p /\ Goto(p, "w.fence")
+                     /\ UNCHANGED <<changeLock, tries>>
+                \* Its hold under the change lock, then a wait for the fence.
+                ELSE /\ changeLock' = p /\ Goto(p, "w.fence")
                      /\ UNCHANGED <<held, tries>>
          ELSE /\ Again(p, "w.vault")
-              /\ UNCHANGED <<head, held>>
+              /\ UNCHANGED <<changeLock, held>>
     /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, l, requests, writes, admits, answered, refusals>>
 
 \* The same statement, after its wait for the fence (a removal: the hold
@@ -547,7 +569,7 @@ WApp(p) ==
 WFence(p) ==
     /\ pc[p] = "w.fence"
     /\ held = None
-    /\ head' = None /\ held' = p
+    /\ changeLock' = None /\ held' = p
     /\ Goto(p, "w.commit")
     /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, l, tries, trips, requests, writes, admits, answered, refusals>>
 
@@ -560,11 +582,11 @@ WCommit(p) ==
     \* vault's `served: false`.)
     /\ \/ Goto(p, "w.seal")
        \/ ~FallBackUncommitted /\ Goto(p, "w.today")
-    /\ UNCHANGED <<ok, names, svc, putBack, forged, gen, sealedTo, head, tries, trips, requests, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, putBack, forged, gen, sealedTo, changeLock, tries, trips, requests, admits, answered, refusals>>
 
 \* Today's path, as it goes: the vault decides on the rows as they are and
 \* wraps the key (0.14's `key.wrap`), then the app's transaction, under
-\* 0.14's head and the fence, writes on that decision. Two steps (review r1
+\* the change lock and the fence, writes on that decision. Two steps (review r1
 \* of #469): a change may come between them, which today's commit does not
 \* weigh again but for the roles and the policy (TodayPolicyHeld, review
 \* r3): a grant revoked, a session ended (TodayStandsAtCommit, a window
@@ -583,7 +605,7 @@ WCommit(p) ==
 \* it spans the tries before, a few round trips).
 WToday(p) ==
     /\ pc[p] = "w.today"
-    /\ head = None /\ held = None
+    /\ changeLock = None /\ held = None
     /\ LET r == Read("write")
            refuses == \/ \E o \in WriteObjects \ {"cred"} :
                             StaleRow(o) \/ (TodayChangeMacChecked /\ o \in forged)
@@ -599,19 +621,20 @@ WToday(p) ==
                                           decided |-> \A o \in WrapObjects : ok[o],
                                           caller |-> ok["cred"]]]
                  /\ Goto(p, "w.tcommit")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, changeLock, held, tries, trips, requests, writes, admits, answered, refusals>>
 
-\* ... and the app's transaction: under 0.14's head and the fence, it finds
-\* the policy the caller was loaded with still the newest (`policyStill`,
-\* else 409 `policy_changed`, the end; review r3 of #469), the environment
+\* ... and the app's transaction: under the change lock and the fence, it finds
+\* the policy the caller was loaded with still in force (`policyStill`: each
+\* number of its digest, read from the log, else 409 `policy_changed`, the
+\* end; review r3 of #469), the environment
 \* still live (`checkEnvironment`) and the key's row where
 \* the decision found it (`app_change`, else `ObjectMoved`, asked again);
 \* then the key's next version, its change numbered. Its write binds no
 \* read, so it replays trivially; its wrap is its own (0).
 WTodayCommit(p) ==
     /\ pc[p] = "w.tcommit"
-    /\ head = None /\ held = None
-    /\ IF \/ TodayPolicyHeld /\ \E o \in PolicyObjects : seal[o] # l[p].auth.pol[o]
+    /\ changeLock = None /\ held = None
+    /\ IF \/ TodayPolicyHeld /\ \E o \in PolicyObjects \ TodayUnheld : PolicyNumber(o) # l[p].auth.pol[o]
           \/ ~ok["env"]
          THEN /\ Goto(p, "done")
               /\ UNCHANGED <<kver, seal, next, l, tries, writes>>
@@ -630,7 +653,7 @@ WTodayCommit(p) ==
                                            t |-> 0, wrap |-> 0]}
               /\ Goto(p, "t.seal")
               /\ UNCHANGED tries
-    /\ UNCHANGED <<ok, names, svc, putBack, forged, gen, sealedTo, head, held, trips, requests, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, putBack, forged, gen, sealedTo, changeLock, held, trips, requests, admits, answered, refusals>>
 
 -----------------------------------------------------------------------------
 (* A member add *)
@@ -648,7 +671,7 @@ ARead(p) ==
               /\ l' = [l EXCEPT ![p] = [n |-> 0, auth |-> Auth(p)]]
          ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, read |-> Read("add"), seals |-> seal, auth |-> Auth(p)]]
               /\ Goto(p, "a.decide")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, changeLock, held, tries, requests, writes, admits, answered, refusals>>
 
 \* The Worker decides on the read: the adder's standing, svc no member yet;
 \* then the app checks the adder's rows, between the vault's two calls.
@@ -667,21 +690,21 @@ ADecide(p) ==
              /\ UNCHANGED l
           \/ ~allowed /\ RefusalLogged /\ RefuseOrAnswer(p)
           \/ (allowed \/ ~RefusalLogged) /\ Today(p, "a.today")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, changeLock, held, tries, trips, requests, writes, admits, answered, refusals>>
 
-\* The write: rows, head, fence, the hold. One round trip. As a key
+\* The write: rows, change lock, fence, the hold. One round trip. As a key
 \* write's, the row and its COMMIT are a step of their own (ACommit), with
 \* only a database writer between.
 AWrite(p) ==
     /\ pc[p] = "a.write"
-    /\ head = None /\ held = None
+    /\ changeLock = None /\ held = None
     /\ trips' = [trips EXCEPT ![p] = @ + 1]
     /\ IF Holds(p)
          THEN /\ held' = p /\ Goto(p, "a.commit")
               /\ UNCHANGED tries
          ELSE /\ Again(p, "a.read")
               /\ UNCHANGED held
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, l, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, changeLock, l, requests, writes, admits, answered, refusals>>
 
 \* svc's row, its change, COMMIT; the locks let go.
 ACommit(p) ==
@@ -692,10 +715,10 @@ ACommit(p) ==
     /\ l' = [l EXCEPT ![p].n = next]
     /\ admits' = admits \cup {Committed(p, "svc", AddStands(p))}
     /\ Goto(p, "a.seal")
-    /\ UNCHANGED <<ok, names, kver, putBack, forged, gen, sealedTo, head, tries, trips, requests, writes, answered, refusals>>
+    /\ UNCHANGED <<ok, names, kver, putBack, forged, gen, sealedTo, changeLock, tries, trips, requests, writes, answered, refusals>>
 
 \* Today's add (`admit`, `setAccess(…, admit)`): one transaction, under the
-\* members' rows and 0.14's head, which every change of what it weighs takes
+\* members' rows and the change lock, which every change of what it weighs takes
 \* but a session's revoke; the fence from its entry to COMMIT. So one step:
 \* it decides on the rows as they are, each held to its newest change and
 \* that change to its MAC (T190, `#onLog`), and writes. Its caller is the
@@ -706,7 +729,7 @@ TodayAddAllowed(p, r) == /\ \A o \in AddObjects \ {"cred", "bob", "svc"} : r[o].
                          /\ ~r["svc"].val
 AToday(p) ==
     /\ pc[p] = "a.today"
-    /\ head = None /\ held = None
+    /\ changeLock = None /\ held = None
     /\ LET refuses == \/ \E o \in AddObjects \ {"cred"} :
                             StaleRow(o) \/ (TodayChangeMacChecked /\ o \in forged)
                       \/ ~TodayAddAllowed(p, Read("add"))
@@ -720,12 +743,12 @@ AToday(p) ==
                  /\ admits' = admits \cup {[p |-> p, n |-> next, today |-> TRUE,
                                              stands |-> AddUp(p) /\ SessionLive,
                                              decided |-> AddUp(p), caller |-> SessionLive,
-                                             policy |-> \A o \in PolicyObjects : ok[o],
+                                             policy |-> \A o \in PolicyObjects \cap AddObjects : ok[o],
                                              replays |-> TRUE, from |-> seal["svc"], was |-> seal["svc"],
                                              authentic |-> IF ActorFromRead THEN l[p].auth.tok = 0 ELSE names[Token] = 0,
                                              t |-> 0, wrap |-> 0]}
                  /\ Goto(p, "t.seal")
-    /\ UNCHANGED <<ok, names, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, answered, refusals>>
+    /\ UNCHANGED <<ok, names, kver, putBack, forged, gen, sealedTo, changeLock, held, tries, trips, requests, writes, answered, refusals>>
 
 -----------------------------------------------------------------------------
 (* A refusal's record (PR 6) *)
@@ -752,7 +775,7 @@ Refuse(p) ==
     \* (A removal: the request goes on down today's path after its record.)
     /\ IF RefusalEnds THEN Goto(p, "r.seal")
        ELSE Goto(p, IF Kind(p) = "write" THEN "w.today" ELSE "a.today")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, head, held, tries, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, changeLock, held, tries, requests, writes, admits, answered>>
 
 -----------------------------------------------------------------------------
 (* The seal wait, the answer, and everything else *)
@@ -763,51 +786,52 @@ Answer(p) ==
     /\ ~WaitForSeal \/ l[p].n < sealedTo
     /\ answered' = answered \cup {[p |-> p, n |-> l[p].n]}
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, changeLock, held, l, tries, trips, requests, writes, admits, refusals>>
 
-\* Every other change, one atomic step: 0.14's head and the fence (a
-\* session's revoke the fence alone, which the head's holder does not stop).
+\* Every other change, one atomic step: the change lock and the fence (a
+\* session's revoke the fence alone, which the change lock's holder does not
+\* stop).
 Change(p) ==
     /\ pc[p] = "change"
     /\ held = None
-    /\ p = "end" \/ head = None
+    /\ p = "end" \/ changeLock = None
     /\ ok' = [ok EXCEPT ![Moves[p]] = FALSE]
     /\ Numbered(Moves[p])
     /\ l' = [l EXCEPT ![p].n = next]
     /\ Goto(p, "x.seal")
-    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, changeLock, held, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* Ada's grant given back once taken: the same row, a newer change.
 GiveBack(p) ==
     /\ pc[p] = "giveback"
-    /\ head = None /\ held = None
+    /\ changeLock = None /\ held = None
     /\ ~ok["member"]
     /\ ok' = [ok EXCEPT !["member"] = TRUE]
     /\ Numbered("member")
     /\ l' = [l EXCEPT ![p].n = next]
     /\ Goto(p, "x.seal")
-    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, changeLock, held, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* Bob removed, his generation advanced, which ends his session though its
 \* row still says live (its revoke follows, by the app's sweep); then
 \* restored, as an admin again: the same row, a newer change, the new
-\* generation. Each one step under the head and the fence, as Change.
+\* generation. Each one step under the change lock and the fence, as Change.
 Remove(p) ==
     /\ pc[p] = "remove"
-    /\ head = None /\ held = None
+    /\ changeLock = None /\ held = None
     /\ ok' = [ok EXCEPT !["bob"] = FALSE]
     /\ gen' = 1
     /\ Numbered("bob")
     /\ Goto(p, "restore")
-    /\ UNCHANGED <<names, svc, kver, putBack, forged, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<names, svc, kver, putBack, forged, sealedTo, changeLock, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 Restore(p) ==
     /\ pc[p] = "restore"
-    /\ head = None /\ held = None
+    /\ changeLock = None /\ held = None
     /\ ok' = [ok EXCEPT !["bob"] = TRUE]
     /\ Numbered("bob")
     /\ l' = [l EXCEPT ![p].n = next]
     /\ Goto(p, "x.seal")
-    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, changeLock, held, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* A database writer puts cA's row back as it was, live, once it is revoked.
 \* Nothing logged: the log's newest change of cA is still the revoke.
@@ -816,7 +840,18 @@ Tamper(p) ==
     /\ seal["cred"] > 0
     /\ putBack' = putBack \cup {"cred"}
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, forged, gen, next, sealedTo, changeLock, held, l, tries, trips, requests, writes, admits, answered, refusals>>
+
+\* A database writer puts env's row back as it was, unprotected, once an
+\* Owner protected it: the whole row, so the seal it stores is again the one
+\* the caller was loaded with. Nothing logged: the log's newest change of it
+\* is still the protection.
+Unprotect(p) ==
+    /\ pc[p] = "unprotect"
+    /\ seal["protected"] > 0
+    /\ putBack' = putBack \cup {"protected"}
+    /\ Goto(p, "done")
+    /\ UNCHANGED <<ok, names, svc, kver, seal, forged, gen, next, sealedTo, changeLock, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* A database writer puts a revoked or demoted row back, live, and writes its
 \* seal into the log's newest change of it, the revoke or the demotion: row
@@ -829,7 +864,7 @@ Forge(p) ==
           /\ putBack' = putBack \cup {o}
           /\ forged' = forged \cup {o}
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, gen, next, sealedTo, changeLock, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* A database writer copies a token hash onto another credential: around
 \* coffre, no lock, nothing logged.
@@ -837,7 +872,7 @@ Substitute(p) ==
     /\ pc[p] = "substitute"
     /\ names' = [names EXCEPT ![Token] = 1]
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, forged, gen, next, sealedTo, changeLock, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* A database writer copies a refusal's record (PR 6), its MAC with it, to a
 \* number of its own as the newest change of a revoked or demoted object,
@@ -859,28 +894,28 @@ Refile(p) ==
           /\ next' = next + 1
        \/ /\ refusals = {} /\ \A q \in Procs \ {p, "ck"} : pc[q] = "done"
           /\ UNCHANGED <<seal, putBack, forged, next>>
-    /\ UNCHANGED <<ok, names, svc, kver, gen, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, gen, sealedTo, changeLock, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* A rename, a key appearing, a config deleted, a project made under an old
-\* slug: an app write under 0.14's head, which moves what a name resolves
+\* slug: an app write under the change lock, which moves what a name resolves
 \* to and no seal.
 Rename(p) ==
     /\ pc[p] = "rename"
-    /\ head = None /\ held = None
+    /\ changeLock = None /\ held = None
     /\ names' = [names EXCEPT ![Renames[p]] = @ + 1]
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, forged, gen, next, sealedTo, changeLock, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* A tick seals every number committed so far.
 Tick ==
     /\ "ck" \in Procs
     /\ sealedTo < next
     /\ sealedTo' = next
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, head, held, pc, l, tries, trips, requests, writes, admits, answered, refusals>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, changeLock, held, pc, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 Step(p) == WVault(p) \/ WRest(p) \/ WDecide(p) \/ WApp(p) \/ WFence(p) \/ WCommit(p) \/ WToday(p) \/ WTodayCommit(p)
         \/ ARead(p) \/ ADecide(p) \/ AWrite(p) \/ ACommit(p) \/ AToday(p) \/ Answer(p) \/ Change(p)
-        \/ GiveBack(p) \/ Remove(p) \/ Restore(p) \/ Tamper(p) \/ Forge(p) \/ Substitute(p) \/ Rename(p)
+        \/ GiveBack(p) \/ Remove(p) \/ Restore(p) \/ Tamper(p) \/ Unprotect(p) \/ Forge(p) \/ Substitute(p) \/ Rename(p)
         \/ Refuse(p) \/ Refile(p)
 
 Terminating ==
@@ -898,10 +933,10 @@ TypeOK ==
     /\ ok \in [Movable -> BOOLEAN]
     /\ names \in [NameParts -> Nat]
     /\ seal \in [Objects -> Nat]
-    /\ putBack \subseteq {"cred", "member", "bob"}
+    /\ putBack \subseteq {"cred", "member", "bob", "protected"}
     /\ gen \in {0, 1}
     /\ forged \subseteq putBack
-    /\ head \in Procs \cup {None}
+    /\ changeLock \in Procs \cup {None}
     /\ held \in Procs \cup {None}
     /\ sealedTo <= next
     /\ \A p \in Procs : tries[p] <= MaxTries + 1
@@ -930,9 +965,10 @@ TodayStandsAtDecision == \A w \in writes \cup admits : w.today => w.decided
 \* #469: revoked after the first try's check, the write still goes).
 TodayCallerStandsAtDecision == \A w \in writes \cup admits : w.today => w.caller
 
-\* ... and commits only while the roles and the policy are still as the
-\* caller was loaded with (`policyStill`): a roles or policy change after
-\* the front door stops it, 409 `policy_changed` (review r3 of #469).
+\* ... and commits only while the roles, the policy and the environment's
+\* protection are still as the caller was loaded with (`policyStill`): a
+\* change of any after the front door stops it, 409 `policy_changed`
+\* (review r3 of #469).
 TodayPolicyStandsAtCommit == \A w \in writes \cup admits : w.today => w.policy
 
 \* ... not at its commit: a revoke or a session's end between the vault's

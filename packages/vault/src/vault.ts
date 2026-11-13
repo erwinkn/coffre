@@ -185,11 +185,12 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, lockNotAvailable, SNAPSHOT } from '@coffre/db/dialect';
 import { changeName, everyProjectConversion, findingMetadata, newestAccess, newestChangeNames, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
-import { appendEntries, COUNTED_AT_ONCE, countWindow, HeadBusy, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestWindow, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, COUNTED_AT_ONCE, countWindow, HeadBusy, holdIssues, isMovedChange, laterChange, lockChange, lockChangeInTurn, lockChangeQueued, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestWindow, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { KeyAccounting } from './accounting.ts';
 import { rebuildRow } from './projection.ts';
 import { addRefusal, callRefusal, openRefusal, refusalRow, writeRefusal } from './refusal.ts';
+import { appEvent, eventRow } from './note.ts';
 import { ADMIT_KINDS, admitStanding, callAdmit, decideAdmit, holdAdmit, openTicket, OWNERS_ONLY, parseAdmitInputs, scopeSlugs, sealTicket, SETS_UP_ONLY, TICKET_MS, validateAdmitRead, type AdmitAsked, type AdmitTicket } from './admit.ts';
 import { admitChange, Changes, changesHold, heldByLog, heldFrom, keptFrom, keptObjects, macsOf, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
@@ -940,7 +941,7 @@ class VaultService implements Vault {
         if (answered !== null) return { result: answered, numbers: null };
         // The bound on lock waits, the members' rows, then the head and everything the decision reads, in one statement
         // (`snapshot` says why it holds): asked together, they go in that order under one Sync (postgres-js's `gather`).
-        const [, members, reads] = await Promise.all([
+        const [, members, , reads] = await Promise.all([
           // A call with a deadline bounds each statement too: a queue for the head, which each holder updates, starts a
           // waiter's lock clock over at every holder (`boundLockWaits`; review r16 of #467). A change's own lock waits
           // are short (`LOCK_WAIT_MS`), its statements otherwise as long as its work takes.
@@ -948,6 +949,10 @@ class VaultService implements Vault {
             ? store.boundLockWaits(tx, within(deadline, READ_LOCK_TIMEOUT_MS), within(deadline, READ_LOCK_TIMEOUT_MS))
             : store.boundLockWaits(tx, within(deadline, LOCK_WAIT_MS), deadline === undefined ? undefined : within(deadline, Infinity)),
           principals.length === 0 ? new Map<string, Member>() : store.lockMembers(tx, principals, shared),
+          // A change takes the change lock, after its members' rows and before the head (WriteLocks.tla's
+          // MembersFirst): it and the app's changes exclude each other from there. One with a place in line takes its
+          // place before it (`reserveProxy`). A read takes none.
+          shared ? null : queue === undefined ? lockChangeInTurn(tx) : lockChangeQueued(tx, queue.waiters, queue.line),
           this.#snapshot(tx, principals, asked, true, shared ? READ_QUEUE : queue),
         ]);
         const d: Decision = {
@@ -1611,6 +1616,8 @@ class VaultService implements Vault {
       await store.boundLockWaits(tx, LOCK_WAIT_MS);
       const principals = (await store.allMembers(tx)).map((row) => row.principal);
       const rows = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
+      // A change: the change lock after the members' rows, before the head.
+      await lockChange(tx);
       await lockLogHead(tx);
       const [newest] = await store.vaultPage(tx, undefined, 1);
       if (newest?.keyId !== from || (await store.allMembers(tx)).length !== rows.size) throw new Retry();
@@ -3756,8 +3763,8 @@ class VaultService implements Vault {
   async prepare(input: PrepareInput): Promise<Outcome<Prepared>> {
     const log015 = this.#prepared.log015;
     if (typeof input?.actor !== 'string' || input.actor.length === 0 || !Array.isArray(input.changes)) throw new Error('prepare takes an actor and the changes the app will write');
-    // No event is signed yet: a call that asks for some is refused, never answered without them.
-    if (input.events !== undefined && input.events.length > 0) throw new Error('this vault prepares no event: prepared events are not built yet');
+    // Events signed for the app's transaction to commit (`log_events`): A1's stand-in, which V1 replaces.
+    for (const event of input.events ?? []) appEvent(event, VAULT_ACTOR);
     try {
       // Each object's newest change, its MAC checked (T190), in one statement: `app_change` holds the row to that
       // change's seal, which SQL compares and cannot authenticate. An unarchive reads the write its archive ended too.
@@ -3793,7 +3800,13 @@ class VaultService implements Vault {
         }
         left.set(call.object, call.seal === null ? null : Buffer.from(call.seal, 'base64'));
       }
-      return { ok: true, changes };
+      if (input.events === undefined) return { ok: true, changes };
+      const at = Date.now() + this.#prepared.options.clockOffset();
+      const events = input.events.map((event) => {
+        const row = eventRow(log015.mac, at, event, 'app');
+        return { ...row, mac: row.mac.toString('base64') };
+      });
+      return { ok: true, changes, events };
     } catch (error) {
       if (!(error instanceof NotLogged)) throw error;
       const reports: NewEntry[] = [];
@@ -3857,7 +3870,7 @@ class VaultService implements Vault {
     }));
     // Each key's change, from its object as read (none for a key the write makes) to its new version.
     const changes = prepareChanges(log015, at, principal, decided.keys.map((key, i): ObjectChange => ({
-      kind: 'secret', id: key.id,
+      kind: 'secret', id: key.id, entry: null,
       before: key.created ? null : { columns: secretColumnsOf(key.before), seal: key.before.object.seal!.toString('base64') },
       after: {
         id: key.id, projectId: environment.projectId, environmentId: environment.id, source: null, reference: null,
@@ -3947,11 +3960,11 @@ class VaultService implements Vault {
       // Its lock waits retried as a change's are (`retryingLocks`): it commits nothing before its COMMIT, and its ticket
       // holds for `TICKET_MS` (Fable's review of #538).
       numbers = await retryingLocks(() => this.#db.transaction(async (tx) => {
-        // One Sync, nothing awaited: the bound, the members' rows, then the head, in that order (as `#decideOnce` takes
-        // them), each a lock; then the hold, which every write after it rests on.
+        // One Sync, nothing awaited: the bound, the members' rows, then the change lock, where the head was, in
+        // that order (as `#decideOnce` takes them), each a lock; then the hold, which every write after it rests on.
         void store.boundLockWaits(tx, LOCK_WAIT_MS, undefined, { final: true });
         store.laterLockMembers(tx, [actor, principal]);
-        laterHead(tx);
+        laterChange(tx);
         holdAdmit(tx, { tokenHash: Buffer.from(ticket.tokenHash, 'base64'), principal, scope: ticket.scopeSlugs, digest: Buffer.from(ticket.digest, 'hex') });
         const at = Date.now() + this.#prepared.options.clockOffset();
         // No 0.14 access entry accounts for the row: its `accessSeq` names none (0, as a row before its first `#seal`),
@@ -3994,10 +4007,20 @@ class VaultService implements Vault {
   }
 
   /**
-   * An event no change records (`Vault.note`; its row is packages/vault/src/note.ts's). Not built, and nothing calls it.
+   * An event no change records (`Vault.note`; its row as packages/vault/src/note.ts pins it), written at once. A1's
+   * stand-in, which V1 replaces: the event signed under the log's MAC key and written by `log_events`; another
+   * event under an id already written is refused, `invalid`.
    */
-  async note(_input: NoteInput): Promise<NoteOutcome> {
-    throw new Error('this vault notes no event: note is not built yet');
+  async note(input: NoteInput): Promise<NoteOutcome> {
+    const log015 = this.#prepared.log015;
+    appEvent(input, VAULT_ACTOR);
+    const row = eventRow(log015.mac, Date.now() + this.#prepared.options.clockOffset(), input, 'app');
+    try {
+      return { ok: true, number: (await store.callEvent(this.#db, row)).toString() };
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      return { ok: false, refusal: refusal('invalid', `the event ${input.id} was written already, and said something else`) };
+    }
   }
 
   /**

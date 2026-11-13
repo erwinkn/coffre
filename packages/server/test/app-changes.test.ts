@@ -11,11 +11,11 @@ import { issuedGrant, sealedSessionScope, storedScope } from '@coffre/core/acces
 import { defineSignin, github, type BindingPolicy } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 import { logObject } from '@coffre/db/log';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { auditLog, credentials, logChanges } from '@coffre/db/schema';
-import { clientFor, contextFor, credentialsLogged, holdSomething, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, credentialsLogged, holdSomething, loggedEntries, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -213,6 +213,6 @@ test("a credential 0.14 made, which the log never held, is revoked and signed ou
   await signin.signOut(session.credential.token, meta());
   const ended = await db.owner.select({ id: credentials.id, revokedAt: credentials.revokedAt }).from(credentials).where(inArray(credentials.id, [issued.id, session.credential.id]));
   assert.ok(ended.every((row) => row.revokedAt !== null));
-  const entries = await db.owner.select({ action: auditLog.action }).from(auditLog).where(and(inArray(auditLog.action, ['token.revoke', 'sign_out']), eq(auditLog.decision, 'allow')));
+  const entries = (await loggedEntries(db.owner, ['token.revoke', 'sign_out'])).filter((entry) => entry.decision === 'allow');
   assert.deepEqual(entries.map(({ action }) => action).sort(), ['sign_out', 'token.revoke']);
 });

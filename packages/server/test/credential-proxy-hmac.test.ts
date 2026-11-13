@@ -16,9 +16,8 @@ import { credential } from '@coffre/client/credential';
 import { defineDeployment } from '@coffre/core/deployment';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { clientFor, usesLogged } from './api-fixture.ts';
+import { clientFor, loggedEntries, usesLogged } from './api-fixture.ts';
 import { db, deps, DEV, entries, NO, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
-import { auditLog } from '@coffre/db/schema';
 import { checkPlugins, type PluginContext, type UseAsked } from '../src/plugins.ts';
 import { credentialProxy, form, hmac, privateKey, type CredentialProxyOptions, type Encoding } from '../src/plugins/credential-proxy.ts';
 
@@ -370,7 +369,7 @@ test('no byte of a secret leaves coffre: not in an answer, an entry of the log, 
   } finally {
     for (const line of lines) console[line] = original[line]!;
   }
-  const log = (await db.owner.select().from(auditLog)).map((row) => JSON.stringify(row, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value)));
+  const log = (await loggedEntries(db.owner)).map((row) => JSON.stringify(row, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value)));
   const everything = [...answered, ...log, ...said].join('\n');
   assert.ok(answered.length > 60, `${answered.length} answers`);
   for (const [key, secret] of Object.entries(SECRETS)) {

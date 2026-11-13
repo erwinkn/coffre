@@ -13,13 +13,13 @@ import assert from 'node:assert/strict';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { defineSignin, github } from '@coffre/core/identity';
-import { asc, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { auditLog } from '@coffre/db/schema';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps, outcomes } from './api-fixture.ts';
+import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps, outcomes } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -110,9 +110,9 @@ async function status(call: Promise<unknown>): Promise<number> {
   }
 }
 
+/** The log's entries of `action`, the vault's and the app's events alike (`loggedEntries`). */
 async function entries(action: string) {
-  const rows = await db.owner.select().from(auditLog).where(eq(auditLog.action, action)).orderBy(asc(auditLog.seq));
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  return loggedEntries(db.owner, [action]);
 }
 
 const levels = async (path: string) => Object.fromEntries((await root.secrets.list(path)).keys.map((entry) => [entry.key, entry.sensitivity]));
@@ -138,7 +138,7 @@ test('an Owner of the project, or of the whole instance, makes a sensitive value
   // Its own entry, saying both levels and the version whose value it kept, naming the vault's rewrap, which says it too.
   const [loosened] = (await entries('secret.loosen')).filter((entry) => entry.metadata.key === 'OLGA_KEY');
   assert.deepEqual([loosened!.decision, loosened!.actor, loosened!.metadata], ['allow', OLGA, { key: 'OLGA_KEY', version: 2, from: 'sensitive', to: 'secret', kept: 1 }]);
-  const [rewrap] = (await entries('key.rewrap')).filter((entry) => entry.seq === loosened!.relatedSeq);
+  const [rewrap] = (await entries('key.rewrap')).filter((entry) => entry.operationId === loosened!.operationId);
   assert.deepEqual([rewrap!.author, rewrap!.decision, rewrap!.metadata.was, rewrap!.metadata.from], ['vault', 'allow', 'sensitive', 1]);
   // No `secret.write` says it: nobody wrote a value, and nobody saw one (the offboarding report reads writes as seen).
   assert.equal((await entries('secret.write')).filter((entry) => entry.metadata.key === 'OLGA_KEY' && entry.metadata.version === 2).length, 0);

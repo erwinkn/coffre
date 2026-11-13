@@ -65,7 +65,7 @@ type World = Awaited<ReturnType<typeof world>>;
 /** A binding of CI's, as the app asks the vault to make it: by the Owner, viewing the project, reading sensitive values when `sensitive`. */
 function binding(w: World, sensitive = false, by = ROOT): MadeBinding {
   return {
-    id: randomUUID(), principal: CI, generation: 0, profile: 'github', issuer: ISSUER, origin: ORIGIN, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
+    entry: null, id: randomUUID(), principal: CI, generation: 0, profile: 'github', issuer: ISSUER, origin: ORIGIN, jwksUri: `${ISSUER}/.well-known/jwks`, claims: JSON.stringify({ repository_id: '1' }),
     scope: storedScope([{ ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }), sensitive }]), policy: null, revoked: false,
     jwks: null, label: 'deploys', createdBy: by.slice('user:'.length), createdAt: Date.now(), authMac: randomBytes(32).toString('base64'),
   };
@@ -158,7 +158,7 @@ async function ending(id: string, credentials?: string[]): Promise<ChangeBinding
   const { columns, seal, authMac } = await read(id);
   const rows = (await db.owner.select().from(credentialsTable).where(eq(credentialsTable.createdBy, `binding:${id}`))).filter((row) => row.revokedAt === null && (credentials === undefined || credentials.includes(row.id)));
   return {
-    before: { columns, seal: seal! }, authMacFrom: authMac, authMac: randomBytes(32).toString('base64'),
+    entry: null, before: { columns, seal: seal! }, authMacFrom: authMac, authMac: randomBytes(32).toString('base64'),
     credentials: rows.map((row) => ({
       before: {
         columns: { id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: false, generation: row.generation, expiresAt: row.expiresAt.getTime() } satisfies CredentialColumns,
@@ -477,22 +477,22 @@ test("an unbind takes the fence for its statement; a bind that ends nothing take
   }
 });
 
-test("an unbind takes 0.14's head first, which 0.14's use of a credential it ends holds from its check to its commit; a bind that ends nothing takes none (EntryLessHead, PR 9b)", async () => {
+test('an unbind takes the change lock, after the members\' rows, and waits for a change that holds it; a bind that ends nothing takes none (ChangeLockFirst)', async () => {
   const w = await world();
   const made = binding(w);
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
   assert.ok((await signIn(w, made.id)).outcome.ok);
   const holder = postgresSession(OWNER_URL);
   try {
-    // 0.14's use of the run's credential, on an isolate still serving: under the head, checked, not yet committed.
+    // Another change in flight, under the change lock, not yet committed.
     await holder.unsafe('BEGIN');
-    await holder.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
+    await holder.unsafe('SELECT pg_advisory_xact_lock(1668244070, 2)');
     const another = await w.vault.changeBindings!(change({ make: binding(w), reason: 'replaced', live: [made.id] }));
-    assert.ok(another.ok, `made while the head is held: ${JSON.stringify(another)}`);
+    assert.ok(another.ok, `made while the change lock is held: ${JSON.stringify(another)}`);
     let ended = false;
     const unbinding = w.vault.changeBindings!(change({ ends: [await ending(made.id)] })).then((outcome) => ((ended = true), outcome));
     await sleep(200);
-    assert.equal(ended, false, "the unbind waits for 0.14's head");
+    assert.equal(ended, false, 'the unbind waits for the change lock');
     await holder.unsafe('COMMIT');
     assert.ok((await unbinding).ok);
   } finally {

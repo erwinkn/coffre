@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
 import { EVERYWHERE } from '@coffre/core/access';
-import { and, asc, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import { listMembers } from '../src/api/members.ts';
 import { memberAccess } from '../src/db/queries.ts';
 import { auditLog, principals } from '@coffre/db/schema';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // A person's instance role and its scope, which project grants add to:
 // docs/design/instance-roles.md.
@@ -54,12 +54,8 @@ beforeEach(async () => {
 
 /** The app's refusals, oldest first, by action and reason. */
 async function refusals() {
-  const rows = await db.owner
-    .select({ action: auditLog.action, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.decision, 'deny'), eq(auditLog.author, 'app')))
-    .orderBy(asc(auditLog.seq));
-  return rows.map((row) => [row.action, JSON.parse(row.metadata).reason]);
+  const rows = (await loggedEntries(db.owner)).filter((entry) => entry.decision === 'deny' && entry.author === 'app');
+  return rows.map((row) => [row.action, row.metadata.reason]);
 }
 
 test('a Developer reads and writes every project, the ones made later too; scoped to dev, only each dev', async () => {

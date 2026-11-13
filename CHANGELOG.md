@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **A listed old app key is rotated from on 0.16's first start, whether
+  or not it signed anything.** A key in `previousAuditChainKeys` that
+  never signed an entry used to log `app_key_unused` and be left alone.
+  Now the first start puts the instance in `rotating` (503 with
+  `retry-after: 1`) for one pass over the signed rows, then serves. To
+  skip that pass, drop a key that never signed anything from the list
+  before you upgrade.
 - **Two databases on one server can run their first migrate at once.**
   The baseline alters and grants the group roles only where they differ
   from what it sets, so a new database's migrate writes no shared role

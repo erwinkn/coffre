@@ -14,11 +14,14 @@ import type { UseOutcome, Vault } from '@coffre/core/vault';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { patchProject } from '../src/api/projects.ts';
+import { AppChanges, environmentChange } from '../src/api/changes.ts';
+import { entryOf } from '../src/api/context.ts';
 import { SigninService } from '../src/api/signin.ts';
-import { resolvePath } from '../src/db/queries.ts';
+import { environmentObjects, resolvePath } from '../src/db/queries.ts';
 import { auditLog, environments, logChanges, checkpointFence, projects, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
-import { clientFor, contextFor, credentialsLogged, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { logObject } from '@coffre/db/log';
+import { loggedEntries, clientFor, contextFor, credentialsLogged, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const CI = 'token:ci';
@@ -181,7 +184,7 @@ test("a key's rows put back to an older version while it is archived: its unarch
   await db.owner.update(secrets).set({ currentVersionId: one! }).where(eq(secrets.id, a));
   await assert.rejects(root.secrets.update('market/dev/A', { archived: false }), notTheLogs);
   assert.deepEqual(await opsOf('secret', a), ops);
-  assert.deepEqual((await db.owner.select({ code: auditLog.code }).from(auditLog).where(eq(auditLog.action, 'vault.tampered'))).map(({ code }) => code), ['stale']);
+  assert.deepEqual((await loggedEntries(db.owner, ['vault.tampered'])).map(({ code }) => code), ['stale']);
   assert.ok((await db.owner.select({ archivedAt: secrets.archivedAt }).from(secrets).where(eq(secrets.id, a)))[0]!.archivedAt !== null, 'still archived');
   await db.owner.update(secrets).set({ currentVersionId: two! }).where(eq(secrets.id, a));
   await root.secrets.update('market/dev/A', { archived: false });
@@ -274,6 +277,33 @@ test("a project archived through the API, then deleted while one of its keys rea
   assert.deepEqual((await opsOf('environment', dev)).slice(-2), ['project.archive', 'environment.delete']);
   const [row] = await db.owner.select({ endedAt: secretReferences.endedAt }).from(secretReferences).where(eq(secretReferences.secretId, held));
   assert.ok(row?.endedAt != null);
+  await inputsLogged();
+});
+
+test("an environment's new name is an event of its own; its new slug, its change, which carries its entry; both at once, the change and the name's event", async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  const dev = await environmentId('dev');
+  // Its name is no column of its object: an event records it, and its object is left as it was.
+  const before = await opsOf('environment', dev);
+  await root.environments.update('market/dev', { name: 'Development' });
+  assert.deepEqual((await loggedEntries(db.owner, ['environment.update'])).map((entry) => [entry.author, entry.environmentId, entry.metadata]), [
+    ['app', dev, { from: 'dev', name: 'Development' }],
+  ]);
+  assert.deepEqual(await opsOf('environment', dev), before);
+  // Its slug is: the change records it, and carries its entry.
+  await root.environments.update('market/dev', { slug: 'development' });
+  assert.deepEqual((await loggedEntries(db.owner, ['environment.update'])).slice(1).map((entry) => entry.metadata), [{ from: 'dev', slug: 'development' }]);
+  assert.equal((await opsOf('environment', dev)).at(-1), 'environment.rename');
+  // Both at once: the change records the slug, and the event the name, which no change holds: its entry is that event.
+  await root.environments.update('market/development', { slug: 'dev', name: 'Dev' });
+  assert.deepEqual((await loggedEntries(db.owner, ['environment.update'])).slice(2).map((entry) => [entry.author, entry.environmentId, entry.metadata]), [
+    ['app', dev, { from: 'development', name: 'Dev', slug: 'dev' }],
+  ]);
+  const events = (await db.owner.select({ payload: logChanges.payload }).from(logChanges)).map(({ payload }) => JSON.parse(payload) as { op: string; action?: string; detail?: unknown })
+    .filter((change) => change.op === 'event' && change.action === 'environment.update');
+  assert.deepEqual(events.map((event) => event.detail), [{ from: 'dev', name: 'Development' }, { from: 'development', name: 'Dev', slug: 'dev' }], 'the two that name a name, events');
+  assert.deepEqual((await opsOf('environment', dev)).slice(-2), ['environment.rename', 'environment.rename']);
   await inputsLogged();
 });
 
@@ -392,8 +422,9 @@ test('a project archived by another request while this one archives it: the seco
   });
   await root.projects.update('market', { archived: true });
   assert.ok(raced);
-  const archives = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.action, 'project.archive'));
-  assert.equal(archives.length, 1);
+  // Its environment's change records the archive, once, and carries its entry: the second request's, the first's
+  // read again and finding nothing to archive.
+  assert.deepEqual((await loggedEntries(db.owner, ['project.archive'])).map((entry) => entry.metadata), [{ slug: 'market' }]);
   assert.deepEqual((await opsOf('environment', dev)).filter((op) => op === 'project.archive'), ['project.archive']);
   await inputsLogged();
 });
@@ -444,7 +475,7 @@ test("a project a writer marked archived in the database: an archive asked then 
   await assert.rejects(root.projects.update('market', { archived: true }));
   await db.owner.update(projects).set({ archivedAt: null }).where(eq(projects.slug, 'market'));
   assert.deepEqual(await opsOf('environment', dev), before);
-  assert.equal((await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.action, 'project.archive'))).length, 0);
+  assert.equal((await loggedEntries(db.owner, ['project.archive'])).length, 0);
 });
 
 test("an archive or a restore asked of the project as another request left it, the other undoing it before: each writes what it asks, its environments sealed to match (review r9)", async () => {
@@ -665,4 +696,42 @@ test('a write refused by `prepare` (a key\'s row not the vault\'s) stores nothin
   const ended = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog).where(and(eq(auditLog.action, 'reference.end'), eq(auditLog.relatedSeq, made[0]!.seq)));
   assert.deepEqual(ended.map((row) => (JSON.parse(row.metadata) as { reason?: string }).reason), ['abandoned']);
   assert.deepEqual(await db.owner.select().from(secretReferences), [], 'nothing stored');
+});
+
+test('an entry whose change makes no call is an event of its own, committed with the change; dropped, or left out by `only`, it is none', async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  const id = await environmentId('dev');
+  const read = (await environmentObjects(db.owner, { ids: [id] })).get(id)!;
+  // The same columns after as before: no op, so no call for its entry to ride.
+  const commitWith = async (action: string, then: (changes: AppChanges) => void) => {
+    const entry = entryOf({ credentialId: null }, { actorType: 'user', actorId: ROOT, action, decision: 'allow', environmentId: id, metadata: {} });
+    const changes = (await AppChanges.prepare(deps.vault, `user:${ROOT}`, [environmentChange(read, read.columns, entry)]))!;
+    assert.equal(changes.has(id), false);
+    then(changes);
+    await db.owner.transaction((tx) => changes.commit(tx));
+  };
+  await commitWith('environment.update', () => {});
+  await commitWith('environment.archive', (changes) => changes.drop());
+  await commitWith('environment.restore', (changes) => changes.only([]));
+  const actions = ['environment.update', 'environment.archive', 'environment.restore'];
+  assert.deepEqual((await loggedEntries(db.owner, actions)).map((entry) => [entry.action, entry.environmentId]), [['environment.update', id]]);
+  assert.deepEqual(await db.owner.select().from(auditLog).where(inArray(auditLog.action, actions)), [], 'none in the old log');
+});
+
+test("a key the log never held, archived, then brought back: each entry is an event of its own, none in the old log", async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  await root.secrets.set('market/dev', { A: 'one' });
+  const a = await keyIn(await environmentId('dev'), 'A');
+  // As the cutover left a row it refused: no seal, no change.
+  await db.owner.update(secrets).set({ seal: null }).where(eq(secrets.id, a));
+  await db.owner.delete(logChanges).where(eq(logChanges.object, logObject('secret', a)));
+  const mark = (await loggedEntries(db.owner)).length;
+  await root.secrets.update('market/dev/A', { archived: true });
+  await root.secrets.update('market/dev/A', { archived: false });
+  const logged = (await loggedEntries(db.owner)).slice(mark);
+  assert.deepEqual(logged.map((entry) => [entry.action, entry.secretId]), [['secret.archive', a], ['secret.unarchive', a]]);
+  assert.deepEqual(await db.owner.select().from(logChanges).where(eq(logChanges.object, logObject('secret', a))), [], 'no change of the key');
+  assert.deepEqual(await db.owner.select().from(auditLog).where(eq(auditLog.secretId, a)), [], 'none in the old log');
 });

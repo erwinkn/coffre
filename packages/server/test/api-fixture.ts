@@ -172,6 +172,54 @@ export function waitUntil(promise: Promise<unknown>): void {
  * `credential.use` entries. Slim (R53): the credential, the key, the purpose's code (`log-replay.ts`, PURPOSES: 4 a
  * use) and the place; a repeat its isolate's cover rides writes none.
  */
+/**
+ * The log's entries of `actions` (every one when left out), as `audit_log`'s rows read with their metadata parsed: the
+ * vault's, which it still appends there, and the app's, which are events of the chain since 0.16 (`note`, and
+ * `log_events` for those committed with its request's changes), and the entries changes carry (`reported`), each
+ * mapped to the same fields, `seq` its number in `log_changes`. In the order they were written, by time, each log's own order kept.
+ *
+ *   await loggedEntries(db.owner, ['project.create'])    [{ action: 'project.create', decision: 'allow', author: 'app', … }]
+ */
+export async function loggedEntries(owner: Database, actions?: readonly string[]) {
+  const old = await owner.select().from(auditLog).where(actions === undefined ? undefined : inArray(auditLog.action, [...actions])).orderBy(auditLog.seq);
+  // The app's entries ride its changes or are events: one in the old log is a site whose entry matched nothing it
+  // prepared, and fell back there. Only the old chain's own upkeep still appends to it.
+  const strays = old.filter((row) => row.author === 'app' && !OLD_LOG_UPKEEP.has(row.action)).map((row) => row.action);
+  assert.deepEqual(strays, [], "the app's entries that fell back to audit_log");
+  // An event's payload is its entry; a change's carries one as `reported`.
+  const entry = sql`(CASE WHEN ${logChanges.payload}::jsonb ->> 'op' = 'event' THEN ${logChanges.payload}::jsonb ELSE ${logChanges.payload}::jsonb -> 'reported' END)`;
+  const events = await owner.select().from(logChanges)
+    .where(and(sql`${entry} IS NOT NULL`, actions === undefined ? undefined : sql`${entry} ->> 'action' IN (${sql.join(actions.map((action) => sql`${action}`), sql`, `)})`))
+    .orderBy(logChanges.number);
+  const entries = [
+    ...old.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> })),
+    ...events.map((row) => {
+      const payload = JSON.parse(row.payload) as { op?: string; reported?: unknown };
+      const event = (payload.op === 'event' ? payload : payload.reported) as { author?: 'app' | 'vault'; action: string; allowed: boolean; code: string | null; subject: string | null; places: Record<'projectId' | 'environmentId' | 'secretId' | 'versionId', string | null>; requestId: string | null; operationId: string | null; sourceIp: string | null; detail: Record<string, unknown> };
+      return {
+        seq: row.number, author: event.author ?? (row.actor === 'system:vault' ? 'vault' : 'app'), occurredAt: row.at, actor: row.actor, action: event.action, decision: event.allowed ? 'allow' : 'deny',
+        code: event.code, subjectPrincipal: event.subject, projectId: event.places.projectId, environmentId: event.places.environmentId, secretId: event.places.secretId,
+        secretVersionId: event.places.versionId, operationId: event.operationId, requestId: event.requestId, sourceIp: event.sourceIp, metadata: event.detail,
+      };
+    }),
+  ];
+  // Stable: each log's own order kept among entries of the same millisecond.
+  return entries.sort((a, b) => a.occurredAt - b.occurredAt);
+}
+
+/** What the app still appends to `audit_log`: its key's rotation and the watcher's records of the chain. */
+const OLD_LOG_UPKEEP = new Set(['key.reseal', 'key.rotate', 'audit.heartbeat', 'audit.loss_accepted', 'audit.loss_unapplied']);
+
+/** How many entries the log holds now: `loggedSince` reads the ones after it. */
+export async function logMark(owner: Database): Promise<number> {
+  return (await loggedEntries(owner)).length;
+}
+
+/** The entries of `actions` (every one when left out) logged after `mark`, a `logMark`. */
+export async function loggedSince(owner: Database, mark: number, actions?: readonly string[]) {
+  return (await loggedEntries(owner)).slice(mark).filter((entry) => actions === undefined || actions.includes(entry.action));
+}
+
 export async function usesLogged(owner: Database): Promise<{ credential: string; secret: string; purpose: number; place: string | null }[]> {
   return owner.select({ credential: logUses.credential, secret: logUses.secret, purpose: logUses.purpose, place: logUses.place }).from(logUses).orderBy(logUses.number);
 }
@@ -181,10 +229,9 @@ export async function usesLogged(owner: Database): Promise<{ credential: string;
  * or, where the vault refused by its own path and logged it, the vault's code: one of them, never both.
  */
 export async function refusedIn(owner: Database): Promise<string | null> {
-  const [newest] = await owner.select({ author: auditLog.author, code: auditLog.code, metadata: auditLog.metadata }).from(auditLog)
-    .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'deny'))).orderBy(desc(auditLog.seq)).limit(1);
+  const newest = (await loggedEntries(owner, ['secret.read'])).filter((entry) => entry.decision === 'deny').at(-1);
   if (newest === undefined) return null;
-  return newest.author === 'vault' ? newest.code : ((JSON.parse(newest.metadata) as { reason?: string }).reason ?? null);
+  return newest.author === 'vault' ? newest.code : ((newest.metadata as { reason?: string }).reason ?? null);
 }
 
 /** A sign-in through a trust binding, as its log records it (`signInsLogged`). */
@@ -389,6 +436,7 @@ export function testVault(
     admitWrite: call('admitWrite'),
     recordRefusal: call('recordRefusal'),
     rebuildAudit: call('rebuildAudit'),
+    note: call('note'),
     waitSealed: call('waitSealed'),
     signIn: call('signIn'),
     revokeCredential: call('revokeCredential'),

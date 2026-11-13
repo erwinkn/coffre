@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
 import { assignableToEnvironment, ROLES } from '@coffre/core/access';
-import { and, asc, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import { members } from '../src/db/queries.ts';
 import { writeAuditHeartbeat } from './watch-fixture.ts';
@@ -13,7 +13,9 @@ import {
   openTestDatabase,
   resetDatabase,
   testDeps,
-  type FixtureDeps, outcomes } from './api-fixture.ts';
+  type FixtureDeps, outcomes,
+  loggedEntries,
+} from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const AUDITOR = 'user:auditor@acme.example';
@@ -51,13 +53,8 @@ beforeEach(async () => {
 });
 
 async function lastAudit(action: string): Promise<{ decision: string; reason: unknown }> {
-  const rows = await db.owner
-    .select({ decision: auditLog.decision, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(eq(auditLog.action, action))
-    .orderBy(asc(auditLog.seq));
-  const row = rows.at(-1)!;
-  return { decision: row.decision, reason: JSON.parse(row.metadata).reason };
+  const row = (await loggedEntries(db.owner, [action])).at(-1)!;
+  return { decision: row.decision, reason: row.metadata.reason };
 }
 
 test('an auditor reads audit data without being able to read secrets', async () => {
@@ -206,7 +203,7 @@ test('archiving is audited, reversible, and preserves the value', async () => {
     (await root.secrets.reveal('market/prod/API_KEY')).values.API_KEY,
     'sk_live_secret',
   );
-  const actions = (await db.owner.select({ action: auditLog.action }).from(auditLog)).map((row) => row.action);
+  const actions = (await loggedEntries(db.owner)).map((row) => row.action);
   assert.ok(actions.includes('secret.archive'));
   assert.ok(actions.includes('secret.unarchive'));
 });

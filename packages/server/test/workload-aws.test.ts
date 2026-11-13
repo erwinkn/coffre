@@ -4,13 +4,16 @@ import { createHash, createHmac, randomUUID, type Hash, type Hmac } from 'node:c
 
 import { SignatureV4 } from '@smithy/signature-v4';
 
-import { canonicalClaims, type BindingClaims } from '@coffre/core/identity';
+import { github, signin, type BindingClaims } from '@coffre/core/identity';
+import { resolveConfig } from '../src/config.ts';
+import { createRuntime } from '../src/runtime.ts';
+import { FetchRefused } from '../src/workloads/transport.ts';
+import { processLimits } from '../src/workloads/limits.ts';
 import type { Database } from '@coffre/db';
 
 import { ExchangeRefused, type MatchedProof, type ProofContext } from '../src/api/workloads.ts';
-import { insertBinding, memberStanding } from '../src/db/queries.ts';
 import { awsProof, GET_CALLER_IDENTITY, stsFetch, type AwsProofInput, type StsTransport } from '../src/workloads/aws.ts';
-import { holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -147,15 +150,16 @@ beforeEach(async () => {
   await holdSomething(db.owner, deps.vault, MEMBER, `user:${ROOT}`);
 });
 
-/** An `aws` binding of the service, written to its row: its claims, and a policy; made on `origin` when said. */
-async function bind(claims: BindingClaims = { account: ACCOUNT, role_id: ROLE_ID }, origin?: string): Promise<string> {
-  const standing = await memberStanding(deps.db, MEMBER);
-  const id = randomUUID();
-  await insertBinding(deps.db, deps.chainKey, {
-    id, principal: MEMBER, generation: standing!.generation, profile: 'aws', issuer: 'urn:coffre:aws', jwksUri: '', jwks: null,
-    claims: canonicalClaims(claims), scope: null, policy: '{}', label: null, createdAt: new Date(), createdBy: ROOT, ...(origin === undefined ? {} : { origin }),
-  });
-  return id;
+/**
+ * An `aws` binding of the service, made as the API makes one: the vault seals it, as 0.16 reads a binding live only by
+ * its seal (`bindingLive`). Made on `origin` when said, by a deployment at that public URL.
+ */
+async function bind(claims: BindingClaims = { account: ACCOUNT, role_id: ROLE_ID }, origin = ORIGIN): Promise<string> {
+  const config = resolveConfig({ publicUrl: origin, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000 }) } }), auditChainKey: deps.chainKey.toString('base64') });
+  const runtime = createRuntime(config, deps.db, deps.vault, { json: async (url) => { throw FetchRefused.answered(url, 404); } });
+  const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'aws', issuer: null, claims, label: null, replaces: [] }, { dryRun: false });
+  assert.ok('binding' in made, JSON.stringify(made));
+  return made.binding.id;
 }
 
 function context(jkt = JKT): ProofContext {

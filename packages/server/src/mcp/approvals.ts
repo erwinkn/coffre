@@ -13,14 +13,16 @@ import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { mcpApprovals } from '@coffre/db/schema';
 
-import { allowed, audited, denied, Refusal, withRefusals, type ApiContext, type McpVia } from '../api/context.ts';
+import { AppChanges } from '../api/changes.ts';
+import { allowed, audited, denied, eventsOf, Refusal, withRefusals, type ApiContext, type McpVia } from '../api/context.ts';
 import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
 import { requireFresh } from '../api/fresh-routes.ts';
 import { serveApi } from '../api/router.ts';
 import { answerDigest } from '../api/ceremony.ts';
 import type { SigninService, TouchAnswer } from '../api/signin.ts';
+import { formatMember } from '../api/paths.ts';
 import { AuthRowTampered } from '../auth-rows.ts';
-import type { AuditEntry } from '../db/audit.ts';
+import { actorOf, eventOf, type AuditEntry } from '../db/audit.ts';
 import { decideApproval, findApproval, findConnection, insertApproval, openApprovals, unansweredApprovals, update, type ApprovalRow, type ConnectionRow } from '../db/queries.ts';
 import { logged } from '../logged.ts';
 import type { WorkloadTransport } from '../workloads/transport.ts';
@@ -29,7 +31,7 @@ import type { McpConnection } from './service.ts';
 import { TOOL_BY_NAME, type Tool } from './tools.ts';
 
 /** The touch an approval asks: required, so that an approval with no sign-in to ask it of cannot pass unasked. */
-type Touches = Pick<SigninService, 'touchFor' | 'touched'>;
+type Touches = Pick<SigninService, 'touchFor' | 'touched' | 'touchEntry'>;
 
 /** How long the person has to decide: Q1's bound, for links as for elicitation. */
 export const APPROVAL_SECONDS = 5 * 60;
@@ -145,19 +147,23 @@ export class McpApprovals {
   /**
    * The approval for a call: the one the same call already opened, if its
    * client has not yet heard how it ended, or a new one, logged with
-   * `entry`. `joined` says which. Read and written under the log's head,
+   * `entry`. `joined` says which. Read and written under the change lock,
    * so that identical calls at once open one approval, and no burst of
-   * calls gets past `MAX_PENDING`.
+   * calls gets past `MAX_PENDING`. No change records an approval opened:
+   * its entry is an event, signed before the transaction, which commits
+   * only if it opens one.
    */
   async ask(connection: McpConnection, tool: Tool, args: unknown, entry: (approvalId: string) => AuditEntry): Promise<{ row: ApprovalRow; joined: boolean } | { full: true }> {
     const digest = Buffer.from(callDigest(tool.name, args), 'hex');
+    const id = randomUUID();
+    const changes = await this.#events(entry(id));
     return audited(this.#deps, async (tx, log) => {
       const { rows, now } = await openApprovals(tx, connection.id, new Date(Date.now() - OUTCOME_SECONDS * 1000));
       const same = rows.find((row) => row.digest.equals(digest) && statusOf(row, now) !== 'expired' && row.createdAt.getTime() + OUTCOME_SECONDS * 1000 > now.getTime());
       if (same !== undefined) return { row: same, joined: true };
       if (rows.filter((row) => statusOf(row, now) === 'pending').length >= MAX_PENDING) return { full: true as const };
       const row = {
-        id: randomUUID(),
+        id,
         connectionId: connection.id,
         tool: tool.name,
         arguments: JSON.stringify(args),
@@ -172,7 +178,7 @@ export class McpApprovals {
       await insertApproval(tx, row);
       log.push(entry(row.id));
       return { row, joined: false };
-    });
+    }, changes);
   }
 
   async find(id: string): Promise<(ApprovalRow & { now: Date }) | null> {
@@ -198,11 +204,17 @@ export class McpApprovals {
     await update(this.#deps.db, mcpApprovals, { id, reportedAt: null }, { reportedAt: new Date() });
   }
 
-  /** The client declined the prompt: a pending approval is cancelled, logged with `entry`, and then decided. */
+  /** The client declined the prompt: a pending approval is cancelled, logged with `entry`, an event, and then decided. */
   async cancel(id: string, entry: AuditEntry): Promise<void> {
+    const changes = await this.#events(entry);
     await audited(this.#deps, async (tx, log) => {
       if ((await update(tx, mcpApprovals, { id, status: 'pending' }, { status: 'cancelled', decidedAt: new Date() })) > 0) log.push(entry);
-    });
+    }, changes);
+  }
+
+  /** `entry`, of a call through MCP, signed as an event before its transaction: a connection's call names no credential. */
+  async #events(entry: AuditEntry): Promise<AppChanges | null> {
+    return AppChanges.prepare(this.#deps.vault, actorOf(entry.actorType, entry.actorId), [], [eventOf(entry, null)]);
   }
 
   // --- for coffre's page ----------------------------------------------------------
@@ -319,6 +331,9 @@ export class McpApprovals {
     // it pending: the touch stands for it; with none, a person who holds no passkey, under `optional`, adds one first.
     if (input.approve && touch === null && tool.change!.fresh === 'always') requireFresh(ctx, 'always', `mcp ${tool.name}`);
 
+    // No change records a decision, nor the touch: events, signed before the transaction, committed in it.
+    const decided = allowed(ctx, action, { metadata: touch === null ? metadata : { ...metadata, passkeyId: touch.passkeyId } });
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), [], eventsOf(ctx, ...(touch === null ? [] : [touches.touchEntry(ctx, touch)]), decided));
     await audited(ctx, async (tx, log) => {
       // Under the log's head, the approval and its connection as they are now: one that expired, or a disconnect, since they were read refuses it.
       const again = (await findApproval(tx, id))!;
@@ -330,8 +345,8 @@ export class McpApprovals {
       // Pending, and unexpired by the database's clock as the write runs.
       if ((await decideApproval(tx, id, input.approve ? 'approved' : 'denied')) === 0) throw refuse(conflict('this approval was decided already, or expired'), 'decided');
       if (touch !== null) await touches.touched(tx, log, ctx, touch);
-      log.push(allowed(ctx, action, { metadata: touch === null ? metadata : { ...metadata, passkeyId: touch.passkeyId } }));
-    });
+      log.push(decided);
+    }, changes);
     if (!input.approve) {
       const outcome = { text: `The person denied this on coffre: nothing changed.` };
       await this.#store(id, { outcome: JSON.stringify(outcome) });

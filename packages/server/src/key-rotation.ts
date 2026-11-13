@@ -24,13 +24,13 @@ import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
 import type { Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
-import { lockLogHead, lockLogHeadIfFree } from '@coffre/db/log';
+import { lockChange, lockChangeIfFree, lockLogHead, lockLogHeadIfFree } from '@coffre/db/log';
 
 import { AppChanges, COFFRE_ACTOR, keeps015, retrying, revokes } from './api/changes.ts';
 import { signedAgain, signedBy, type AuthRow, type AuthTable } from './auth-rows.ts';
 import { appendAudit, appLogKey, type AppKeys, type AuditEntry } from './db/audit.ts';
 import type { CredentialRow } from './db/queries.ts';
-import { movedFrom, newestAppEntry, newestMove, reseal, signedRowsAfter, wroteUnder, type Resealed } from './db/rotation.ts';
+import { movedFrom, newestAppEntry, newestMove, reseal, signedRowsAfter, type Resealed } from './db/rotation.ts';
 
 /** Every table whose rows carry the app's MAC, in the order a rotation signs them again. */
 export const SIGNED_TABLES: readonly AuthTable[] = [
@@ -81,21 +81,22 @@ export type KeyState =
  * refused: a rollback, or an instance a newer deployment replaced. The
  * newest `key.reseal` or `key.rotate`, checked by its MAC under the key it
  * names, says whether a rotation is under way, and to which key. Then each
- * key held as replaced that wrote entries and was never moved from is
- * moved from, every row it signed signed again, whatever wrote after it:
- * rows the new key signed meanwhile are left as they are, and the order
- * the keys are listed in changes nothing. A key the app does not hold,
- * the log's newest, is said and served under: its
- * rows fail and the log does not verify, but the instance does not stop. Three indexed reads, together; a key
- * held as replaced is looked for among the entries until one is found.
+ * key held as replaced that was never moved from is moved from, every row
+ * it signed signed again, whatever wrote after it: rows the new key signed
+ * meanwhile are left as they are, and the order the keys are listed in
+ * changes nothing. Whether it wrote is not asked: since 0.16 the app's
+ * entries ride the vault's changes, so its key signs rows and no
+ * entry, and a listed key that signed nothing costs one walk of the rows,
+ * once. A key the app does not hold, the log's newest, is said and served
+ * under: as before rotations, its rows fail and the log does not verify,
+ * but the instance does not stop. Three indexed reads, together.
  */
 export async function keyState(db: Queryable, keys: AppKeys): Promise<KeyState> {
   const current = appLogKey(keys.chainKey).keyId;
   const previous = keys.previousChainKeys.map((key) => ({ id: appLogKey(key).keyId, key }));
   const held = new Map([[current, keys.chainKey], ...previous.map(({ id, key }) => [id, key] as const)]);
   // Its first reads asked together: one round trip at a cold isolate's door, not three (`groupReads`, or a
-  // transaction's statements under one Sync). The newest app entry is read whether or not a move is found: an indexed
-  // read of the newest few, where the entries a replaced key wrote are looked for only as each is due (`wroteUnder`).
+  // transaction's statements under one Sync). The newest app entry is read whether or not a move is found.
   const [moved, move, latest] = await Promise.all([movedFrom(db, [...held.keys()]), newestMove(db), newestAppEntry(db)]);
   const due = (from: Buffer) => previous.filter(({ id, key }) => !moved.has(id) && !key.equals(from)).map(({ key }) => key);
   if (moved.has(current)) {
@@ -120,11 +121,8 @@ export async function keyState(db: Queryable, keys: AppKeys): Promise<KeyState> 
     // The log is under the key its newest rotation moved to, a key this app replaced: it moves on from that one in turn.
     if (move.keyId !== current) return { kind: 'rotating', from: under, next: START, others: due(under) };
   }
-  for (const { id, key } of previous) {
-    if (moved.has(id)) continue;
-    if (await wroteUnder(db, id)) return { kind: 'rotating', from: key, next: START, others: due(key) };
-    unused(id);
-  }
+  const replaced = previous.find(({ id }) => !moved.has(id));
+  if (replaced !== undefined) return { kind: 'rotating', from: replaced.key, next: START, others: due(replaced.key) };
   if (move === undefined && latest !== undefined && !held.has(latest.keyId)) unknown = latest.keyId;
   if (unknown !== null) unheld(unknown, current);
   return { kind: 'settled' };
@@ -150,8 +148,14 @@ export function keyStateNow(db: Database, keys: AppKeys): Promise<KeyState> {
  * rotation to the start that holds it, and says it is still under way.
  */
 async function headFor(tx: Transaction, wait: boolean): Promise<boolean> {
-  if (wait) await lockLogHead(tx);
-  return wait || lockLogHeadIfFree(tx);
+  // The change lock first, as every change takes it: the step's sign-outs are changes, and its entry, appended before
+  // them, takes the issue lock and the fence, which a change takes after the change lock.
+  if (wait) {
+    await lockChange(tx);
+    await lockLogHead(tx);
+    return true;
+  }
+  return (await lockChangeIfFree(tx)) && lockLogHeadIfFree(tx);
 }
 
 /**
@@ -298,17 +302,6 @@ function endsAt(table: AuthTable, row: AuthRow, now: Date): { revokedAt: Date } 
 }
 
 const told = new Set<string>();
-
-/**
- * Said once a process or isolate: a key in previousAuditChainKeys that
- * wrote no entry and was never moved from verifies nothing, and costs each
- * new isolate a read of the log for its first entry.
- */
-function unused(keyId: string): void {
-  if (told.has(keyId)) return;
-  told.add(keyId);
-  console.warn({ event: 'app_key_unused', keyId }, 'a key in previousAuditChainKeys wrote no entry of the log: it verifies nothing, and is never rotated from, so a row it signed stays as it is; it can go');
-}
 
 /**
  * Said once a process or isolate: the log's newest move or entry is under

@@ -9,8 +9,9 @@
 (* One step is one SQL statement, or a run of statements nothing else can  *)
 (* interleave with because the step holds the lock they need, as in        *)
 (* Coffre.tla. Isolation is READ COMMITTED. The locks are members' rows,   *)
-(* in principal order, which a vault decision takes first, and the log's   *)
-(* head, which every app transaction takes first.                          *)
+(* in principal order, which a vault decision takes first, and the change  *)
+(* lock (Coffre.tla; before 0.16 the log's head), which every app          *)
+(* transaction that changes something takes first.                         *)
 (*                                                                         *)
 (* Olga is an Owner of the project, and so is Omar, who may demote her,    *)
 (* or remove her and admit her again, an Owner again, at a new generation. *)
@@ -29,12 +30,12 @@ CONSTANTS
     \* What decides a credential's sensitive reads, the issuer's standing as
     \* an Owner of the project, is weighed from the vault's answer about
     \* them, read after the newest entry about their access, and committed
-    \* only while that entry is still the newest, under the head (server
+    \* only while that entry is still the newest, under the change lock (server
     \* api/services.ts, issuerNow and issuerStill): issuing a token, and
     \* sealing one (sealCredentials).
     IssuerFence,
     SealIssuerFence,
-    \* Issuing reads the service account's standing again under the head
+    \* Issuing reads the service account's standing again under the change lock
     \* (server api/signin.ts, issueServiceToken, #stillMember).
     ServiceRecheckInIssue,
     \* A seal updates the row only as it read it, unsealed (server
@@ -43,9 +44,9 @@ CONSTANTS
     \* The vault's answer about the issuer counts only at the generation the
     \* request came in at (services.ts, issuerNow, `generation`).
     IssuerGenerationKept,
-    \* And under the head, the request's credential and its member still
+    \* And under the change lock, the request's credential and its member still
     \* stand, at that generation (server api/context.ts, credentialStill).
-    IssuerStandsUnderHead
+    IssuerStandsUnderChangeLock
 
 None == "none"
 People == {"olga", "omar"}
@@ -66,14 +67,14 @@ VARIABLES
     log,            \* the audit log, in seq order
     \* locks
     rowLock,        \* rowLock[m]: the process holding m's row, or None
-    head,           \* the process holding the log's head, or None
+    changeLock,           \* the process holding the change lock, or None
     \* processes
     pc, op, l, left,
     \* history, for the invariants
     given           \* a record per scope committed: whether it reads sensitive values, and whether its issuer is an Owner then
 
 rows == <<owners, olgaStatus, olgaGen, svcStatus, svcGen, legacy>>
-locks == <<rowLock, head>>
+locks == <<rowLock, changeLock>>
 procs == <<pc, op, l, left>>
 vars == <<rows, log, locks, procs, given>>
 
@@ -114,7 +115,7 @@ Goto(p, label) == pc' = [pc EXCEPT ![p] = label]
 
 Release(p) ==
     /\ rowLock' = [m \in Members |-> IF rowLock[m] = p THEN None ELSE rowLock[m]]
-    /\ head' = IF head = p THEN None ELSE head
+    /\ changeLock' = IF changeLock = p THEN None ELSE changeLock
 
 Sorted(S) == [i \in 1..Cardinality(S) |-> CHOOSE m \in S : Cardinality({n \in S : Rank[n] < Rank[m]}) = i - 1]
 
@@ -124,11 +125,11 @@ LockNext(p, then) ==
     /\ rowLock' = [rowLock EXCEPT ![m] = p]
     /\ l' = [l EXCEPT ![p].toLock = Tail(@)]
     /\ Goto(p, IF Tail(l[p].toLock) = <<>> THEN then ELSE pc[p])
-    /\ UNCHANGED <<rows, log, head, op, left, given>>
+    /\ UNCHANGED <<rows, log, changeLock, op, left, given>>
 
-TakeHead(p, then) ==
-    /\ head \in {None, p}
-    /\ head' = p
+TakeChangeLock(p, then) ==
+    /\ changeLock \in {None, p}
+    /\ changeLock' = p
     /\ Goto(p, then)
     /\ UNCHANGED <<rows, log, rowLock, op, l, left, given>>
 
@@ -191,18 +192,18 @@ IssueLoad(p) ==
 IssueAccess(p) ==
     /\ pc[p] = "issue.access"
     /\ IF svcStatus = "active" /\ (IssuerGenerationKept => AsAuthenticated(l[p].auth))
-         THEN Read(p, "issue.head", [l[p] EXCEPT !.owner = Owns(op[p].actor), !.gen = svcGen])
+         THEN Read(p, "issue.changelock", [l[p] EXCEPT !.owner = Owns(op[p].actor), !.gen = svcGen])
          ELSE Refuse(p)
 
-IssueHead(p) == pc[p] = "issue.head" /\ TakeHead(p, "issue.commit")
+IssueChangeLock(p) == pc[p] = "issue.changelock" /\ TakeChangeLock(p, "issue.commit")
 
-\* Under the head: the account again, the issuer's newest access entry
+\* Under the change lock: the account again, the issuer's newest access entry
 \* again, then the token and `token.create`.
 IssueCommit(p) ==
     /\ pc[p] = "issue.commit"
     /\ IF \/ ServiceRecheckInIssue /\ ~(svcStatus = "active" /\ svcGen = l[p].gen)
           \/ IssuerFence /\ NewestAbout(op[p].actor) # l[p].seq
-          \/ IssuerStandsUnderHead /\ ~AsAuthenticated(l[p].auth)
+          \/ IssuerStandsUnderChangeLock /\ ~AsAuthenticated(l[p].auth)
          THEN Refuse(p)
          ELSE /\ log' = Append(log, [Entry("token.create", p) EXCEPT !.who = op[p].actor, !.sensitive = l[p].owner])
               /\ given' = given \cup {[id |-> l[p].id, sensitive |-> l[p].owner, owner |-> Owns(op[p].actor),
@@ -228,11 +229,11 @@ SealRead(p) ==
 \* The vault's answer about the issuer, outside any transaction.
 SealAccess(p) ==
     /\ pc[p] = "seal.access"
-    /\ Read(p, "seal.head", [l[p] EXCEPT !.owner = Owns(op[p].who)])
+    /\ Read(p, "seal.changelock", [l[p] EXCEPT !.owner = Owns(op[p].who)])
 
-SealHead(p) == pc[p] = "seal.head" /\ TakeHead(p, "seal.commit")
+SealChangeLock(p) == pc[p] = "seal.changelock" /\ TakeChangeLock(p, "seal.commit")
 
-\* Under the head: the issuer's newest access entry again, then the row,
+\* Under the change lock: the issuer's newest access entry again, then the row,
 \* only if it is still as read, and `token.seal`. One sealed meanwhile is
 \* left as it is, and logs nothing.
 SealCommit(p) ==
@@ -255,10 +256,10 @@ SealCommit(p) ==
 (***************************************************************************)
 
 \* Demoting an Owner of the project: the actor's row and theirs, in
-\* principal order, then the head, then `member.role` about them.
-DemoteLock(p) == pc[p] = "demote.lock" /\ LockNext(p, "demote.head")
+\* principal order, then the change lock, then `member.role` about them.
+DemoteLock(p) == pc[p] = "demote.lock" /\ LockNext(p, "demote.changelock")
 
-DemoteHead(p) == pc[p] = "demote.head" /\ TakeHead(p, "demote.commit")
+DemoteChangeLock(p) == pc[p] = "demote.changelock" /\ TakeChangeLock(p, "demote.commit")
 
 DemoteCommit(p) ==
     /\ pc[p] = "demote.commit"
@@ -270,10 +271,10 @@ DemoteCommit(p) ==
               /\ Goto(p, "idle")
               /\ UNCHANGED <<olgaStatus, olgaGen, svcStatus, svcGen, legacy, op, l, left, given>>
 
-\* Removing the service account: its row, the head, its generation on.
-RemoveLock(p) == pc[p] = "remove.lock" /\ LockNext(p, "remove.head")
+\* Removing the service account: its row, the change lock, its generation on.
+RemoveLock(p) == pc[p] = "remove.lock" /\ LockNext(p, "remove.changelock")
 
-RemoveHead(p) == pc[p] = "remove.head" /\ TakeHead(p, "remove.commit")
+RemoveChangeLock(p) == pc[p] = "remove.changelock" /\ TakeChangeLock(p, "remove.commit")
 
 RemoveCommit(p) ==
     /\ pc[p] = "remove.commit"
@@ -287,11 +288,12 @@ RemoveCommit(p) ==
               /\ UNCHANGED <<owners, olgaStatus, olgaGen, legacy, op, l, left, given>>
 
 \* Removing Olga and admitting her again, an Owner again: her row and the
-\* actor's, the head, her generation on, `member.remove` and `member.add`.
-\* One decision here, two in the code: nothing in between decides more.
-ReadmitLock(p) == pc[p] = "readmit.lock" /\ LockNext(p, "readmit.head")
+\* actor's, the change lock, her generation on, `member.remove` and
+\* `member.add`. One decision here, two in the code: nothing in between decides
+\* more.
+ReadmitLock(p) == pc[p] = "readmit.lock" /\ LockNext(p, "readmit.changelock")
 
-ReadmitHead(p) == pc[p] = "readmit.head" /\ TakeHead(p, "readmit.commit")
+ReadmitChangeLock(p) == pc[p] = "readmit.changelock" /\ TakeChangeLock(p, "readmit.commit")
 
 ReadmitCommit(p) ==
     /\ pc[p] = "readmit.commit"
@@ -315,7 +317,7 @@ Init ==
     /\ legacy = "unsealed"
     /\ log = <<>>
     /\ rowLock = [m \in Members |-> None]
-    /\ head = None
+    /\ changeLock = None
     /\ pc = [p \in Procs |-> "idle"]
     /\ op = [p \in Procs |-> NoOp]
     /\ l = [p \in Procs |-> L0]
@@ -324,11 +326,11 @@ Init ==
 
 Step(p) ==
     \/ Begin(p)
-    \/ IssueAuth(p) \/ IssueLoad(p) \/ IssueAccess(p) \/ IssueHead(p) \/ IssueCommit(p)
-    \/ SealRead(p) \/ SealAccess(p) \/ SealHead(p) \/ SealCommit(p)
-    \/ DemoteLock(p) \/ DemoteHead(p) \/ DemoteCommit(p)
-    \/ RemoveLock(p) \/ RemoveHead(p) \/ RemoveCommit(p)
-    \/ ReadmitLock(p) \/ ReadmitHead(p) \/ ReadmitCommit(p)
+    \/ IssueAuth(p) \/ IssueLoad(p) \/ IssueAccess(p) \/ IssueChangeLock(p) \/ IssueCommit(p)
+    \/ SealRead(p) \/ SealAccess(p) \/ SealChangeLock(p) \/ SealCommit(p)
+    \/ DemoteLock(p) \/ DemoteChangeLock(p) \/ DemoteCommit(p)
+    \/ RemoveLock(p) \/ RemoveChangeLock(p) \/ RemoveCommit(p)
+    \/ ReadmitLock(p) \/ ReadmitChangeLock(p) \/ ReadmitCommit(p)
 
 Finished == \A p \in Procs : pc[p] = "idle" /\ left[p] = 0
 
@@ -345,7 +347,7 @@ TypeOK ==
     /\ owners \subseteq People
     /\ legacy \in {"unsealed", "sensitive", "secret"}
     /\ rowLock \in [Members -> Procs \cup {None}]
-    /\ head \in Procs \cup {None}
+    /\ changeLock \in Procs \cup {None}
 
 \* A scope reads the project's sensitive values only if whoever issued it
 \* is an Owner of the project when it commits: a person demoted before

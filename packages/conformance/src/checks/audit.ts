@@ -94,10 +94,6 @@ export async function settled(deployment: Deployment): Promise<void> {
     (SELECT coalesce(max(seq), -1) FROM audit_log)::text AS seq,
     greatest((SELECT coalesce(max(number), 0) FROM log_changes), (SELECT coalesce(max(number), 0) FROM log_uses))::text AS number`));
   const { seq, number } = target!;
-  // Temporary: the projector lists an entry of `audit_log` only up to the newest signed checkpoint, and only the
-  // scheduled run's beat writes one, every 5 minutes on a deployment. This run goes once the app's entries are signed
-  // changes, listed a tick after the write; the wait on `old_floor` goes with that column.
-  await deployment.scheduled();
   let cursor: { old_floor: string; through: string } | undefined;
   const oldPassed = () => cursor !== undefined && BigInt(cursor.old_floor) > BigInt(seq);
   const chainsPassed = () => cursor !== undefined && BigInt(cursor.through) >= BigInt(number);
@@ -223,65 +219,73 @@ export async function checkpoints(deployment: Deployment, { admin }: People): Pr
   return `${after.entries} entries verified through ${after.through}, checkpointed at ${after.checkpoint.seq}`;
 }
 
+/** The app's entries for a stored version, which its key's change carries. */
+const WRITES = ['secret.write', 'secret.restore', 'secret.loosen'];
+
 /**
- * Every version the app says it stored names the vault's entry for the key
- * it was sealed with, `key.wrap` for a write and `key.rewrap` for a restore,
- * a mark and a loosening:
- * the same member, request and operation, the same secret and version. A
- * version written down the two-trip path (on Postgres) has no 0.14
- * entry: its record is its key's change in 0.15's log, which only the vault
- * makes, naming the version, the request it was decided on, its operation
- * and its request id; never both. And every value read is the vault's to
- * log: the app keeps no reads of its own.
+ * Every version stored has one record, its key's change in the log, which
+ * names the request it was decided on and its operation. A version the
+ * vault decided itself (the two-trip path, on Postgres) carries its
+ * decision's `inputs`. One the app wrote carries the app's `secret.write`,
+ * `secret.restore` or `secret.loosen` entry (`reported`), which names the
+ * vault's entry for the key it was sealed with, `key.wrap` for a new value
+ * and `key.rewrap` for a restore, a mark (which says the version it `kept`)
+ * and a loosening: the same member, request and operation, the same secret
+ * and version. The app writes no such entry to `audit_log`, and no read of
+ * a value: every value read is the vault's to log.
  */
 export async function writesAgree(deployment: Deployment): Promise<string> {
   return using(deployment.database(), async (sql) => {
-    const entries = await sql.query<{
-      seq: number | string; author: string; action: string; decision: string; actor: string; metadata: string;
+    type Row = {
+      author: string; action: string; decision: string; actor: string; metadata: string;
       project_id: string | null; environment_id: string | null; secret_id: string | null;
-      request_id: string | null; operation_id: string | null; related_seq: string | number | null;
-    }>('SELECT * FROM audit_log ORDER BY seq');
-    const bySeq = new Map(entries.map((entry) => [String(entry.seq), entry]));
-    const writes = entries.filter((entry) => entry.author === 'app' && entry.decision === 'allow'
-      && (entry.action === 'secret.write' || entry.action === 'secret.restore' || entry.action === 'secret.loosen'));
+      request_id: string | null; operation_id: string | null;
+    };
+    const entries = await sql.query<Row>('SELECT * FROM audit_log ORDER BY seq');
     for (const entry of entries.filter((row) => row.author === 'app' && row.decision === 'allow')) {
-      expect(entry.action !== 'secret.read', 'the app logged an allowed read of a value', entry);
-    }
-    for (const entry of writes) {
-      // A write of a new value wraps a new key; a restore, a mark (which says the version it `kept`) and a loosening rewrap one.
-      const seal = entry.action === 'secret.write' && JSON.parse(entry.metadata).kept === undefined ? 'key.wrap' : 'key.rewrap';
-      const key = entry.related_seq === null ? undefined : bySeq.get(String(entry.related_seq));
-      expect(key !== undefined && key.author === 'vault' && key.action === seal && key.decision === 'allow',
-        `a ${entry.action} names no ${seal} of the vault's`, { entry, key });
-      for (const field of ['actor', 'request_id', 'operation_id', 'project_id', 'environment_id'] as const) {
-        expect(entry[field] === key[field], `the write and its seal have different ${field}`, { entry, key });
-      }
-      expect(entry.operation_id !== null && entry.request_id !== null, 'the committed write has no operation or request', entry);
-      const metadata = JSON.parse(entry.metadata) as { version: number; key: string };
-      const sealed = JSON.parse(key.metadata) as { secretId?: string; version: number; subject: string };
-      expect((sealed.secretId ?? key.secret_id) === entry.secret_id && sealed.version === metadata.version
-        && sealed.subject.split('/').at(-1) === metadata.key, 'the write names a seal of another secret or version', { entry, key });
+      expect(!['secret.read', ...WRITES].includes(entry.action), `the app logged an allowed ${entry.action} in audit_log`, entry);
     }
     const versions = await query<{ id: string; secret_id: string; version: number }>(sql,
       `SELECT v.id, v.secret_id, v.version FROM secret_versions v JOIN secrets s ON s.id = v.secret_id
        JOIN projects p ON p.id = s.project_id WHERE p.slug = $1`, [PROJECT]);
     expect(versions.length > 0, 'no stored versions were inspected');
-    type Logged = { op?: unknown; version?: unknown; inputs?: unknown; ref?: { id?: unknown }; request?: { operationId?: unknown; requestId?: unknown } };
-    const logged = (await query<{ payload: string }>(sql, `SELECT payload FROM log_changes WHERE payload LIKE '%"op":"secret.write"%' AND payload LIKE '%"inputs":"%'`))
-      .map(({ payload }) => JSON.parse(payload) as Logged);
-    let alone = 0;
+    type Reported = {
+      action?: unknown; allowed?: unknown; author?: unknown; operationId?: unknown; requestId?: unknown;
+      detail?: { key?: unknown; version?: unknown; kept?: unknown };
+      places?: { projectId?: unknown; environmentId?: unknown; secretId?: unknown };
+    };
+    type Logged = { version?: unknown; inputs?: unknown; ref?: { id?: unknown }; request?: { operationId?: unknown; requestId?: unknown }; reported?: Reported | null };
+    const logged = (await query<{ actor: string; payload: string }>(sql,
+      `SELECT actor, payload FROM log_changes WHERE payload LIKE '%"op":"secret.write"%' AND (payload LIKE '%"inputs":"%' OR payload LIKE '%"reported":{%')`))
+      .map(({ actor, payload }) => ({ actor, ...(JSON.parse(payload) as Logged) }));
+    let decided = 0;
     for (const version of versions) {
-      const matching = writes.filter((entry) => entry.secret_id === version.secret_id
-        && (JSON.parse(entry.metadata) as { version: number }).version === version.version);
       const changes = logged.filter((change) => change.version === version.id && change.ref?.id === version.secret_id);
-      expect(matching.length + changes.length === 1, 'a stored version has no unique write record, an app entry or a change of 0.15\'s', { version, matching, changes });
-      if (changes.length === 1) {
-        alone += 1;
-        const { request } = changes[0]!;
-        expect(typeof request?.operationId === 'string' && typeof request.requestId === 'string', 'a write recorded in 0.15\'s log alone names no operation or request', changes[0]);
+      expect(changes.length === 1, 'a stored version has no unique write record, its key\'s change in the log', { version, changes });
+      const change = changes[0]!;
+      if (typeof change.inputs === 'string') {
+        decided += 1;
+        const { request } = change;
+        expect(typeof request?.operationId === 'string' && typeof request.requestId === 'string', 'a write the vault decided names no operation or request', change);
+        continue;
       }
+      const entry = change.reported!;
+      expect(entry.author === 'app' && entry.allowed === true && WRITES.includes(String(entry.action)), 'a stored version carries no app write', change);
+      expect(typeof entry.operationId === 'string' && typeof entry.requestId === 'string', 'the committed write has no operation or request', change);
+      expect(entry.detail?.version === version.version && entry.places?.secretId === version.secret_id, 'the write names another secret or version than its change', change);
+      const seal = entry.action === 'secret.write' && entry.detail?.kept === undefined ? 'key.wrap' : 'key.rewrap';
+      const keys = entries.filter((key) => key.author === 'vault' && key.action === seal && key.decision === 'allow'
+        && key.operation_id === entry.operationId && key.request_id === entry.requestId);
+      const key = keys.find((row) => {
+        const sealed = JSON.parse(row.metadata) as { secretId?: string; version: number; subject: string };
+        return (sealed.secretId ?? row.secret_id) === version.secret_id && sealed.version === version.version
+          && sealed.subject.split('/').at(-1) === entry.detail?.key;
+      });
+      expect(key !== undefined, `a ${String(entry.action)} names no ${seal} of the vault's in its operation`, { change, keys });
+      expect(key.actor === change.actor && key.project_id === entry.places?.projectId && key.environment_id === entry.places?.environmentId,
+        'the write and its seal have different members or places', { change, key });
     }
-    return `${versions.length} stored versions, each with one app write naming the vault's seal in the same operation, or (${alone} of them) one change of 0.15's log naming its request`;
+    return `${versions.length} stored versions, each with one change in the log: ${versions.length - decided} carrying the app's write, which names the vault's seal in the same operation, and ${decided} the vault decided`;
   });
 }
 

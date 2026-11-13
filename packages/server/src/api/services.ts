@@ -34,9 +34,10 @@ import {
 import type { Access, Vault } from '@coffre/core/vault';
 import type { Database, Queryable } from '@coffre/db';
 import { unsealedCredentials, type Unsealed } from '@coffre/db/grants';
-import { credentials, serviceBindings } from '@coffre/db/schema';
+import { credentials } from '@coffre/db/schema';
 
 import { settingsShown } from '../db/answers.ts';
+import type { AuditEntry } from '../db/audit.ts';
 // A row's scope, read and stored (`@coffre/core/access`, where the vault makes a credential's too).
 export { readScope, storedScope } from '@coffre/core/access';
 
@@ -44,7 +45,7 @@ import { credentialsBy, liveCredentialsWhere, memberOf, newestAccessSeq, places,
 import type { Caller, PrincipalRef } from './caller.ts';
 import { callerFrom, newestPolicySeq, placeOf } from './caller.ts';
 import { AppChanges, COFFRE_ACTOR, credentialChange } from './changes.ts';
-import { audited, denied, Refusal, type ApiContext } from './context.ts';
+import { audited, denied, entryOf, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, formatPath, parsePath } from './paths.ts';
 
@@ -441,15 +442,16 @@ export function unsealedScope(stored: string | null): boolean {
 }
 
 /**
- * Seal the tokens and trust bindings an older release made (`Unsealed`):
- * once a configuration, the isolate's or the process's, before it checks
- * its first credential (`SigninService.verify`). A row an older release
+ * Seal the tokens an older release made (`Unsealed`): once a
+ * configuration, the isolate's or the process's, before it checks its
+ * first credential (`SigninService.verify`). A token an older release
  * still makes while both run is sealed on its first use instead
- * (`sealCredentials`, from `verify` or an exchange). Returns how many rows
- * it sealed.
+ * (`sealCredentials`, from `verify`). A trust binding is never sealed: one
+ * whose scope is unsealed is refused, and bound again. Returns how
+ * many tokens it sealed.
  */
 export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): Promise<number> {
-  const unsealed = await unsealedCredentials(db, new Date());
+  const unsealed = (await unsealedCredentials(db, new Date())).filter((row): row is UnsealedToken => row.kind === 'token');
   let sealed = 0;
   for (const principal of new Set(unsealed.map((row) => row.principal))) {
     const policySeq = await newestPolicySeq(db);
@@ -460,8 +462,11 @@ export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): 
   return sealed;
 }
 
+/** A token whose scope this release has not sealed yet. */
+type UnsealedToken = Unsealed & { kind: 'token' };
+
 /**
- * Seal these unsealed rows of one account, as `access` answered it, asked
+ * Seal these unsealed tokens of one account, as `access` answered it, asked
  * of the vault after the newest `policy.change` was `policySeq`. One of
  * 0.4 keeps what the account holds now, each grant with what its role
  * holds now, so nothing granted after reaches it; one of a release before
@@ -472,56 +477,52 @@ export async function sealScopes(db: Database, chainKey: Buffer, vault: Vault): 
  * vault's, asked before the transaction (`issuerNow`), and the transaction
  * commits only while it is still theirs (`issuerStill`): an issuer demoted
  * from Owner meanwhile seals no row reading them. In one transaction,
- * committed only while the policy is still `policySeq`'s (`policyStill`),
- * with a `token.seal` entry for each scope it wrote, naming those it sealed
- * with it, so a row put back unsealed later, and sealed again, shows in the log.
- * Each update matches the row's scope as read, so two at once seal a row
- * once. Returns how many it sealed.
+ * committed only while the policy is still `policySeq`'s (`policyStill`).
+ * Each token it seals is a change (`credential.scope`) that carries its own
+ * `token.seal` entry, naming it, as the change's actor (`COFFRE_ACTOR`,
+ * 0.16). So a row put back unsealed later, and sealed again, shows in
+ * the log. Each update matches the row's scope as read, so two at once seal
+ * a row once, and record it once. Returns how many it sealed.
  */
-export async function sealCredentials(db: Database, chainKey: Buffer, vault: Vault, access: Access, policySeq: bigint | null, rows: readonly Unsealed[]): Promise<number> {
+export async function sealCredentials(db: Database, chainKey: Buffer, vault: Vault, access: Access, policySeq: bigint | null, rows: readonly UnsealedToken[]): Promise<number> {
   const policy = access.policy ?? DEFAULT_POLICY;
   const held = access.grants.map(({ projectId, environmentId, role }) => issuedGrant({ projectId, environmentId, role }, policy));
   // Each issuer as the vault answers them now, asked before the transaction: no vault call is made inside one.
   const issuers = new Map<string, { caller: Caller; accessSeq: bigint | null }>();
   for (const by of new Set(rows.map((row) => row.createdBy))) issuers.set(by, await issuerNow({ db, vault }, { type: 'user', id: by }));
   const scopes = rows.map((row) => storedScope((readScope(row.scope) ?? held).map((grant) => ({ ...grant, sensitive: ownsProject(issuers.get(row.createdBy)!.caller, grant.projectId!) }))));
-  // With 0.15's log, a token's scope written is a change of it (`credential.scope`); a binding is no object of the log's.
-  const tokens = rows.flatMap((row, i) => (row.kind === 'token' ? [{ id: row.id, scope: scopes[i]! }] : []));
+  // A token's scope written is a change of it (`credential.scope`).
+  const tokens = rows.map((row, i) => ({ id: row.id, scope: scopes[i]! }));
+  const sealed = (id: string, scope: string): AuditEntry => ({
+    actorType: 'system',
+    actorId: 'app',
+    action: 'token.seal',
+    decision: 'allow',
+    metadata: { principalType: 'service', principalId: memberOf(access.principal).id, tokens: [id], scope: JSON.parse(scope) as unknown },
+  });
   const changes = await AppChanges.prepare(vault, COFFRE_ACTOR, async () => {
     const read = tokens.length === 0 ? [] : await liveCredentialsWhere(db, chainKey, credentialsBy.ids(tokens.map(({ id }) => id)));
     return read.flatMap((row) => {
       const token = tokens.find(({ id }) => id === row.id)!;
-      return row.scope === rows.find(({ id }) => id === row.id)!.scope ? [credentialChange(row, { ...row, scope: token.scope })] : [];
+      // Its entry rides its change, the change's actor's: one token not written drops with it.
+      const entry = { ...entryOf({ credentialId: null }, sealed(row.id, token.scope)), actor: COFFRE_ACTOR };
+      return row.scope === rows.find(({ id }) => id === row.id)!.scope ? [credentialChange(row, { ...row, scope: token.scope }, entry)] : [];
     });
   });
-  return audited({ db, chainKey, vault, caller: { policySeq, policy } }, async (tx, log) => {
+  return audited({ db, chainKey, vault, caller: { policySeq, policy } }, async (tx) => {
     for (const { caller, accessSeq } of issuers.values()) await issuerStill(tx, caller, accessSeq);
-    const done = new Map<string, { tokens: string[]; bindings: string[] }>();
     const written: string[] = [];
+    let count = 0;
     for (const [i, row] of rows.entries()) {
       const scope = scopes[i]!;
-      // With 0.15's log, a token none was prepared for (revoked since it was read) is left as it is.
-      if (changes !== null && row.kind === 'token' && !changes.has(row.id)) continue;
-      const changed = row.kind === 'token'
-        ? await updateAuth(tx, chainKey, credentials, { id: row.id, scope: row.scope }, { scope })
-        : await updateAuth(tx, chainKey, serviceBindings, { id: row.id, scope: row.scope }, { scope });
-      if (changed === 0) continue;
-      if (row.kind === 'token') written.push(row.id);
-      const sealed = done.get(scope) ?? { tokens: [], bindings: [] };
-      sealed[row.kind === 'token' ? 'tokens' : 'bindings'].push(row.id);
-      done.set(scope, sealed);
-    }
-    for (const [scope, sealed] of done) {
-      log.push({
-        actorType: 'system',
-        actorId: 'app',
-        action: 'token.seal',
-        decision: 'allow',
-        metadata: { principalType: 'service', principalId: memberOf(access.principal).id, ...sealed, scope: JSON.parse(scope) as unknown },
-      });
+      // A token none was prepared for (revoked since it was read) is left as it is.
+      if (changes !== null && !changes.has(row.id)) continue;
+      if ((await updateAuth(tx, chainKey, credentials, { id: row.id, scope: row.scope }, { scope })) === 0) continue;
+      count += 1;
+      written.push(row.id);
     }
     // Two at once seal a row once: only the changes of the rows this one wrote.
     changes?.only(written);
-    return [...done.values()].reduce((sum, sealed) => sum + sealed.tokens.length + sealed.bindings.length, 0);
+    return count;
   }, changes);
 }

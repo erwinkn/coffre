@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import type { AuditEntryView, CoffreClient } from '@coffre/client';
-import { and, asc, eq, gte } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 import { auditChainHead, auditLog, environments, projects, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedSince, logMark, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 /**
  * Forks that inherit (docs/design/forking.md): an environment with a
@@ -24,7 +24,7 @@ let deps: FixtureDeps;
 let root: CoffreClient;
 let maintainer: CoffreClient;
 let ada: CoffreClient;
-let firstSeq: bigint;
+let mark: number;
 
 before(async () => {
   db = await openTestDatabase();
@@ -46,17 +46,11 @@ beforeEach(async () => {
   await root.members.add(`user:${ADA}`);
   await root.access.set(`user:${MAINTAINER}`, { market: 'maintainer' });
   await root.secrets.set('market/prod', { DATABASE_URL: 'postgres://prod', STRIPE_KEY: 'sk_live_1', SENTRY_DSN: 'https://sentry/prod' });
-  const [head] = await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead);
-  firstSeq = head.nextSeq;
+  mark = await logMark(db.owner);
 });
 
 async function entries(author: 'app' | 'vault', action: string) {
-  const rows = await db.owner
-    .select({ actor: auditLog.actor, decision: auditLog.decision, code: auditLog.code, projectId: auditLog.projectId, environmentId: auditLog.environmentId, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, author), eq(auditLog.action, action), gte(auditLog.seq, firstSeq)))
-    .orderBy(asc(auditLog.seq));
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  return (await loggedSince(db.owner, mark, [action])).filter((entry) => entry.author === author);
 }
 
 /** An environment's id, by its path, `market/prod`, or its slug in market. */
@@ -116,7 +110,7 @@ test('a fork sets, adds and removes keys of its own; archiving an override, or r
 test("an inherited value is the parent's read: logged there, and in the fork through `also`", async () => {
   await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
   await maintainer.secrets.set('market/prod-eu', { DATABASE_URL: 'postgres://eu' });
-  firstSeq = (await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead))[0].nextSeq;
+  mark = await logMark(db.owner);
   await maintainer.secrets.reveal('market/prod-eu');
   const [prod, eu] = [await environmentId('prod'), await environmentId('prod-eu')];
   const reads = await entries('vault', 'secret.read');
@@ -140,7 +134,7 @@ test('a fork lends nothing: reading what it inherits takes read on the parent, b
   await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
   await maintainer.secrets.set('market/prod-eu', { DATABASE_URL: 'postgres://eu' });
   await root.access.set(`user:${ADA}`, { 'market/prod-eu': 'developer' });
-  firstSeq = (await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead))[0].nextSeq;
+  mark = await logMark(db.owner);
 
   await assert.rejects(ada.secrets.reveal('market/prod-eu'), (error: { status: number; message: string }) => {
     assert.equal(error.status, 403);
@@ -420,7 +414,7 @@ test("a fork the vault refuses is named in the refusal, never filed under: anoth
   await root.projects.create('billing', { name: 'Billing' });
   await root.environments.create('billing/dev', { name: 'Dev' });
   const [version] = await db.owner.select({ id: secretVersions.id }).from(secretVersions).limit(1);
-  firstSeq = (await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead))[0].nextSeq;
+  mark = await logMark(db.owner);
   const billingDev = await environmentId('billing/dev');
   const claimed = await deps.vault.unwrap({ principal: `user:${MAINTAINER}`, purpose: 'run', items: [{ secretVersionId: version.id, through: billingDev }] });
   assert.deepEqual(claimed.ok ? null : claimed.refusal.code, 'bad_claim');
@@ -444,7 +438,7 @@ test('a fork is filed under only for a read whose reference holds: a forged pair
     .from(secretVersions)
     .innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
     .where(eq(secrets.key, 'PRIVATE_SOURCE'));
-  firstSeq = (await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead))[0].nextSeq;
+  mark = await logMark(db.owner);
   const eu = await environmentId('prod-eu');
   const claimed = await deps.vault.unwrap({
     principal: `user:${ROOT}`,
@@ -730,7 +724,7 @@ test("a reference a fork inherits is read in its log's terms: filed under its so
   await root.secrets.set('billing/prod', { PRIVATE_SOURCE: 'billing-secret' });
   await root.secrets.set('market/prod', { SHARED: { ref: 'billing/prod/PRIVATE_SOURCE' } });
   await maintainer.environments.create('market/prod-eu', { from: 'prod', inherit: true });
-  firstSeq = (await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead))[0].nextSeq;
+  mark = await logMark(db.owner);
   await root.secrets.reveal('market/prod-eu/SHARED');
   const [read] = await entries('vault', 'secret.read');
   assert.deepEqual([read.metadata.subject, read.metadata.through, (read.metadata.also as { environmentId: string }).environmentId],

@@ -187,11 +187,20 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     // A caller the app read from the vault's rows, unchecked, is only shown (`SHOWING`, fetch-api.ts): no route but that decides on one.
     if (ctx.caller.unchecked === true && `${route.method} ${route.shape}` !== 'GET /me') throw new Error(`a caller the vault has not checked reached ${route.method} ${route.shape}`);
     if (ctx.via !== null) {
-      // Through MCP, a route is the connection's only within its scopes, whatever the person may do.
-      const needed = ROUTE_SCOPES[`${route.method} ${route.shape}` as keyof typeof ROUTE_SCOPES];
-      if (needed === null || needed === undefined) throw new ApiError('forbidden', 'apps connected through MCP cannot do this: only people can, in coffre itself');
-      if (!ctx.via.scopes.includes(needed)) {
-        throw new ApiError('insufficient_scope', `this needs the ${MCP_SCOPE_INFO[needed].label} scope: connect the app again with it (${scopeString(challengeScopes(ctx.via.scopes, needed))})`, needed);
+      // Through MCP, a route is the connection's only within its scopes, whatever the person may do: logged, as the
+      // connection's call tried it (the call itself records no refusal of the API's).
+      const shape = `${route.method} ${route.shape}`;
+      const needed = ROUTE_SCOPES[shape as keyof typeof ROUTE_SCOPES];
+      if (needed === null || needed === undefined) {
+        await refuse(ctx, new Refusal(
+          new ApiError('forbidden', 'apps connected through MCP cannot do this: only people can, in coffre itself'),
+          denied(ctx, 'mcp.call', 'forbidden', { metadata: { route: shape } }),
+        ));
+      } else if (!ctx.via.scopes.includes(needed)) {
+        await refuse(ctx, new Refusal(
+          new ApiError('insufficient_scope', `this needs the ${MCP_SCOPE_INFO[needed].label} scope: connect the app again with it (${scopeString(challengeScopes(ctx.via.scopes, needed))})`, needed),
+          denied(ctx, 'mcp.call', 'insufficient_scope', { metadata: { route: shape, needed } }),
+        ));
       }
     }
     if (ctx.personalToken !== null && !PERSONAL_TOKEN_ROUTES[`${route.method} ${route.shape}` as keyof typeof PERSONAL_TOKEN_ROUTES]) {

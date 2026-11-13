@@ -10,7 +10,7 @@ import { eq, isNull } from 'drizzle-orm';
 import { auditLog, credentials, identities, secrets, secretVersions } from '@coffre/db/schema';
 import { CredentialUncheckable, SigninService } from '../src/api/signin.ts';
 import { authenticateRequest } from '../src/auth.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { loggedEntries, clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const LEAD = 'lead@acme.example';
@@ -129,11 +129,8 @@ test('removing someone revokes every way in, so re-adding them starts from nothi
   assert.equal((await signin.verify(again.token)).id, DEV);
 
   // The vault's record: the grant it took, and the generation that ends every session and token from before.
-  const [removal] = await db.owner
-    .select({ author: auditLog.author, subject: auditLog.subjectPrincipal, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(eq(auditLog.action, 'member.remove'));
-  assert.deepEqual({ ...removal, metadata: JSON.parse(removal.metadata) }, {
+  const [removal] = (await loggedEntries(db.owner, ['member.remove'])).map((entry) => ({ author: entry.author, subject: entry.subjectPrincipal, metadata: entry.metadata }));
+  assert.deepEqual(removal, {
     author: 'vault',
     subject: `user:${DEV}`,
     metadata: { revoked: 1, generation: 1 },

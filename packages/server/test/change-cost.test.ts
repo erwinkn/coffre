@@ -37,6 +37,7 @@ const VIEWER = 'viewer@acme.example';
 const ADMIN = 'admin-off@acme.example';
 /** A Developer of market/dev, who owns no project: a token they issue there is told what it withholds. */
 const DEVELOPER = 'developer@acme.example';
+const SIGNER = 'signer@acme.example';
 
 /** A client whose statements go to the pool of the request under way: on Workers, each request opens its own. */
 class PerRequest {
@@ -99,6 +100,7 @@ before(async () => {
   await root.access.set(`user:${ADMIN}`, { 'market/dev': 'developer' });
   await removePasskey(db.owner, deps.chainKey, await addPasskey(db.owner, deps.chainKey, ADMIN));
   await root.members.add(`user:${DEVELOPER}`);
+  await root.members.add(`user:${SIGNER}`);
   await root.access.set(`user:${DEVELOPER}`, { 'market/dev': 'developer' });
 
   // Each Sync's statements, in the trace a failure prints; with `COFFRE_CHANGE_COST_RTT_MS`, each held that long, as
@@ -199,7 +201,11 @@ async function cost(work: () => Promise<unknown>): Promise<Cost> {
  * is brought down to two and the line struck off. `uses`: the environment whose keys it uses, market/base unless it
  * names another.
  */
-type Case = { name: string; setup?: (i: number) => Promise<void>; run: (i: number) => Promise<unknown>; over?: number; uses?: string };
+type Case = {
+  name: string; setup?: (i: number) => Promise<void>; run: (i: number) => Promise<unknown>; over?: number; uses?: string;
+  /** Its vault calls and its statements, held exactly where a route's cost lies in them more than in its trips. */
+  calls?: number; statements?: number;
+};
 
 /** A route sending API_KEY, which market/dev holds. */
 const ROUTE: ProxyDefinition = {
@@ -330,6 +336,12 @@ const CASES: Case[] = [
     },
     run: (i) => owner.call('DELETE /members/:member/passkeys', { member: `user:reset-${held}-${i}@acme.example` }),
   })),
+  // A returning person's browser sign-in, the provider alone, holding no passkey under `optional` (state-rows.md,
+  // section 3): the identity read; the vault's access and its prepare; then one Sync of the change lock, the member's
+  // row, their passkeys and the identity stamped, its update the re-read; and one of the session's row, its change and
+  // the COMMIT. `waitSealed` is the third vault call. The freeze deletes `audited`'s two `audit_chain_head` reads, in
+  // the same Syncs, and lowers it to 9 statements.
+  { name: 'signed in, browser', over: 5, calls: 3, statements: 11, setup: () => signedIn(), run: () => signedIn() },
   {
     name: 'token revoked', over: 5,
     setup: async (i) => void tokens.set(i, (await owner.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 })).id),
@@ -337,12 +349,24 @@ const CASES: Case[] = [
   },
 ];
 const tokens = new Map<number, string>();
+
+/** A member with no passkey signs in again through the provider (`completeSignin`): the first binds their account. */
+async function signedIn(): Promise<void> {
+  const signed = await runtime.signin!.completeSignin({ provider: 'github', subject: 'signer', emails: [SIGNER], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox on macOS' });
+  if (!('credential' in signed)) throw new Error(`${SIGNER} was not signed in`);
+}
 const seals = new Map<number, string | null>();
+
+/** The statements a trace's Syncs sent, but BEGIN and COMMIT. */
+function statementsIn(ran: readonly string[]): number {
+  return ran.flatMap((line) => (/ Sync: /.test(line) ? line.split(' Sync: ')[1]!.split(' | ') : []))
+    .filter((statement) => statement !== '(none)' && !/^(begin|commit)\b/i.test(statement)).length;
+}
 
 test('each change route answers within its budget of round trips', async () => {
   const table: Record<string, { app: number; vault: number; hot: number; total: number; calls: number; ms: number }> = {};
   const failures: string[] = [];
-  for (const [n, { name, setup, run, over, uses = 'market/base' }] of CASES.entries()) {
+  for (const [n, { name, setup, run, over, calls, statements, uses = 'market/base' }] of CASES.entries()) {
     try {
       // The warm request and the measured one in one bulk refresh period of every key they use (a minute, at the default
       // 15-minute window, from each key's phase): a use that crosses into the next moves its key's row on, a statement
@@ -361,6 +385,9 @@ test('each change route answers within its budget of round trips', async () => {
         // A change's decision is the vault's alone: nothing on the hot path.
         if (counts.hot > 0) failures.push(`${name}: ${counts.hot} round trips on the hot path`);
       } else assertOver(name, { trips: total }, { budget: { trips: over }, of: BUDGET.change }, trace);
+      // Where a case names them, its vault calls and its statements, BEGIN and COMMIT aside, exactly.
+      if (calls !== undefined && counts.calls !== calls) failures.push(`${name}: ${counts.calls} vault calls, not ${calls}${trace}`);
+      if (statements !== undefined && statementsIn(ran) !== statements) failures.push(`${name}: ${statementsIn(ran)} statements, not ${statements}${trace}`);
       if (process.env.COFFRE_CHANGE_COST_VERBOSE) console.log(`\n${name}\n  ${ran.join('\n  ')}`);
     } catch (error) {
       const { message } = error as Error;

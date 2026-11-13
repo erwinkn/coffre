@@ -12,7 +12,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { decideApproval } from '../src/db/queries.ts';
 import { callDigest } from '../src/mcp/approvals.ts';
 import { TOOL_BY_NAME } from '../src/mcp/tools.ts';
-import { clientFor, holdSomething } from './api-fixture.ts';
+import { clientFor, holdSomething, loggedEntries } from './api-fixture.ts';
 import { auditLog, credentials, mcpApprovals, mcpConnections } from '@coffre/db/schema';
 import { browserFor, callRaw, client, connect, db, deps, DEV, documents, entries, fetched, fromPage, type Result, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 
@@ -214,7 +214,7 @@ test('a value comes from the page only: the person types it, coffre writes it, a
   assert.equal(JSON.stringify(revealed).includes(typed), true, 'written');
   assert.equal(JSON.stringify(first.body).includes(typed) || JSON.stringify(result.body).includes(typed), false);
   assert.equal(JSON.stringify(await approvalRows()).includes(typed), false, 'never stored with the approval');
-  const log = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog);
+  const log = (await loggedEntries(db.owner)).map(({ metadata }) => ({ metadata }));
   assert.equal(JSON.stringify(log).includes(typed), false);
 });
 

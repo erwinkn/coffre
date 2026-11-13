@@ -10,7 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { cloudflareAccess, github, google, hashToken, signin } from '@coffre/core/identity';
 import type { UseInput, Vault } from '@coffre/core/vault';
 import { createDatabase, type Database } from '@coffre/db';
-import { and, eq, gt, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
@@ -18,7 +18,7 @@ import { checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
-import { clientFor, entryOf, contextFor, hotDatabaseUrl, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { logMark, loggedSince, clientFor, entryOf, contextFor, hotDatabaseUrl, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { auditLog, credentials as credentialRows, environments, bulkCap, checkpointFence, logUses, grants } from '@coffre/db/schema';
@@ -125,9 +125,9 @@ async function reveal(token: string, body: { path: string; keys?: readonly strin
   return { status: response.status, body: (await response.json()) as Record<string, unknown> };
 }
 
-/** The app's entries since `seq`, as action, decision and code. */
-async function entriesSince(seq: bigint): Promise<string[]> {
-  const rows = await db.owner.select({ action: auditLog.action, decision: auditLog.decision, code: auditLog.code, metadata: auditLog.metadata }).from(auditLog).where(gt(auditLog.seq, seq)).orderBy(auditLog.seq);
+/** The entries since `mark`, as action, decision and code. */
+async function entriesSince(mark: number): Promise<string[]> {
+  const rows = await loggedSince(db.owner, mark);
   // A proxy's use as it names it (`logged`): its credential, host, and egress.
   const named = (metadata: unknown) => {
     const { credential, host, egress: through } = (typeof metadata === 'string' ? JSON.parse(metadata) : metadata ?? {}) as Record<string, unknown>;
@@ -135,7 +135,7 @@ async function entriesSince(seq: bigint): Promise<string[]> {
   };
   return rows.map((row) => `${row.action} ${row.decision} ${row.code ?? ''}`.trim() + named(row.metadata));
 }
-const newest = async () => (await db.owner.select({ seq: auditLog.seq }).from(auditLog)).reduce((max, row) => (row.seq > max ? row.seq : max), -1n);
+const newest = () => logMark(db.owner);
 
 test('one key, by its path or as a list of one, a person\'s CLI session or token or a service\'s, is the vault\'s one call by name; several are not', async () => {
   const token = await personalToken(DEV);
@@ -177,8 +177,10 @@ test('a key the place does not hold is answered as every refusal of a key is, an
       answers.push({ status: read.status, values: read.body.values, sensitive: read.body.sensitive, error: read.body.error, entries: await entriesSince(since) });
     }
     const [before, now] = answers;
-    // By its path, a key never made: no such key, or no access to it, alike; the log says which, as before.
-    assert.deepEqual(now, body.path.endsWith('NEVER_MADE') ? { ...before!, error: 'not_available' } : before, JSON.stringify(body));
+    // By its path, a key never made: no such key, or no access to it, alike; the log says which, as before: the app's
+    // `unknown_secret` on its own path, the vault's code, `missing`, by name.
+    if (body.path.endsWith('NEVER_MADE')) assert.deepEqual(before!.entries, ['secret.read deny unknown_secret']);
+    assert.deepEqual(now, body.path.endsWith('NEVER_MADE') ? { ...before!, error: 'not_available', entries: ['secret.read deny missing'] } : before, JSON.stringify(body));
   }
 });
 
@@ -436,6 +438,7 @@ test("a token that expires during its request is that request's, judged at its o
   const issued = await runtime.signin!.issuePersonalToken(await contextFor(deps, EXPIRING), { label: 'expiring', expiresInMinutes: 1, scope: { 'market/dev': 'developer' } });
   const expiresAt = Date.parse(issued.expiresAt);
   const real = deps.vault.useNamed!;
+  const note = deps.vault.note!;
   const ask = async (key: string) => {
     // Just before its expiry when the request begins, and past it once the vault has answered.
     mock.timers.enable({ apis: ['Date'], now: expiresAt - 300 });
@@ -444,9 +447,16 @@ test("a token that expires during its request is that request's, judged at its o
       mock.timers.setTime(expiresAt + 700);
       return answered;
     };
+    // A refusal's event is stamped by the real clock, once the app has judged it: one stamped a minute ahead would sort
+    // after every entry the later tests log.
+    deps.vault.note = async (input) => {
+      mock.timers.reset();
+      return note.call(deps.vault, input);
+    };
     try {
       return await reveal(issued.token, { path: `market/dev/${key}` });
     } finally {
+      deps.vault.note = note;
       deps.vault.useNamed = real;
       mock.timers.reset();
     }
@@ -538,11 +548,39 @@ test("the proxy's use of a plain value is answered and logged as before; of a ke
     for (const url of [`/use/market/${env}/api/v1/thing`, '/use/api/v1/thing']) {
       const [before, now] = await both((at) => proxied(url, handle, at));
       if (env === 'plain') assert.deepEqual(now, before, `${env}: ${url}`);
-      // Its credential's key not held there: no such key, or no access to it, logged as a refusal of it.
-      else assert.deepEqual(now, { answer: { status: 404, body: '{"error":"credential_proxy","message":"not available: no such key, or no access to it","reason":"not_available"}' }, entries: ['secret.read deny'] }, `${env}: ${url}`);
+      // Its credential's key not held there: no such key, or no access to it, logged as a refusal of it, the vault's code.
+      else assert.deepEqual(now, { answer: { status: 404, body: '{"error":"credential_proxy","message":"not available: no such key, or no access to it","reason":"not_available"}' }, entries: ['secret.read deny missing'] }, `${env}: ${url}`);
       // Its entry names the credential, its host, and the egress it left through.
       if (now!.answer.status === 204) assert.ok(now!.entries.some((entry) => entry.startsWith('credential.use') && entry.includes('"egress":true')), `${env}: ${url}: ${JSON.stringify(now)}`);
     }
+  }
+});
+
+test("the proxy's use of a plain value is its own event, a second vault call, written before the value goes back: the event refused, nothing goes back", async () => {
+  const root = clientFor(deps, ROOT);
+  await root.environments.create('market/public');
+  await root.secrets.set('market/public', { API_KEY: { value: 'pk_public_0123', sensitivity: 'plain' } });
+  await root.access.set(`user:${DEV}`, { 'market/dev': 'developer', 'market/public': 'developer' });
+  const handleOf = async (env: string) => (await runtime.signin!.issueHandle({ ...(await contextFor(deps, DEV)), personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: [`market/${env}`] })).token;
+  const [plainHandle, sealedHandle] = [await handleOf('public'), await handleOf('dev')];
+  const used = async (handle: string, env: string) => {
+    calls.length = 0;
+    sent.length = 0;
+    const answer = await proxied(`/use/market/${env}/api/v1/thing`, handle);
+    return { status: answer.status, calls: calls.filter((call) => call === 'useNamed' || call === 'note' || call === 'use'), sent: [...sent] };
+  };
+  // A sealed value: the use by name records it, one call. A plain one: the use by name decides it, its event a note.
+  assert.deepEqual(await used(sealedHandle, 'dev'), { status: 204, calls: ['useNamed'], sent: [DEV_KEY] });
+  assert.deepEqual(await used(plainHandle, 'public'), { status: 204, calls: ['useNamed', 'note'], sent: ['pk_public_0123'] });
+  // The vault refuses the event: the request fails with it, and the value never reaches the upstream.
+  const note = deps.vault.note!;
+  deps.vault.note = async () => ({ ok: false, refusal: { code: 'invalid', message: 'refused for the test' } });
+  try {
+    sent.length = 0;
+    await assert.rejects(proxied('/use/market/public/api/v1/thing', plainHandle), /the vault wrote no event credential\.use: refused for the test/);
+    assert.deepEqual(sent, []);
+  } finally {
+    deps.vault.note = note;
   }
 });
 
@@ -554,7 +592,11 @@ test("a handle whose person lost their grant is refused by the use, as every ref
   // its handle's check first, `handle`, then the use).
   for (const url of ['/use/market/dev/api/v1/thing', '/use/api/v1/thing', '/use/api/thing']) {
     const [before, now] = await both((at) => proxied(url, handle, at));
-    assert.deepEqual(now!.entries, before!.entries, `${url}: logged as before`);
+    // Logged as before, each saying why: the app's check on its own path, the vault's use by name.
+    const refused = (entries: string[], code: string) => entries.map((entry) => entry.replace(new RegExp(` ${code}$`), ''));
+    assert.deepEqual(before!.entries, ['secret.read deny missing_secret_use'], url);
+    assert.deepEqual(refused(now!.entries, 'no_grant'), refused(before!.entries, 'missing_secret_use'), `${url}: logged as before`);
+    assert.deepEqual(now!.entries, ['secret.read deny no_grant'], url);
     assert.ok(now!.entries.some((entry) => entry.includes('deny')), `${url}: the refusal logged: ${JSON.stringify(now)}`);
     assert.deepEqual(now!.answer, { status: 404, body: '{"error":"credential_proxy","message":"not available: no such key, or no access to it","reason":"not_available"}' }, url);
   }
@@ -686,7 +728,9 @@ test("at a fork, every refusal of a key is one answer in one vault call: one inh
   };
   // Theirs: the fork's own.
   assert.equal((await answer('market/feature/OWN')).status, 200);
-  const no = { status: 404, body: { error: 'not_available', message: 'not available: no such key, or no access to it' }, calls: ['useNamed'] };
+  // One call by name decides each, and the refusal's event is one `note` (A1), until the vault records it in the
+  // call that refused (V1).
+  const no = { status: 404, body: { error: 'not_available', message: 'not available: no such key, or no access to it' }, calls: ['useNamed', 'note'] };
   // dev's, which they do not read, and a key never made: alike, one call each (before: the app's path, `parent_unreadable`).
   for (const path of ['market/feature/API_KEY', 'market/feature/NEVER_MADE']) assert.deepEqual(await answer(path), no, path);
   const [before] = await both((at) => reveal(token, { path: 'market/feature/API_KEY' }, at));

@@ -13,8 +13,8 @@ import { indexOf, logObject } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
 import { policySeqAndSettings } from '../src/db/answers.ts';
-import { hasTombstone, latestCheckpoint, latestTallied, memberAccess, missingMembers, originsOf, talliedAfter } from '../src/db/queries.ts';
-import { newestAppEntry, newestMove, wroteUnder } from '../src/db/rotation.ts';
+import { bindingEndedInLog, bindingLive, latestCheckpoint, latestTallied, memberAccess, missingMembers, originsOf, talliedAfter } from '../src/db/queries.ts';
+import { newestAppEntry, newestMove } from '../src/db/rotation.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { emptyLog, openTestDatabase, withLogUnlocked, withTriggersLifted } from './db/engine.ts';
 
@@ -52,6 +52,7 @@ const ZERO = Buffer.alloc(32);
 /** A change's seal and its MAC, both 16 bytes: no MAC of the vault's, which the reads here do not check. */
 const SEAL = Buffer.alloc(16);
 const CREDENTIAL = '00000000-0000-4000-8000-0000000000c1';
+const BINDING = '00000000-0000-4000-8000-0000000000d1';
 
 const LOOKUPS: Lookup[] = [
   {
@@ -67,15 +68,6 @@ const LOOKUPS: Lookup[] = [
     tail: [{ author: 'vault', action: 'key.unwrap' }],
     indexes: ['audit_log_app_idx'],
     ask: async (app, { newest }) => assert.equal((await newestAppEntry(app))?.seq, newest),
-  },
-  {
-    name: 'wroteUnder',
-    // Under the app's previous key, after one before it: the first of its entries, past every one of the other's.
-    head: [{ author: 'app', action: 'secret.read', key: 'app:first', count: TAIL }],
-    run: { author: 'app', action: 'secret.read', key: 'app:previous' },
-    tail: [],
-    indexes: ['audit_log_app_key_idx'],
-    ask: async (app) => assert.equal(await wroteUnder(app, 'app:previous'), true),
   },
   {
     name: 'latestCheckpoint, latestTallied, talliedAfter',
@@ -134,18 +126,19 @@ const LOOKUPS: Lookup[] = [
     },
   },
   {
-    // Whether a binding has a tombstone (`EXISTS`): one probe of `audit_log_unbind_idx` keyed by the binding,
-    // past a long run of other bindings' unbinds.
-    name: 'hasTombstone',
-    run: { author: 'app', action: 'token.unbind', metadata: JSON.stringify({ bindingId: 'binding:other' }) },
-    tail: [{ author: 'app', action: 'secret.read' }],
-    indexes: ['audit_log_unbind_idx'],
+    // Whether a binding is live, and whether its end is the vault's (its row's seal and its newest change's op), behind
+    // a long run of another object's changes: one step of the object's own.
+    name: 'bindingLive, bindingEndedInLog',
+    tail: [],
+    changes: [
+      { object: logObject('secret', '00000000-0000-4000-8000-0000000000b1'), count: TAIL },
+      { object: logObject('binding', BINDING), payload: JSON.stringify({ op: 'binding.make' }) },
+    ],
+    indexes: ['log_changes_object_idx'],
     ask: async (app) => {
-      const [none, other] = await Promise.all(['binding:none', 'binding:other'].map(async (id) => {
-        const [row] = await rowsOf<{ t: boolean }>(app, sql`SELECT ${hasTombstone(id)} AS t`);
-        return Boolean(row!.t);
-      }));
-      assert.deepEqual([none, other], [false, true]);
+      const id = sql`CAST(${BINDING} AS uuid)`;
+      const [row] = await rowsOf<{ live: boolean; ended: boolean }>(app, sql`SELECT ${bindingLive(id, sql`${SEAL}`)} AS live, ${bindingEndedInLog(id, sql`${SEAL}`)} AS ended`);
+      assert.deepEqual(row, { live: true, ended: false });
     },
   },
   ...(['policy', 'settings'] as const).map((kind): Lookup => ({
@@ -193,7 +186,7 @@ async function newestSeq(): Promise<bigint> {
 type Statement = { text: string; values: unknown[] };
 type Node = { 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Index Name'?: string; Plans?: Node[] };
 
-/** Each statement on the audit log `work` sends as the app: through a client of the app's login. */
+/** Each statement on the audit log or 0.15's changes `work` sends as the app: through a client of the app's login. */
 async function sent(work: (app: Database) => Promise<unknown>): Promise<Statement[]> {
   const seen: Statement[] = [];
   const client = postgresClient(TEST_RUNTIME_DATABASE_URL, { max: 1 });
@@ -207,7 +200,7 @@ async function sent(work: (app: Database) => Promise<unknown>): Promise<Statemen
   } finally {
     await client.end();
   }
-  return seen.filter(({ text }) => /\baudit_log\b/.test(text) && /^\s*(select|with)\b/i.test(text));
+  return seen.filter(({ text }) => /\b(audit_log|log_changes)\b/.test(text) && /^\s*(select|with)\b/i.test(text));
 }
 
 /** The pages `statement` reads, run again under EXPLAIN as the app's login, and the indexes it reads them by. */

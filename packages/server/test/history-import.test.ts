@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 
 import { planImport, type CoffreClient } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
-import { and, asc, count, eq } from 'drizzle-orm';
+import { count, eq } from 'drizzle-orm';
 
 import { auditLog, secrets, secretVersions } from '@coffre/db/schema';
 import { serveApi } from '../src/api/router.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps, outcomes } from './api-fixture.ts';
+import { clientFor, contextFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, type FixtureDeps, outcomes } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const VIEWER = 'viewer@acme.example';
@@ -50,13 +50,9 @@ async function importText(content: string, dryRun: boolean, as = root) {
   return { plan, changes, problems };
 }
 
+/** The log's entries of `action` so decided: `audit_log`'s, and the app's events, a refusal's (`loggedEntries`). */
 async function auditRows(action: string, decision: 'allow' | 'deny') {
-  const rows = await db.owner
-    .select({ metadata: auditLog.metadata, operationId: auditLog.operationId, relatedSeq: auditLog.relatedSeq })
-    .from(auditLog)
-    .where(and(eq(auditLog.action, action), eq(auditLog.decision, decision)))
-    .orderBy(asc(auditLog.seq));
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) }));
+  return (await loggedEntries(db.owner, [action])).filter((row) => row.decision === decision);
 }
 
 /** A raw PATCH, for query strings the client would never send. */
@@ -148,9 +144,12 @@ test('a restore is audited with both versions, and refused without write permiss
   await root.secrets.restore('market/dev/API_KEY', 1);
   const [restored] = await auditRows('secret.restore', 'allow');
   assert.deepEqual(restored.metadata, { key: 'API_KEY', version: 3, from: 1 });
-  // It follows from the vault's rewrap, which shares its operation.
+  // It names the vault's rewrap of the same member, request and operation, secret and version.
   const [rewrap] = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'key.rewrap'));
-  assert.deepEqual([restored.relatedSeq, restored.operationId], [rewrap.seq, rewrap.operationId]);
+  assert.deepEqual(
+    [restored.actor, restored.requestId, restored.operationId, restored.secretId, restored.metadata.version],
+    [rewrap.actor, rewrap.requestId, rewrap.operationId, rewrap.secretId, JSON.parse(rewrap.metadata).version],
+  );
   await assert.rejects(reader.secrets.restore('market/dev/API_KEY', 2), { status: 403 });
   assert.equal((await auditRows('secret.restore', 'deny'))[0].metadata.reason, 'missing_secret_write');
 });

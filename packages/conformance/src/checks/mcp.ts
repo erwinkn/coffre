@@ -307,18 +307,17 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
   const leaked = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
   expect(leaked.length === 0, 'a Read tool answered with a secret value', leaked);
 
-  // Every call in the log, under the client; the API's own refusal names the connection.
+  // A read-only call that returns no value writes nothing of its own, as a page view does not; the API's refusal is in
+  // the log, once, under the client, and so are the API's own entries for the calls.
   await settled(deployment);
   const { entries } = await people.admin.api.audit.list({ actor: people.reader.member, detail: '1', limit: 500 });
   const mine = entries.filter((entry) => (entry.metadata.via as { clientId?: string } | undefined)?.clientId === clientId);
   const reads = mine.filter((entry) => entry.action === 'mcp.read').length;
-  const refused = mine.filter((entry) => entry.action === 'mcp.call' && entry.decision === 'deny').length;
-  expect(reads === 5 && refused === 1, 'the log does not hold each call under the client', { reads, refused });
+  const refused = mine.filter((entry) => entry.decision === 'deny').length;
+  expect(reads === 0 && refused === 1, 'the log does not hold the refusal once under the client, and nothing for the reads', { reads, refused });
   const api = mine.filter((entry) => !entry.action.startsWith('mcp.'));
   expect(api.length > 0, "the API's own entries for the calls do not name the connection", mine.map((entry) => entry.action));
-  const shown = (await people.admin.api.audit.list({ actor: people.reader.member, limit: 500 })).entries;
-  expect(!shown.some((entry) => entry.action === 'mcp.read'), 'read-only calls are not detail');
-  return `on 2026-07-28 and 2025-11-25, the Read tools as the reader: ${DEV} listed, ${PROD} refused, no value in any answer; headers held to the body; ${reads} reads as detail and the refusal shown, each under the client`;
+  return `on 2026-07-28 and 2025-11-25, the Read tools as the reader: ${DEV} listed, ${PROD} refused, no value in any answer; headers held to the body; the refusal in the log under the client, and no entry for a read`;
 }
 
 type ToolAnswer = {

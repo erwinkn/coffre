@@ -11,7 +11,6 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { defineDeployment } from '@coffre/core/deployment';
 import { defineSignin, github, signin } from '@coffre/core/identity';
 import { RELEASE, versioned, type ProxyDefinition, type VaultEntry } from '@coffre/core/vault';
-import { and, asc, eq } from 'drizzle-orm';
 
 import { keeps015 } from '../src/api/changes.ts';
 import { SigninService } from '../src/api/signin.ts';
@@ -19,6 +18,7 @@ import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { auditLog } from '@coffre/db/schema';
+import { loggedEntries } from './api-fixture.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -102,9 +102,8 @@ async function refusal(call: Promise<unknown>): Promise<{ status: number; reason
 }
 
 async function denials(action: string): Promise<string[]> {
-  const rows = await db.owner.select({ metadata: auditLog.metadata, code: auditLog.code }).from(auditLog)
-    .where(and(eq(auditLog.action, action), eq(auditLog.decision, 'deny'))).orderBy(asc(auditLog.seq));
-  return rows.map((row) => row.code ?? (JSON.parse(row.metadata) as { reason?: string }).reason ?? '?');
+  const rows = (await loggedEntries(db.owner, [action])).filter((entry) => entry.decision === 'deny');
+  return rows.map((row) => row.code ?? (row.metadata as { reason?: string }).reason ?? '?');
 }
 
 /** The API as a request with this bearer token sees it, through the app's front door. */
@@ -155,8 +154,8 @@ test("a role an Owner gives proxy.edit routes what its holder reads, where the u
   assert.match(sensitive.message!, /STRIPE_SECRET_KEY is sensitive: an Owner of its project may route sensitive keys/);
   const owner = await pat.proxy.save('market/dev', { seal: null, items: { stripe2: route('stripe2', ['STRIPE_SECRET_KEY']) } });
   assert.deepEqual(owner.items.map((item) => [item.savedBy, item.routesSensitive]), [[PAT, true]]);
-  const [entry] = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog).where(and(eq(auditLog.action, 'proxy.save'), eq(auditLog.actor, PAT)));
-  assert.deepEqual((JSON.parse(entry!.metadata) as { proxy: { saved: { routesSensitive: string[] }[] } }).proxy.saved[0]!.routesSensitive, ['STRIPE_SECRET_KEY']);
+  const [entry] = (await loggedEntries(db.owner, ['proxy.save'])).filter((row) => row.actor === PAT);
+  assert.deepEqual((entry!.metadata as { proxy: { saved: { routesSensitive: string[] }[] } }).proxy.saved[0]!.routesSensitive, ['STRIPE_SECRET_KEY']);
 });
 
 test("the tab marks an item that would not route now, until someone who reads its keys saves it again (decision 5)", async () => {

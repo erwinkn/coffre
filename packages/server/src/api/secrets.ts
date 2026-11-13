@@ -6,7 +6,7 @@ import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coff
 import { isTombstone, splitAtMost } from '@coffre/core/schemas';
 import { handsBack, type HolderRef, type SecretColumns, type SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
-import { laterHead } from '@coffre/db/log';
+import { laterChange } from '@coffre/db/log';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { dismissedKeys, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 
@@ -30,6 +30,7 @@ import {
   secretHistory,
   update,
   MAX_PARENTS,
+  parentsOf,
   type ParentRow,
   type ResolvedPath,
   type SecretPlaceRow,
@@ -43,8 +44,8 @@ import {
 import { can, lists, permissionsAt, placeOf, type Caller } from './caller.ts';
 import { protectedFor, unprotects } from './roles.ts';
 import { AppChanges, ObjectMoved, retrying, secretChange, uses015, versionColumns, writtenSecret } from './changes.ts';
-import { allowed, asking, audited, denied, fenced, need, recorded, refuse, Refusal, unlogged, vaultRefusal, wayIn, withRefusals, type ApiContext, type EntryFields } from './context.ts';
-import { appendAudit, appLogKey, type AuditEntry } from '../db/audit.ts';
+import { allowed, asking, audited, denied, entryOf, eventsOf, fenced, need, recorded, refuse, Refusal, vaultDecided, vaultRefusal, wayIn, withRefusals, type ApiContext, type EntryFields } from './context.ts';
+import { eventOf, noteEvent, sameEvent, type AuditEntry } from '../db/audit.ts';
 import type { Written, WriteTry } from '../write-ahead.ts';
 import { readAhead, type ReadAhead } from '../db/read-ahead.ts';
 import { requireFresh } from './fresh-routes.ts';
@@ -557,11 +558,54 @@ async function endRemovals(
   keys: readonly string[],
   operationId: string | null,
 ): Promise<void> {
-  if (place.environment!.parentId === null || keys.length === 0) return;
-  const removed = new Set((await dismissalsIn(tx, environment.environmentId)).map((row) => row.key));
-  for (const key of keys.filter((key) => removed.has(key))) {
+  for (const { key, entry } of await removalsEnded(ctx, tx, place, environment, keys, operationId)) {
     await update(tx, dismissedKeys, { environmentId: environment.environmentId, key }, { restoredAt: new Date(), restoredBy: ctx.caller.principal.id });
-    log.push(allowed(ctx, 'missing.restore', { ...environment, operationId, metadata: { key } }));
+    log.push(entry);
+  }
+}
+
+/**
+ * The removals a write ends (`endRemovals`), each with its entry, as read in `db`: before the write's transaction, the
+ * events it prepares (no change records a removal); under the change lock, what it ends, which must be those
+ * (`onlyPrepared`).
+ */
+async function removalsEnded(
+  ctx: ApiContext,
+  db: Queryable,
+  place: ResolvedPath,
+  environment: Environment,
+  keys: readonly string[],
+  operationId: string | null,
+): Promise<{ key: string; entry: AuditEntry }[]> {
+  if (place.environment!.parentId === null || keys.length === 0) return [];
+  const removed = new Set((await dismissalsIn(db, environment.environmentId)).map((row) => row.key));
+  return keys.filter((key) => removed.has(key)).map((key) => ({ key, entry: allowed(ctx, 'missing.restore', { ...environment, operationId, metadata: { key } }) }));
+}
+
+/**
+ * What a write to keys does that no change records, each an event it prepares before its transaction: a removal ended
+ * or made, a key renamed, a key filed (its object holds neither name nor folder). A write's other entries are its
+ * changes' (a value written, a key archived).
+ */
+const EVENTS: ReadonlySet<string> = new Set(['missing.restore', 'missing.dismiss', 'secret.rename', 'secret.move']);
+
+/**
+ * Under the change lock, at the end of a write's work: each entry of an `EVENTS` action it logged is one of the events
+ * it prepared from what it read before its transaction (`AppChanges.prepare`), one for one. One that is none of them (a
+ * key removed, renamed or filed by another write between that read and the lock) is read and prepared again
+ * (`ObjectMoved`): none is recorded but as an event the vault signed. One prepared and not logged commits nothing.
+ *
+ *   read before:  prod-eu removes STRIPE_KEY        prepared: missing.restore STRIPE_KEY
+ *   under the lock: prod-eu removes STRIPE_KEY, PAYPAL_KEY too    logged: two missing.restore   ObjectMoved, read again
+ */
+export function onlyPrepared(log: readonly AuditEntry[], prepared: readonly AuditEntry[]): void {
+  const left = prepared.map((entry) => eventOf(entry, null, ''));
+  for (const entry of log) {
+    if (!EVENTS.has(entry.action)) continue;
+    const event = eventOf(entry, null, '');
+    const i = left.findIndex((one) => sameEvent(one, event));
+    if (i < 0) throw new ObjectMoved();
+    left.splice(i, 1);
   }
 }
 
@@ -703,6 +747,8 @@ export async function setSecrets(
   const marks = Object.entries(patch).flatMap(([key, value]) => (isMark(value) ? [{ key, to: value.sensitivity }] : []));
   const refs = Object.entries(patch).flatMap(([key, value]) => (value !== null && typeof value === 'object' && 'ref' in value ? [{ key, ref: value.ref }] : []));
   const archives = keysIn.filter((key) => patch[key] === null);
+  // The keys it leaves with a row live.
+  const live = keysIn.filter((key) => patch[key] !== null);
   const result = await optimistic(ctx, async () => {
     const operationId = randomUUID();
     const heads = await secretHeads(ctx.db, environment.environmentId, { keys: keysIn });
@@ -781,6 +827,8 @@ export async function setSecrets(
       }
     }
 
+    // In a fork, the removals of the keys it makes live end (`endRemovals`), which no change records: its events.
+    const restoring = (await removalsEnded(ctx, ctx.db, place, environment, live, operationId)).map(({ entry }) => entry);
     // With 0.15's log, each key's change, from its object as read to what this write leaves it: the rows it was
     // prepared from are the transaction's, held below (`PrepareAgain`), and their seals by `app_change`. Refused, the
     // write stores none of the references the vault just made: they are abandoned, as when its transaction fails.
@@ -790,26 +838,64 @@ export async function setSecrets(
       // the two reads is prepared again, or a change prepared from one state would be committed beside a write from the other.
       if (heads.some((row) => !sameHead(row, objects.get(row.id)))) throw new PrepareAgain();
       const at = (id: string) => ({ id, ...environment });
-      const after = new Map<string, SecretColumns | null | 'as read'>();
+      // Each key's change, and the entry it carries, built from what this attempt prepared, which the transaction
+      // holds it to: a value written says the level the key had as read before (`levelNow`), compared under the head below.
+      // A key revived and written in one change carries one entry, its write's, which says so (`unarchived`).
+      const revived = (key: string) => (prepared.get(key)?.archivedAt != null ? { unarchived: true } : {});
+      const after = new Map<string, { columns: SecretColumns | null | 'as read'; entry: AuditEntry | null }>();
       // Unarchived with nothing written: as it was (a reference written again unchanged), restored.
       for (const key of keysIn) {
         const row = prepared.get(key);
-        if (row !== undefined && patch[key] !== null && row.archivedAt !== null && objects.has(row.id)) after.set(row.id, 'as read');
+        if (row !== undefined && patch[key] !== null && row.archivedAt !== null && objects.has(row.id)) {
+          after.set(row.id, { columns: 'as read', entry: allowed(ctx, 'secret.unarchive', { ...environment, secretId: row.id, operationId, metadata: { key } }) });
+        }
       }
       items.forEach(({ key, secret, value, versionId }, i) => {
         const level = levelOf(key);
-        after.set(secret.secretId, writtenSecret(at(secret.secretId), versionColumns(versionId, sealed.values[i]!, { sensitive: level === 'sensitive', plaintext: level === 'plain' ? value : null })));
+        const recipe = recipes.get(key) ?? null;
+        after.set(secret.secretId, {
+          columns: writtenSecret(at(secret.secretId), versionColumns(versionId, sealed.values[i]!, { sensitive: level === 'sensitive', plaintext: level === 'plain' ? value : null })),
+          entry: allowed(ctx, 'secret.write', {
+            ...environment, secretId: secret.secretId, operationId,
+            metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(level, levelNow(key)), ...revived(key) },
+          }),
+        });
       });
-      marked.forEach(({ secret, to, versionId }, i) => {
-        after.set(secret.secretId, writtenSecret(at(secret.secretId), versionColumns(versionId, rewrapped.values[i]!, { sensitive: to === 'sensitive', plaintext: null })));
+      // The value as it is, marked. Made looser, a sensitive value made a secret, it is its own entry, `secret.loosen`,
+      // which no reader of the log takes for a write of a value its maker saw.
+      marked.forEach(({ key, secret, from, to, was, recipe, versionId }, i) => {
+        const recipeDetail = recipe === null ? {} : { recipe: recipe.recipe };
+        after.set(secret.secretId, {
+          columns: writtenSecret(at(secret.secretId), versionColumns(versionId, rewrapped.values[i]!, { sensitive: to === 'sensitive', plaintext: null })),
+          entry: stricter(was, to)
+            ? allowed(ctx, 'secret.loosen', {
+              ...environment, secretId: secret.secretId, operationId,
+              metadata: { key, version: secret.version, ...recipeDetail, from: was, to, kept: from.version, ...revived(key) },
+            })
+            : allowed(ctx, 'secret.write', {
+              ...environment, secretId: secret.secretId, operationId,
+              metadata: { key, version: secret.version, ...recipeDetail, ...sensitivityDetail(to, was), kept: from.version, ...revived(key) },
+            }),
+        });
       });
-      for (const { id, holder, source } of references) after.set(holder.secretId, { ...at(holder.secretId), source: source.id, reference: id, version: null });
+      references.forEach(({ key, id, holder, source }, i) => {
+        after.set(holder.secretId, {
+          columns: { ...at(holder.secretId), source: source.id, reference: id, version: null },
+          entry: allowed(ctx, 'secret.reference', {
+            ...environment, secretId: holder.secretId, operationId, metadata: {
+              key, source: sourcePath(source), also: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.id }, ...revived(key),
+            },
+          }),
+        });
+      });
       for (const key of archives) {
         const row = prepared.get(key);
-        if (row !== undefined && row.archivedAt === null) after.set(row.id, null);
+        if (row !== undefined && row.archivedAt === null) {
+          after.set(row.id, { columns: null, entry: allowed(ctx, 'secret.archive', { ...environment, secretId: row.id, operationId, metadata: { key } }) });
+        }
       }
-      return [...after].map(([id, columns]) => secretChange(id, objects.get(id), columns));
-    }).catch(async (error: unknown) => {
+      return [...after].map(([id, { columns, entry }]) => secretChange(id, objects.get(id), columns, entry === null ? null : entryOf(ctx, entry)));
+    }, eventsOf(ctx, ...restoring)).catch(async (error: unknown) => {
       await abandon(ctx, operationId, references, made.seqs);
       throw error;
     });
@@ -865,13 +951,14 @@ export async function setSecrets(
         const before = new Map([...byKey].filter(([key]) => prepared.has(key)));
         if (regenerated(patch, before, await inheritedOf(tx, place)) !== null) throw new PrepareAgain();
       }
-      // Each written key's level again under the head, what its entry says it was. A write that says nothing takes it: a
-      // value written or marked, a reference made, retargeted or ended, here or in a parent, since it was prepared, is prepared again.
+      // Each written key's level again under the head, which its entry says it was as read before (`levelNow`), and a write
+      // that says nothing takes: a value written or marked, a reference made, retargeted or ended, here or in a parent, since
+      // it was prepared, prepares it again.
       const previous = items.length === 0 ? new Map<string, Sensitivity | null>() : await levelsAt(tx, place, environment.environmentId, items.map(({ key }) => key));
-      const loosened = items.filter(({ key, secret }) => !asked.has(key) && previous.get(key) === 'sensitive' && secret.sensitive !== true);
+      const moved = items.filter(({ key }) => (previous.get(key) ?? null) !== levelNow(key));
       // Found so, it stays so: the attempt that prepares again keeps it sensitive, whatever its source is by then.
-      for (const { key } of loosened) sticky.add(key);
-      if (loosened.length > 0) throw new PrepareAgain();
+      for (const { key } of moved) if (previous.get(key) === 'sensitive') sticky.add(key);
+      if (moved.length > 0) throw new PrepareAgain();
       const keys: Record<string, SetOutcome> = {};
       // A reset override written again serves again, a reference written again unchanged too; still one the parent holds.
       const revived = keysIn.filter((key) => patch[key] !== null && byKey.get(key)?.archivedAt != null);
@@ -879,37 +966,22 @@ export async function setSecrets(
       for (const key of revived) {
         const row = byKey.get(key)!;
         if (!stillResettable.has(key)) throw refuseArchived(key, row);
+        // Revived alone, its change carries `secret.unarchive`; given a value or a reference too, that entry says `unarchived`.
         await update(tx, secrets, { id: row.id }, { archivedAt: null });
-        log.push(allowed(ctx, 'secret.unarchive', { ...environment, secretId: row.id, operationId, metadata: { key } }));
       }
       const versions = [
         ...items.map(({ key, secret, value, versionId }, i) => {
           const recipe = recipes.get(key) ?? null;
           const level = levelOf(key);
-          log.push(allowed(ctx, 'secret.write', {
-            ...environment, secretId: secret.secretId, operationId, relatedSeq: sealed.seqs[i],
-            metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(level, previous.get(key) ?? null) },
-          }));
           keys[key] = { version: secret.version, versionId, sensitivity: level };
           return {
             id: versionId, secretId: secret.secretId, version: secret.version, ...sealed.values[i],
             createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: level === 'plain' ? value : null, sensitive: level === 'sensitive',
           };
         }),
-        // The value as it is, marked: its ciphertext and how it was made, its key wrapped again as the new level. Made
-        // looser, a sensitive value made a secret, it is its own entry, `secret.loosen`, which no reader of the log takes
-        // for a write of a value its maker saw.
-        ...marked.map(({ key, secret, from, to, was, recipe, versionId }, i) => {
-          const recipeDetail = recipe === null ? {} : { recipe: recipe.recipe };
-          log.push(stricter(was, to)
-            ? allowed(ctx, 'secret.loosen', {
-              ...environment, secretId: secret.secretId, operationId, relatedSeq: rewrapped.seqs[i],
-              metadata: { key, version: secret.version, ...recipeDetail, from: was, to, kept: from.version },
-            })
-            : allowed(ctx, 'secret.write', {
-              ...environment, secretId: secret.secretId, operationId, relatedSeq: rewrapped.seqs[i],
-              metadata: { key, version: secret.version, ...recipeDetail, ...sensitivityDetail(to, was), kept: from.version },
-            }));
+        // The value as it is, marked: its ciphertext and how it was made, its key wrapped again as the new level. Its
+        // entry rides its change.
+        ...marked.map(({ key, secret, to, recipe, versionId }, i) => {
           keys[key] = { version: secret.version, versionId, sensitivity: to };
           return {
             id: versionId, secretId: secret.secretId, version: secret.version, ...rewrapped.values[i],
@@ -937,15 +1009,10 @@ export async function setSecrets(
           // The member, as the vault's entry names them. Provenance only: lists and the offboarding report read the maker from the entry.
           createdBy: formatMember(ctx.caller.principal),
         });
-        log.push(allowed(ctx, 'secret.reference', {
-          ...environment, secretId: holder.secretId, operationId, relatedSeq: made.seqs[i], metadata: {
-            key, source: sourcePath(source), also: { projectId: source.projectId, environmentId: source.environmentId, secretId: source.id },
-          },
-        }));
         keys[key] = { reference: sourcePath(source) };
       }
       for (const { key, source } of refs.map((ref) => ({ key: ref.key, source: ref.ref }))) keys[key] ??= { reference: source };
-      await endRemovals(ctx, tx, log, place, environment, keysIn.filter((key) => patch[key] !== null), operationId);
+      await endRemovals(ctx, tx, log, place, environment, live, operationId);
       const archiving = archives.map((key) => byKey.get(key)).filter((secret) => secret !== undefined && secret.archivedAt === null);
       if (archiving.length > 0) {
         await refuseIfRead(ctx, tx, `${place.project.slug}/${place.environment!.slug}`, { ...environment, secretIds: archiving.map((secret) => secret!.id) }, 'secret.archive', { ...environment, operationId });
@@ -955,8 +1022,8 @@ export async function setSecrets(
         keys[key] = { archived: true };
         if (secret === undefined || secret.archivedAt !== null) continue;
         await update(tx, secrets, { id: secret.id }, { archivedAt: now });
-        log.push(allowed(ctx, 'secret.archive', { ...environment, secretId: secret.id, operationId, metadata: { key } }));
       }
+      onlyPrepared(log, restoring);
       return { operationId, keys };
     }, changes).catch(async (error: unknown) => {
       await abandon(ctx, operationId, references, made.seqs);
@@ -1048,8 +1115,9 @@ async function heldOnce(
   const touched = written.touched;
   for (const { key, level, versionId } of items) keys[key.name] = { version: key.version, versionId, sensitivity: level };
   await ctx.db.transaction(async (tx) => {
-    // 0.14's head first, a lock alone (two-trips.md, "Locks": head, credential, issue lock, fence, hold, rows).
-    laterHead(tx);
+    // The change lock first, a lock alone, where 0.14's head was (two-trips.md, "Locks": change lock, credential,
+    // issue lock, fence, hold, rows).
+    laterChange(tx);
     heldWrites(tx, {
       hold: { tokenHash: written.tokenHash, project: written.asked.project, environment: written.asked.environment, keys: names, digest: Buffer.from(answer.digest, 'hex') },
       made: items.filter(({ key }) => key.created).map(({ key }) => ({ id: key.id, ...environment, key: key.name })),
@@ -1112,6 +1180,14 @@ async function levelsAt(db: Queryable, place: ResolvedPath, environmentId: strin
   }));
 }
 
+/** What a `secret.write` entry says of who sees the value: as 0.9 said plain, and what it was when that changed. */
+function sensitivityDetail(level: Sensitivity, was: Sensitivity | null): Record<string, unknown> {
+  return {
+    ...(level === 'plain' ? { plain: true } : level === 'sensitive' ? { sensitive: true } : {}),
+    ...(was !== null && was !== level ? { was } : {}),
+  };
+}
+
 /**
  * Who sees a value written saying nothing, over a key whose value is `now`
  * (`levelsAt`): a secret, or sensitive where the key is, never looser than
@@ -1124,14 +1200,6 @@ async function levelsAt(db: Queryable, place: ResolvedPath, environmentId: strin
 function bareLevel(now: Sensitivity | null, { personal, generated }: { personal: boolean; generated: boolean }): Sensitivity {
   if (now === 'sensitive') return 'sensitive';
   return personal && now === 'plain' && !generated ? 'plain' : 'secret';
-}
-
-/** What a `secret.write` entry says of who sees the value: as 0.9 said plain, and what it was when that changed. */
-function sensitivityDetail(level: Sensitivity, was: Sensitivity | null): Record<string, unknown> {
-  return {
-    ...(level === 'plain' ? { plain: true } : level === 'sensitive' ? { sensitive: true } : {}),
-    ...(was !== null && was !== level ? { was } : {}),
-  };
 }
 
 /** A key's current value marked, as a new version: its key wrapped again as `to`, the rest of it kept. */
@@ -1447,24 +1515,44 @@ export async function patchSecret(
   if (renaming && archived) {
     throw conflict(`${secret.key} is archived; unarchive it before renaming it`);
   }
-  const before = (await secretFolderOf(ctx.db, environment.environmentId)).get(secret.id) ?? null;
+  const nextKey = patch.key!;
+  // A rename's events of what it carries down to the forks below (`renamesBelow`), read beside the key's folder, in the
+  // same round trip; read again on a retry.
+  const readBelow = () => renamesBelow(ctx, ctx.db, place, secret.key, nextKey).then(entriesOf, unlessRefused);
+  const [folders, carried] = await Promise.all([secretFolderOf(ctx.db, environment.environmentId), renaming ? readBelow() : null]);
+  let below = carried;
+  const before = folders.get(secret.id) ?? null;
   const moving = patch.folder !== undefined && patch.folder !== before;
   const folder = moving ? patch.folder! : before;
   if (!renaming && !archiving && !moving) return { key: secret.key, archived, folder };
 
-  const nextKey = patch.key!;
+  const renamed = allowed(ctx, 'secret.rename', { ...where, metadata: { key: secret.key, nextKey } });
+  const moved = allowed(ctx, 'secret.move', { ...where, metadata: { key: renaming ? nextKey : secret.key, from: before, to: folder } });
+  // Live under its key again, or under a new one: in a fork, no longer removed.
+  const liveAs = !archived && (archiving || renaming) ? (renaming ? nextKey : secret.key) : null;
   // With 0.15's log, an archive or unarchive is the key's change (a rename or a move is none: its object holds neither
-  // name nor folder), prepared from the key as read now, which the transaction must find it still.
+  // name nor folder), prepared from the key as read now, which the transaction must find it still. What no change
+  // records is an event, prepared from what is read now too, which the transaction must log the same (`onlyPrepared`):
+  // the rename, carried down to the forks below, the removal it ends here, and the move.
   const result = await retrying(async () => {
     let read: SecretRead | undefined;
-    const changes = !archiving ? null : await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
+    const prepared = [
+      ...(renaming ? [renamed, ...(below ?? (await readBelow()))] : []),
+      ...(liveAs === null ? [] : (await removalsEnded(ctx, ctx.db, place, environment, [liveAs], null)).map(({ entry }) => entry)),
+      ...(moving ? [moved] : []),
+    ];
+    below = null;
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
+      if (!archiving) return [];
       read = (await secretObjects(ctx.db, { ids: [secret.id] })).get(secret.id);
-      return read === undefined ? [] : [secretChange(secret.id, read, archived ? null : 'as read')];
-    });
+      // Its entry rides its change.
+      const entry = entryOf(ctx, allowed(ctx, archived ? 'secret.archive' : 'secret.unarchive', { ...where, metadata: { key: secret.key } }));
+      return read === undefined ? [] : [secretChange(secret.id, read, archived ? null : 'as read', entry)];
+    }, eventsOf(ctx, ...prepared));
     return audited(ctx, async (tx, log) => {
       // Under the head, as every write to a place: one deleted since the router found it is not written to, nor filed.
       await checkEnvironment(tx, place, environment);
-      if (changes !== null) await stillAsRead(tx, secret.id, read);
+      if (archiving && changes !== null) await stillAsRead(tx, secret.id, read);
       // A rename names the key it found: renamed meanwhile, the forks below would be searched for a name gone.
       if (renaming) {
         const [now] = await lock(tx, secrets, { id: secret.id });
@@ -1480,6 +1568,10 @@ export async function patchSecret(
       }
       // Unarchived, its value is live again: made so only by whoever could have read it (`madeLive`).
       if (archiving && !archived) madeLive(ctx, place, await natureOfRow(tx, environment.environmentId, secret.id), 'secret.unarchive', { metadata: { key: secret.key } });
+      // What the rename carries down, read under the lock before it writes anything, as its events were read before the
+      // transaction (`renamesBelow`); a fork's refusal of it heard after the key's own, as ever.
+      const below = renaming ? await renamesBelow(ctx, tx, place, secret.key, nextKey, (fork) => lock(tx, secrets, { projectId: place.project.id, environmentId: fork, key: [secret.key, nextKey] }))
+        .catch((error: unknown) => (error instanceof Refusal ? error : Promise.reject(error))) : null;
       if (renaming || archiving) {
         try {
           await update(tx, secrets, { id: secret.id }, {
@@ -1494,25 +1586,21 @@ export async function patchSecret(
           );
         }
       }
-      if (archiving) {
-        log.push(allowed(ctx, archived ? 'secret.archive' : 'secret.unarchive', {
-          ...where,
-          metadata: { key: secret.key },
-        }));
-      }
       if (renaming) {
-        log.push(allowed(ctx, 'secret.rename', { ...where, metadata: { key: secret.key, nextKey } }));
-        await renameBelow(ctx, tx, log, place, secret.key, nextKey);
+        log.push(renamed);
+        if (below instanceof Refusal) throw below;
+        await renameBelow(ctx, tx, log, below!, secret.key, nextKey);
       }
-      // Live under its key again, or under a new one: in a fork, no longer removed. The row as it is now, under the head, names the key.
-      if (!archived && (archiving || renaming)) {
+      // The row as it is now, under the head, names the key.
+      if (liveAs !== null) {
         const [now] = await lock(tx, secrets, { id: secret.id });
         if (now !== undefined && now.archivedAt === null) await endRemovals(ctx, tx, log, place, environment, [now.key], null);
       }
       if (moving) {
         await fileSecrets(tx, [{ secretId: secret.id, folder }]);
-        log.push(allowed(ctx, 'secret.move', { ...where, metadata: { key: renaming ? nextKey : secret.key, from: before, to: folder } }));
+        log.push(moved);
       }
+      onlyPrepared(log, prepared);
       return { key: renaming ? nextKey : secret.key, archived, folder };
     }, changes);
   });
@@ -1527,71 +1615,153 @@ export async function patchSecret(
  * export its old override beside the parent's renamed key. A fork that
  * holds the new name already refuses the rename, named. No value moves, so
  * the forks take nothing of the renamer.
+ *
+ * Written from what it read first (`renamesBelow`), each fork's rows locked, before the key's own rename.
  */
 async function renameBelow(
   ctx: ApiContext,
   tx: Transaction,
   log: AuditEntry[],
-  place: ResolvedPath,
+  below: readonly RenamedBelow[],
   key: string,
   nextKey: string,
 ): Promise<void> {
+  const now = new Date();
+  const by = ctx.caller.principal.id;
+  for (const { fork, aside, own, removal, entries } of below) {
+    if (aside !== null) {
+      await update(tx, secrets, { id: aside.id }, { key: aside.key, updatedAt: now });
+      if (aside.restored) await update(tx, dismissedKeys, { environmentId: fork, key: aside.key }, { restoredAt: now, restoredBy: by });
+    }
+    if (own !== null) await update(tx, secrets, { id: own }, { key: nextKey, updatedAt: now });
+    if (removal === 'moved') {
+      await update(tx, dismissedKeys, { environmentId: fork, key }, { restoredAt: now, restoredBy: by });
+      await upsert(tx, dismissedKeys, [{ environmentId: fork, key: nextKey, dismissedAt: now, dismissedBy: by, restoredAt: null, restoredBy: null }], {
+        target: ['environmentId', 'key'],
+        columns: ['dismissedAt', 'dismissedBy', 'restoredAt', 'restoredBy'],
+      });
+    } else if (removal === 'ended') {
+      await update(tx, dismissedKeys, { environmentId: fork, key: nextKey }, { restoredAt: now, restoredBy: by });
+    }
+    log.push(...entries);
+  }
+}
+
+/** What a rename carries down to one fork (`renameBelow`), and the entries it logs of it. */
+type RenamedBelow = {
+  fork: string;
+  /** A personal config's own key of the new name, moved aside: its row, its name aside, and whether that name's removal ends. */
+  aside: { id: string; key: string; restored: boolean } | null;
+  /** Its own row of the key, which takes the new name. */
+  own: string | null;
+  /** Its removal of the key, which moves to the new name; or of the new name, which ends. */
+  removal: 'moved' | 'ended' | null;
+  entries: AuditEntry[];
+};
+
+/**
+ * What a rename carries down to each fork below (`renameBelow`), as read in `db`: before the rename's transaction, the
+ * events it prepares; under the change lock, each fork's rows of the two names locked (`rows`), what it writes, which
+ * must log those (`onlyPrepared`). Both read the rows as they are before the rename writes anything, the key's own
+ * rename included: so they agree unless another write came between.
+ */
+async function renamesBelow(
+  ctx: ApiContext,
+  db: Queryable,
+  place: ResolvedPath,
+  key: string,
+  nextKey: string,
+  rows: (fork: string) => Promise<readonly { id: string; key: string; archivedAt: Date | null }[]> = (fork) => secretHeads(db, fork, { keys: [key, nextKey] }),
+): Promise<RenamedBelow[]> {
   const parent = place.environment!.slug;
-  for (const fork of await descendantsOf(tx, place.environment!.id)) {
+  const below: RenamedBelow[] = [];
+  const forks = await descendantsOf(db, place.environment!.id);
+  // The environments the rename writes: the key's own, and every fork below.
+  const renaming = { place: place.environment!.id, forks: new Set(forks.map((fork) => fork.id)) };
+  for (const fork of forks) {
     const at = { projectId: place.project.id, environmentId: fork.id };
-    const rows = await lock(tx, secrets, { projectId: place.project.id, environmentId: fork.id, key: [key, nextKey] });
-    const taken = rows.find((row) => row.key === nextKey);
+    const held = await rows(fork.id);
+    const removed = new Set((await dismissalsIn(db, fork.id)).map((row) => row.key));
+    const entries: AuditEntry[] = [];
+    const taken = held.find((row) => row.key === nextKey);
+    let aside: RenamedBelow['aside'] = null;
     // A personal config is named to nobody but its owner: its own key of the new name moves aside, `NEXT_KEY_2`, rather than stop the rename.
     if (taken !== undefined && fork.owner !== null) {
-      const aside = await asideKey(tx, fork.id, nextKey);
-      await update(tx, secrets, { id: taken.id }, { key: aside, updatedAt: new Date() });
-      log.push(allowed(ctx, 'secret.rename', { ...at, secretId: taken.id, metadata: { key: nextKey, nextKey: aside, parent, aside: true } }));
+      const name = await asideKey(db, fork.id, renaming, key, nextKey);
       // Live under its new name, it is no longer removed there, as any row made live (`endRemovals`). An archived one serves nothing: the removal stands.
-      if (taken.archivedAt === null && (await dismissalsIn(tx, fork.id)).some((row) => row.key === aside)) {
-        await update(tx, dismissedKeys, { environmentId: fork.id, key: aside }, { restoredAt: new Date(), restoredBy: ctx.caller.principal.id });
-        log.push(allowed(ctx, 'missing.restore', { ...at, metadata: { key: aside, renamed: nextKey, parent } }));
-      }
+      aside = { id: taken.id, key: name, restored: taken.archivedAt === null && removed.has(name) };
+      entries.push(allowed(ctx, 'secret.rename', { ...at, secretId: taken.id, metadata: { key: nextKey, nextKey: name, parent, aside: true } }));
+      if (aside.restored) entries.push(allowed(ctx, 'missing.restore', { ...at, metadata: { key: name, renamed: nextKey, parent } }));
     } else if (taken !== undefined) {
       throw new Refusal(
         conflict(`${place.project.slug}/${fork.slug} inherits ${key} and holds a ${nextKey} of its own: rename or archive that one first`),
         denied(ctx, 'secret.rename', 'duplicate_key_below', { ...at, secretId: taken.id, metadata: { key, nextKey, parent } }),
       );
     }
-    const own = rows.find((row) => row.key === key);
-    if (own !== undefined) {
-      await update(tx, secrets, { id: own.id }, { key: nextKey, updatedAt: new Date() });
-      log.push(allowed(ctx, 'secret.rename', { ...at, secretId: own.id, metadata: { key, nextKey, parent } }));
-    }
+    const own = held.find((row) => row.key === key);
+    if (own !== undefined) entries.push(allowed(ctx, 'secret.rename', { ...at, secretId: own.id, metadata: { key, nextKey, parent } }));
     // Its removal follows the key: removed under the old name, removed under the new; not, not.
-    const removed = new Set((await dismissalsIn(tx, fork.id)).map((row) => row.key));
-    const now = new Date();
-    const by = ctx.caller.principal.id;
-    if (removed.has(key)) {
-      await update(tx, dismissedKeys, { environmentId: fork.id, key }, { restoredAt: now, restoredBy: by });
-      await upsert(tx, dismissedKeys, [{ environmentId: fork.id, key: nextKey, dismissedAt: now, dismissedBy: by, restoredAt: null, restoredBy: null }], {
-        target: ['environmentId', 'key'],
-        columns: ['dismissedAt', 'dismissedBy', 'restoredAt', 'restoredBy'],
-      });
-      log.push(allowed(ctx, 'missing.restore', { ...at, metadata: { key, renamed: nextKey, parent } }));
-      log.push(allowed(ctx, 'missing.dismiss', { ...at, metadata: { key: nextKey, renamed: key, parent } }));
-    } else if (removed.has(nextKey)) {
-      await update(tx, dismissedKeys, { environmentId: fork.id, key: nextKey }, { restoredAt: now, restoredBy: by });
-      log.push(allowed(ctx, 'missing.restore', { ...at, metadata: { key: nextKey, renamed: key, parent } }));
+    const removal = removed.has(key) ? 'moved' : removed.has(nextKey) ? 'ended' : null;
+    if (removal === 'moved') {
+      // A key moved aside onto the old name has ended its removal there already, and said so.
+      if (aside?.restored !== true || aside.key !== key) entries.push(allowed(ctx, 'missing.restore', { ...at, metadata: { key, renamed: nextKey, parent } }));
+      entries.push(allowed(ctx, 'missing.dismiss', { ...at, metadata: { key: nextKey, renamed: key, parent } }));
+    } else if (removal === 'ended') {
+      entries.push(allowed(ctx, 'missing.restore', { ...at, metadata: { key: nextKey, renamed: key, parent } }));
     }
+    below.push({ fork: fork.id, aside, own: own?.id ?? null, removal, entries });
   }
+  return below;
+}
+
+const entriesOf = (below: readonly RenamedBelow[]): AuditEntry[] => below.flatMap(({ entries }) => entries);
+
+/** Read before the transaction, a refusal prepares nothing: the transaction refuses it again under the change lock, or reads again. */
+function unlessRefused(error: unknown): AuditEntry[] {
+  if (error instanceof Refusal) return [];
+  throw error;
 }
 
 /**
  * A name for a personal config's key moved out of a rename's way:
  * `NEXT_KEY_2`, `_3` and on, held by nothing the config reads, its own
  * keys or those it inherits, and within the 128 characters a key takes.
+ * Read before the rename writes anything (`renamesBelow`), what it inherits
+ * is taken as the rename leaves it: in each environment the rename writes
+ * (`renaming`), a row of the old name renamed; in each fork below, a removal
+ * of it moved to the new name, or one of the new name ended, as `renameBelow`
+ * does. So the
+ * old name is free only if nothing above still passes it down.
+ *
+ *   dev renames FOO_2 to FOO; ada's config holds FOO          her FOO moves aside to FOO_2, the name dev freed
+ *   the same, prod above dev holding a FOO_2 of its own       to FOO_3: her config still inherits prod's FOO_2
  */
-async function asideKey(tx: Transaction, environmentId: string, key: string): Promise<string> {
-  const inherited = await inheritedRows(tx, environmentId);
-  const taken = new Set([...(await environmentSecrets(tx, environmentId)).map((row) => row.key), ...(inherited?.held.keys() ?? [])]);
+async function asideKey(
+  db: Queryable, environmentId: string, renaming: { place: string; forks: ReadonlySet<string> }, key: string, nextKey: string,
+): Promise<string> {
+  // `inheritedRows`' keys held, its parents' rows and removals read as the rename leaves them.
+  const held = new Set<string>();
+  const settled = new Set<string>();
+  for (const parent of (await parentsOf(db, environmentId)) ?? []) {
+    const fork = renaming.forks.has(parent.id);
+    const named = (name: string) => ((fork || parent.id === renaming.place) && name === key ? nextKey : name);
+    for (const row of await environmentSecrets(db, parent.id)) {
+      const name = named(row.key);
+      if (settled.has(name) || row.archivedAt !== null) continue;
+      held.add(name);
+      settled.add(name);
+    }
+    const removed = (await dismissalsIn(db, parent.id)).map((row) => row.key);
+    // A fork's removal follows the key (`renameBelow`): of the old name, moved to the new; else one of the new name, ended.
+    for (const name of removed) {
+      if (fork && name === nextKey && !removed.includes(key)) continue;
+      settled.add(fork ? named(name) : name);
+    }
+  }
+  const taken = new Set([...(await environmentSecrets(db, environmentId)).map((row) => row.key), ...held]);
   for (let n = 2; ; n++) {
     const suffix = `_${n}`;
-    const name = `${key.slice(0, 128 - suffix.length)}${suffix}`;
+    const name = `${nextKey.slice(0, 128 - suffix.length)}${suffix}`;
     if (!taken.has(name)) return name;
   }
 }
@@ -1613,17 +1783,28 @@ export async function inheritSecret(ctx: ApiContext, place: ResolvedPath, inheri
     throw conflict(`${here} inherits from no environment: ${inherit ? 'archive' : 'unarchive'} ${secret.key} instead`);
   }
   // With 0.15's log, the reset (archived) or override again (unarchived) is the key's change, prepared from it as read
-  // now, which the transaction must find it still.
+  // now, which the transaction must find it still; and an override again ends the key's removal here, if any, which
+  // no change records: its event.
   return retrying(async () => {
     let read: SecretRead | undefined;
+    const restoring = inherit ? [] : (await removalsEnded(ctx, ctx.db, place, environment, [secret.key], null)).map(({ entry }) => entry);
+    // The parent its entry names, read before as the key is, and compared under the head.
+    const parent = (await inheritedRows(ctx.db, environment.environmentId))?.held.get(secret.key)?.from;
     const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
       read = (await secretObjects(ctx.db, { ids: [secret.id] })).get(secret.id);
-      return read === undefined ? [] : [secretChange(secret.id, read, inherit ? null : 'as read')];
-    });
+      if (read === undefined) return [];
+      // Its entry rides its change; one already so, which the transaction leaves, says nothing.
+      const entry = parent === undefined || read.archived === inherit ? null : entryOf(ctx, inherit
+        ? allowed(ctx, 'secret.reset', { ...where, metadata: { key: secret.key, from: parent.slug } })
+        : allowed(ctx, 'secret.unarchive', { ...where, metadata: { key: secret.key } }));
+      return [secretChange(secret.id, read, inherit ? null : 'as read', entry)];
+    }, eventsOf(ctx, ...restoring));
     return audited(ctx, async (tx, log) => {
       await checkEnvironment(tx, place, environment);
       const [row] = await lock(tx, secrets, { id: secret.id });
       if (row === undefined) throw notFound('unknown secret');
+      // Renamed meanwhile, it is not the key the request named, and no retry finds that one (`retrying` retries `ObjectMoved`).
+      if (row.key !== secret.key) throw conflict(`${secret.key} was renamed meanwhile to ${row.key}: nothing changed`);
       if (changes !== null) await stillAsRead(tx, secret.id, read);
       const folder = (await secretFolderOf(tx, environment.environmentId)).get(secret.id) ?? null;
       const inherited = await inheritedRows(tx, environment.environmentId);
@@ -1634,19 +1815,20 @@ export async function inheritSecret(ctx: ApiContext, place: ResolvedPath, inheri
           denied(ctx, 'secret.update', 'not_inherited', { ...where, metadata: { key: row.key } }),
         );
       }
+      // The parent its entry names, moved since: prepared again.
+      if (held.from.id !== parent?.id || held.from.slug !== parent.slug) throw new ObjectMoved();
       const result = { key: row.key, archived: inherit, folder, from: held.from.slug };
       if ((row.archivedAt !== null) === inherit) return result;
       if (inherit) {
         await refuseIfRead(ctx, tx, here, { ...environment, secretIds: [row.id] }, 'secret.reset', where);
         await update(tx, secrets, { id: row.id }, { archivedAt: new Date() });
-        log.push(allowed(ctx, 'secret.reset', { ...where, metadata: { key: row.key, from: held.from.slug } }));
       } else {
         // Its own value live again: made so only by whoever could have read it (`madeLive`).
         madeLive(ctx, place, await natureOfRow(tx, environment.environmentId, row.id), 'secret.unarchive', { metadata: { key: row.key } });
         await update(tx, secrets, { id: row.id }, { archivedAt: null });
-        log.push(allowed(ctx, 'secret.unarchive', { ...where, metadata: { key: row.key } }));
         await endRemovals(ctx, tx, log, place, environment, [row.key], null);
       }
+      onlyPrepared(log, restoring);
       return result;
     }, changes);
   });
@@ -1661,18 +1843,23 @@ export async function inheritSecret(ctx: ApiContext, place: ResolvedPath, inheri
 export async function refileSecrets(ctx: ApiContext, place: ResolvedPath, folder: string, to: string | null): Promise<{ folder: string | null; moved: string[] }> {
   const environment = requireLive(place);
   const operationId = randomUUID();
-  return audited(ctx, async (tx, log) => {
-    // Under the head, as every write to a place: one archived or deleted since the router found it takes none.
-    await checkEnvironment(tx, place, environment);
-    const filed = await secretsInFolder(tx, environment.environmentId, folder);
-    if (filed.length === 0) throw notFound(`no folder "${folder}" in ${place.project.slug}/${place.environment!.slug}`);
-    if (to !== folder) {
-      await fileSecrets(tx, filed.map((secret) => ({ secretId: secret.id, folder: to })));
-      for (const secret of filed) {
-        log.push(allowed(ctx, 'secret.move', { ...environment, secretId: secret.id, operationId, metadata: { key: secret.key, from: folder, to } }));
-      }
-    }
-    return { folder: to, moved: filed.map((secret) => secret.key) };
+  const moves = (filed: readonly { id: string; key: string }[]) => (to === folder ? [] : filed.map((secret) =>
+    allowed(ctx, 'secret.move', { ...environment, secretId: secret.id, operationId, metadata: { key: secret.key, from: folder, to } })));
+  // A key's folder is no change (its object holds none): each move is an event, prepared from the keys filed there now,
+  // which the transaction must find still.
+  return retrying(async () => {
+    const prepared = moves(await secretsInFolder(ctx.db, environment.environmentId, folder));
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), [], eventsOf(ctx, ...prepared));
+    return audited(ctx, async (tx, log) => {
+      // Under the head, as every write to a place: one archived or deleted since the router found it takes none.
+      await checkEnvironment(tx, place, environment);
+      const filed = await secretsInFolder(tx, environment.environmentId, folder);
+      if (filed.length === 0) throw notFound(`no folder "${folder}" in ${place.project.slug}/${place.environment!.slug}`);
+      if (to !== folder) await fileSecrets(tx, filed.map((secret) => ({ secretId: secret.id, folder: to })));
+      log.push(...moves(filed));
+      onlyPrepared(log, prepared);
+      return { folder: to, moved: filed.map((secret) => secret.key) };
+    }, changes);
   });
 }
 
@@ -1769,7 +1956,9 @@ export async function restoreVersion(
       return { was, sensitive: was === 'sensitive' || newest?.sensitive === true };
     };
     // Sensitive once found so, by any attempt: a reference's source written again as a secret between attempts makes it no looser.
-    if ((await floor(ctx.db, versions[0])).sensitive) foundSensitive = true;
+    // Its `was` is what the entry says, compared under the head.
+    const floored = await floor(ctx.db, versions[0]);
+    if (floored.sensitive) foundSensitive = true;
     // An old version comes back no looser than it was, nor than its value was made since: the newest version of its very
     // ciphertext, a mark in place, whatever was written after, known by its IV and tag, which no erasure changes. Its plain version brings back no secret: making a secret
     // plain takes reading it, which a restore does not (R24). An Owner's loosening in place is the current value's alone
@@ -1794,13 +1983,17 @@ export async function restoreVersion(
     }
     const versionId = randomUUID();
     const plaintext = level === 'plain' ? target.plaintext : null;
+    // In a fork, the key's removal it ends (`endRemovals`), which no change records: its event.
+    const restoring = (await removalsEnded(ctx, ctx.db, place, environment, [prepared.key], operationId)).map(({ entry }) => entry);
     // With 0.15's log, the key's change: the old value back as a new version of its own. Its row is held below.
     const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
       const read = (await secretObjects(ctx.db, { ids: [secret.id] })).get(secret.id);
       // As `prepared` read it, which the transaction holds it to.
       if (!sameHead(prepared, read)) throw new PrepareAgain();
-      return [secretChange(secret.id, read, writtenSecret(read.columns, versionColumns(versionId, rewrapped.values[0]!, { sensitive: level === 'sensitive', plaintext })))];
-    });
+      return [secretChange(secret.id, read, writtenSecret(read.columns, versionColumns(versionId, rewrapped.values[0]!, { sensitive: level === 'sensitive', plaintext })), entryOf(ctx, allowed(ctx, 'secret.restore', {
+        ...where, operationId, metadata: { key: prepared.key, version, from: toVersion, ...sensitivityDetail(level, floored.was) },
+      })))];
+    }, eventsOf(ctx, ...restoring));
     return audited(ctx, async (tx, log) => {
       await checkEnvironment(tx, place, environment);
       const [current] = await lock(tx, secrets, { id: secret.id });
@@ -1812,13 +2005,13 @@ export async function restoreVersion(
         foundSensitive = true;
         throw new PrepareAgain();
       }
+      // The level its entry says the key had, moved since: prepared again.
+      if (was !== floored.was) throw new PrepareAgain();
       // The old value comes back with how it was made, and plain if it was. A key pair's half comes
       // back with its pair's id, which pairs it again only beside the other half of the same pair.
       await appendVersion(tx, versionId, secret.id, version, rewrapped.values[0], ctx.caller.principal.id, target.recipe, plaintext, level === 'sensitive');
-      log.push(allowed(ctx, 'secret.restore', {
-        ...where, operationId, relatedSeq: rewrapped.seqs[0], metadata: { key: prepared.key, version, from: toVersion, ...sensitivityDetail(level, was) },
-      }));
       await endRemovals(ctx, tx, log, place, environment, [prepared.key], operationId);
+      onlyPrepared(log, restoring);
       return { key: prepared.key, version };
     }, changes);
   });
@@ -1891,7 +2084,9 @@ export async function reveal(
   const many = decided !== undefined && 'keys' in decided ? decided : undefined;
   const single = many === undefined ? decided as Decided | undefined : undefined;
   const one = path.key ?? (use?.only === true && Array.isArray(use.keys) && use.keys.length === 1 ? use.keys[0]! : null);
-  return recorded(ctx, refusedAlike(ctx, single, operationId, path, one, async (log, fence, at, stood) => {
+  // The proxy's use of values no use of the vault's records (a plain value, which the vault opens nothing of): its event.
+  let unrecorded = null as AuditEntry | null;
+  const result = await recorded(ctx, refusedAlike(ctx, single, operationId, path, one, async (fence, at, stood) => {
     // The place and its keys in one call where it can (`readValues`); the proxy's read them with the handle already.
     // Of a use, its keys alone when it reads no other (`UseAsked.only`): it answers every key the environment holds.
     const reads = use === undefined ? only : use.only === true && Array.isArray(use.keys) ? use.keys : undefined;
@@ -2033,19 +2228,19 @@ export async function reveal(
     if (plainKeys.length > 0 && decided === undefined) fence();
     if (opened.stood === true) stood();
     if (used !== null) {
-      // Appended by the vault already, the app has nothing to append: its fence takes no lock (`recorded`).
-      if (opened.used !== true) log.push(used);
+      // Recorded by the vault's uses already, the app records nothing; otherwise, if anything goes back, its event does.
+      if (opened.used !== true && rows.length > 0) unrecorded = used;
       // Every key the environment holds, or, read `only` for its keys, those of them it holds.
       const held = read.items.filter((item) => use?.only !== true || wanted(item)).map((item) => item.key);
       return { operationId, values: { ...values }, plain: plainKeys, sensitive, useOnly: usesOnly, version: null, environment: named, keys: held };
     }
-    if (rows.length === 0) {
-      // An empty environment still produced a read. Log the attempt rather than nothing.
-      log.push(allowed(ctx, 'secret.read', { ...environment, operationId, metadata: { reason: only === undefined ? 'empty_environment' : 'no_named_key' } }));
-    }
     // An environment's version, of exactly what was read: what a watch compares the next one with.
     return { operationId, values: { ...values }, plain: plainKeys, sensitive, useOnly: usesOnly, version: path.key === undefined ? versionOf({ items: rows, unreadable }) : null, environment: named, keys: rows.map((row) => row.key) };
   }));
+  // Written before the values go back, once the way in still stands (`recorded`), and outside any transaction: refused,
+  // or failed, the request fails with it, and nothing goes back unrecorded.
+  if (unrecorded !== null) await noteEvent(ctx.vault, eventOf(unrecorded, ctx.credentialId ?? null));
+  return result;
 }
 
 /**
@@ -2086,20 +2281,20 @@ function refusedAlike<T extends { values: Record<string, string> }>(
   // out, and why, is its answer.
   if (code !== undefined && one !== null) {
     return async () => {
-      throw new Refusal(notAvailable(), denied(ctx, 'secret.read', code, {
+      throw vaultDecided(ctx, notAvailable(), 'secret.read', code, {
         ...(decided!.at ?? {}), ...(decided!.secretId === null ? {} : { secretId: decided!.secretId }), operationId,
         metadata: { path: formatPath(path), key: one },
-      }));
+      });
     };
   }
   const keys = (error: ApiError, reason: unknown) => !['unauthenticated', 'unavailable', 'bulk_limit', 'registration_required', 'migrating', 'rotating', 'app_key'].includes(error.code)
     && reason !== 'unknown_environment' && error.reason !== 'changed';
-  return async (log, fence, at, stood) => {
+  return async (fence, at, stood) => {
     let where: EntryFields = {};
-    const no = (reason: string) => denied(ctx, 'secret.read', reason, { ...where, operationId, metadata: path.key === undefined ? {} : { key: path.key } });
+    const fields = (): EntryFields => ({ ...where, operationId, metadata: path.key === undefined ? {} : { key: path.key } });
     let read: T;
     try {
-      read = await work(log, fence, (fields) => at((where = fields)), stood);
+      read = await work(fence, (fields) => at((where = fields)), stood);
     } catch (error) {
       if (error instanceof Refusal) {
         if (outcome === undefined && !(error.error instanceof ApiError && keys(error.error, error.entry.metadata?.reason))) throw error;
@@ -2113,12 +2308,14 @@ function refusedAlike<T extends { values: Record<string, string> }>(
       // its key and purpose (review r5 of D153); only its answer is the one `no`.
       if (error instanceof UnloggedRefusal) {
         error.fields.operationId ??= operationId;
-        throw new Refusal(notAvailable(), unlogged(ctx, error, code ?? error.reason ?? error.code));
+        const { metadata, ...held } = error.fields;
+        throw vaultDecided(ctx, notAvailable(), 'secret.read', code ?? error.reason ?? error.code, { ...held, metadata: { ...metadata } });
       }
-      throw new Refusal(notAvailable(), no(code ?? error.reason ?? error.code));
+      // The vault's code where it decided; the app's own error otherwise, as the app decided it.
+      if (code !== undefined) throw vaultDecided(ctx, notAvailable(), 'secret.read', code, fields());
+      throw new Refusal(notAvailable(), denied(ctx, 'secret.read', error.reason ?? error.code, fields()));
     }
-    if (code !== undefined && one !== null) throw new Refusal(notAvailable(), no(code));
-    if (outcome === undefined && one !== null && !Object.hasOwn(read.values, one)) throw new Refusal(notAvailable(), no('unknown_secret'));
+    if (outcome === undefined && one !== null && !Object.hasOwn(read.values, one)) throw new Refusal(notAvailable(), denied(ctx, 'secret.read', 'unknown_secret', fields()));
     return read;
   };
 }

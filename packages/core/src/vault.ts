@@ -408,7 +408,7 @@ export interface Vault {
    * packages/vault/src/note.ts), so that a beat that runs twice writes it once.
    *
    * Action names and detail fields are `audit_log`'s, unchanged (its `action` and `metadata`), so that the projector
-   * and the pages need no new vocabulary. Not built: the vault throws, and nothing calls it.
+   * and the pages need no new vocabulary.
    */
   note?(input: NoteInput): Promise<NoteOutcome>;
   /**
@@ -843,7 +843,23 @@ type ChangeOf<K extends string, Before, After> = {
    */
   before: { columns: Before; seal: string | null } | null;
   after: After;
+  /**
+   * The entry this change records (0.16; #569, "A change carries its entry"): the one its site appended to
+   * `audit_log` before, less its id, which the change's own row serves; null for none. Required, so each site says
+   * which. Of several changes one entry covers, one named change carries it and the others null. Its actor is the
+   * change's. The vault writes it in the payload of the change's first
+   * logged call, as `reported`. A change that makes no logged call (a row with no seal, a key brought back that its
+   * log never held, a change that changes nothing) carries it nowhere: the app sends it as an event of its own
+   * (`AppChanges.prepare`), never drops it.
+   */
+  entry: Omit<NoteInput, 'id'> | null;
 };
+
+/**
+ * What a change's payload holds as `reported`: an event's payload less `op` and `ref`, and less `actor`, the row's
+ * own, with who wrote it, which the vault sets: `app` for an entry `prepare` takes, `vault` for its own change's.
+ */
+export type ReportedPayload = Omit<NoteInput, 'id' | 'actor'> & { author: EventAuthor };
 
 /** The version a key's value is: its ids, its nature and its wrapped data key; a plain one's text. Never its ciphertext. */
 export type VersionColumns = {
@@ -1162,8 +1178,7 @@ export type PrepareInput = {
    * `log_events` call answers a number per event, in this order: a new event's ascending, a retried one's the number it
    * was first written under. An id twice in one call is a retry of its first; twice with another event, the whole call
    * is refused and writes nothing; `prepare` signs each event asked, duplicates included, and leaves that to
-   * `log_events`. Each event's `actor` is its own. Not built: the vault prepares no event, and refuses a call that asks
-   * for some.
+   * `log_events`. Each event's `actor` is its own.
    */
   events?: NoteInput[];
 };
@@ -1287,7 +1302,15 @@ export type BindingColumns = {
 };
 
 /** A binding the vault makes (`changeBindings`): its object's columns and the rest of its row, with the app's MAC over it. */
-export type MadeBinding = BindingColumns & { jwks: string | null; label: string | null; createdBy: string; createdAt: number; authMac: string };
+export type MadeBinding = BindingColumns & {
+  jwks: string | null;
+  label: string | null;
+  createdBy: string;
+  createdAt: number;
+  authMac: string;
+  /** Its entry (`token.bind`), as `ObjectChange.entry`; null for none. */
+  entry: Omit<NoteInput, 'id'> | null;
+};
 
 /** A binding a change ends: as the app read it, with its seal and MAC, the app's MAC over it revoked, and the credentials it issued that are live. */
 export type EndedBinding = {
@@ -1300,6 +1323,8 @@ export type EndedBinding = {
    * with no seal (0.14's, or written around the vault) is ended all the same, its row revoked with no change.
    */
   credentials: { before: { columns: CredentialColumns; seal: string | null }; authMacFrom: string; authMac: string }[];
+  /** Its entry (`token.unbind`), as `ObjectChange.entry`; null for none (a sweep's close). */
+  entry: Omit<NoteInput, 'id'> | null;
 };
 
 export type ChangeBindingsInput = {

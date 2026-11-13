@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { GENESIS_HASH, sealEntry, type LogFields, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import type { PreparedChange } from '@coffre/core/vault';
+import type { NotedRow, PreparedChange } from '@coffre/core/vault';
 import { and, asc, count, desc, eq, gt, gte, lt, lte, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { authoredBy, entriesOf, keyedBy, KINDS, type Kind } from './access-entries.ts';
@@ -179,14 +179,67 @@ export function lockLogHeadRead(tx: Transaction, key: LogKey): Promise<HeldHead>
 }
 
 /**
- * Lock the log's head and read nothing under it, not waited for (`later`): it goes first in the transaction's next
- * Sync, before whatever is asked after it. For a write that appends no 0.14 entry and still orders itself after every
- * writer that takes the head before its rows (`audited`, `app_change`): 0.16.0's two-trip key write, whose one Sync is
- * BEGIN, this, its hold, its rows, its changes and COMMIT (docs/design/two-trips.md, "Locks").
+ * The change lock (0.16; formal/WriteLocks.tla, docs/formal.md "0.16: the change lock"): an advisory lock
+ * every change takes, the app's and the vault's, where it took 0.14's head before (the old chain's checkpoint, a
+ * decision, too), and no use, read or checkpointer's barrier takes.
+ * Two changes exclude each other from there on, as the head made them: each one's reads under it see the other's
+ * commit. Its order: a change's member rows where it locks them, this, then the issue lock, then the fence. Taking it
+ * again in the same transaction is free.
  */
-export function laterHead(tx: Transaction): void {
-  later(tx, sql`SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE`);
-  holding.add(tx);
+const CHANGE_LOCK = sql`SELECT pg_advisory_xact_lock(1668244070, 2)`;
+
+/**
+ * Take the change lock, a statement of its own: started now, not awaited, so that it goes first in its Sync, before
+ * whatever the caller asks next, which then takes its snapshot after the lock is held (READ COMMITTED takes a
+ * statement's snapshot before it waits). Its wait is the transaction's `lock_timeout`. Awaited, it is held.
+ */
+export function lockChange(tx: Transaction): Promise<void> {
+  const locking = tx.execute(CHANGE_LOCK).then(() => undefined);
+  locking.catch(() => {});
+  return locking;
+}
+
+/**
+ * `lockChange` started when awaited, not when asked: in a group whose other statements each start at their own first
+ * await, it goes in its written place among them. The vault's decision asks its lock bound and its members' rows
+ * before it, and an eager start would send the lock ahead of both: unbounded, and before the rows (MembersFirst).
+ */
+export async function lockChangeInTurn(tx: Transaction): Promise<void> {
+  await rowsOf(tx, CHANGE_LOCK);
+}
+
+/**
+ * Take the change lock if no one holds it, without waiting, a statement of its own: whether it is held now. For work
+ * any caller may do, of which one at a time is enough (the app key's rotation step at a deploy's starts).
+ */
+export async function lockChangeIfFree(tx: Transaction): Promise<boolean> {
+  const [row] = await rowsOf<{ held: boolean }>(tx, sql`SELECT pg_try_advisory_xact_lock(1668244070, 2) AS held`);
+  return row?.held === true;
+}
+
+/**
+ * `lockChange` in one of `line`'s `waiters` places in line, or refused at once (`HeadBusy`), having waited for nothing:
+ * a place is tried, never waited for, and held to the end of the transaction, as `lockLogHeadQueued`'s, the same places.
+ * One statement: the place, then, only if one was free, the lock. For a change a herd asks at once, of which one is
+ * enough (`reserveProxy`'s code's names: a deploy's isolates all reserve the same names): one waits, the rest read again.
+ */
+export function lockChangeQueued(tx: Transaction, waiters: number, line: HeadLine = 'reads'): Promise<void> {
+  const locking = rowsOf(tx, sql`
+    SELECT pg_advisory_xact_lock(1668244070, 2)
+      FROM (SELECT true FROM generate_series(1, ${waiters}::int) AS place WHERE pg_try_advisory_xact_lock(${HEAD_LINES[line]}, place) LIMIT 1) AS placed`)
+    .then((rows) => {
+      if (rows.length === 0) throw new HeadBusy();
+    });
+  locking.catch(() => {});
+  return locking;
+}
+
+/**
+ * `lockChange` with nothing awaiting it (`later`): it goes first in the transaction's next Sync, before whatever is
+ * asked after it. For a write whose one Sync is BEGIN, this, its hold, its rows, its changes and COMMIT (two-trips.md).
+ */
+export function laterChange(tx: Transaction): void {
+  later(tx, CHANGE_LOCK);
 }
 
 /**
@@ -725,6 +778,20 @@ export async function newestCommitted(db: Queryable, numbers: ChangeNumbers): Pr
 export async function laterChanges(tx: Transaction, calls: readonly PreparedChange[]): Promise<ChangeNumbers> {
   if (calls.length === 0) return { answer: Promise.resolve([]), requests: [] };
   return numbersOf(laterRows(tx, callsOf(calls, sql``, true)), calls);
+}
+
+/**
+ * A request's events the vault signed for it to commit (`Prepared.events`, `NotedRow`; 0.16): every one in one
+ * call of `log_events` (migration 0086), one array per column in order, asked with `later`, so that it goes with the
+ * transaction's COMMIT, after its changes: an event takes the fence shared, which a change's statement before it holds
+ * exclusive already. No number is awaited: an event waits for no seal (`Vault.note`).
+ *
+ *   SELECT log_events(ARRAY[$1, $6], …)          a project made and its environment's rename, one statement
+ */
+export function laterEvents(tx: Transaction, rows: readonly NotedRow[]): void {
+  if (rows.length === 0) return;
+  const column = (type: string, value: (row: NotedRow) => SQL) => sql`ARRAY[${sql.join(rows.map(value), sql`, `)}]::${sql.raw(type)}[]`;
+  later(tx, sql`SELECT log_events(${column('text', (row) => sql`${row.requestId}`)}, ${column('bigint', (row) => sql`${String(row.at)}`)}, ${column('text', (row) => sql`${row.actor}`)}, ${column('text', (row) => sql`${row.payload}`)}, ${column('bytea', (row) => sql`${bytes(row.mac)}`)})`);
 }
 
 /**

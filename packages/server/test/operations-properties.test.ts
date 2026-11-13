@@ -9,7 +9,7 @@ import { defineSignin, github } from '@coffre/core/identity';
 import { and, eq, ne } from 'drizzle-orm';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { clientFor, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, watchUses, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, watchUses, type FixtureDeps } from './api-fixture.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
 import { auditLog, principals, grants, credentials as storedCredentials, identities, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets, secretReferences, secretVersions } from '@coffre/db/schema';
 import { SigninService } from '../src/api/signin.ts';
@@ -258,8 +258,8 @@ async function scenario(operations: readonly Operation[]) {
       credentials: await database.owner.select().from(storedCredentials).orderBy(storedCredentials.id),
       identities: await database.owner.select().from(identities).orderBy(identities.id),
       // The checkpoints aside: the fixture lists the log before a page or a report, refused or not, and listing it
-      // checkpoints 0.14's log; a checkpoint is the log's, no operation's.
-      allowed: await database.owner.select().from(auditLog).where(and(eq(auditLog.decision, 'allow'), ne(auditLog.action, 'audit.checkpoint'))).orderBy(auditLog.seq),
+      // checkpoints the log; a checkpoint is the log's, no operation's.
+      allowed: (await loggedEntries(database.owner)).filter((entry) => entry.decision === 'allow' && entry.action !== 'audit.checkpoint'),
     };
   }
   async function allowed<T>(work: () => Promise<T>, expected: boolean, unchanged = false, status?: number): Promise<T | undefined> {
@@ -603,7 +603,8 @@ async function scenario(operations: readonly Operation[]) {
           .where(and(eq(storedEnvironments.projectId, model.billing.projectId), eq(storedEnvironments.slug, 'prod')));
         const [sourceSecret] = await database.owner.select({ id: storedSecrets.id }).from(storedSecrets)
           .where(and(eq(storedSecrets.environmentId, source.id), eq(storedSecrets.key, 'VALUE')));
-        const [unsealed] = await database.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.action, 'project.create')).limit(1);
+        // A reference's number is an entry of the vault's in audit_log (its foreign key); the forged one takes one that is no reference.create.
+        const [unsealed] = await database.owner.select({ seq: auditLog.seq }).from(auditLog).where(ne(auditLog.action, 'reference.create')).orderBy(auditLog.seq).limit(1);
         const holder = randomUUID();
         await database.owner.insert(storedSecrets).values({ id: holder, projectId: model.billing.projectId, environmentId: billing!.environmentId, key: 'FORGED' });
         await database.owner.insert(secretReferences).values({

@@ -11,7 +11,7 @@ import type { AddressInfo } from 'node:net';
 import { createClient } from '@coffre/client';
 import { defineDeployment } from '@coffre/core/deployment';
 
-import { clientFor, usesLogged } from './api-fixture.ts';
+import { clientFor, loggedEntries, usesLogged } from './api-fixture.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { auditLog } from '@coffre/db/schema';
 import { coffreRoute } from '../src/app.ts';
@@ -426,7 +426,7 @@ test("the token is in no log line, no audit entry and no refusal", async () => {
   assert.ok(free(said), said);
   assert.ok(reached.length >= 4);
   // Every audit entry, whatever its action.
-  assert.ok(free(JSON.stringify(await db.owner.select().from(auditLog), (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value))));
+  assert.ok(free(JSON.stringify(await loggedEntries(db.owner), (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value))));
   // The use row is slim: it names no host or URL at all.
   assert.ok((await usesLogged(db.owner)).length > 0);
 });

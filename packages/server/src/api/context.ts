@@ -1,11 +1,11 @@
 import type { ProxyCode } from '../proxy-code.ts';
 import { makesProjects, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
-import type { Confirmation, Refusal as VaultRefusal, RequestTrace, Through, UseInput, Vault } from '@coffre/core/vault';
+import type { Confirmation, NoteInput, Refusal as VaultRefusal, RequestTrace, Through, UseInput, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
-import { lockLogHeadRead } from '@coffre/db/log';
+import { lockChange, lockLogHeadRead } from '@coffre/db/log';
 
-import { appendAudit, appLogKey, type AuditEntry } from '../db/audit.ts';
+import { appendAudit, appLogKey, eventOf, noteEvent, type AuditEntry } from '../db/audit.ts';
 import type { ReadAhead } from '../db/read-ahead.ts';
 import type { Written } from '../write-ahead.ts';
 import type { Admission } from '../admit-ahead.ts';
@@ -129,6 +129,23 @@ export type ApiContext = {
    */
   admission?: Admission;
 };
+
+/**
+ * The events a write's entries will be, for `AppChanges.prepare` to have the vault sign before its transaction (0.16):
+ * what it does that no change records. Its work logs them as it logs any entry, and each that it logs commits.
+ */
+export function eventsOf(ctx: Pick<ApiContext, 'credentialId'>, ...entries: AuditEntry[]): NoteInput[] {
+  return entries.map((entry) => eventOf(entry, ctx.credentialId ?? null));
+}
+
+/**
+ * The entry a change carries (`ObjectChange.entry`), from the one its site appended before: less its id, which the
+ * change's own row serves. Built before the transaction, from the read the change is prepared from.
+ */
+export function entryOf(ctx: Pick<ApiContext, 'credentialId'>, entry: AuditEntry): Omit<NoteInput, 'id'> {
+  const { id: _id, ...carried } = eventOf(entry, ctx.credentialId ?? null, '');
+  return carried;
+}
 
 /** The fields of an audit entry that are the same for everything one request does. */
 export function actor(
@@ -264,32 +281,40 @@ export async function audited<T>(
   try {
     const result = await ctx.db.transaction(async (tx) => {
       const log: AuditEntry[] = [];
-      // A change to a person's passkeys takes their factor lock first, before the head (docs/design/passkeys.md,
-      // section 6.1; formal/Factor.tla's FactorFirst): the vault's issue of their tokens takes it, and no head.
+      // A change to a person's passkeys takes their factor lock first, before the change lock (docs/design/passkeys.md,
+      // section 6.1; formal/Factor.tla's FactorFirst): the vault's issue of their tokens takes it, and no change lock.
       const factored = factor === null ? null : lockFactor(tx, factor);
       factored?.catch(() => {});
-      // Take the head before any application rows, with what the append reads under it; then the policy, then the
-      // work's first reads: asked together, they go in that order under one Sync (postgres-js's `gather`).
-      const held = lockLogHeadRead(tx, appLogKey(ctx.chainKey));
+      // Take the change lock before any application rows, where 0.14's head was taken; then the policy, then the
+      // work's first reads: asked together, they go in that order under one Sync (postgres-js's `gather`), each read's
+      // snapshot taken once the lock is held.
+      const held = lockChange(tx);
+      // Then 0.14's head, with what an append reads under it, as before, while the app may still append to `audit_log`
+      // (the entries no change carries yet, until the freeze): taken before any row, as it always
+      // was, so an append at the COMMIT never waits for the head behind a reader that waits for this transaction's rows.
+      const head = lockLogHeadRead(tx, appLogKey(ctx.chainKey));
+      head.catch(() => {});
       const fenced = ctx.caller === undefined ? null : policyStill({ caller: ctx.caller }, tx);
       const working = work(tx, log);
-      // Each heard at once, though awaited in turn: the head's refusal first, then the policy's, then the work's; one
+      // Each heard at once, though awaited in turn: the lock's refusal first, then the policy's, then the work's; one
       // left unawaited behind an earlier refusal fails no one.
-      // The head too, behind the factor lock: a factor lock that fails (a `lock_timeout`) is awaited first, and the
-      // head's statement, queued behind it, fails with it (25P02), unheard (review r13 of #500).
-      held.catch(() => {});
+      // The change lock too, behind the factor lock: a factor lock that fails (a `lock_timeout`) is awaited first, and
+      // the change lock's statement, queued behind it, fails with it (25P02), unheard (review r13 of #500).
       fenced?.catch(() => {});
       working.catch(() => {});
       await factored;
-      const locked = await held;
+      await held;
+      const locked = await head;
       await fenced;
       const result = await working;
+      // The entries the write's prepared events are commit as those events (`entries`); the rest are appended.
+      const rest = changes === null ? log : changes.entries(log);
       // Nothing awaits the append, nor the changes: they go with the COMMIT, under its Sync (`later`).
       if (changes === null) {
-        if (log.length > 0) await appendAudit(tx, ctx.chainKey, log, [], log015, { final: true, locked });
-      } else if (log.length > 0) {
+        if (rest.length > 0) await appendAudit(tx, ctx.chainKey, rest, [], log015, { final: true, locked });
+      } else if (rest.length > 0) {
         // The changes in the append's own statement: one round trip less under the head (T123).
-        await changes.commit(tx, async (calls) => (await appendAudit(tx, ctx.chainKey, log, calls, log015, { final: true, locked })).later);
+        await changes.commit(tx, async (calls) => (await appendAudit(tx, ctx.chainKey, rest, calls, log015, { final: true, locked })).later);
       } else {
         await changes.commit(tx);
       }
@@ -366,25 +391,17 @@ export const POLICY_CHANGED = 'policy_changed';
  */
 export async function recorded<T>(
   ctx: Pick<ApiContext, 'db' | 'chainKey' | 'vault' | 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'bindingId' | 'via'>,
-  work: (log: AuditEntry[], fence: () => void, at: (where: EntryFields) => void, stood: () => void) => Promise<T>,
+  work: (fence: () => void, at: (where: EntryFields) => void, stood: () => void) => Promise<T>,
 ): Promise<T> {
   return withRefusals(ctx, async () => {
-    const log: AuditEntry[] = [];
     let fencing = false;
     let standing = false;
     // Where the read was, and its operation, for the refusal of a credential that ended meanwhile.
     let where: EntryFields = {};
-    const result = await work(log, () => (fencing = true), (fields) => (where = fields), () => (standing = true));
+    const result = await work(() => (fencing = true), (fields) => (where = fields), () => (standing = true));
     await ctx.caller.recalled?.confirm();
-    if (log.length > 0) {
-      await audited(ctx, async (tx, entries) => {
-        await credentialStill(ctx, tx, 'secret.read', where);
-        entries.push(...log);
-      });
-    } else {
-      if (fencing) await fenced(ctx);
-      if (!standing) await credentialStill(ctx, ctx.db, 'secret.read', where);
-    }
+    if (fencing) await fenced(ctx);
+    if (!standing) await credentialStill(ctx, ctx.db, 'secret.read', where);
     return result;
   });
 }
@@ -449,7 +466,7 @@ export async function fenced(ctx: Pick<ApiContext, 'db' | 'caller'>): Promise<vo
 
 /** Checks made before the write transaction still need their refusal recorded. */
 export async function withRefusals<T>(
-  ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'recalled'> },
+  ctx: Refusing,
   work: () => Promise<T>,
 ): Promise<T> {
   try {
@@ -457,16 +474,19 @@ export async function withRefusals<T>(
   } catch (error) {
     // A use the vault refused before it wrote anything, whoever asked for it (a read, a fork's copy, a dry run's
     // compare): the request's entry is the app's, where the use was and why (review r3 of D153).
-    if (error instanceof UnloggedRefusal && writes(ctx)) return refuse(ctx, new Refusal(error, unlogged(ctx, error)));
+    if (error instanceof UnloggedRefusal && writes(ctx)) return refuse(ctx, unloggedRefusal(ctx, error));
     if (!(error instanceof Refusal)) throw error;
     return refuse(ctx, error);
   }
 }
 
-/** The entry of a use the vault refused before it wrote anything: where the use was, its key and purpose, and why. */
-export function unlogged(ctx: Writer, error: UnloggedRefusal, reason = error.reason ?? error.code): AuditEntry {
+/**
+ * A use the vault refused before it wrote anything, recorded as the vault's decision (`vaultDecided`): where the use
+ * was, its key and purpose, and why.
+ */
+export function unloggedRefusal(ctx: Writer, error: UnloggedRefusal, reason = error.reason ?? error.code): Refusal {
   const { metadata, ...fields } = error.fields;
-  return denied(ctx, 'secret.read', reason, { ...fields, metadata: { ...metadata } });
+  return vaultDecided(ctx, error, 'secret.read', reason, { ...fields, metadata: { ...metadata } });
 }
 
 /** Whether a context can write an entry of its own: a request's, with its caller. */
@@ -574,7 +594,24 @@ export function vaultRefusal(
   action: string,
   fields: EntryFields = {},
 ): Refusal {
-  return new Refusal(vaultRefused(refusal), denied(ctx, action, `vault_${refusal.code}`, fields));
+  return vaultDecided(ctx, vaultRefused(refusal), action, `vault_${refusal.code}`, fields);
+}
+
+/**
+ * A refusal the vault decided (no grant, no such key, a credential it found ended), which the app records as its own
+ * event until the vault records it in the call that refused. The one place that records them: V1 drops the entry
+ * here, never at each site, and no refusal is left recorded by no one meanwhile.
+ *
+ *   vault.issueToken answers refused 'gone'     vaultDecided(ctx, unauthenticated, 'token.create', 'credential_ended')
+ */
+export function vaultDecided(
+  ctx: Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'> & { provenance?: string | null; via?: McpVia | null; confirmed?: Confirmation | null },
+  error: ApiError | Error,
+  action: string,
+  reason: string,
+  fields: EntryFields = {},
+): Refusal {
+  return new Refusal(error, denied(ctx, action, reason, fields));
 }
 
 /**
@@ -604,19 +641,19 @@ export function requireProjectMaker(ctx: ApiContext, action: string, fields: Ent
  * the vault answers the same now (`Recalled.confirm`): otherwise nothing is
  * logged, and the request starts over (`AccessChanged`).
  */
-export async function refuse(
-  ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'recalled'> } & Partial<Pick<ApiContext, 'written' | 'admission'>>,
-  refusal: Refusal,
-): Promise<never> {
+export async function refuse(ctx: Refusing, refusal: Refusal): Promise<never> {
   await ctx.caller?.recalled?.confirm();
   // The refusal of the action the vault's decision refused on its read (T179 PR 6): the vault's record in 0.15's log
-  // stands for its entry (refused.ts); one whose ticket expired is appended as before.
+  // stands for its entry (refused.ts); one whose ticket expired is an event, as every refusal the app decides alone.
   const recording = ctx.written?.refusal ?? ctx.admission?.refusal ?? null;
   if (recording === null || !recording.covers(refusal.entry) || !(await recording.record())) {
-    await ctx.db.transaction((tx) => appendAudit(tx, ctx.chainKey, [refusal.entry]));
+    await noteEvent(ctx.vault, eventOf(refusal.entry, ctx.credentialId ?? null));
   }
   throw answered(refusal);
 }
+
+/** What a refusal is recorded with: the vault, which writes its event, and the request's caller and credential, if any. */
+type Refusing = Pick<ApiContext, 'db' | 'chainKey' | 'vault'> & { caller?: Pick<Caller, 'recalled'>; credentialId?: string | null } & Partial<Pick<ApiContext, 'written' | 'admission'>>;
 
 /**
  * The error a refusal answers with, carrying the reason its entry logs

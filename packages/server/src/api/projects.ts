@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 
 import { MAX_SERVICE_TOKEN_DAYS, runsInstance, UNWRITTEN_FORK_MS, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
 import type { PasskeyPolicy } from '@coffre/core/identity';
+import type { AuditEntry } from '../db/audit.ts';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
-import { deletedWithProject, isTombstone, tombstoneOf } from '@coffre/core/schemas';
+import { deletedWithProject, isTombstone } from '@coffre/core/schemas';
 import { environments, projects, secrets } from '@coffre/db/schema';
 
 
@@ -14,6 +15,7 @@ import {
   environmentObjects,
   eraseVersions,
   forkedKeys,
+  heldVersions,
   forksOf,
   insert,
   liveSecretsUnder,
@@ -36,7 +38,7 @@ import { COFFRE_VERSION } from '../version.ts';
 import { can, canAnywhere, lists, permissionsAt, placeOf, projectsReached, seesProject, type Caller } from './caller.ts';
 import { reachedPlaces } from './render.ts';
 import { AppChanges, environmentChange, madeEnvironment, madeProtection, ObjectMoved, retrying, sameIds, secretChange } from './changes.ts';
-import { allowed, type ApiContext, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, through, correlated, withRefusals } from './context.ts';
+import { allowed, type ApiContext, audited, denied, eventsOf, missing, entryOf, Refusal, requireInstance, requireProjectMaker, through, correlated, withRefusals } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import { FRESH_MS, freshness } from './fresh-routes.ts';
 import { scopeView } from './members.ts';
@@ -332,24 +334,27 @@ export async function putProject(
 ): Promise<{ project: PlaceView; created: boolean }> {
   // A place goes by its slug. Its name, which releases before 0.6.2 show, is the slug unless an older client sends one.
   const name = input.name ?? slug;
-  const put = await audited(ctx, async (tx, log) => {
+  return withRefusals(ctx, async () => {
     requireProjectMaker(ctx, 'project.create', { metadata: { slug } });
-    if (place !== null) {
-      const { project } = place;
-      return { id: project.id, project: { slug, name: project.name, archivedAt: iso(project.archivedAt) }, created: false };
-    }
+    // No change of the log's records a project: its event does, signed before the transaction, committed in it.
     const id = randomUUID();
-    try {
-      await insert(tx, projects, { id, slug, name });
-    } catch (error) {
-      if (isUniqueViolation(error)) throw slugTaken('project', slug);
-      throw error;
-    }
-    log.push(allowed(ctx, 'project.create', { projectId: id, metadata: { slug, name } }));
-    return { id, project: { slug, name, archivedAt: null }, created: true };
+    const made = allowed(ctx, 'project.create', { projectId: id, metadata: { slug, name } });
+    const changes = place === null ? await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), [], eventsOf(ctx, made)) : null;
+    return audited(ctx, async (tx, log) => {
+      if (place !== null) {
+        const { project } = place;
+        return { project: { slug, name: project.name, archivedAt: iso(project.archivedAt) }, created: false };
+      }
+      try {
+        await insert(tx, projects, { id, slug, name });
+      } catch (error) {
+        if (isUniqueViolation(error)) throw slugTaken('project', slug);
+        throw error;
+      }
+      log.push(made);
+      return { project: { slug, name, archivedAt: null }, created: true };
+    }, changes);
   });
-  const { id: _, ...made } = put;
-  return made;
 }
 
 type PlacePatch = { name?: string; slug?: string; archived?: boolean };
@@ -404,27 +409,38 @@ export async function patchProject(
   // transaction must find under the head, or prepares again: one made meanwhile would keep its project live in the log.
   const live = async (db: Queryable) => [...(await environmentObjects(db, { projectId: project.id })).values()].filter((row) => !isTombstone(row.columns.slug));
   return retrying(async () => {
-    let read: { environments: string[]; archived: boolean } = { environments: [], archived: false };
     // Prepared from what the request asks, not from the project's row as the router read it: a row a writer marked
     // archived would otherwise make the archive a no-op that checks nothing.
     const asked = patch.archived;
-    const changes = asked === undefined ? null : await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
-      const rows = await live(ctx.db);
-      // The project as these rows were read, in the same statement (each carries its project's archival): the
-      // transaction must find it so under the head, or what this prepared (nothing, when another request had archived
-      // it) is no longer what it would commit beside. A project with no live environment prepares nothing either way.
-      read = { environments: rows.map((row) => row.columns.id), archived: rows.some((row) => row.columns.projectArchived) };
-      // Every one, even one already as asked (an archive another request made meanwhile): it changes nothing, but
-      // `prepare` holds its rows to its seal, so that an archival flag a writer set is refused, never taken as done.
-      return rows.map((row) => environmentChange(row, { ...row.columns, projectArchived: asked }));
-    });
+    const rows = asked === undefined ? [] : await live(ctx.db);
+    // The project as these rows were read, in the same statement (each carries its project's archival): the
+    // transaction must find it so under the change lock, or what this prepared (nothing, when another request had
+    // archived it) is no longer what it would commit beside. A project with no live environment prepares no change.
+    const read = { environments: rows.map((row) => row.columns.id), archived: rows.some((row) => row.columns.projectArchived) };
+    const slugNow = renames.slug ?? project.slug;
+    // What no change records is an event (0.16): a rename, a move, and an archive or a restore of a project with
+    // no live environment, which its environments' changes would record.
+    const archival = (archived: boolean) => allowed(ctx, archived ? 'project.archive' : 'project.restore', { projectId: project.id, metadata: { slug: slugNow } });
+    const events = eventsOf(ctx, ...[
+      renamed ? allowed(ctx, 'project.update', { projectId: project.id, metadata: { from: project.slug, ...renames } }) : null,
+      asked !== undefined && rows.length === 0 ? archival(asked) : null,
+      moving ? allowed(ctx, 'project.move', { projectId: project.id, metadata: { slug: slugNow, from: before, to: patch.folder } }) : null,
+    ].filter((entry) => entry !== null));
+    // Every environment, even one already as asked (an archive another request made meanwhile): it changes nothing, but
+    // `prepare` holds its rows to its seal, so that an archival flag a writer set is refused, never taken as done. The
+    // archive or the restore has no object of its own: its entry rides the first change (#569), when this request makes
+    // it, as read (the transaction finds the project so, or reads again).
+    const archives = asked !== undefined && rows.length > 0 && read.archived !== asked ? entryOf(ctx, archival(asked)) : null;
+    const changes = asked === undefined && events.length === 0 ? null : await AppChanges.prepare(
+      ctx.vault, formatMember(ctx.caller.principal), rows.map((row, i) => environmentChange(row, { ...row.columns, projectArchived: asked === true }, i === 0 ? archives : null)), events,
+    );
     return audited(ctx, async (tx, log) => {
       const now = await stillThere(tx, place);
       // Archived or restored meanwhile by another request, as this one asks: nothing to write or log of it (its renames
       // and its move still go).
       // From what the request asks, as the changes were prepared, against the project as found under the head.
       const archiving = asked !== undefined && (now.project.archivedAt !== null) !== asked ? (asked ? archivedAt ?? new Date() : null) : undefined;
-      if (changes !== null && (!sameIds((await live(tx)).map((row) => row.columns.id), read.environments)
+      if (asked !== undefined && changes !== null && (!sameIds((await live(tx)).map((row) => row.columns.id), read.environments)
         || (read.environments.length > 0 && (now.project.archivedAt !== null) !== read.archived))) throw new ObjectMoved();
       if (archiving != null) await refuseIfRead(ctx, tx, project.slug, { projectId: project.id }, 'project.archive', { projectId: project.id });
       if (renamed || archiving !== undefined) {
@@ -438,24 +454,12 @@ export async function patchProject(
           );
         }
       }
-      if (renamed) {
-        log.push(allowed(ctx, 'project.update', {
-          projectId: project.id,
-          metadata: { from: project.slug, ...renames },
-        }));
-      }
-      if (archiving !== undefined) {
-        log.push(allowed(ctx, archiving === null ? 'project.restore' : 'project.archive', {
-          projectId: project.id,
-          metadata: { slug: renames.slug ?? project.slug },
-        }));
-      }
+      if (renamed) log.push(allowed(ctx, 'project.update', { projectId: project.id, metadata: { from: project.slug, ...renames } }));
+      // Its environments' changes record an archive or a restore; with none, its event does.
+      if (archiving !== undefined && read.environments.length === 0) log.push(archival(archiving !== null));
       if (moving) {
         await fileProject(tx, project.id, patch.folder!);
-        log.push(allowed(ctx, 'project.move', {
-          projectId: project.id,
-          metadata: { slug: renames.slug ?? project.slug, from: before, to: patch.folder },
-        }));
+        log.push(allowed(ctx, 'project.move', { projectId: project.id, metadata: { slug: slugNow, from: before, to: patch.folder } }));
       }
       return {
         project: {
@@ -500,8 +504,14 @@ export async function putEnvironment(
     return { environment: existing, created: false };
   }
   const made = madeEnvironment(ctx.caller, { id, projectId: project.id, slug, owner: null, parentId });
-  const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), [environmentChange(undefined, made)]);
-  return audited(ctx, async (tx, log) => {
+  // Its entry rides its change, the page's line of it.
+  const entry = allowed(ctx, 'environment.create', {
+    projectId: project.id,
+    environmentId: id,
+    metadata: { slug, name, ...(from === undefined ? {} : { from }), ...(parentId === null ? {} : { inherits: from }) },
+  });
+  const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), [environmentChange(undefined, made, entryOf(ctx, entry))]);
+  return audited(ctx, async (tx) => {
     // The project as it is under the head: archived, or deleted, since the router found it, it takes nothing new.
     if ((await stillThere(tx, place)).project.archivedAt !== null) {
       throw new Refusal(
@@ -530,11 +540,6 @@ export async function putEnvironment(
       if (isUniqueViolation(error)) throw slugTaken('environment', slug);
       throw error;
     }
-    log.push(allowed(ctx, 'environment.create', {
-      projectId: project.id,
-      environmentId: id,
-      metadata: { slug, name, ...(from === undefined ? {} : { from }), ...(parentId === null ? {} : { inherits: from }) },
-    }));
     return { environment: { slug, name, archivedAt: null, protected: protectedFor(ctx.caller, { id }) }, created: true };
   }, changes);
 }
@@ -551,24 +556,33 @@ export type Refiled = { folder: string | null; moved: string[] };
  */
 export async function refileProjects(ctx: ApiContext, folder: string, to: string | null): Promise<Refiled> {
   const operationId = randomUUID();
-  return audited(ctx, async (tx, log) => {
-    const filed = await projectsInFolder(tx, folder);
-    // A folder none of whose projects the caller sees is, to them, no folder.
-    const seen = filed.filter((project) => seesProject(ctx.caller, project));
-    if (seen.length === 0) throw notFound(`no folder "${folder}" among your projects`);
-    if (filed.some((project) => !can(ctx.caller, 'project.manage', { projectId: project.id }))) {
-      throw new Refusal(
-        forbidden(`renaming or removing the folder "${folder}" takes project.manage on every project in it`),
-        denied(ctx, 'project.move', 'missing_project_manage', { operationId, metadata: { folder, to } }),
-      );
-    }
-    if (to !== folder) {
-      for (const project of filed) {
-        await fileProject(tx, project.id, to);
-        log.push(allowed(ctx, 'project.move', { projectId: project.id, operationId, metadata: { slug: project.slug, from: folder, to } }));
+  const moved = (project: { id: string; slug: string }) => allowed(ctx, 'project.move', { projectId: project.id, operationId, metadata: { slug: project.slug, from: folder, to } });
+  return retrying(async () => {
+    // No change of the log's records a folder, a label: each project's move is an event (0.16), signed before the
+    // transaction for the projects filed there as read now, which the transaction must find under the change lock.
+    const read = await projectsInFolder(ctx.db, folder);
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), [], eventsOf(ctx, ...(to === folder ? [] : read.map(moved))));
+    return audited(ctx, async (tx, log) => {
+      const filed = await projectsInFolder(tx, folder);
+      // A folder none of whose projects the caller sees is, to them, no folder.
+      const seen = filed.filter((project) => seesProject(ctx.caller, project));
+      if (seen.length === 0) throw notFound(`no folder "${folder}" among your projects`);
+      if (filed.some((project) => !can(ctx.caller, 'project.manage', { projectId: project.id }))) {
+        throw new Refusal(
+          forbidden(`renaming or removing the folder "${folder}" takes project.manage on every project in it`),
+          denied(ctx, 'project.move', 'missing_project_manage', { operationId, metadata: { folder, to } }),
+        );
       }
-    }
-    return { folder: to, moved: filed.map((project) => project.slug) };
+      // A project filed there meanwhile would move with no event: read and prepared again.
+      if (!sameIds(filed.map((project) => project.id), read.map((project) => project.id))) throw new ObjectMoved();
+      if (to !== folder) {
+        for (const project of filed) {
+          await fileProject(tx, project.id, to);
+          log.push(moved(project));
+        }
+      }
+      return { folder: to, moved: filed.map((project) => project.slug) };
+    }, changes);
   });
 }
 
@@ -591,23 +605,42 @@ export async function patchEnvironment(
   const configsMoving = async (db: Queryable) => archivedAt === undefined
     ? []
     : (await forksOf(db, environment.id, { archived: true })).filter((fork) => fork.owner !== null && (fork.archivedAt === null) !== (archivedAt === null));
+  // Its name is no column of its object: a rename that changes the name is an event (0.16), whether or not the slug
+  // moves with it, and its entry commits as that event. A rename of the slug alone keeps its entry, which its change carries.
+  const renaming = renamed ? allowed(ctx, 'environment.update', { ...scope, metadata: { from: environment.slug, ...renames } }) : null;
+  const slugOnly = renames.slug !== undefined && renames.name === undefined;
+  const action = archivedAt === null ? 'environment.restore' : 'environment.archive';
+  // Re-slugged and archived (or restored) at once, one change of two acts: it carries the archive's entry, the act a
+  // filter by action must find, which names the slug it had (`from`). A name renamed too is its own event, which names it.
+  const archival = allowed(ctx, action, { ...scope, metadata: { environmentSlug: renames.slug ?? environment.slug, ...(slugOnly ? { from: environment.slug } : {}) } });
+  const configArchival = (config: { id: string; slug: string }) => allowed(ctx, action, {
+    projectId: project.id,
+    environmentId: config.id,
+    metadata: { environmentSlug: config.slug, personal: environment.slug, with: environment.slug },
+  });
   return retrying(async () => {
     // With 0.15's log, each change prepared from the rows as read now; what the transaction finds under the head must be them.
     let read: { archived: boolean; configs: string[] } | null = null;
+    let archives = false;
     const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
       const configs = (await configsMoving(ctx.db)).map((config) => config.id);
       const rows = await environmentObjects(ctx.db, { ids: [environment.id, ...configs] });
       const own = rows.get(environment.id);
       if (own === undefined) return [];
       read = { archived: own.columns.archived, configs };
+      // Each entry rides the change that records its act, as read (the transaction finds the environment and its configs
+      // so, or reads again): an archive or a restore, the environment's, a slug renamed with it included (`from`); a slug
+      // renamed alone, its rename's; and each config's its own.
+      archives = archivedAt !== undefined && own.columns.archived !== (archivedAt !== null);
+      const carries = archives ? archival : slugOnly ? renaming : null;
       return [
-        environmentChange(own, { ...own.columns, slug: renames.slug ?? own.columns.slug, archived: archivedAt === undefined ? own.columns.archived : archivedAt !== null }),
+        environmentChange(own, { ...own.columns, slug: renames.slug ?? own.columns.slug, archived: archivedAt === undefined ? own.columns.archived : archivedAt !== null }, carries === null ? null : entryOf(ctx, carries)),
         ...configs.flatMap((id) => {
           const config = rows.get(id);
-          return config === undefined ? [] : [environmentChange(config, { ...config.columns, archived: archivedAt !== null })];
+          return config === undefined ? [] : [environmentChange(config, { ...config.columns, archived: archivedAt !== null }, entryOf(ctx, configArchival(config.columns)))];
         }),
       ];
-    });
+    }, renaming === null || renames.name === undefined ? [] : eventsOf(ctx, renaming));
     return audited(ctx, async (tx, log) => {
       const now = await stillThere(tx, place);
       if (changes !== null && (read === null || (now.environment!.archivedAt !== null) !== read.archived)) throw new ObjectMoved();
@@ -643,27 +676,14 @@ export async function patchEnvironment(
           );
         }
       }
-      if (renamed) {
-        log.push(allowed(ctx, 'environment.update', {
-          ...scope,
-          metadata: { from: environment.slug, ...renames },
-        }));
-      }
+      // A name's rename is its event; a slug's alone rides its change.
+      if (renaming !== null && !slugOnly) log.push(renaming);
       if (archivedAt !== undefined) {
-        log.push(allowed(ctx, archivedAt === null ? 'environment.restore' : 'environment.archive', {
-          ...scope,
-          metadata: { environmentSlug: renames.slug ?? environment.slug },
-        }));
         // Its personal configs go with it, and come back with it: private and derived, they stop nobody archiving.
         const personal = await configsMoving(tx);
         if (changes !== null && !sameIds(personal.map((config) => config.id), read!.configs)) throw new ObjectMoved();
         for (const config of personal) {
           await update(tx, environments, { id: config.id }, { archivedAt });
-          log.push(allowed(ctx, archivedAt === null ? 'environment.restore' : 'environment.archive', {
-            projectId: project.id,
-            environmentId: config.id,
-            metadata: { environmentSlug: config.slug, personal: environment.slug, with: environment.slug },
-          }));
         }
       }
       return {
@@ -705,14 +725,19 @@ async function deletePersonal(ctx: ApiContext, place: ResolvedPath, { dryRun }: 
     const operationId = randomUUID();
     const going = async () => ({ environments: [config.id], places: [doomed] });
     return retrying(async () => {
-      const erasure = await Erasure.prepare(ctx, going);
-      return audited(ctx, async (tx, log) => {
+      const tombstone = await tombstoneSlug(ctx.db, config.slug, new Date(), { projectId: project.id });
+      const versions = await heldVersions(ctx.db, doomed);
+      const erasure = await Erasure.prepare(ctx, going, async () => ({
+        tombstones: new Map([[config.id, tombstone]]),
+        entries: new Map([[config.id, personalEntry(ctx, doomed, operationId, { path }, tombstone, versions)]]),
+        events: [],
+      }));
+      return audited(ctx, async (tx) => {
         const now = await resolvePath(tx, { project: project.slug, environment: config.slug });
         if (now?.environment?.id !== config.id) throw conflict(`${path} changed while it was being deleted: look again, and ask again`);
         await erasure.hold(tx, going);
-        const erased = await erasePersonal(ctx, tx, doomed, config.slug, operationId, { path });
-        log.push(erased.entry);
-        return { dryRun: false, deletion: deletion(erased.tombstone, erased.versions) };
+        await erasePersonal(tx, doomed, tombstone, versions);
+        return { dryRun: false, deletion: deletion(tombstone, versions) };
       }, erasure.changes);
     });
   });
@@ -738,25 +763,27 @@ class Erasure {
     this.#read = read;
   }
 
-  /** `going`: the environments a deletion takes, by id, and the places whose keys it erases, as `db` has them. */
-  static async prepare(ctx: ApiContext, going: (db: Queryable) => Promise<Going>): Promise<Erasure> {
-    const read = { environments: [] as string[], keys: [] as string[] };
-    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), async () => {
-      const { environments, places } = await going(ctx.db);
-      const rows = await environmentObjects(ctx.db, { ids: environments });
-      const live: SecretRead[] = [];
-      for (const under of places) live.push(...[...(await secretObjects(ctx.db, { under })).values()].filter((key) => !key.archived));
-      read.environments = environments;
-      read.keys = live.map((key) => key.columns.id);
-      // The slug its tombstone keeps, as the transaction writes it (the object holds the slug before it either way).
-      const day = new Date();
-      const tombstone = (slug: string) => (places[0]!.environmentId === null ? deletedWithProject(slug) : tombstoneOf(slug, day));
-      return [
-        // Deleted, an environment holds no project's archival (`environment.delete`): said here, not left to the vault.
-        ...[...rows.values()].map((row) => environmentChange(row, { ...row.columns, slug: tombstone(row.columns.slug), projectArchived: false })),
-        ...live.map((key) => secretChange(key.columns.id, key, null)),
-      ];
-    });
+  /**
+   * `going`: the environments a deletion takes, by id, and the places whose keys it erases, as `db` has them. `plan`,
+   * from the environments read: the slug each one's tombstone keeps, which the transaction writes exactly; the entry
+   * each one's change carries, by id; and what no change records, its events. Its keys' deletions carry none.
+   */
+  static async prepare(ctx: ApiContext, going: (db: Queryable) => Promise<Going>, plan: (read: readonly { id: string; slug: string }[]) => Promise<ErasurePlan>): Promise<Erasure> {
+    const { environments, places } = await going(ctx.db);
+    const rows = [...(await environmentObjects(ctx.db, { ids: environments })).values()];
+    const live: SecretRead[] = [];
+    for (const under of places) live.push(...[...(await secretObjects(ctx.db, { under })).values()].filter((key) => !key.archived));
+    const read = { environments, keys: live.map((key) => key.columns.id) };
+    const { tombstones, entries, events } = await plan(rows.map((row) => ({ id: row.columns.id, slug: row.columns.slug })));
+    const entry = (id: string) => {
+      const planned = entries.get(id);
+      return planned === undefined ? null : entryOf(ctx, planned);
+    };
+    const changes = await AppChanges.prepare(ctx.vault, formatMember(ctx.caller.principal), [
+      // Deleted, an environment holds no project's archival (`environment.delete`): said here, not left to the vault.
+      ...rows.map((row) => environmentChange(row, { ...row.columns, slug: tombstones.get(row.columns.id)!, projectArchived: false }, entry(row.columns.id))),
+      ...live.map((key) => secretChange(key.columns.id, key, null, null)),
+    ], eventsOf(ctx, ...events));
     return new Erasure(changes, read);
   }
 
@@ -774,12 +801,26 @@ class Erasure {
 /** What a deletion takes: the environments it deletes, by id, and the places whose keys it erases. */
 type Going = { environments: string[]; places: Doomed[] };
 
-/** Erase a personal config's values and make its slug a tombstone, under the head: the entry that says so. */
-async function erasePersonal(ctx: ApiContext, tx: Transaction, doomed: Doomed, slug: string, operationId: string, metadata: Record<string, unknown>) {
-  const tombstone = await tombstoneSlug(tx, slug, new Date(), { projectId: doomed.projectId });
-  const versions = await eraseVersions(tx, doomed);
-  await update(tx, environments, { id: doomed.environmentId! }, { slug: tombstone });
-  return { tombstone, versions, entry: allowed(ctx, 'environment.delete', { ...doomed, operationId, metadata: { ...metadata, personal: true, tombstone, versions } }) };
+/** What a deletion writes, chosen before its transaction (`Erasure.prepare`). */
+type ErasurePlan = { tombstones: ReadonlyMap<string, string>; entries: ReadonlyMap<string, AuditEntry>; events: readonly AuditEntry[] };
+
+/**
+ * A tombstone chosen before the transaction, written as chosen: one another deletion took meanwhile meets the slug's
+ * unique key, and the deletion reads again (`retrying`).
+ */
+const claimed = (write: Promise<unknown>) => write.catch((error: unknown) => {
+  throw isUniqueViolation(error) ? new ObjectMoved() : error;
+});
+
+/** A personal config's deletion's entry: its tombstone, and the versions it erases, as read before. */
+function personalEntry(ctx: ApiContext, doomed: Doomed, operationId: string, metadata: Record<string, unknown>, tombstone: string, versions: number): AuditEntry {
+  return allowed(ctx, 'environment.delete', { ...doomed, operationId, metadata: { ...metadata, personal: true, tombstone, versions } });
+}
+
+/** Erase a personal config's values and make its slug a tombstone, under the head, as its entry says: otherwise read again. */
+async function erasePersonal(tx: Transaction, doomed: Doomed, tombstone: string, versions: number): Promise<void> {
+  if (await eraseVersions(tx, doomed) !== versions) throw new ObjectMoved();
+  await claimed(update(tx, environments, { id: doomed.environmentId! }, { slug: tombstone }));
 }
 
 /** What deleting a project or an environment takes, or took. */
@@ -913,8 +954,44 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
         places: [doomed, ...configs.map((config) => ({ projectId: project.id, environmentId: config.id }))],
       };
     };
+    // Its entry, its tombstone and the versions it erases as read before the transaction, which writes exactly those. It
+    // rides the environment's own change, a project's on its first; a project with no standing environment has no change
+    // to record it, so it is an event (0.16).
+    const entry = (tombstone: string, versions: number, personal: number) => {
+      const done = deletion(tombstone, versions);
+      return allowed(ctx, action, {
+        ...doomed,
+        operationId,
+        metadata: { path, tombstone, keys: done.keys, versions, grants: done.grants.length, references: done.references.length, ...(personal === 0 ? {} : { personal }) },
+      });
+    };
     return retrying(async () => {
-      const erasure = await Erasure.prepare(ctx, going);
+      const day = new Date();
+      const tombstone = await tombstoneSlug(ctx.db, slug, day, within);
+      const versions = await heldVersions(ctx.db, doomed);
+      // Its personal configs, each with its own tombstone and entry.
+      let configs: { id: string; tombstone: string; versions: number }[] = [];
+      // What no change records, which its work logs as prepared: a project with no standing environment's own entry.
+      let unrecorded: AuditEntry[] = [];
+      const total = () => configs.reduce((sum, config) => sum + config.versions, versions);
+      const erasure = await Erasure.prepare(ctx, going, async (read) => {
+        configs = environment === null ? [] : await Promise.all(read.filter((row) => row.id !== environment.id).map(async (row) => ({
+          id: row.id,
+          tombstone: await tombstoneSlug(ctx.db, row.slug, day, within),
+          versions: await heldVersions(ctx.db, { projectId: project.id, environmentId: row.id }),
+        })));
+        const own = entry(tombstone, total(), configs.length);
+        return {
+          tombstones: new Map(read.map((row) => [row.id, environment === null
+            ? deletedWithProject(row.slug)
+            : row.id === environment.id ? tombstone : configs.find((config) => config.id === row.id)!.tombstone])),
+          entries: new Map([
+            ...(read.length === 0 ? [] : [[environment?.id ?? read[0]!.id, own] as const]),
+            ...configs.map((config) => [config.id, personalEntry(ctx, { projectId: project.id, environmentId: config.id }, operationId, { path, with: environment!.slug }, config.tombstone, config.versions)] as const),
+          ]),
+          events: (unrecorded = read.length === 0 ? [own] : []),
+        };
+      });
       return audited(ctx, async (tx, log) => {
         // Again, under the log's head, which every change to a place takes first.
         const now = await resolvePath(tx, { project: project.slug, environment: environment?.slug });
@@ -945,29 +1022,17 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
           );
         }
         await erasure.hold(tx, going);
-        const day = new Date();
-        const tombstone = await tombstoneSlug(tx, slug, day, within);
-        let versions = await eraseVersions(tx, doomed);
+        if (await eraseVersions(tx, doomed) !== versions) throw new ObjectMoved();
         if (environment === null) {
-          await update(tx, projects, { id: project.id }, { slug: tombstone });
+          await claimed(update(tx, projects, { id: project.id }, { slug: tombstone }));
           // With 0.15's log, each of its environments too, `dev~deleted`: 0.15's environment is deleted by its own slug.
           // 0.14 takes the project's for theirs. Either way `coffre audit market~deleted-…/dev` finds dev (`resolvePath`).
           if (erasure.changes !== null) await tombstoneEnvironments(tx, scopeNow.environments.map((each) => each.id));
-        } else await update(tx, environments, { id: environment.id }, { slug: tombstone });
-        // Its personal configs with it: none outlives the environment it is a config of.
-        const configs = environment === null ? [] : (await forksOf(tx, environment.id, { archived: true })).filter((fork) => fork.owner !== null);
-        for (const config of configs) {
-          const erased = await erasePersonal(ctx, tx, { projectId: project.id, environmentId: config.id }, config.slug, operationId, { path, with: environment!.slug });
-          versions += erased.versions;
-          log.push(erased.entry);
-        }
-        const done = deletion(tombstone, versions);
-        log.push(allowed(ctx, action, {
-          ...doomed,
-          operationId,
-          metadata: { path, tombstone, keys: done.keys, versions, grants: done.grants.length, references: done.references.length, ...(configs.length === 0 ? {} : { personal: configs.length }) },
-        }));
-        return { dryRun: false, deletion: done };
+        } else await claimed(update(tx, environments, { id: environment.id }, { slug: tombstone }));
+        // Its personal configs with it, those `hold` found still: none outlives the environment it is a config of.
+        for (const config of configs) await erasePersonal(tx, { projectId: project.id, environmentId: config.id }, config.tombstone, config.versions);
+        log.push(...unrecorded);
+        return { dryRun: false, deletion: deletion(tombstone, total()) };
       }, erasure.changes);
     });
   });

@@ -6,7 +6,7 @@ import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 import { withTriggersLifted } from './db/engine.ts';
-import { clientFor, openTestDatabase, refusedIn, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedEntries, openTestDatabase, refusedIn, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // References between environments and projects (docs/design/environments.md).
 // market/prod/DATABASE_URL is the source; billing/prod holds references to it.
@@ -123,9 +123,9 @@ test("a reference reads its source's newest version only, whatever its current_v
   const [source] = await db.owner.select({ id: secrets.id }).from(secrets).where(and(eq(secrets.key, 'DATABASE_URL'), eq(secrets.currentVersion, 2)));
   const [first] = await db.owner.select({ id: secretVersions.id }).from(secretVersions).where(and(eq(secretVersions.secretId, source!.id), eq(secretVersions.version, 1)));
   await db.owner.update(secrets).set({ currentVersionId: first!.id }).where(eq(secrets.id, source!.id));
-  const before = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'allow')));
+  const before = (await loggedEntries(db.owner, ['secret.read'])).filter((entry) => entry.decision === 'allow');
   await assert.rejects(bo.secrets.reveal('billing/prod/DATABASE_URL'), { status: 404, code: 'not_available' });
-  const after = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'allow')));
+  const after = (await loggedEntries(db.owner, ['secret.read'])).filter((entry) => entry.decision === 'allow');
   assert.equal(after.length, before.length, 'nothing is released');
 });
 
@@ -195,8 +195,7 @@ test("the source's access manager breaks it, and a run of the holder stops, sayi
   await assert.rejects(max.references.break('billing/prod/DATABASE_URL'), { status: 409 });
   // The end names the holder's key, so that key's own log shows it broken, as its environment's does.
   const [holder] = await db.owner.select({ secretId: secretReferences.secretId }).from(secretReferences);
-  const ended = await db.owner.select({ secretId: auditLog.secretId }).from(auditLog)
-    .where(and(eq(auditLog.action, 'reference.end'), eq(auditLog.decision, 'allow')));
+  const ended = (await loggedEntries(db.owner, ['reference.end'])).filter((entry) => entry.decision === 'allow').map((entry) => ({ secretId: entry.secretId }));
   assert.deepEqual(ended, [{ secretId: holder!.secretId }]);
   const { entries } = await root.audit.list({ path: 'billing/prod', detail: '1', limit: 50 });
   assert.ok(entries.some((entry) => entry.action === 'reference.end' && entry.decision === 'allow'), "billing/prod's log shows the reference broken");
@@ -212,9 +211,8 @@ test('archiving what live references read is refused, naming them and who can br
   // What nothing reads is archived as before; and the refusals are logged, naming the references.
   await caro.secrets.update('market/prod/STRIPE_KEY', { archived: true });
   await caro.secrets.update('market/prod/STRIPE_KEY', { archived: false });
-  const refused = (await db.owner.select({ action: auditLog.action, metadata: auditLog.metadata }).from(auditLog)
-    .where(eq(auditLog.decision, 'deny')).orderBy(asc(auditLog.seq)))
-    .filter((row) => (JSON.parse(row.metadata) as { reason?: string }).reason === 'referenced');
+  const refused = (await loggedEntries(db.owner))
+    .filter((row) => row.decision === 'deny' && (row.metadata as { reason?: string }).reason === 'referenced');
   assert.deepEqual(refused.map((row) => row.action), ['secret.archive', 'secret.archive', 'environment.archive', 'project.archive']);
 
   // The holder's own place archives freely: archiving it stops no one else's read.

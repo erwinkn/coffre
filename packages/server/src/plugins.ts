@@ -463,14 +463,15 @@ export function bindingRoute(request: Request, runtime: CoffreRuntime, principal
  * `credentialId` `binding:<id>`, so the proxy sees one kind of caller.
  * Throws `WorkloadRefused`.
  */
-export function workloadFromBinding(runtime: CoffreRuntime, principal: string, at: WorkloadAsk): Promise<WorkloadUse> {
-  return bindingWorkload(runtime, principal, at, new WeakMap());
+export function workloadFromBinding(runtime: CoffreRuntime, principal: string, at: WorkloadAsk, requestId: string): Promise<WorkloadUse> {
+  return bindingWorkload(runtime, principal, at, new WeakMap(), requestId);
 }
 
 /** What a workload's request asks, as the checks take it: a plugin's `WorkloadAt`, its counts made for the caller (`GateCounts`). */
 type WorkloadAsk = Omit<WorkloadAt, 'counts'> & { counts?: GateCounts };
 
-async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: WorkloadAsk, standings: Standings): Promise<WorkloadUse> {
+/** `requestId`: the request's, which an alert it raises names (`raiseAlert`). */
+async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: WorkloadAsk, standings: Standings, requestId: string): Promise<WorkloadUse> {
   const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
   const unbound = () => refusedWith(new ApiError('unauthenticated', `no live cloudflare binding of ${principal} takes this call`));
   if (workloads === null || !/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(principal)) throw await unbound();
@@ -507,7 +508,7 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
   // The URL's other reading (`WorkloadAt.or`): the environment it reaches is the one the URL names, or there is not one.
   if (at.or !== undefined && at.place === null && (place === null || path === at.or.place)) {
     const { or, ...rest } = at;
-    return bindingWorkload(runtime, principal, { ...rest, place: or.place, credential: or.credential }, standings);
+    return bindingWorkload(runtime, principal, { ...rest, place: or.place, credential: or.credential }, standings, requestId);
   }
   if (at.credential !== null && place === null) {
     throw await refusedWith(new ApiError('bad_request', 'name the environment it uses, /use/<project>/<environment>/<credential>: this service reaches none, or several'));
@@ -525,7 +526,7 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
     if (!admitted.ok) {
       if (admitted.reason === 'limit') {
         const limit = { key: admitted.key, retryAfterMs: admitted.retryAfterMs, first: admitted.first };
-        if (admitted.first) await raiseAlert(runtime, limitAlert({ principal, bindingId: binding.id, session: null, sourceIp: null }, admitted), { credential: at.credential, count: admitted.key, retryAfterMs: admitted.retryAfterMs }, place);
+        if (admitted.first) await raiseAlert(runtime, limitAlert({ principal, bindingId: binding.id, session: null, sourceIp: null }, admitted), { credential: at.credential, count: admitted.key, retryAfterMs: admitted.retryAfterMs }, place, requestId);
         throw await workloadRefused(errorResponse(new ApiError('too_many_requests', `past this workload's limit for ${admitted.key}`, 'limit'), { 'retry-after': String(Math.ceil(admitted.retryAfterMs / 1000)) }), limit);
       }
       throw await refusedWith(new ApiError('too_many_requests', 'this workload sends more calls than its gate takes: try again shortly', 'overloaded'), { 'retry-after': '1' });
@@ -550,12 +551,12 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
 }
 
 /** A workload's session for a plugin's request (`PluginContext.workload`), as `standingSession` checks it. */
-async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceIp: string | null, at: WorkloadAsk, standings: Standings): Promise<WorkloadUse | null> {
+async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceIp: string | null, requestId: string, at: WorkloadAsk, standings: Standings): Promise<WorkloadUse | null> {
   const token = dpopToken(request);
   if (token === null) return null;
   let session: StandingSession;
   // The fields a plugin may ask, each by name: nothing it adds reaches the checks (an `ending`, say).
-  const asking = (where: { place: string | null; credential: string | null; unless?: string }) => standingSession(request, runtime, token, sourceIp, {
+  const asking = (where: { place: string | null; credential: string | null; unless?: string }) => standingSession(request, runtime, token, sourceIp, requestId, {
     ...where,
     ...(at.body === undefined ? {} : { body: at.body }),
     ...(at.counts === undefined ? {} : { counts: at.counts }),
@@ -585,11 +586,11 @@ async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceI
  * a session's statement again, every clause but the proof and the gate; a
  * Cloudflare call's binding, as `workloadFromBinding` holds it.
  */
-async function rechecked(runtime: CoffreRuntime, caller: WorkloadUse, standings: Standings): Promise<boolean> {
+async function rechecked(runtime: CoffreRuntime, caller: WorkloadUse, standings: Standings, requestId: string): Promise<boolean> {
   const standing = standings.get(caller);
   if (standing === undefined) return false;
   if (standing.kind === 'session') return sessionStands(runtime, standing.session, { place: caller.place, credential: standing.credential, children: true });
-  return bindingWorkload(runtime, caller.principal, { place: caller.place, credential: standing.credential }, new WeakMap()).then(
+  return bindingWorkload(runtime, caller.principal, { place: caller.place, credential: standing.credential }, new WeakMap(), requestId).then(
     (again) => again.bindingId === caller.bindingId,
     (error: unknown) => {
       if (error instanceof WorkloadRefused) return false;
@@ -679,6 +680,8 @@ function pluginContext(
   binding: string | null = null,
   ui = false,
 ): PluginContext {
+  // The plugin request's own id, which the workload checks' alerts name: its calls into the API each draw theirs.
+  const requestId = crypto.randomUUID();
   // The token where the API looks for it in this instance's mode: a header either way, so never ambient.
   const carrying = (token: string): Record<string, string> => (runtime.auth.mode === 'cloudflare' ? { [ACCESS_JWT_HEADER]: token } : { authorization: `Bearer ${token}` });
   // One of coffre's own routes outside the API's, in process: its answer, or its refusal as the client throws one.
@@ -982,9 +985,9 @@ function pluginContext(
     workload: (asked, at) => {
       const { counts, ...rest } = at;
       const checked: WorkloadAsk = { ...rest, ...(counts === undefined ? {} : { counts: counted(counts)! }) };
-      return binding === null ? sessionWorkload(asked, runtime, sourceIp, checked, standings) : bindingWorkload(runtime, binding, checked, standings);
+      return binding === null ? sessionWorkload(asked, runtime, sourceIp, requestId, checked, standings) : bindingWorkload(runtime, binding, checked, standings, requestId);
     },
-    recheck: (caller) => rechecked(runtime, caller, standings),
+    recheck: (caller) => rechecked(runtime, caller, standings, requestId),
     handle: async (handle) => {
       // A handle of one environment: its person's standing there, decided by the vault's one named call on the sealed
       // rows, nothing asked of `access` (T145). Refused, it names no environment.

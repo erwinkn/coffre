@@ -18,10 +18,17 @@
 (*     row's lock comes with an advisory lock that queues: a share lock    *)
 (*     waits behind a change that asked first, rather than join the ones   *)
 (*     it waits for;                                                       *)
-(*   - the log's head, audit_chain_head, the one row every append and      *)
-(*     every change to a place takes (db log.ts, lockLogHead).             *)
+(*   - the change lock, an advisory lock, which every change takes in its  *)
+(*     first statement, after the members' rows, and holds to its commit:  *)
+(*     what a change reads between there and its last statement, no other  *)
+(*     change moves. It is the lock 0.14's head was (`audit_chain_head`,   *)
+(*     db log.ts, lockLogHead), less the row and what was read under it;   *)
+(*     0.16 keeps it for this. The checkpointer, the projector and  *)
+(*     a 0.15 use (HotPathOne.tla) never take it. The read here is 0.14's  *)
+(*     (vault.ts, unwrap and #keys), which queued for the head and here    *)
+(*     takes this lock: its steps leave the model with the path.           *)
 (*                                                                         *)
-(* The app's own rows are only ever locked under the head (server          *)
+(* The app's own rows are only ever locked under the change lock (server   *)
 (* context.ts, audited), so they never decide who waits and are left out.  *)
 (*                                                                         *)
 (* The places are one project and its one environment, which holds one    *)
@@ -66,42 +73,43 @@ CONSTANTS
 (* one off to fail.                                                        *)
 (***************************************************************************)
 CONSTANTS
-    \* deletePlace re-reads the place's grants under the head and refuses
+    \* deletePlace re-reads the place's grants under the change lock and refuses
     \* if any is left (server api/projects.ts, `granted_meanwhile`). #134.
     GrantRereadInDeletion,
-    \* setAccess takes the head before it reads whether the place is
+    \* setAccess takes the change lock before it reads whether the place is
     \* deleted (vault vault.ts, setAccess). #134.
-    PlaceReadUnderHead,
-    \* deletePlace checks under the head that the place is still archived
+    PlaceReadUnderChangeLock,
+    \* deletePlace checks under the change lock that the place is still archived
     \* (server api/projects.ts, `restored`). #134.
     ArchivedRecheckInDeletion,
-    \* A rename, archive or restore resolves the place again under the head,
-    \* rather than trust the path the router resolved before (server
+    \* A rename, archive or restore resolves the place again under the change
+    \* lock, rather than trust the path the router resolved before (server
     \* api/projects.ts, stillThere). #147.
-    PatchRecheckUnderHead,
-    \* A key decision checks again, under the head, that its place was not
-    \* deleted while it decided (vault vault.ts, #keys). #147.
-    KeyPlaceRecheckUnderHead,
-    \* Adding an environment resolves its project again under the head, and
-    \* reads whether it is archived there (server api/projects.ts,
+    PatchRecheckUnderChangeLock,
+    \* A key decision checks again, under the change lock, that its place was
+    \* not deleted while it decided (vault vault.ts, #keys). #147.
+    KeyPlaceRecheckUnderChangeLock,
+    \* Adding an environment resolves its project again under the change lock,
+    \* and reads whether it is archived there (server api/projects.ts,
     \* putEnvironment, stillThere).
-    EnvCreateRecheckUnderHead,
+    EnvCreateRecheckUnderChangeLock,
     \* Renaming, archiving or restoring a key resolves its environment again
-    \* under the head (server api/secrets.ts, patchSecret, checkEnvironment).
-    SecretPatchRecheckUnderHead,
-    \* Sign-in reads the member's generation again under the head (server
+    \* under the change lock (server api/secrets.ts, patchSecret,
+    \* checkEnvironment).
+    SecretPatchRecheckUnderChangeLock,
+    \* Sign-in reads the member's generation again under the change lock (server
     \* api/signin.ts, #stillMember).
     MemberRecheckInSignin,
     \* Members' rows are locked in principal order (vault store.ts,
     \* lockMembers, `ORDER BY principal`), not in the order a call names them.
     SortedMemberLocks,
     \* A read or a wrap checks its reader's standing again where it commits,
-    \* under their row, shared, and the head, once its key service has
+    \* under their row, shared, and the change lock, once its key service has
     \* answered: the first check, the intent's, holds no lock across the key
     \* service (R75), so a revocation or a removal commits meanwhile and is
     \* seen here, and the key is withheld (vault vault.ts, #keys: the
     \* outcome's decision runs the check again). Off, only the first check.
-    StandingRecheckUnderHead,
+    StandingRecheckUnderChangeLock,
     \* A rotation to a new vault key logs, under the new key, an outcome for
     \* every key service's intent still open (vault vault.ts, #rotate,
     \* `closeIntents`): the call that logged it, its key now retired, can
@@ -109,29 +117,30 @@ CONSTANTS
     \* (R75). Off, the intent is left with no outcome, which verification
     \* reports as missing once it is overdue.
     RotationClosesIntents,
-    \* A read through a reference checks again, under the head, that no
+    \* A read through a reference checks again, under the change lock, that no
     \* `reference.end` committed since it decided (vault vault.ts, unwrap's
     \* `vet`, run again in #keys' `underLock`).
-    EndRecheckUnderHead,
-    \* Making a reference checks its source again under the head, where the
-    \* app writes its row: archived or deleted since, it is no source
+    EndRecheckUnderChangeLock,
+    \* Making a reference checks its source again under the change lock, where
+    \* the app writes its row: archived or deleted since, it is no source
     \* (server api/secrets.ts, setSecrets). #152.
     SourceRecheckInReference,
     \* Archiving a place is refused while a live reference from elsewhere
     \* reads it (server api/references.ts, refuseIfRead). #152.
     ArchiveRefusedWhileRead,
     \* deletePlace reads the references into and out of the place again under
-    \* the head, and refuses if one is live (server api/projects.ts,
+    \* the change lock, and refuses if one is live (server api/projects.ts,
     \* `referenced_meanwhile`).
     ReferenceRereadInDeletion,
-    \* Demoting or removing an Owner counts the other Owners under the head,
-    \* not only under the rows it locks (vault vault.ts, #keepAnOwner).
-    LastOwnerCheckUnderHead,
+    \* Demoting or removing an Owner counts the other Owners under the change
+    \* lock, not only under the rows it locks (vault vault.ts, #keepAnOwner).
+    LastOwnerCheckUnderChangeLock,
     \* A regenerate in a fork resolves each key it replaces again under the
-    \* head, the parent's rows included, and refuses if the name no longer
-    \* resolves to the version it was listed with (server api/secrets.ts,
-    \* setSecrets, `regenerated`), not only before the vault wraps.
-    InheritedRecheckUnderHead
+    \* change lock, the parent's rows included, and refuses if the name no
+    \* longer resolves to the version it was listed with (server
+    \* api/secrets.ts, setSecrets, `regenerated`), not only before the vault
+    \* wraps.
+    InheritedRecheckUnderChangeLock
 
 None == "none"
 \* No reference. A reference is named by the operation that made it, as
@@ -161,7 +170,7 @@ VARIABLES
     \* locks
     memberLock,     \* memberLock[m]: the process holding m's row alone, or None
     memberShared,   \* memberShared[m]: the processes sharing m's row
-    head,           \* the process holding the log's head, or None
+    changeLock,           \* the process holding the change lock, or None
     \* processes
     pc, op, l, left,
     \* history, for the invariants
@@ -173,7 +182,7 @@ VARIABLES
     regens          \* a record per regenerate that committed in the fork
 
 rows == <<slug, archived, held, version, status, gen, grants, owners, refRow, keyName, forkOwn>>
-locks == <<memberLock, memberShared, head>>
+locks == <<memberLock, memberShared, changeLock>>
 procs == <<pc, op, l, left>>
 history == <<revealed, deletions, everDeleted, excused, declared, regens>>
 vars == <<rows, log, creds, locks, procs, history>>
@@ -292,7 +301,7 @@ Goto(p, label) == pc' = [pc EXCEPT ![p] = label]
 Release(p) ==
     /\ memberLock' = [m \in Members |-> IF memberLock[m] = p THEN None ELSE memberLock[m]]
     /\ memberShared' = [m \in Members |-> memberShared[m] \ {p}]
-    /\ head' = IF head = p THEN None ELSE head
+    /\ changeLock' = IF changeLock = p THEN None ELSE changeLock
 
 \* Lock the next member's row, waiting while another holds it, alone or
 \* shared, and go to `then` once the last is held.
@@ -303,7 +312,7 @@ LockNext(p, then) ==
     /\ memberLock' = [memberLock EXCEPT ![m] = p]
     /\ l' = [l EXCEPT ![p].toLock = Tail(@)]
     /\ Goto(p, IF Tail(l[p].toLock) = <<>> THEN then ELSE pc[p])
-    /\ UNCHANGED <<rows, log, creds, memberShared, head, op, left, history>>
+    /\ UNCHANGED <<rows, log, creds, memberShared, changeLock, op, left, history>>
 
 \* The steps that lock members' rows; of them, those that share them.
 LockLabels == {"read.lock", "write.lock", "call.lock", "remove.lock", "demote.lock", "declare.lock", "rotate.lock", "refer.lock", "end.lock"}
@@ -322,12 +331,12 @@ ShareNext(p, then) ==
     /\ memberShared' = [memberShared EXCEPT ![m] = @ \cup {p}]
     /\ l' = [l EXCEPT ![p].toLock = Tail(@)]
     /\ Goto(p, IF Tail(l[p].toLock) = <<>> THEN then ELSE pc[p])
-    /\ UNCHANGED <<rows, log, creds, memberLock, head, op, left, history>>
+    /\ UNCHANGED <<rows, log, creds, memberLock, changeLock, op, left, history>>
 
-\* Lock the log's head, waiting while another holds it.
-TakeHead(p, then) ==
-    /\ head \in {None, p}
-    /\ head' = p
+\* Lock the change lock, waiting while another holds it.
+TakeChangeLock(p, then) ==
+    /\ changeLock \in {None, p}
+    /\ changeLock' = p
     /\ Goto(p, then)
     /\ UNCHANGED <<rows, log, creds, memberLock, memberShared, op, l, left, history>>
 
@@ -338,7 +347,7 @@ Read(p, then, locals) ==
     /\ UNCHANGED <<rows, log, creds, locks, op, left, history>>
 
 \* The operation ends, or is refused: its transaction rolls back. A refusal's
-\* own entries commit in a transaction of their own that takes the head
+\* own entries commit in a transaction of their own that takes the change lock
 \* alone (vault.ts, #decideOnce; context.ts, audited), which can wait for no
 \* one and decides nothing, so it is left out.
 Refuse(p) ==
@@ -371,18 +380,18 @@ RotatedSince(p) ==
         /\ log[i].kind = "key.intent" /\ log[i].id = l[p].id
         /\ \E j \in (i + 1)..Len(log) : log[j].kind = "key.rotate"
 
-\* The intent: its check, then its entry, under the head, which it takes and
-\* lets go of in the one step, its own transaction (#keys).
+\* The intent: its check, then its entry, under the change lock, which it takes
+\* and lets go of in the one step, its own transaction (#keys).
 LogIntent(p, then) ==
     IF IntentsLogged
-      THEN /\ head = None
+      THEN /\ changeLock = None
            /\ log' = Append(log, Entry("key.intent", None, p))
            /\ Goto(p, then)
            /\ UNCHANGED <<rows, creds, locks, op, l, left, history>>
       ELSE Read(p, then, l[p])
 
-\* A key operation's outcome refused under the head: each key logged so, then
-\* its transaction ends. A vault whose key a rotation retired since its
+\* A key operation's outcome refused under the change lock: each key logged so,
+\* then its transaction ends. A vault whose key a rotation retired since its
 \* intent logs nothing (`superseded`).
 RefuseKeys(p) ==
     IF RotatedSince(p) \/ ~IntentsLogged
@@ -414,7 +423,7 @@ FirstLabel(kind) ==
       [] kind = "refer"     -> "refer.resolve"
       [] kind = "break"     -> "break.resolve"
       [] kind = "regenerate" -> "regen.resolve"
-      [] kind = "override"  -> "override.head"
+      [] kind = "override"  -> "override.changelock"
 
 Begin(p) ==
     /\ pc[p] = "idle"
@@ -478,41 +487,41 @@ ReadCheck(p) ==
          ELSE Refuse(p)
 
 \* The outcome's decision, once the keys are open: the reader's row, shared
-\* with their other reads, then the head.
-ReadLock(p) == pc[p] = "read.lock" /\ ShareNext(p, "read.head")
+\* with their other reads, then the change lock.
+ReadLock(p) == pc[p] = "read.lock" /\ ShareNext(p, "read.changelock")
 
-ReadHead(p) == pc[p] = "read.head" /\ TakeHead(p, "read.commit")
+ReadChangeLock(p) == pc[p] = "read.changelock" /\ TakeChangeLock(p, "read.commit")
 
-\* Or, while another holds the head, the read gives up waiting for it: its
-\* statement's bound or its call's deadline ran out, or as many reads as
-\* the vault lets wait for the head already do (vault snapshot.ts, log.ts
-\* lockLogHeadQueued). It rolls back, having released nothing and appended
-\* no `secret.read` (a key service's intent, committed before, is accounted
-\* for as after any failure), and answers unavailable; its caller asks
-\* again later. No invariant may need a read to wait.
+\* Or, while another holds the change lock, the read gives up waiting for it:
+\* its statement's bound or its call's deadline ran out, or as many reads as
+\* the vault lets wait for the change lock already do (vault snapshot.ts,
+\* log.ts lockLogHeadQueued). It rolls back, having released nothing and
+\* appended no `secret.read` (a key service's intent, committed before, is
+\* accounted for as after any failure), and answers unavailable; its caller
+\* asks again later. No invariant may need a read to wait.
 ReadGivesUp(p) ==
-    /\ pc[p] = "read.head"
-    /\ head \notin {None, p}
+    /\ pc[p] = "read.changelock"
+    /\ changeLock \notin {None, p}
     /\ Refuse(p)
 
-\* Under the head: both places again, which a deletion renames under the
+\* Under the change lock: both places again, which a deletion renames under the
 \* same lock, and the reference's end again (`underLock`), then append
 \* `secret.read` and commit; then the key leaves the vault. Without the
 \* rechecks, a place deleted or a reference ended since the check above is
 \* read all the same. This is the read with a key service, which takes the
-\* head only once the keys are open, and reads it all again with it. With a
-\* key in memory, the vault takes the head right after the row, in the one
+\* lock only once the keys are open, and reads it all again with it. With a
+\* key in memory, the vault takes the lock right after the row, in the one
 \* statement that reads all the check decides on, and checks once, under
 \* both: the run here in which no step comes between ReadCheck and
-\* ReadHead, so its rechecks find what the check found. That statement
-\* never waits for the head (SKIP LOCKED; held, the vault waits in a
+\* ReadChangeLock, so its rechecks find what the check found. That statement
+\* never waits for the change lock (SKIP LOCKED; held, the vault waits in a
 \* statement of its own and reads again), so it reads as of the lock.
 ReadCommit(p) ==
     /\ pc[p] = "read.commit"
     /\ IF RotatedSince(p) THEN Refuse(p)
-       ELSE IF \/ StandingRecheckUnderHead /\ ~MayUse(op[p].who, op[p].at)
-               \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))
-               \/ EndRecheckUnderHead /\ l[p].ref # NoRef /\ Ended(l[p].ref)
+       ELSE IF \/ StandingRecheckUnderChangeLock /\ ~MayUse(op[p].who, op[p].at)
+               \/ KeyPlaceRecheckUnderChangeLock /\ (Gone("env") \/ Gone(op[p].at))
+               \/ EndRecheckUnderChangeLock /\ l[p].ref # NoRef /\ Ended(l[p].ref)
          THEN RefuseKeys(p)
          ELSE /\ log' = Append(log, [Entry("secret.read", "env", p) EXCEPT !.via = l[p].ref])
               /\ Release(p)
@@ -529,7 +538,7 @@ ReadAnswer(p) ==
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* Writing a value (server api/secrets.ts, setSecrets): prepare, have the  *)
-(* vault wrap, then one short app transaction under the head.              *)
+(* vault wrap, then one short app transaction under the change lock.       *)
 (***************************************************************************)
 
 WriteResolve(p) ==
@@ -545,26 +554,26 @@ WriteCheck(p) ==
          THEN LogIntent(p, "write.lock")
          ELSE Refuse(p)
 
-WriteLock(p) == pc[p] = "write.lock" /\ ShareNext(p, "write.head")
+WriteLock(p) == pc[p] = "write.lock" /\ ShareNext(p, "write.changelock")
 
-WriteHead(p) == pc[p] = "write.head" /\ TakeHead(p, "write.wrap")
+WriteChangeLock(p) == pc[p] = "write.changelock" /\ TakeChangeLock(p, "write.wrap")
 
-\* Under the writer's row and the head, the check again, then the vault
+\* Under the writer's row and the change lock, the check again, then the vault
 \* appends `key.wrap` and commits; the wrapped key goes to the app.
 WriteWrap(p) ==
     /\ pc[p] = "write.wrap"
     /\ IF RotatedSince(p) THEN Refuse(p)
-       ELSE IF \/ StandingRecheckUnderHead /\ ~MayUse(op[p].who, "env")
-               \/ KeyPlaceRecheckUnderHead /\ Gone("env")
+       ELSE IF \/ StandingRecheckUnderChangeLock /\ ~MayUse(op[p].who, "env")
+               \/ KeyPlaceRecheckUnderChangeLock /\ Gone("env")
          THEN RefuseKeys(p)
          ELSE /\ log' = Append(log, Entry("key.wrap", "env", p))
               /\ Release(p)
               /\ Goto(p, "write.tx")
               /\ UNCHANGED <<rows, creds, op, l, left, history>>
 
-WriteTx(p) == pc[p] = "write.tx" /\ TakeHead(p, "write.store")
+WriteTx(p) == pc[p] = "write.tx" /\ TakeChangeLock(p, "write.store")
 
-\* Under the head: the path again, still live (checkEnvironment), the
+\* Under the change lock: the path again, still live (checkEnvironment), the
 \* secret's version as prepared, then the new version and its entry. A
 \* version that moved prepares again (PrepareAgain); here the write ends.
 WriteStore(p) ==
@@ -601,9 +610,9 @@ OnPlaces(call) == call.at \cap Places # {}
 
 CallLock(p) ==
     /\ pc[p] = "call.lock"
-    /\ LockNext(p, IF PlaceReadUnderHead /\ OnPlaces(l[p].call) THEN "call.headfirst" ELSE "call.check")
+    /\ LockNext(p, IF PlaceReadUnderChangeLock /\ OnPlaces(l[p].call) THEN "call.lockfirst" ELSE "call.check")
 
-CallHeadFirst(p) == pc[p] = "call.headfirst" /\ TakeHead(p, "call.check")
+CallLockFirst(p) == pc[p] = "call.lockfirst" /\ TakeChangeLock(p, "call.check")
 
 \* Return from setAccess to the caller, with whether it was allowed.
 Return(p, ok) ==
@@ -620,13 +629,13 @@ CallCheck(p) ==
     /\ IF /\ ~(c.grant /\ \E x \in c.at : Gone(x))
           /\ MayManage(c.actor)
           /\ status[c.who] = "active"
-         THEN Read(p, "call.head", l[p])
+         THEN Read(p, "call.changelock", l[p])
          ELSE /\ Return(p, FALSE)
               /\ UNCHANGED <<rows, log, creds, op, left, history>>
 
-CallHead(p) == pc[p] = "call.head" /\ TakeHead(p, "call.commit")
+CallChangeLock(p) == pc[p] = "call.changelock" /\ TakeChangeLock(p, "call.commit")
 
-\* Append the entries under the head, change the grants, seal, commit: an
+\* Append the entries under the change lock, change the grants, seal, commit: an
 \* `access.grant` or an `access.revoke` for each place that changed.
 CallCommit(p) ==
     LET c == l[p].call
@@ -646,7 +655,7 @@ CallCommit(p) ==
 (* Deleting an archived place for good (server api/projects.ts,            *)
 (* deletePlace): its scope read, one vault revocation per member, the      *)
 (* references into and out of it ended, then one app transaction under    *)
-(* the head that erases and renames.                                       *)
+(* the change lock that erases and renames.                                *)
 (***************************************************************************)
 
 DeleteResolve(p) ==
@@ -675,7 +684,7 @@ DeleteNext(p) ==
          ELSE IF l[p].queue = <<>> /\ l[p].end # NoRef
          THEN Read(p, "end.lock", [l[p] EXCEPT !.toLock = <<op[p].actor>>, !.ret = "delete.next"])
          ELSE IF l[p].queue = <<>>
-         THEN Read(p, "delete.head", l[p])
+         THEN Read(p, "delete.changelock", l[p])
          ELSE Read(p, "call.lock",
                    [l[p] EXCEPT !.queue = Tail(@),
                                 !.call = [actor |-> op[p].actor, who |-> m,
@@ -684,10 +693,10 @@ DeleteNext(p) ==
                                 !.toLock = LockOrder(op[p].actor, m),
                                 !.ret = "delete.next"])
 
-DeleteHead(p) == pc[p] = "delete.head" /\ TakeHead(p, "delete.commit")
+DeleteChangeLock(p) == pc[p] = "delete.changelock" /\ TakeChangeLock(p, "delete.commit")
 
-\* Under the head: the path again; still archived; no grant left there, nor
-\* a live reference. Then erase every version, rename to the tombstone,
+\* Under the change lock: the path again; still archived; no grant left there,
+\* nor a live reference. Then erase every version, rename to the tombstone,
 \* log, commit.
 DeleteCommit(p) ==
     LET x == op[p].at IN
@@ -710,24 +719,24 @@ DeleteCommit(p) ==
 (***************************************************************************)
 (* Archiving, restoring and renaming a place (server api/projects.ts,      *)
 (* patchProject and patchEnvironment): the router resolves the path before *)
-(* the transaction; the update is by id, under the head. Archiving is      *)
-(* refused while a live reference from elsewhere reads the place.          *)
+(* the transaction; the update is by id, under the change lock. Archiving  *)
+(* is refused while a live reference from elsewhere reads the place.       *)
 (***************************************************************************)
 
 PatchResolve(p) ==
     /\ pc[p] = "patch.resolve"
     /\ IF Resolves(op[p].at, Named)
-         THEN Read(p, "patch.head", [l[p] EXCEPT !.named = Named])
+         THEN Read(p, "patch.changelock", [l[p] EXCEPT !.named = Named])
          ELSE Refuse(p)
 
-PatchHead(p) == pc[p] = "patch.head" /\ TakeHead(p, "patch.commit")
+PatchChangeLock(p) == pc[p] = "patch.changelock" /\ TakeChangeLock(p, "patch.commit")
 
 PatchCommit(p) ==
     LET x == op[p].at
         k == op[p].kind
     IN
     /\ pc[p] = "patch.commit"
-    /\ IF \/ PatchRecheckUnderHead /\ ~Resolves(x, l[p].named)
+    /\ IF \/ PatchRecheckUnderChangeLock /\ ~Resolves(x, l[p].named)
           \/ ArchiveRefusedWhileRead /\ k = "archive" /\ ReadFromOutside(x)
          THEN Refuse(p)
          ELSE /\ archived' = IF k = "archive" THEN [archived EXCEPT ![x] = TRUE]
@@ -750,22 +759,23 @@ PatchCommit(p) ==
 (* Adding an environment (server api/projects.ts, putEnvironment), and     *)
 (* renaming, archiving or restoring a key (server api/secrets.ts,          *)
 (* patchSecret). Each writes under a place the router resolved before its  *)
-(* transaction, under the head. A new environment is a log entry here: the *)
-(* model's places are fixed, and the entry is what the invariant reads.    *)
+(* transaction, under the change lock. A new environment is a log entry    *)
+(* here: the model's places are fixed, and the entry is what the invariant *)
+(* reads.                                                                  *)
 (***************************************************************************)
 
 AddEnvResolve(p) ==
     /\ pc[p] = "addenv.resolve"
     /\ IF Resolves("proj", Named) /\ ~archived["proj"]
-         THEN Read(p, "addenv.head", [l[p] EXCEPT !.named = Named])
+         THEN Read(p, "addenv.changelock", [l[p] EXCEPT !.named = Named])
          ELSE Refuse(p)
 
-AddEnvHead(p) == pc[p] = "addenv.head" /\ TakeHead(p, "addenv.commit")
+AddEnvChangeLock(p) == pc[p] = "addenv.changelock" /\ TakeChangeLock(p, "addenv.commit")
 
 \* Without the recheck, the project as the router saw it: not archived.
 AddEnvCommit(p) ==
     /\ pc[p] = "addenv.commit"
-    /\ IF EnvCreateRecheckUnderHead /\ (~Resolves("proj", l[p].named) \/ archived["proj"])
+    /\ IF EnvCreateRecheckUnderChangeLock /\ (~Resolves("proj", l[p].named) \/ archived["proj"])
          THEN Refuse(p)
          ELSE /\ log' = Append(log, Entry("environment.create", "proj", p))
               /\ Release(p)
@@ -775,14 +785,14 @@ AddEnvCommit(p) ==
 RenameKeyResolve(p) ==
     /\ pc[p] = "renamekey.resolve"
     /\ IF AppLive
-         THEN Read(p, "renamekey.head", [l[p] EXCEPT !.named = Named])
+         THEN Read(p, "renamekey.changelock", [l[p] EXCEPT !.named = Named])
          ELSE Refuse(p)
 
-RenameKeyHead(p) == pc[p] = "renamekey.head" /\ TakeHead(p, "renamekey.commit")
+RenameKeyChangeLock(p) == pc[p] = "renamekey.changelock" /\ TakeChangeLock(p, "renamekey.commit")
 
 RenameKeyCommit(p) ==
     /\ pc[p] = "renamekey.commit"
-    /\ IF SecretPatchRecheckUnderHead /\ ~(Resolves("env", l[p].named) /\ AppLive)
+    /\ IF SecretPatchRecheckUnderChangeLock /\ ~(Resolves("env", l[p].named) /\ AppLive)
          THEN Refuse(p)
          ELSE /\ log' = Append(log, Entry("secret.rename", "env", p))
               /\ keyName' = IF keyName = "k1" THEN "k2" ELSE "k1"
@@ -796,7 +806,7 @@ RenameKeyCommit(p) ==
 (* api/secrets.ts, setSecrets with `{ ref }`): the app checks both sides,  *)
 (* the vault seals the reference with its `reference.create` (vault        *)
 (* vault.ts, reference), ends the one it replaces, if live, as `replaced`, *)
-(* then one app transaction under the head writes the row.                 *)
+(* then one app transaction under the change lock writes the row.          *)
 (***************************************************************************)
 
 \* referenceTargets, outside any transaction: the holder's environment and
@@ -816,12 +826,12 @@ ReferLock(p) == pc[p] = "refer.lock" /\ LockNext(p, "refer.check")
 ReferCheck(p) ==
     /\ pc[p] = "refer.check"
     /\ IF MayUse(op[p].actor, "hold") /\ MayUse(op[p].actor, "env") /\ ~Gone("hold") /\ ~Gone("env")
-         THEN Read(p, "refer.head", l[p])
+         THEN Read(p, "refer.changelock", l[p])
          ELSE Refuse(p)
 
-ReferHead(p) == pc[p] = "refer.head" /\ TakeHead(p, "refer.seal")
+ReferChangeLock(p) == pc[p] = "refer.changelock" /\ TakeChangeLock(p, "refer.seal")
 
-\* Under the head (`underLock`): neither side deleted since. Append
+\* Under the change lock (`underLock`): neither side deleted since. Append
 \* `reference.create`, which is the reference, and commit.
 ReferSeal(p) ==
     /\ pc[p] = "refer.seal"
@@ -836,13 +846,14 @@ ReferSeal(p) ==
 ReferTx(p) ==
     /\ pc[p] = "refer.tx"
     /\ IF l[p].ok
-         THEN TakeHead(p, "refer.commit")
+         THEN TakeChangeLock(p, "refer.commit")
          ELSE Refuse(p)
 
-\* Under the head: the holder's environment still live (checkEnvironment),
-\* the source still live, no reference made there meanwhile; then the row,
-\* which points at the vault's entry. Without the source's recheck, a source
-\* archived since, and deleted next, is read by a row nothing ends.
+\* Under the change lock: the holder's environment still live
+\* (checkEnvironment), the source still live, no reference made there
+\* meanwhile; then the row, which points at the vault's entry. Without the
+\* source's recheck, a source archived since, and deleted next, is read by a
+\* row nothing ends.
 ReferCommit(p) ==
     /\ pc[p] = "refer.commit"
     /\ IF \/ ~(Resolves("hold", l[p].named) /\ Live("hold"))
@@ -879,13 +890,14 @@ EndLock(p) == pc[p] = "end.lock" /\ LockNext(p, "end.check")
 EndCheck(p) ==
     /\ pc[p] = "end.check"
     /\ IF (MayManage(op[p].actor) \/ MayUse(op[p].actor, "hold")) /\ ~Ended(l[p].end)
-         THEN Read(p, "end.head", l[p])
+         THEN Read(p, "end.changelock", l[p])
          ELSE /\ Return(p, FALSE)
               /\ UNCHANGED <<rows, log, creds, op, left, history>>
 
-EndHead(p) == pc[p] = "end.head" /\ TakeHead(p, "end.commit")
+EndChangeLock(p) == pc[p] = "end.changelock" /\ TakeChangeLock(p, "end.commit")
 
-\* Under the head: not ended meanwhile, by another end; then `reference.end`.
+\* Under the change lock: not ended meanwhile, by another end; then
+\* `reference.end`.
 EndCommit(p) ==
     /\ pc[p] = "end.commit"
     /\ IF Ended(l[p].end)
@@ -900,17 +912,17 @@ EndCommit(p) ==
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* Signing in (server api/signin.ts): the member's standing from the vault,*)
-(* unlocked, then one app transaction under the head that issues a         *)
+(* unlocked, then one app transaction under the change lock that issues a  *)
 (* credential at that generation.                                          *)
 (***************************************************************************)
 
 SigninAccess(p) ==
     /\ pc[p] = "signin.access"
     /\ IF Active(op[p].who)
-         THEN Read(p, "signin.head", [l[p] EXCEPT !.gen = gen[op[p].who]])
+         THEN Read(p, "signin.changelock", [l[p] EXCEPT !.gen = gen[op[p].who]])
          ELSE Refuse(p)
 
-SigninHead(p) == pc[p] = "signin.head" /\ TakeHead(p, "signin.commit")
+SigninChangeLock(p) == pc[p] = "signin.changelock" /\ TakeChangeLock(p, "signin.commit")
 
 SigninCommit(p) ==
     LET m == op[p].who
@@ -929,15 +941,16 @@ SigninCommit(p) ==
 (* Removing a member (vault vault.ts, remove): one decision under both     *)
 (* rows; their grants go and their generation moves on. Only an Owner      *)
 (* removes an Owner, themselves included, and leaves another, or is        *)
-(* refused (#keepAnOwner): the code counts the others under the head,      *)
-(* which the commit step holds. Nobody removes one the deployment names.   *)
+(* refused (#keepAnOwner): the code counts the others under the change     *)
+(* lock, which the commit step holds. Nobody removes one the deployment    *)
+(* names.                                                                  *)
 (***************************************************************************)
 
 RemoveLock(p) == pc[p] = "remove.lock" /\ LockNext(p, "remove.check")
 
-\* With the count under the rows alone, it is made here, before the head.
-KeepsAnOwnerUnderRows(m) == LastOwnerCheckUnderHead \/ m \notin owners \/ AnotherOwner(m)
-KeepsAnOwnerUnderHead(m) == ~LastOwnerCheckUnderHead \/ m \notin owners \/ AnotherOwner(m)
+\* With the count under the rows alone, it is made here, before the change lock.
+KeepsAnOwnerUnderRows(m) == LastOwnerCheckUnderChangeLock \/ m \notin owners \/ AnotherOwner(m)
+KeepsAnOwnerUnderChangeLock(m) == ~LastOwnerCheckUnderChangeLock \/ m \notin owners \/ AnotherOwner(m)
 
 RemoveCheck(p) ==
     /\ pc[p] = "remove.check"
@@ -946,15 +959,15 @@ RemoveCheck(p) ==
           /\ op[p].who \notin Listed
           /\ (op[p].who \notin owners \/ ChangesOwners(op[p].actor))
           /\ KeepsAnOwnerUnderRows(op[p].who)
-         THEN Read(p, "remove.head", l[p])
+         THEN Read(p, "remove.changelock", l[p])
          ELSE Refuse(p)
 
-RemoveHead(p) == pc[p] = "remove.head" /\ TakeHead(p, "remove.commit")
+RemoveChangeLock(p) == pc[p] = "remove.changelock" /\ TakeChangeLock(p, "remove.commit")
 
 RemoveCommit(p) ==
     LET m == op[p].who IN
     /\ pc[p] = "remove.commit"
-    /\ IF KeepsAnOwnerUnderHead(m)
+    /\ IF KeepsAnOwnerUnderChangeLock(m)
          THEN /\ grants' = {g \in grants : g.who # m}
               /\ status' = [status EXCEPT ![m] = "removed"]
               /\ gen' = [gen EXCEPT ![m] = @ + 1]
@@ -979,15 +992,15 @@ DemoteCheck(p) ==
     LET m == op[p].who IN
     /\ pc[p] = "demote.check"
     /\ IF ChangesOwners(op[p].actor) /\ status[m] = "active" /\ m \in owners /\ m \notin Listed /\ KeepsAnOwnerUnderRows(m)
-         THEN Read(p, "demote.head", l[p])
+         THEN Read(p, "demote.changelock", l[p])
          ELSE Refuse(p)
 
-DemoteHead(p) == pc[p] = "demote.head" /\ TakeHead(p, "demote.commit")
+DemoteChangeLock(p) == pc[p] = "demote.changelock" /\ TakeChangeLock(p, "demote.commit")
 
 DemoteCommit(p) ==
     LET m == op[p].who IN
     /\ pc[p] = "demote.commit"
-    /\ IF KeepsAnOwnerUnderHead(m)
+    /\ IF KeepsAnOwnerUnderChangeLock(m)
          THEN /\ owners' = owners \ {m}
               /\ log' = Append(log, Entry("member.role", "*", p))
               /\ Release(p)
@@ -999,12 +1012,12 @@ DemoteCommit(p) ==
 (***************************************************************************)
 (* Making someone the deployment names an Owner (vault vault.ts,          *)
 (* #declare), as it starts and when they sign in: one decision under their *)
-(* row, whoever else owns the instance, then the head its entry takes.     *)
+(* row, whoever else owns the instance, then the change lock.              *)
 (***************************************************************************)
 
-DeclareLock(p) == pc[p] = "declare.lock" /\ LockNext(p, "declare.head")
+DeclareLock(p) == pc[p] = "declare.lock" /\ LockNext(p, "declare.changelock")
 
-DeclareHead(p) == pc[p] = "declare.head" /\ TakeHead(p, "declare.commit")
+DeclareChangeLock(p) == pc[p] = "declare.changelock" /\ TakeChangeLock(p, "declare.commit")
 
 DeclareCommit(p) ==
     LET m == op[p].who IN
@@ -1020,16 +1033,16 @@ DeclareCommit(p) ==
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* Moving to a new vault key (vault vault.ts, #rotate): every member's row *)
-(* locked, as a decision locks one, then the head.                         *)
+(* locked, as a decision locks one, then the change lock.                  *)
 (***************************************************************************)
 
 RotateRead(p) ==
     /\ pc[p] = "rotate.read"
     /\ Read(p, "rotate.lock", [l[p] EXCEPT !.toLock = Sorted(Members)])
 
-RotateLock(p) == pc[p] = "rotate.lock" /\ LockNext(p, "rotate.head")
+RotateLock(p) == pc[p] = "rotate.lock" /\ LockNext(p, "rotate.changelock")
 
-RotateHead(p) == pc[p] = "rotate.head" /\ TakeHead(p, "rotate.commit")
+RotateChangeLock(p) == pc[p] = "rotate.changelock" /\ TakeChangeLock(p, "rotate.commit")
 
 \* Its first entry under the new key, `key.rotate`, and with it, an outcome
 \* for every intent still open, which no vault on the old key can log now.
@@ -1045,8 +1058,8 @@ RotateCommit(p) ==
 (* Regenerating, in a fork, the key it inherits (server api/secrets.ts,    *)
 (* setSecrets with `replaces`): the listing names the version "k1"         *)
 (* resolves to, the app checks it again before the vault wraps, then once  *)
-(* more under the head, where it writes the fork's override. A value typed *)
-(* in the fork is an override too, written under the head.                 *)
+(* more under the change lock, where it writes the fork's override. A value *)
+(* typed in the fork is an override too, written under the change lock.    *)
 (***************************************************************************)
 
 \* The version the fork's "k1" resolves to, as the listing gives it: the
@@ -1060,15 +1073,14 @@ RegenResolve(p) ==
          THEN Read(p, "regen.tx", [l[p] EXCEPT !.nver = Inherited])
          ELSE Refuse(p)
 
-RegenTx(p) == pc[p] = "regen.tx" /\ TakeHead(p, "regen.store")
+RegenTx(p) == pc[p] = "regen.tx" /\ TakeChangeLock(p, "regen.store")
 
-\* Under the head: the fork's own rows as prepared (PrepareAgain), and the
-\* parent's resolved again. Without that, a rename or a write in the parent
-\* since leaves an override under a name that no longer holds what it
-\* replaced.
+\* Under the change lock: the fork's own rows as prepared (PrepareAgain), and
+\* the parent's resolved again. Without that, a rename or a write in the parent
+\* since leaves an override under a name that no longer holds what it replaced.
 RegenStore(p) ==
     /\ pc[p] = "regen.store"
-    /\ IF forkOwn \/ (InheritedRecheckUnderHead /\ Inherited # l[p].nver)
+    /\ IF forkOwn \/ (InheritedRecheckUnderChangeLock /\ Inherited # l[p].nver)
          THEN Refuse(p)
          ELSE /\ regens' = regens \cup {[listed |-> l[p].nver, key |-> keyName, version |-> version]}
               /\ forkOwn' = TRUE
@@ -1077,7 +1089,7 @@ RegenStore(p) ==
               /\ UNCHANGED <<slug, archived, held, version, status, gen, grants, owners, refRow, keyName,
                              log, creds, op, l, left, revealed, deletions, everDeleted, excused, declared>>
 
-OverrideHead(p) == pc[p] = "override.head" /\ TakeHead(p, "override.commit")
+OverrideChangeLock(p) == pc[p] = "override.changelock" /\ TakeChangeLock(p, "override.commit")
 
 OverrideCommit(p) ==
     /\ pc[p] = "override.commit"
@@ -1104,7 +1116,7 @@ Init ==
     /\ creds = {}
     /\ memberLock = [m \in Members |-> None]
     /\ memberShared = [m \in Members |-> {}]
-    /\ head = None
+    /\ changeLock = None
     /\ pc = [p \in Procs |-> "idle"]
     /\ op = [p \in Procs |-> NoOp]
     /\ l = [p \in Procs |-> L0]
@@ -1118,16 +1130,16 @@ Init ==
 
 \* The process p waits for: the holders of the lock its next step takes,
 \* and for a share lock, those queued to take it alone.
-HeadLabels == {"read.head", "write.head", "write.tx", "call.headfirst", "call.head",
-               "delete.head", "patch.head", "addenv.head", "renamekey.head",
-               "signin.head", "remove.head", "demote.head", "declare.head", "rotate.head", "refer.head", "refer.tx", "end.head",
-               "regen.tx", "override.head"}
+ChangeLockLabels == {"read.changelock", "write.changelock", "write.tx", "call.lockfirst", "call.changelock",
+               "delete.changelock", "patch.changelock", "addenv.changelock", "renamekey.changelock",
+               "signin.changelock", "remove.changelock", "demote.changelock", "declare.changelock", "rotate.changelock", "refer.changelock", "refer.tx", "end.changelock",
+               "regen.tx", "override.changelock"}
 WaitsFor(p) ==
     IF pc[p] \in LockLabels /\ l[p].toLock # <<>>
       THEN LET m == Head(l[p].toLock) IN
            (({memberLock[m]} \ {None}) \cup (IF pc[p] \in SharedLabels THEN Changing(m) ELSE memberShared[m])) \ {p}
-    ELSE IF pc[p] \in HeadLabels /\ head \notin {None, p}
-      THEN {head}
+    ELSE IF pc[p] \in ChangeLockLabels /\ changeLock \notin {None, p}
+      THEN {changeLock}
     ELSE {}
 
 \* Or any process waiting for a lock gives up (R75): a change's wait is
@@ -1140,24 +1152,24 @@ GivesUp(p) == WaitsFor(p) # {} /\ Refuse(p)
 Step(p) ==
     \/ Begin(p)
     \/ ReadResolve(p) \/ ReadVersions(p) \/ ReadLock(p) \/ ReadCheck(p)
-    \/ ReadHead(p) \/ ReadGivesUp(p) \/ ReadCommit(p) \/ ReadAnswer(p) \/ GivesUp(p)
-    \/ WriteResolve(p) \/ WriteLock(p) \/ WriteCheck(p) \/ WriteHead(p)
+    \/ ReadChangeLock(p) \/ ReadGivesUp(p) \/ ReadCommit(p) \/ ReadAnswer(p) \/ GivesUp(p)
+    \/ WriteResolve(p) \/ WriteLock(p) \/ WriteCheck(p) \/ WriteChangeLock(p)
     \/ WriteWrap(p) \/ WriteTx(p) \/ WriteStore(p)
-    \/ GrantResolve(p) \/ CallLock(p) \/ CallHeadFirst(p) \/ CallCheck(p)
-    \/ CallHead(p) \/ CallCommit(p)
-    \/ DeleteResolve(p) \/ DeleteScope(p) \/ DeleteNext(p) \/ DeleteHead(p) \/ DeleteCommit(p)
-    \/ PatchResolve(p) \/ PatchHead(p) \/ PatchCommit(p)
-    \/ AddEnvResolve(p) \/ AddEnvHead(p) \/ AddEnvCommit(p)
-    \/ RenameKeyResolve(p) \/ RenameKeyHead(p) \/ RenameKeyCommit(p)
-    \/ SigninAccess(p) \/ SigninHead(p) \/ SigninCommit(p)
-    \/ RemoveLock(p) \/ RemoveCheck(p) \/ RemoveHead(p) \/ RemoveCommit(p)
-    \/ DemoteLock(p) \/ DemoteCheck(p) \/ DemoteHead(p) \/ DemoteCommit(p)
-    \/ DeclareLock(p) \/ DeclareHead(p) \/ DeclareCommit(p)
-    \/ RotateRead(p) \/ RotateLock(p) \/ RotateHead(p) \/ RotateCommit(p)
-    \/ ReferResolve(p) \/ ReferLock(p) \/ ReferCheck(p) \/ ReferHead(p) \/ ReferSeal(p)
+    \/ GrantResolve(p) \/ CallLock(p) \/ CallLockFirst(p) \/ CallCheck(p)
+    \/ CallChangeLock(p) \/ CallCommit(p)
+    \/ DeleteResolve(p) \/ DeleteScope(p) \/ DeleteNext(p) \/ DeleteChangeLock(p) \/ DeleteCommit(p)
+    \/ PatchResolve(p) \/ PatchChangeLock(p) \/ PatchCommit(p)
+    \/ AddEnvResolve(p) \/ AddEnvChangeLock(p) \/ AddEnvCommit(p)
+    \/ RenameKeyResolve(p) \/ RenameKeyChangeLock(p) \/ RenameKeyCommit(p)
+    \/ SigninAccess(p) \/ SigninChangeLock(p) \/ SigninCommit(p)
+    \/ RemoveLock(p) \/ RemoveCheck(p) \/ RemoveChangeLock(p) \/ RemoveCommit(p)
+    \/ DemoteLock(p) \/ DemoteCheck(p) \/ DemoteChangeLock(p) \/ DemoteCommit(p)
+    \/ DeclareLock(p) \/ DeclareChangeLock(p) \/ DeclareCommit(p)
+    \/ RotateRead(p) \/ RotateLock(p) \/ RotateChangeLock(p) \/ RotateCommit(p)
+    \/ ReferResolve(p) \/ ReferLock(p) \/ ReferCheck(p) \/ ReferChangeLock(p) \/ ReferSeal(p)
     \/ ReferTx(p) \/ ReferCommit(p)
-    \/ BreakResolve(p) \/ EndLock(p) \/ EndCheck(p) \/ EndHead(p) \/ EndCommit(p)
-    \/ RegenResolve(p) \/ RegenTx(p) \/ RegenStore(p) \/ OverrideHead(p) \/ OverrideCommit(p)
+    \/ BreakResolve(p) \/ EndLock(p) \/ EndCheck(p) \/ EndChangeLock(p) \/ EndCommit(p)
+    \/ RegenResolve(p) \/ RegenTx(p) \/ RegenStore(p) \/ OverrideChangeLock(p) \/ OverrideCommit(p)
 
 \* Every process has run its operations: the run is over. Without this
 \* step a finished run would look like a deadlock to TLC.
@@ -1183,7 +1195,7 @@ TypeOK ==
     /\ memberLock \in [Members -> Procs \cup {None}]
     /\ memberShared \in [Members -> SUBSET Procs]
     /\ \A m \in Members : memberLock[m] # None => memberShared[m] \subseteq {memberLock[m]}
-    /\ head \in Procs \cup {None}
+    /\ changeLock \in Procs \cup {None}
 
 
 RECURSIVE Waited(_, _)

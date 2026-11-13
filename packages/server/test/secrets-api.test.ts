@@ -12,7 +12,7 @@ import {
   secretVersions,
 } from '@coffre/db/schema';
 import { withLogUnlocked, withTriggersLifted } from './db/engine.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps, outcomes } from './api-fixture.ts';
+import { clientFor, logMark, loggedSince, openTestDatabase, resetDatabase, testDeps, type FixtureDeps, outcomes } from './api-fixture.ts';
 import { actorParts } from '../src/db/audit.ts';
 
 const ROOT = 'admin@acme.example';
@@ -28,7 +28,7 @@ let developer: CoffreClient;
 let outsider: CoffreClient;
 let ci: CoffreClient;
 /** Audit entries from the seeding are not what these tests look at. */
-let firstSeq: bigint;
+let mark: number;
 
 before(async () => {
   db = await openTestDatabase();
@@ -56,7 +56,7 @@ beforeEach(async () => {
   await root.access.set(`user:${READER}`, { 'market/dev': 'viewer' });
   await root.access.set(`user:${DEVELOPER}`, { 'market/dev': 'developer' });
   await root.access.set(`token:${CI}`, { 'market/prod': 'viewer' });
-  firstSeq = await nextSeq();
+  mark = await logMark(db.owner);
 });
 
 async function nextSeq(): Promise<bigint> {
@@ -64,22 +64,12 @@ async function nextSeq(): Promise<bigint> {
   return head.nextSeq;
 }
 
-/** One author's entries since `firstSeq`: the app's by default, or the vault's, which logs reads. */
+/** One author's entries since `mark`: the app's by default, or the vault's, which logs reads. */
 async function auditRows(author: 'app' | 'vault' = 'app'): Promise<
   { actorId: string; action: string; decision: string; operationId: string | null; metadata: Record<string, unknown> }[]
 > {
-  const rows = await db.owner
-    .select({
-      actor: auditLog.actor,
-      action: auditLog.action,
-      decision: auditLog.decision,
-      operationId: auditLog.operationId,
-      metadata: auditLog.metadata,
-    })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, author), gte(auditLog.seq, firstSeq)))
-    .orderBy(asc(auditLog.seq));
-  return rows.map(({ actor, ...row }) => ({ actorId: actorParts(actor).actorId, ...row, metadata: JSON.parse(row.metadata) }));
+  const rows = (await loggedSince(db.owner, mark)).filter((entry) => entry.author === author);
+  return rows.map(({ actor, action, decision, operationId, metadata }) => ({ actorId: actorParts(actor).actorId, action, decision, operationId, metadata }));
 }
 
 async function versionCount(): Promise<number> {
@@ -265,7 +255,7 @@ test('a service read is attributed to the service principal', async () => {
 
 test('revealing an environment returns every secret and logs one entry listing each', async () => {
   await root.secrets.set('market/dev', { DATABASE_URL: 'postgres://x', REDIS_URL: 'redis://y', JWT_SECRET: 'shhh' });
-  firstSeq = await nextSeq();
+  mark = await logMark(db.owner);
   const result = await reader.secrets.reveal('market/dev');
   assert.deepEqual(result.values, {
     DATABASE_URL: 'postgres://x',
@@ -286,7 +276,7 @@ test('revealing an environment returns every secret and logs one entry listing e
 
 test('revealing some keys of an environment opens and logs only those, and names what it left out among them only', async () => {
   await root.secrets.set('market/dev', { DATABASE_URL: 'postgres://x', REDIS_URL: 'redis://y', JWT_SECRET: 'shhh', SIGNING_KEY: { value: 'k', sensitivity: 'sensitive' }, WEBHOOK: { value: 'w', sensitivity: 'sensitive' } });
-  firstSeq = await nextSeq();
+  mark = await logMark(db.owner);
   // A key the environment does not hold is left out, not refused: the CLI listed it first.
   const result = await reader.secrets.reveal('market/dev', ['REDIS_URL', 'DATABASE_URL', 'SIGNING_KEY', 'NOT_HERE']);
   assert.deepEqual(result.values, { DATABASE_URL: 'postgres://x', REDIS_URL: 'redis://y' });
@@ -305,12 +295,11 @@ test('revealing some keys of an environment opens and logs only those, and names
   await root.secrets.set('market/dev', { REDIS_URL: 'redis://z' });
   assert.notEqual((await reader.secrets.reveal('market/dev', ['DATABASE_URL', 'REDIS_URL'])).version, result.version);
 
-  // Nothing it names to open: the read is logged as one, of nothing.
-  firstSeq = await nextSeq();
+  // Nothing it names to open: an allowed read that opens nothing records nothing.
+  mark = await logMark(db.owner);
   const none = await reader.secrets.reveal('market/dev', ['NOT_HERE']);
   assert.deepEqual([none.values, none.sensitive], [{}, []]);
-  const [nothing] = await auditRows();
-  assert.deepEqual([nothing!.action, nothing!.decision, nothing!.metadata.reason], ['secret.read', 'allow', 'no_named_key']);
+  assert.deepEqual([await auditRows(), await auditRows('vault')], [[], []]);
 });
 
 test('keys names keys of an environment, never of one key, and only well-formed ones', async () => {
@@ -544,7 +533,7 @@ test('a secret archived while rewrapping cannot be restored by the prepared writ
 for (const read of ['reveal', 'run', 'import preview'] as const) {
   test(`a ${read} is on the record before any value reaches the app, which writes nothing for it`, async (t) => {
     await root.secrets.set('market/dev', { VALUE: 'the value' });
-    firstSeq = await nextSeq();
+    mark = await logMark(db.owner);
     // From here no transaction of the app's commits: a read needs none, the vault's entry is its record.
     t.mock.method(db.runtime, 'transaction', (() => Promise.reject(new Error('the app cannot write'))) as typeof db.runtime.transaction);
     if (read === 'import preview') {

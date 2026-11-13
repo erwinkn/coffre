@@ -1,4 +1,5 @@
-import type { CheckState, EventAuthor, NoteInput, NotePayload } from '@coffre/core/vault';
+import type { CheckState, EventAuthor, NoteInput, NotePayload, ReportedPayload } from '@coffre/core/vault';
+import { RECORDS } from '@coffre/db/log';
 
 import { canonical, logObject } from './inputs.ts';
 import { entryMac, type LogMacKey } from './log-entry.ts';
@@ -74,4 +75,39 @@ export function notePayload(input: NoteInput, author: EventAuthor): string {
 export function eventRow(key: LogMacKey, at: number, input: NoteInput, author: EventAuthor): { at: number; requestId: string; object: string; actor: string; payload: string; seal: null; mac: Buffer } {
   const row = { at, requestId: input.id, object: eventObject(input.id), actor: input.actor, payload: notePayload(input, author), seal: null };
   return { ...row, mac: entryMac(key, { tree: 'changes', row }) };
+}
+
+/** A lowercase UUID: the only id the app may give an event; the derived forms (`findingEventId`) are the vault's. */
+const APP_EVENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * That the app may hand this event over, to `note` or in `prepare`'s `events`, or throw, as for any bug of the app's:
+ * its id a lowercase UUID, its actor not the vault, its detail holding no record's text (`holdsNoRecord`).
+ */
+export function appEvent(input: NoteInput, vaultActor: string): void {
+  if (!APP_EVENT_ID.test(input.id)) throw new Error(`an event the app hands over has a lowercase UUID for its id, not ${input.id}`);
+  if (input.actor === vaultActor) throw new Error("an event of the vault's own is the vault's to write, not the app's");
+  holdsNoRecord(input.detail);
+}
+
+/** That a detail holds none of the texts 0.15's readers know a payload by (`RECORDS`), which it could hold by chance. */
+function holdsNoRecord(detail: Record<string, unknown>): void {
+  const encoded = canonical(detail);
+  for (const { holds } of Object.values(RECORDS)) {
+    if (encoded.includes(holds)) throw new Error(`an entry's detail holds ${holds}, which 0.15's readers take for a record of theirs`);
+  }
+}
+
+/**
+ * The entry a change carries, as its payload's `reported` (A1's stand-in; #569, "A change carries its entry"),
+ * which V1 replaces: refused (thrown) unless its actor is the change's, and unless its detail holds none of the texts
+ * 0.15's readers know a payload by (`RECORDS`), which a detail could hold by chance.
+ */
+export function reportedPayload(entry: Omit<NoteInput, 'id'>, actor: string, author: EventAuthor): ReportedPayload {
+  if (entry.actor !== actor) throw new Error(`a change carries an entry of its own actor's: ${entry.actor} is not ${actor}`);
+  // Field by field, as an event's (`notePayload`): a field the entry's type does not name stays out of the signed payload.
+  const { action, allowed, code, subject, places, credential, requestId, operationId, sourceIp, detail } = entry;
+  holdsNoRecord(detail);
+  const { projectId, environmentId, secretId, versionId } = places;
+  return { action, allowed, author, code, credential, detail, operationId, places: { projectId, environmentId, secretId, versionId }, requestId, sourceIp, subject };
 }

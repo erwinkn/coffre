@@ -15,7 +15,7 @@ import { FRESH_MS } from '../src/api/fresh-routes.ts';
 import { MAX_PASSKEYS } from '../src/api/signin.ts';
 import { passkeyName } from '../src/passkey-names.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, deviceLogins, mcpConnections, passkeys } from '@coffre/db/schema';
 import * as rows from './passkey-rows.ts';
 import { assertion, Browser, bytes, enroll, me, register, RP, signinDeployment, touch } from './signin-browser.ts';
@@ -125,7 +125,7 @@ function onNextAccess(principal: string, meanwhile: () => Promise<unknown>, { af
 
 /** The entries of `action`, oldest first. */
 async function entries(action: string) {
-  return (await db.owner.select().from(auditLog).where(eq(auditLog.action, action))).map((entry) => ({ ...entry, metadata: JSON.parse(entry.metadata ?? '{}') }));
+  return loggedEntries(db.owner, [action]);
 }
 
 test("a person lists their passkeys, adds another from a fresh session, and renames one; a first passkey is added at sign-in, and ten at most", async (t) => {

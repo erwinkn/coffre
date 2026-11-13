@@ -6,7 +6,7 @@ import type * as schema from '@coffre/db/schema';
 import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { authMac, checkAuthRow } from '../auth-rows.ts';
-import { hasTombstone, insert, newestChangeColumns, newestChanges, type BindingRow, type NewestChanges } from './queries.ts';
+import { bindingLive, insert, newestChangeColumns, newestChanges, type BindingRow, type NewestChanges } from './queries.ts';
 import { cappedAlerts, credentials, environments, principals, projects, secrets, serviceBindings } from '@coffre/db/schema';
 
 // A workload's key-bound sessions (docs/design/workload-access.md, section
@@ -17,12 +17,12 @@ import { cappedAlerts, credentials, environments, principals, projects, secrets,
 type Tables = typeof schema;
 export type SessionRow = Tables['credentials']['$inferSelect'];
 
-/** Whether binding `id` (a column, as text) has a tombstone, as a boolean (`hasTombstone`). */
-function tombstoned(id: SQL): SQL<boolean> {
-  return truth(hasTombstone(id));
+/** Whether a binding's row is dead to the app: not standing as the log has it (`bindingLive`), as a boolean. */
+function tombstoned(binding: typeof serviceBindings): SQL<boolean> {
+  return truth(sql`NOT ${bindingLive(binding.id, binding.seal)}`);
 }
 
-/** A binding's ID as text, as a tombstone names it. */
+/** An ID as text. */
 function idText(id: SQL | AnyColumn): SQL {
   return sql`${id}::text`;
 }
@@ -98,7 +98,7 @@ export function sessionStatement(db: Queryable) {
     .select({
       credential: credentials,
       binding: serviceBindings,
-      bindingTombstoned: tombstoned(idText(serviceBindings.id)),
+      bindingTombstoned: tombstoned(serviceBindings),
       memberStatus: principals.status,
       memberGeneration: principals.generation,
       place,
@@ -128,7 +128,7 @@ const bindingCalls = prepared((db) => {
   return db
     .select({
       binding: serviceBindings,
-      tombstoned: tombstoned(idText(serviceBindings.id)),
+      tombstoned: tombstoned(serviceBindings),
       memberStatus: principals.status,
       memberGeneration: principals.generation,
       place,
@@ -174,7 +174,7 @@ export async function workloadCandidates(
 ): Promise<{ bindings: BindingRow[]; newest: NewestChanges }> {
   if (profiles.length === 0) return { bindings: [], newest: newestChanges([]) };
   const rows = await db
-    .select({ binding: serviceBindings, tombstoned: tombstoned(idText(serviceBindings.id)), ...newestChangeColumns(principal, serviceBindings.id), now: clockMillis() })
+    .select({ binding: serviceBindings, ...newestChangeColumns(principal, serviceBindings.id), now: clockMillis() })
     .from(serviceBindings)
     .innerJoin(principals, and(eq(principals.principal, serviceBindings.principal), eq(principals.generation, serviceBindings.generation)))
     .where(and(
@@ -185,6 +185,8 @@ export async function workloadCandidates(
       isNull(serviceBindings.closedAt),
       isNotNull(serviceBindings.policy),
       inArray(serviceBindings.profile, [...profiles]),
+      // Standing as the log has it, as the vault holds it to after: a row put back over its end matches nothing here.
+      bindingLive(serviceBindings.id, serviceBindings.seal),
     ))
     .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id))
     .limit(max + 1);
@@ -192,7 +194,7 @@ export async function workloadCandidates(
     console.error({ event: 'bindings_over_limit', principal, issuer }, 'a service holds more bindings than any can');
     return { bindings: [], newest: newestChanges([]) };
   }
-  const bindings = rows.filter((row) => !row.tombstoned).map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
+  const bindings = rows.map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
   return { bindings, newest: newestChanges(rows) };
 }
 

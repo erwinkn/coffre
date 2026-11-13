@@ -34,6 +34,7 @@ import {
   revokesLogged,
   testDeps,
   type FixtureDeps,
+  loggedEntries,
 } from './api-fixture.ts';
 import { actorParts } from '../src/db/audit.ts';
 import { openDeviceSources } from '../src/db/queries.ts';
@@ -101,22 +102,8 @@ function meta(label: string | null = 'Firefox on macOS') {
 }
 
 async function auditRows() {
-  const rows = await db.owner
-    .select({
-      action: auditLog.action,
-      decision: auditLog.decision,
-      actor: auditLog.actor,
-      sourceIp: auditLog.sourceIp,
-      metadata: auditLog.metadata,
-    })
-    .from(auditLog)
-    .where(eq(auditLog.author, 'app'))
-    .orderBy(auditLog.seq);
-  return rows.map(({ actor, ...row }) => ({
-    ...row,
-    ...actorParts(actor),
-    metadata: JSON.parse(row.metadata) as Record<string, unknown>,
-  }));
+  const rows = (await loggedEntries(db.owner)).filter((entry) => entry.author === 'app');
+  return rows.map(({ actor, action, decision, sourceIp, metadata }) => ({ action, decision, sourceIp, ...actorParts(actor), metadata }));
 }
 
 async function auditActions(): Promise<string[]> {
@@ -309,18 +296,20 @@ test('a first sign-in with an invited email binds the account and opens a browse
   );
 
   const rows = await auditRows();
+  // The sign-in's entry rides its session's issue, a change, and the link is an event: a request's changes take their
+  // numbers before its events (K1, #581), so the sign-in lists first.
   assert.deepEqual(rows.map((row) => `${row.action} ${row.decision} ${row.actorId}`), [
-    `account.link allow ${DEV}`,
     `sign_in allow ${DEV}`,
+    `account.link allow ${DEV}`,
   ]);
-  assert.deepEqual(rows[0].metadata, {
+  assert.deepEqual(rows[1].metadata, {
     provider: 'github',
     subject: '101',
     emails: [DEV],
     identityId: identity.id,
     matchedEmail: DEV,
   });
-  assert.deepEqual(rows[1].metadata, {
+  assert.deepEqual(rows[0].metadata, {
     provider: 'github',
     subject: '101',
     emails: [DEV],
@@ -354,7 +343,7 @@ test('a first sign-in with an invited email binds the account and opens a browse
 test('any verified email on the account may match, not only the primary one', async () => {
   const result = await signedIn(profile('google', 'g-7', ['personal@example.com', DEV]));
   assert.deepEqual(result.principal, { type: 'user', id: DEV });
-  const [bind] = await auditRows();
+  const bind = (await auditRows()).find((row) => row.action === 'account.link')!;
   assert.equal(bind.metadata.matchedEmail, DEV);
   assert.equal(await identityEmail(), 'personal@example.com', 'the primary address is remembered');
 });
@@ -381,8 +370,8 @@ test('once bound, the account signs in as its person whatever its email says', a
   assert.equal(await countRows(identities), 1);
   assert.equal(await countRows(credentials), 4);
   assert.deepEqual(await auditActions(), [
-    `account.link allow ${DEV}`,
     `sign_in allow ${DEV}`,
+    `account.link allow ${DEV}`,
     `sign_in allow ${DEV}`,
     `sign_in allow ${DEV}`,
     `sign_in allow ${DEV}`,
@@ -460,8 +449,8 @@ test('deactivated people are refused, bound or not, and their sessions stop', as
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => [row.action, row.decision, row.actorId, row.metadata.reason]), [
     ['sign_in', 'deny', GONE, 'deactivated'],
-    ['account.link', 'allow', DEV, undefined],
     ['sign_in', 'allow', DEV, undefined],
+    ['account.link', 'allow', DEV, undefined],
     ['sign_in', 'deny', DEV, 'deactivated'],
   ]);
   assert.equal(await countRows(identities, eq(identities.principal, `user:${GONE}`)), 0);
@@ -541,8 +530,8 @@ test('signing out revokes that credential only, once, and is audited', async () 
   const rows = await auditRows();
   // The vault ends it, and its change records the sign-out.
   assert.deepEqual(rows.map((row) => `${row.action} ${row.decision} ${row.actorId}`), [
-    `account.link allow ${DEV}`,
     `sign_in allow ${DEV}`,
+    `account.link allow ${DEV}`,
     `sign_in allow ${DEV}`,
   ]);
   assert.deepEqual(await revokesLogged(db.owner), [{ actor: `user:${DEV}`, reason: 'sign_out', targetCredentialId: ended.credential.id }]);
@@ -559,9 +548,9 @@ test('sign-ins stay in the log, and the audit list shows them only when asked', 
   const all = (await audit.list({ detail: '1' })).entries;
   assert.deepEqual(all.slice(0, 4).map((entry) => `${entry.log} ${entry.action} ${entry.decision} ${entry.detail}`), [
     '0.15 sign_out allow true',
-    '0.14 sign_in deny true',
-    '0.14 sign_in allow true',
-    '0.14 account.link allow true',
+    '0.15 sign_in deny true',
+    '0.15 account.link allow true',
+    '0.15 sign_in allow true',
   ]);
   // Left out by default: what is shown is the rest, the members admitted above.
   const shown = (await audit.list({})).entries;
@@ -665,8 +654,8 @@ test('a signed-in person links another account, which then signs them in', async
 
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => `${row.action} ${row.decision} ${row.actorId}`), [
-    `account.link allow ${DEV}`,
     `sign_in allow ${DEV}`,
+    `account.link allow ${DEV}`,
     `account.link allow ${DEV}`,
     `sign_in allow ${DEV}`,
   ]);
@@ -947,6 +936,21 @@ async function approvedCliSession(ctx: Asker, clientLabel: string | null = null)
 function poll(deviceCode: string) {
   return signin.pollDevice(deviceCode, { requestId: randomUUID(), sourceIp: IP });
 }
+
+test('a device approval voided by a removal and re-admission before the poll is spent, denied and recorded', async () => {
+  const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: IP });
+  await signin.decideDevice(dev, started.userCode, true);
+  await deactivate(DEV);
+  await deactivate(DEV, true);
+  assert.deepEqual(await poll(started.deviceCode), { status: 'denied' });
+  assert.deepEqual(await poll(started.deviceCode), { status: 'expired' }, 'the code is spent');
+  const [row] = await db.owner.select().from(deviceLogins);
+  const refused = (await auditRows()).filter((entry) => entry.action === 'sign_in' && entry.decision === 'deny');
+  assert.deepEqual(refused.map(({ actorId, metadata }) => ({ actorId, metadata })), [
+    { actorId: DEV, metadata: { kind: 'cli', deviceAuthorizationId: row!.id, reason: 'membership_changed' } },
+  ]);
+  assert.equal(await countRows(credentials, eq(credentials.kind, 'cli')), 0, 'no CLI session');
+});
 
 test('device flow: start, describe, approve, then one poll gets a CLI session', async () => {
   const started = await signin.startDevice({ clientLabel: 'coffre CLI on laptop', sourceIp: IP });

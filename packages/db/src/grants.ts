@@ -210,16 +210,21 @@ export async function everyProjectPreview(db: Queryable, at: number): Promise<Ev
 export type Unsealed = { kind: 'token' | 'binding'; id: string; principal: string; createdBy: string; scope: string | null };
 
 /**
+ * Whether a stored scope is not sealed (`Unsealed`), as SQL. Every scope this release writes for a service says, at
+ * each place it names, whether it reads the sensitive values there; one that names none, sealed while its account held
+ * nothing, is sealed (`unsealedScope` in @coffre/server).
+ */
+export function unsealed(scope: typeof credentials.scope | typeof serviceBindings.scope): SQL {
+  return or(isNull(scope), and(like(scope, '%"projectId"%'), sql`${scope} NOT LIKE '%"sensitive":%'`))!;
+}
+
+/**
  * The live service tokens and trust bindings of active service accounts
  * whose scope is not sealed yet (`Unsealed`): what the app seals once a
  * process (`sealScopes`), and what `coffre migrate` says it will. A
  * credential a binding issued carries its binding's.
  */
 export async function unsealedCredentials(db: Queryable, at: Date): Promise<Unsealed[]> {
-  // Every scope this release writes for a service says, at each place it names, whether it reads the sensitive values
-  // there; one that names none, sealed while its account held nothing, is sealed (`unsealedScope` in @coffre/server).
-  const unsealed = (scope: typeof credentials.scope | typeof serviceBindings.scope) =>
-    or(isNull(scope), and(like(scope, '%"projectId"%'), sql`${scope} NOT LIKE '%"sensitive":%'`));
   const [tokens, bindings] = await Promise.all([
     db
       .select({ id: credentials.id, principal: credentials.principal, createdBy: credentials.createdBy, scope: credentials.scope })

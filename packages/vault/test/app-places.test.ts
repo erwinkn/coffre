@@ -95,8 +95,8 @@ async function readEnvironment(id: string): Promise<{ columns: EnvironmentColumn
 /** A key's change from its row as read now (archived: no object; brought back as its rows hold it, a restore) to `after`. */
 async function keyChange(id: string, after: SecretColumns | null): Promise<ObjectChange> {
   const read = await readKey(id);
-  if (read.archived && after !== null && JSON.stringify(after) === JSON.stringify(read.columns)) return { kind: 'secret', id, before: null, after, restores: true };
-  return { kind: 'secret', id, before: read.archived ? null : { columns: read.columns, seal: read.seal }, after };
+  if (read.archived && after !== null && JSON.stringify(after) === JSON.stringify(read.columns)) return { kind: 'secret', entry: null, id, before: null, after, restores: true };
+  return { kind: 'secret', entry: null, id, before: read.archived ? null : { columns: read.columns, seal: read.seal }, after };
 }
 
 /** A new version of `w`'s key `id`: its value encrypted under a fresh data key, wrapped, and the row that stores it; a plain one's text too. */
@@ -230,9 +230,9 @@ test('a key\'s row moved to another environment, its seal kept, is refused as ta
   const id = await w.key();
   const read = await readKey(id);
   const elsewhere = randomUUID();
-  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'secret', id, before: { columns: { ...read.columns, environmentId: elsewhere }, seal: read.seal }, after: null }], new Map()),
+  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'secret', entry: null, id, before: { columns: { ...read.columns, environmentId: elsewhere }, seal: read.seal }, after: null }], new Map()),
     (error: unknown) => error instanceof NotLogged && error.fault === 'tampered');
-  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'secret', id, before: { columns: read.columns, seal: read.seal }, after: { ...read.columns, environmentId: elsewhere } }], new Map()),
+  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'secret', entry: null, id, before: { columns: read.columns, seal: read.seal }, after: { ...read.columns, environmentId: elsewhere } }], new Map()),
     /does nothing|no change the log knows/);
 });
 
@@ -241,20 +241,20 @@ test('an environment made protected, renamed, archived and restored through the 
   const id = await w.key();
   const env = await readEnvironment(w.dev);
   // Renamed: `environment.rename`; the member's grant is on its id, so the use goes on, its seal current.
-  await write([{ kind: 'environment', id: w.dev, before: env, after: { ...env.columns, slug: 'development' } }],
+  await write([{ kind: 'environment', entry: null, id: w.dev, before: env, after: { ...env.columns, slug: 'development' } }],
     async (tx) => run(tx, sql`UPDATE environments SET slug = 'development' WHERE id = ${w.dev}`));
   assert.ok((await used(w, id)).ok);
   const renamed = await readEnvironment(w.dev);
-  await write([{ kind: 'environment', id: w.dev, before: renamed, after: { ...renamed.columns, archived: true } }],
+  await write([{ kind: 'environment', entry: null, id: w.dev, before: renamed, after: { ...renamed.columns, archived: true } }],
     async (tx) => run(tx, sql`UPDATE environments SET archived_at = ${new Date().toISOString()} WHERE id = ${w.dev}`));
   const archived = await readEnvironment(w.dev);
-  await write([{ kind: 'environment', id: w.dev, before: archived, after: { ...archived.columns, archived: false } }],
+  await write([{ kind: 'environment', entry: null, id: w.dev, before: archived, after: { ...archived.columns, archived: false } }],
     async (tx) => run(tx, sql`UPDATE environments SET archived_at = NULL WHERE id = ${w.dev}`));
   assert.ok((await used(w, id)).ok);
   // Made, protected from its first moment (a protected fork's), its row carrying the protection its object holds.
   const fork = randomUUID();
   const made: EnvironmentColumns = { id: fork, projectId: w.project, slug: 'staging', owner: null, parentId: w.dev, protected: true, archived: false, projectArchived: false };
-  await write([{ kind: 'environment', id: fork, before: null, after: made }], async (tx) => {
+  await write([{ kind: 'environment', entry: null, id: fork, before: null, after: made }], async (tx) => {
     await tx.insert(environments).values({ id: fork, projectId: w.project, slug: 'staging', name: 'staging', parentId: w.dev, protected: true });
   });
   const stored = await readEnvironment(fork);
@@ -263,7 +263,7 @@ test('an environment made protected, renamed, archived and restored through the 
   assert.deepEqual(await opsOf({ kind: 'environment', id: fork }), ['environment.create']);
   // What the app may not write: a protection (the vault's), a parent, another project.
   for (const after of [{ ...stored.columns, protected: false }, { ...stored.columns, parentId: null }, { ...stored.columns, projectId: randomUUID() }]) {
-    assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', id: fork, before: stored, after }], new Map()), /no change the log knows/);
+    assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', entry: null, id: fork, before: stored, after }], new Map()), /no change the log knows/);
   }
   await replayAgrees();
 });
@@ -280,7 +280,7 @@ async function deletedWithKeys(tombstone: string): Promise<void> {
   assert.ok((await used(w, ids[0]!)).ok);
   const env = await readEnvironment(w.dev);
   const changes: ObjectChange[] = [
-    { kind: 'environment', id: w.dev, before: env, after: { ...env.columns, slug: tombstone } },
+    { kind: 'environment', entry: null, id: w.dev, before: env, after: { ...env.columns, slug: tombstone } },
     ...await Promise.all(ids.map((id) => keyChange(id, null))),
   ];
   await write(changes, async (tx) => {
@@ -297,7 +297,7 @@ async function deletedWithKeys(tombstone: string): Promise<void> {
   assert.deepEqual(await opsOf({ kind: 'environment', id: w.dev }), ['genesis', 'environment.delete']);
   // A deleted environment changes no more.
   const now = await readEnvironment(w.dev);
-  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', id: w.dev, before: now, after: { ...now.columns, archived: true } }], new Map()), /does nothing/);
+  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', entry: null, id: w.dev, before: now, after: { ...now.columns, archived: true } }], new Map()), /does nothing/);
   await replayAgrees();
 }
 
@@ -312,7 +312,7 @@ test('a key erased but left unarchived, as 0.14 leaves it, would be `tampered` t
   const id = await w.key();
   const read = await readKey(id);
   // Its object is gone (`secret.delete`), its seal none; the row still live, its version emptied.
-  await write([{ kind: 'secret', id, before: { columns: read.columns, seal: read.seal }, after: null }],
+  await write([{ kind: 'secret', entry: null, id, before: { columns: read.columns, seal: read.seal }, after: null }],
     async (tx) => run(tx, sql`UPDATE secret_versions SET ciphertext = ${Buffer.alloc(0)}, wrapped_dek = ${Buffer.alloc(0)} WHERE secret_id = ${id}`));
   const outcome = await used(w, id);
   assert.equal(codeOf(outcome), 'tampered');
@@ -534,7 +534,7 @@ async function reference(w: World, vault: Awaited<ReturnType<typeof deciding>>, 
   const id = randomUUID();
   const made = await vault.reference({ principal: ROOT, caller: 'person', items: [{ id, holder: { projectId: w.project, environmentId: w.dev, secretId: holder, path: 'p/dev/HELD' }, source: { secretId: source } }] });
   assert.ok(made.ok, JSON.stringify(made));
-  await write([{ kind: 'secret', id: holder, before: null, after: { id: holder, projectId: w.project, environmentId: w.dev, source, reference: id, version: null } }], async (tx) => {
+  await write([{ kind: 'secret', entry: null, id: holder, before: null, after: { id: holder, projectId: w.project, environmentId: w.dev, source, reference: id, version: null } }], async (tx) => {
     await tx.insert(secrets).values({ id: holder, projectId: w.project, environmentId: w.dev, key: `HELD_${holder.slice(0, 4)}` });
     await tx.insert(secretReferences).values({
       id, projectId: w.project, environmentId: w.dev, secretId: holder, sourceProjectId: w.project, sourceEnvironmentId: w.dev, sourceSecretId: source,
@@ -887,7 +887,7 @@ test("a break by a Developer in a protected environment after a writer marked it
 /** A project archived or restored as the app does it (`patchProject`): its row, and `project.archive` on each of its live environments. */
 async function archiveProject(w: World, archived: boolean, environments: readonly string[]): Promise<void> {
   const reads = await Promise.all(environments.map(readEnvironment));
-  await write(environments.map((id, i) => ({ kind: 'environment' as const, id, before: reads[i]!, after: { ...reads[i]!.columns, projectArchived: archived } })),
+  await write(environments.map((id, i) => ({ kind: 'environment' as const, entry: null, id, before: reads[i]!, after: { ...reads[i]!.columns, projectArchived: archived } })),
     async (tx) => run(tx, sql`UPDATE projects SET archived_at = ${archived ? new Date().toISOString() : null} WHERE id = ${w.project}`));
 }
 
@@ -896,7 +896,7 @@ async function fork(w: World): Promise<string> {
   const id = randomUUID();
   const slug = `fork-${id.slice(0, 4)}`;
   const made: EnvironmentColumns = { id, projectId: w.project, slug, owner: null, parentId: w.dev, protected: false, archived: false, projectArchived: false };
-  await write([{ kind: 'environment', id, before: null, after: made }], async (tx) => {
+  await write([{ kind: 'environment', entry: null, id, before: null, after: made }], async (tx) => {
     await tx.insert(environments).values({ id, projectId: w.project, slug, name: slug, parentId: w.dev, protected: false });
   });
   return id;
@@ -921,14 +921,14 @@ test("an environment's own archival and its project's are apart: either edited a
   const id = await w.key();
   const through = await fork(w);
   const own = await readEnvironment(through);
-  await write([{ kind: 'environment', id: through, before: own, after: { ...own.columns, archived: true } }],
+  await write([{ kind: 'environment', entry: null, id: through, before: own, after: { ...own.columns, archived: true } }],
     async (tx) => run(tx, sql`UPDATE environments SET archived_at = ${new Date().toISOString()} WHERE id = ${through}`));
   await archiveProject(w, true, [w.dev, through]);
   // A writer clears the fork's own archival while its project is archived: one bit for both would not see it.
   await run(db.owner, sql`UPDATE environments SET archived_at = NULL WHERE id = ${through}`);
   assert.equal(codeOf(await used(w, id, { place: through })), 'tampered');
   const edited = await readEnvironment(through);
-  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', id: through, before: edited, after: { ...edited.columns, projectArchived: false } }], new Map()),
+  assert.throws(() => prepareChanges(KEYS, Date.now(), ROOT, [{ kind: 'environment', entry: null, id: through, before: edited, after: { ...edited.columns, projectArchived: false } }], new Map()),
     (error: unknown) => error instanceof NotLogged && error.fault === 'tampered');
   // The project's archival cleared around the app: a use in its environment refused too.
   await run(db.owner, sql`UPDATE environments SET archived_at = ${new Date().toISOString()} WHERE id = ${through}`);

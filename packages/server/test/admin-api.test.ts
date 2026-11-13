@@ -2,7 +2,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
-import { and, asc, count, eq } from 'drizzle-orm';
+import { count } from 'drizzle-orm';
 
 import { PROJECT_PAGES } from '@coffre/core/pages';
 import { EVERYWHERE } from '@coffre/core/access';
@@ -14,6 +14,7 @@ import {
   resetDatabase,
   testDeps,
   type FixtureDeps,
+  loggedEntries,
 } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
@@ -59,15 +60,11 @@ async function seedProject(): Promise<void> {
 
 /** The log's actions, the app's and the vault's, oldest first. */
 async function auditActions(): Promise<{ action: string; decision: string }[]> {
-  return db.owner
-    .select({ action: auditLog.action, decision: auditLog.decision })
-    .from(auditLog)
-    .orderBy(asc(auditLog.seq));
+  return (await loggedEntries(db.owner)).map(({ action, decision }) => ({ action, decision }));
 }
 
 async function auditCount(): Promise<number> {
-  const [row] = await db.owner.select({ n: count() }).from(auditLog);
-  return row.n;
+  return (await loggedEntries(db.owner)).length;
 }
 
 test('Owners create projects without implicit secret grants', async () => {
@@ -134,13 +131,9 @@ test('renaming projects and environments to existing slugs is a conflict and is 
   await assert.rejects(root.projects.update('market', { slug: 'other' }), { status: 409 });
   await assert.rejects(root.environments.update('market/prod', { slug: 'dev' }), { status: 409 });
 
-  const denials = await db.owner
-    .select({ action: auditLog.action, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.decision, 'deny')))
-    .orderBy(asc(auditLog.seq));
+  const denials = (await loggedEntries(db.owner)).filter((entry) => entry.author === 'app' && entry.decision === 'deny');
   assert.deepEqual(
-    denials.map((row) => [row.action, JSON.parse(row.metadata).reason]),
+    denials.map((row) => [row.action, row.metadata.reason]),
     [
       ['project.update', 'slug_taken'],
       ['environment.update', 'slug_taken'],
@@ -176,14 +169,9 @@ test('project owners create environments; environment-scoped grants do not', asy
 test('project-only roles cannot be scoped to one environment', async () => {
   await seedProject();
   await assert.rejects(root.access.set(READER, { 'market/prod': 'owner' }), { status: 409 });
-  const [last] = await db.owner
-    .select({ decision: auditLog.decision, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(eq(auditLog.author, 'app'))
-    .orderBy(asc(auditLog.seq))
-    .then((rows) => rows.slice(-1));
+  const last = (await loggedEntries(db.owner)).filter((entry) => entry.author === 'app').at(-1)!;
   assert.equal(last.decision, 'deny');
-  assert.equal(JSON.parse(last.metadata).reason, 'role_is_project_scoped');
+  assert.equal(last.metadata.reason, 'role_is_project_scoped');
 });
 
 test('environment archiving hides reads, is reversible, and preserves values', async () => {
@@ -365,11 +353,7 @@ test('two owners adding the same member at once both succeed, and one of them cr
     owner.members.add('user:new@acme.example'),
   ]);
   assert.deepEqual(added.map((result) => result.created).sort(), [false, true]);
-  const creates = await db.owner
-    .select({ subject: auditLog.subjectPrincipal })
-    .from(auditLog)
-    .where(and(eq(auditLog.action, 'member.add'), eq(auditLog.decision, 'allow')))
-    .orderBy(asc(auditLog.seq));
+  const creates = (await loggedEntries(db.owner, ['member.add'])).filter((entry) => entry.decision === 'allow').map((entry) => ({ subject: entry.subjectPrincipal }));
   // The Owner's own row, the bootstrap's; LEAD, READER, CI, OWNER; then the new member once.
   assert.deepEqual(creates.map(({ subject }) => subject), [
     'user:admin@acme.example', LEAD, READER, CI, OWNER, 'user:new@acme.example',

@@ -17,35 +17,35 @@
 (*            passkey, so it takes the lock too, and issues only from a    *)
 (*            credential no passkey confirmed.                             *)
 (*   change   a change to the person's passkeys, the app's transaction:    *)
-(*            the factor lock, the log's head (`audited`), the read of the *)
-(*            person's live credentials, then a revoke of each, which      *)
-(*            takes the member's row exclusive and the credential's (as    *)
-(*            `change_input` does), the new session it issues to the       *)
-(*            browser that touched (rule 1), the commit.                   *)
+(*            the factor lock, the change lock (`audited`; Coffre.tla),    *)
+(*            the read of the person's live credentials, then a revoke of  *)
+(*            each, which takes the member's row exclusive and the         *)
+(*            credential's (as `change_input` does), the new session it    *)
+(*            issues to the browser that touched (rule 1), the commit.     *)
 (*   app      the app's own issue (T176 PR 4): a session at sign-in or at  *)
 (*            a device login's poll, an MCP connection, a token the vault  *)
 (*            leaves to it; here, one issued on cA, carrying its passkey.  *)
-(*            Its transaction takes the log's head first, as every one of  *)
-(*            `audited`'s does, and no factor lock: the head is what       *)
-(*            orders it against a change. Under the head it checks its     *)
-(*            source live and the passkey rule (section 6.1): what it      *)
-(*            names, a live passkey of the person's, or none while they    *)
-(*            hold none.                                                   *)
+(*            Its transaction takes the change lock first, as every one of *)
+(*            `audited`'s that changes something does, and no factor lock: *)
+(*            the change lock is what orders it against a change. Under    *)
+(*            it, it checks its source live and the passkey rule (section  *)
+(*            6.1): what it names, a live passkey of the person's, or none *)
+(*            while they hold none.                                        *)
 (*   prev     the previous release's app signing Ada in during a rollout,  *)
-(*            or any app while the policy is `off`: the head, an insert    *)
-(*            naming no passkey, no rule.                                  *)
+(*            or any app while the policy is `off`: the change lock, an    *)
+(*            insert naming no passkey, no rule.                           *)
 (*   req      a request on one credential: its one statement reads the     *)
 (*            row, the passkey it names and whether its person holds a     *)
 (*            live one (section 6.2), and serves it or refuses.            *)
 (*   sgn      a sign-in at the callback, `optional`, Ada holding no        *)
 (*            passkey (T176 PR 4b): it reads her access's sequence, then   *)
 (*            asks the vault, whose answer decides whether she adds a      *)
-(*            passkey first (an Owner of the whole instance does); not,    *)
-(*            it takes the head and, under it, holds the answer to the     *)
+(*            passkey first (an Owner of the whole instance does); not, it *)
+(*            takes the change lock and, under it, holds the answer to the *)
 (*            sequence it read, else decides again; then a session the     *)
 (*            provider alone signed in.                                    *)
 (*   pro      an Owner promotes Ada to one: the vault's change, under the  *)
-(*            head, which moves her access's sequence.                     *)
+(*            change lock, which moves her access's sequence.              *)
 (*                                                                         *)
 (* One step is one statement, or the part of one between two lock waits;   *)
 (* READ COMMITTED, each step reading what is committed.                    *)
@@ -79,11 +79,11 @@ CONSTANTS
     \* `issue_token` goes ahead only while `via` names the passkey the issue
     \* carries (`c.passkey_id IS NOT DISTINCT FROM p_passkey`).
     IssueChecksPasskey,
-    \* A change's transaction takes the log's head before it reads what to
+    \* A change's transaction takes the change lock before it reads what to
     \* end (`audited`): what orders it against the app's issues.
-    ChangeTakesHead,
-    \* The app's issue checks, under the head, that its source is live and
-    \* that what it names is a live passkey of the person's, or none while
+    ChangeTakesChangeLock,
+    \* The app's issue checks, under the change lock, that its source is live
+    \* and that what it names is a live passkey of the person's, or none while
     \* they hold none (section 6.1).
     AppIssueChecks,
     \* Every request's statement reads its credential with the passkey it
@@ -91,7 +91,7 @@ CONSTANTS
     \* live passkey stands behind (section 6.2).
     RequestChecks,
     \* A provider-only sign-in's transaction holds the vault's answer to the
-    \* access sequence read before it was asked, under the head, and
+    \* access sequence read before it was asked, under the change lock, and
     \* decides again when it moved (`#stillMember`; review r1 of #500).
     SigninHoldsAccess
 
@@ -121,7 +121,7 @@ VARIABLES
     rows,       \* rows[c]: the credentials table as committed
     passkeys,   \* Ada's live passkeys, as committed
     fx,         \* the factor lock's holder
-    hx,         \* the log's head: its holder
+    changeLock,         \* the change lock: its holder
     mx, ms,     \* Ada's member row: exclusive holder, shared holders
     cx, cs,     \* each credential's row: exclusive holder, shared holders
     pc, op,     \* each process: where it is, what it does
@@ -132,7 +132,7 @@ VARIABLES
                 \* read of them (`seq`, then the vault's `answer`); and `wrong`, whether a
                 \* provider-only session was committed while she was an Owner
 
-locks == <<fx, hx, mx, ms, cx, cs>>
+locks == <<fx, changeLock, mx, ms, cx, cs>>
 vars == <<rows, passkeys, locks, pc, op, l, leftover, unbacked, acc>>
 
 \* The passkey an issue carries, which its row's MAC covers: the new vault
@@ -143,11 +143,11 @@ Carried(p) == IF p = "iss" THEN rows["cA"].passkey ELSE None
 \* names, or, naming none, a person who holds none.
 Backed(row) == IF row.passkey = None THEN passkeys = {} ELSE row.passkey \in passkeys
 
-Holds(p) == fx = p \/ hx = p \/ mx = p \/ p \in ms \/ \E c \in Creds : cx[c] = p \/ p \in cs[c]
+Holds(p) == fx = p \/ changeLock = p \/ mx = p \/ p \in ms \/ \E c \in Creds : cx[c] = p \/ p \in cs[c]
 
 Release(p) ==
     /\ fx' = IF fx = p THEN None ELSE fx
-    /\ hx' = IF hx = p THEN None ELSE hx
+    /\ changeLock' = IF changeLock = p THEN None ELSE changeLock
     /\ mx' = IF mx = p THEN None ELSE mx
     /\ ms' = ms \ {p}
     /\ cx' = [c \in Creds |-> IF cx[c] = p THEN None ELSE cx[c]]
@@ -166,7 +166,7 @@ IssueFactor(p) ==
     /\ fx = None
     /\ fx' = p
     /\ pc' = [pc EXCEPT ![p] = IF FactorFirst THEN "rows" ELSE "via"]
-    /\ UNCHANGED <<rows, passkeys, hx, mx, ms, cx, cs, op, l, leftover, unbacked, acc>>
+    /\ UNCHANGED <<rows, passkeys, changeLock, mx, ms, cx, cs, op, l, leftover, unbacked, acc>>
 
 \* IssuerLocked: the members' rows shared, Ada's among them.
 IssueRows(p) ==
@@ -174,7 +174,7 @@ IssueRows(p) ==
     /\ mx = None
     /\ ms' = ms \cup {p}
     /\ pc' = [pc EXCEPT ![p] = IF IssueTakesFactor /\ ~FactorFirst THEN "factor" ELSE "via"]
-    /\ UNCHANGED <<rows, passkeys, fx, hx, mx, cx, cs, op, l, leftover, unbacked, acc>>
+    /\ UNCHANGED <<rows, passkeys, fx, changeLock, mx, cx, cs, op, l, leftover, unbacked, acc>>
 
 \* The credential it comes in on, shared, then compared: live and naming the
 \* passkey the issue carries, or "ended".
@@ -184,7 +184,7 @@ IssueVia(p) ==
     /\ IF Live(rows["cA"]) /\ (IssueChecksPasskey => rows["cA"].passkey = Carried(p))
           THEN /\ cs' = [cs EXCEPT !["cA"] = @ \cup {p}]
                /\ pc' = [pc EXCEPT ![p] = "insert"]
-               /\ UNCHANGED <<fx, hx, mx, ms, cx, acc>>
+               /\ UNCHANGED <<fx, changeLock, mx, ms, cx, acc>>
           ELSE /\ Release(p)
                /\ pc' = [pc EXCEPT ![p] = "done"]
     /\ UNCHANGED <<rows, passkeys, op, l, leftover, unbacked, acc>>
@@ -201,21 +201,21 @@ IssueCommit(p) ==
 
 ChangeBegin(p) ==
     /\ pc[p] = "begin"
-    /\ pc' = [pc EXCEPT ![p] = IF ChangeTakesFactor THEN "factor" ELSE IF ChangeTakesHead THEN "head" ELSE "read"]
+    /\ pc' = [pc EXCEPT ![p] = IF ChangeTakesFactor THEN "factor" ELSE IF ChangeTakesChangeLock THEN "changelock" ELSE "read"]
     /\ UNCHANGED <<rows, passkeys, locks, op, l, leftover, unbacked, acc>>
 
 ChangeFactor(p) ==
     /\ pc[p] = "factor"
     /\ fx = None
     /\ fx' = p
-    /\ pc' = [pc EXCEPT ![p] = IF ChangeTakesHead THEN "head" ELSE "read"]
-    /\ UNCHANGED <<rows, passkeys, hx, mx, ms, cx, cs, op, l, leftover, unbacked, acc>>
+    /\ pc' = [pc EXCEPT ![p] = IF ChangeTakesChangeLock THEN "changelock" ELSE "read"]
+    /\ UNCHANGED <<rows, passkeys, changeLock, mx, ms, cx, cs, op, l, leftover, unbacked, acc>>
 
-\* `audited`: the log's head, before any row.
-TakeHead(p, next) ==
-    /\ pc[p] = "head"
-    /\ hx = None
-    /\ hx' = p
+\* `audited`: the change lock, before any row.
+TakeChangeLock(p, next) ==
+    /\ pc[p] = "changelock"
+    /\ changeLock = None
+    /\ changeLock' = p
     /\ pc' = [pc EXCEPT ![p] = next]
     /\ UNCHANGED <<rows, passkeys, fx, mx, ms, cx, cs, op, l, leftover, unbacked, acc>>
 
@@ -232,7 +232,7 @@ ChangeMember(p) ==
     /\ mx = None /\ ms \subseteq {p}
     /\ mx' = p
     /\ pc' = [pc EXCEPT ![p] = "revoke"]
-    /\ UNCHANGED <<rows, passkeys, fx, hx, ms, cx, cs, op, l, leftover, unbacked, acc>>
+    /\ UNCHANGED <<rows, passkeys, fx, changeLock, ms, cx, cs, op, l, leftover, unbacked, acc>>
 
 \* Each credential it ends: its row, exclusive.
 ChangeRevoke(p) ==
@@ -241,7 +241,7 @@ ChangeRevoke(p) ==
         /\ cx[c] = None /\ cs[c] \subseteq {p}
         /\ cx' = [cx EXCEPT ![c] = p]
         /\ l' = [l EXCEPT ![p].held = @ \cup {c}]
-    /\ UNCHANGED <<rows, passkeys, fx, hx, mx, ms, cs, pc, op, leftover, unbacked, acc>>
+    /\ UNCHANGED <<rows, passkeys, fx, changeLock, mx, ms, cs, pc, op, leftover, unbacked, acc>>
 
 ChangeCommit(p) ==
     /\ pc[p] = "revoke"
@@ -258,14 +258,14 @@ ChangeCommit(p) ==
     /\ UNCHANGED <<op, l, unbacked, acc>>
 
 -----------------------------------------------------------------------------
-(* The app's issue on cA: the head, then its check, then the insert *)
+(* The app's issue on cA: the change lock, then its check, then the insert *)
 
 AppBegin(p) ==
     /\ pc[p] = "begin"
-    /\ pc' = [pc EXCEPT ![p] = "head"]
+    /\ pc' = [pc EXCEPT ![p] = "changelock"]
     /\ UNCHANGED <<rows, passkeys, locks, op, l, leftover, unbacked, acc>>
 
-\* Under the head: cA still live, and what s would name backed now.
+\* Under the change lock: cA still live, and what s would name backed now.
 AppCheck(p) ==
     /\ pc[p] = "check"
     /\ IF ~AppIssueChecks \/ (Live(rows["cA"]) /\ Backed(rows["cA"]))
@@ -282,7 +282,7 @@ AppCommit(p) ==
     /\ pc' = [pc EXCEPT ![p] = "done"]
     /\ UNCHANGED <<passkeys, op, l, leftover, unbacked, acc>>
 
-(* The previous release's sign-in: the head, then its session, naming none *)
+(* The previous release's sign-in: the change lock, then a session naming none *)
 
 PrevCommit(p) ==
     /\ pc[p] = "insert"
@@ -320,10 +320,10 @@ SigninRead(p) ==
 SigninAsk(p) ==
     /\ pc[p] = "ask"
     /\ acc' = [acc EXCEPT !.answer = acc.role]
-    /\ pc' = [pc EXCEPT ![p] = IF acc.role = "owner" THEN "done" ELSE "head"]
+    /\ pc' = [pc EXCEPT ![p] = IF acc.role = "owner" THEN "done" ELSE "changelock"]
     /\ UNCHANGED <<rows, passkeys, locks, op, l, leftover, unbacked>>
 
-\* Under the head: the sequence as read, or decided again from the reads.
+\* Under the change lock: the sequence as read, or decided again from the reads.
 SigninCheck(p) ==
     /\ pc[p] = "held"
     /\ IF SigninHoldsAccess /\ acc.seq # acc.seen
@@ -340,7 +340,7 @@ SigninCommit(p) ==
     /\ pc' = [pc EXCEPT ![p] = "done"]
     /\ UNCHANGED <<rows, passkeys, op, l, leftover, unbacked>>
 
-(* A promotion: the vault's change, under the head *)
+(* A promotion: the vault's change, under the change lock *)
 
 PromoteCommit(p) ==
     /\ pc[p] = "promote"
@@ -359,7 +359,7 @@ Init ==
         /\ op \in [Procs -> UNION {Ops[p] : p \in Procs}]
         /\ \A p \in Procs : op[p] \in Ops[p]
         /\ \A p \in Changes : (op[p].kind = "first") = (start = None)
-    /\ fx = None /\ hx = None /\ mx = None /\ ms = {}
+    /\ fx = None /\ changeLock = None /\ mx = None /\ ms = {}
     /\ cx = [c \in Creds |-> None] /\ cs = [c \in Creds |-> {}]
     /\ pc = [p \in Procs |-> "begin"]
     /\ l = [p \in Procs |-> [ends |-> {}, held |-> {}]]
@@ -369,12 +369,12 @@ Init ==
 
 Step(p) ==
     CASE p \in Issuers -> IssueBegin(p) \/ IssueFactor(p) \/ IssueRows(p) \/ IssueVia(p) \/ IssueCommit(p)
-      [] p \in Changes -> ChangeBegin(p) \/ ChangeFactor(p) \/ TakeHead(p, "read") \/ ChangeRead(p) \/ ChangeMember(p) \/ ChangeRevoke(p) \/ ChangeCommit(p)
-      [] p \in AppIssuers -> AppBegin(p) \/ TakeHead(p, "check") \/ AppCheck(p) \/ AppCommit(p)
-      [] p \in Previous -> AppBegin(p) \/ TakeHead(p, "insert") \/ PrevCommit(p)
+      [] p \in Changes -> ChangeBegin(p) \/ ChangeFactor(p) \/ TakeChangeLock(p, "read") \/ ChangeRead(p) \/ ChangeMember(p) \/ ChangeRevoke(p) \/ ChangeCommit(p)
+      [] p \in AppIssuers -> AppBegin(p) \/ TakeChangeLock(p, "check") \/ AppCheck(p) \/ AppCommit(p)
+      [] p \in Previous -> AppBegin(p) \/ TakeChangeLock(p, "insert") \/ PrevCommit(p)
       [] p \in Requests -> Request(p)
-      [] p \in Signers -> SigninRead(p) \/ SigninAsk(p) \/ TakeHead(p, "held") \/ SigninCheck(p) \/ SigninCommit(p)
-      [] p \in Promoters -> AppBegin(p) \/ TakeHead(p, "promote") \/ PromoteCommit(p)
+      [] p \in Signers -> SigninRead(p) \/ SigninAsk(p) \/ TakeChangeLock(p, "held") \/ SigninCheck(p) \/ SigninCommit(p)
+      [] p \in Promoters -> AppBegin(p) \/ TakeChangeLock(p, "promote") \/ PromoteCommit(p)
 
 Finished == \A p \in Procs : pc[p] = "done"
 
@@ -386,8 +386,8 @@ Spec == Init /\ [][Next]_vars
 (* What must hold *)
 
 TypeOK ==
-    /\ pc \in [Procs -> {"begin", "factor", "head", "check", "rows", "via", "insert", "read", "member", "revoke", "ask", "held", "session", "promote", "done"}]
-    /\ fx \in Procs \cup {None} /\ hx \in Procs \cup {None} /\ mx \in Procs \cup {None} /\ ms \subseteq Procs
+    /\ pc \in [Procs -> {"begin", "factor", "changelock", "check", "rows", "via", "insert", "read", "member", "revoke", "ask", "held", "session", "promote", "done"}]
+    /\ fx \in Procs \cup {None} /\ changeLock \in Procs \cup {None} /\ mx \in Procs \cup {None} /\ ms \subseteq Procs
     /\ leftover \subseteq Creds /\ unbacked \subseteq Creds
 
 \* A change ends every credential of the person's its rule names, those
@@ -406,7 +406,7 @@ NamesItsSource == \A h \in {"h1", "h2"} : rows[h].exists => rows[h].passkey = ro
 
 \* Every live credential the new release issued has a live passkey behind
 \* it, or names none while its person holds none: what the app's check
-\* under the head and the revocations keep. Only the previous release's
+\* under the change lock and the revocations keep. Only the previous release's
 \* sign-in, o, issues past the rule.
 IssuedBacked == \A c \in Creds \ {"o"} : Live(rows[c]) => Backed(rows[c])
 

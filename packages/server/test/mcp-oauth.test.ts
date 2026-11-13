@@ -19,7 +19,7 @@ import { forgetDocuments } from '../src/mcp/clients.ts';
 import { McpService } from '../src/mcp/service.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, logChanges, mcpConnections, oauthClients } from '@coffre/db/schema';
 import { addPasskey, confirmedSession, removePasskey, touchFor, type Touch } from './passkey-rows.ts';
 
@@ -172,7 +172,7 @@ function discover(token: string | null, headers: Record<string, string> = {}): P
 }
 
 async function entries(action: string) {
-  return (await db.owner.select().from(auditLog).where(eq(auditLog.action, action)).orderBy(auditLog.seq)).map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  return loggedEntries(db.owner, [action]);
 }
 
 test('the metadata documents say where the authorization server is, and what it takes', async () => {

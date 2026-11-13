@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { createClient, type CoffreClient } from '@coffre/client';
 import { eq } from 'drizzle-orm';
 
-import { clientFor } from './api-fixture.ts';
+import { loggedEntries, clientFor } from './api-fixture.ts';
 import { callRaw, connect, db, deps, DEV, entries, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { auditLog, environments } from '@coffre/db/schema';
 import { coffreRoute } from '../src/app.ts';
@@ -212,7 +212,7 @@ for (const [who, email] of [['an instance Owner', ROOT], ["the project's Maintai
 
 test('no audit entry holds a value of a personal config, plain ones included', async () => {
   await dev.secrets.reveal('market/dev@me');
-  const rows = await db.owner.select().from(auditLog);
+  const rows = await loggedEntries(db.owner);
   assert.ok(rows.length > 0);
   assert.deepEqual(leaks(JSON.stringify(rows, (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value))), []);
 });

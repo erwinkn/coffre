@@ -6,7 +6,7 @@ import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, prepared, type Queryable, type Transaction } from '@coffre/db';
 import { accessAllowed, changesOf, entriesOf, keyedBy, logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
-import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
+import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers, unsealed } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
@@ -601,14 +601,13 @@ export async function deletionScope(db: Queryable, place: Doomed): Promise<{
 }> {
   const under = secretsUnder(secrets, place);
   // Every grant on the instance, the place's and all others: few rows, and what tells who is left holding nothing.
-  const [going, [keys], [versions], held] = await Promise.all([
+  const [going, [keys], versions, held] = await Promise.all([
     db.select({ id: environments.id, slug: environments.slug }).from(environments).where(and(
       eq(environments.projectId, place.projectId),
       place.environmentId === null ? standing(environments.slug) : eq(environments.id, place.environmentId),
     )).orderBy(asc(environments.slug)),
     db.select({ n: count() }).from(secrets).where(under),
-    db.select({ n: count() }).from(secretVersions).innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
-      .where(and(under, holdsValue(secretVersions))),
+    heldVersions(db, place),
     db.select({
       principal: grants.principal,
       projectId: sql<string>`coalesce(${grants.projectId}, ${environments.projectId})`,
@@ -633,7 +632,14 @@ export async function deletionScope(db: Queryable, place: Doomed): Promise<{
   const stranded = [...new Set(lost.map((grant) => grant.principal))].filter((principal) =>
     held.every((grant) => grant.principal !== principal
       || (roleless(grant) && (doomed(grant) || (grant.expiresAt !== null && grant.expiresAt <= now)))));
-  return { environments: going, keys: Number(keys.n), versions: Number(versions.n), grants: lost, stranded };
+  return { environments: going, keys: Number(keys.n), versions, grants: lost, stranded };
+}
+
+/** How many versions under a place still hold a value: what its deletion erases (`eraseVersions`), which it counts before. */
+export async function heldVersions(db: Queryable, place: Doomed): Promise<number> {
+  const [row] = await db.select({ n: count() }).from(secretVersions).innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
+    .where(and(secretsUnder(secrets, place), holdsValue(secretVersions)));
+  return Number(row!.n);
 }
 
 function secretsUnder(secrets: Tables['secrets'], place: Doomed): SQL {
@@ -681,9 +687,10 @@ export async function tombstoneEnvironments(tx: Transaction, going: readonly str
 /**
  * The slug a deleted place keeps, `market~deleted-2026-10-05`, or
  * `market~deleted-2026-10-05-2` for the second that day: one that no
- * tombstone beside it holds yet. A deletion reads it under the log's
- * head, which every change of a slug takes first, so no other can claim it
- * before it commits.
+ * tombstone beside it holds yet. A deletion reads it before its
+ * transaction, which writes exactly it, the slug its entry names: another
+ * deletion that took it meanwhile meets the slug's unique key, and the
+ * deletion reads again.
  */
 export async function tombstoneSlug(db: Queryable, slug: string, day: Date, within: { projectId: string } | null): Promise<string> {
   const base = tombstoneOf(slug, day);
@@ -876,7 +883,7 @@ export async function wayInStands(
   const connection = way.connectionId === null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${mcpConnections} WHERE ${mcpConnections.id} = ${way.connectionId}
     AND ${mcpConnections.revokedAt} IS NULL AND ${mcpConnections.generation} = ${way.generation})`;
   const binding = way.bindingId == null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${serviceBindings} WHERE ${serviceBindings.id} = ${way.bindingId}
-    AND ${serviceBindings.revokedAt} IS NULL AND ${serviceBindings.generation} = ${way.generation}) AND NOT ${hasTombstone(way.bindingId)}`;
+    AND ${serviceBindings.revokedAt} IS NULL AND ${serviceBindings.generation} = ${way.generation} AND ${bindingLive(serviceBindings.id, serviceBindings.seal)})`;
   const [row] = await db
     .select({ status: principals.status, generation: principals.generation, stands: truth(sql`${credential} AND ${connection} AND ${binding}`), now: clock() })
     .from(principals)
@@ -1231,6 +1238,22 @@ export async function findIdentity(
 }
 
 /**
+ * A returning sign-in's identity, stamped with it (`last_sign_in_at`, and its email when the provider gave one), while it
+ * is still live: the row as it is now, its MAC checked, or null for none (revoked meanwhile). Started at once, so that it
+ * goes in the Sync its caller asks it in (the read under the lock and the update were two statements). The caller
+ * holds the row to its person and generation; a refusal rolls the stamp back with the rest.
+ */
+export function stampIdentity(tx: Transaction, chainKey: Buffer, id: string, set: { lastSignInAt: Date; email?: string }) {
+  const stamped = tx.update(identities).set(set).where(and(eq(identities.id, id), isNull(identities.revokedAt))).returning().then(([row]) => {
+    if (row === undefined) return null;
+    verifyAuthRow(chainKey, 'identities', row);
+    return row;
+  });
+  stamped.catch(() => {});
+  return stamped;
+}
+
+/**
  * A credential by its token's hash or by id, with whether its sign-in
  * account is still bound. Revoked and expired ones too: the caller decides
  * what is live, and the vault whether its principal is still a member.
@@ -1518,14 +1541,23 @@ export function lockFactor(tx: Transaction, principal: string): Promise<unknown>
  * `unbacked`: only those that name no passkey, a first passkey's; otherwise all of them, a removal's and a reset's.
  * The ids it denied.
  */
-export async function denyApprovals(tx: Queryable, chainKey: Buffer, principal: string, at: Date, which: { unbacked: boolean }): Promise<string[]> {
-  const rows = await tx.select().from(deviceLogins).where(and(
+/** The approvals `denyApprovals` would deny now, read and not changed, each held to its MAC: their ids. */
+export async function approvalsToDeny(db: Queryable, chainKey: Buffer, principal: string, at: Date, which: { unbacked: boolean }): Promise<string[]> {
+  return (await approvedLogins(db, principal, at, which)).filter((row) => checkAuthRow(chainKey, 'device_authorizations', row)).map((row) => row.id);
+}
+
+function approvedLogins(db: Queryable, principal: string, at: Date, which: { unbacked: boolean }) {
+  return db.select().from(deviceLogins).where(and(
     eq(deviceLogins.principal, principal),
     eq(deviceLogins.decision, 'approved'),
     isNull(deviceLogins.consumedAt),
     which.unbacked ? isNull(deviceLogins.passkeyId) : undefined,
     gt(deviceLogins.expiresAt, at),
   ));
+}
+
+export async function denyApprovals(tx: Queryable, chainKey: Buffer, principal: string, at: Date, which: { unbacked: boolean }): Promise<string[]> {
+  const rows = await approvedLogins(tx, principal, at, which);
   // A denial names no passkey either (`device_logins_passkey_check`; review r1 of #529): the touch that approved
   // it no longer stands. Each its own compare-and-set, asked together: one round trip for them all.
   const decided = await Promise.all(rows.filter((row) => checkAuthRow(chainKey, 'device_authorizations', row)).map(async (row) => {
@@ -1631,7 +1663,7 @@ export async function serviceSignIns(
       : [],
     read.bindings
       ? db.select().from(serviceBindings)
-        .where(and(like(serviceBindings.principal, 'token:%'), isNull(serviceBindings.revokedAt), not(hasTombstone(sql`CAST(${serviceBindings.id} AS text)`))))
+        .where(and(like(serviceBindings.principal, 'token:%'), isNull(serviceBindings.revokedAt), bindingLive(serviceBindings.id, serviceBindings.seal)))
         .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id))
       : [],
   ]);
@@ -1644,20 +1676,19 @@ export async function serviceSignIns(
 /**
  * A service's bindings at a generation, from one read: every row not
  * revoked (`unrevoked`), and those of them live (`liveBindings`: its MAC
- * the app's, no tombstone). With 0.15's log the vault's change of them
+ * the app's, standing as the log has it, `bindingLive`). With 0.15's log the vault's change of them
  * holds the first set to the rows (PR 3a): the MAC and the tombstone are
  * the app's concerns, and a row that fails them is still a row there,
  * which would otherwise refuse every change of the account's bindings.
  */
 export async function bindingsNow(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<{ live: BindingRow[]; unrevoked: BindingRow[] }> {
   const rows = await db
-    .select()
+    .select({ ...getTableColumns(serviceBindings), sealed: truth(bindingLive(serviceBindings.id, serviceBindings.seal)) })
     .from(serviceBindings)
     .where(and(eq(serviceBindings.principal, principal), eq(serviceBindings.generation, generation), isNull(serviceBindings.revokedAt)))
     .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id));
-  const genuine = rows.filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
-  const dead = await tombstoned(db, genuine.map((row) => row.id));
-  return { live: genuine.filter((row) => !dead.has(row.id)), unrevoked: rows };
+  const genuine = rows.filter((row) => checkAuthRow(chainKey, 'service_bindings', row) && row.sealed);
+  return { live: genuine.map(({ sealed: _, ...row }) => row), unrevoked: rows.map(({ sealed: _, ...row }) => row) };
 }
 
 /** A binding of `principal`'s by id, as its row is, MAC or not: what the vault ends, whose seal it checks itself (PR 3a). */
@@ -1726,13 +1757,11 @@ export async function liveIssued(db: Queryable, principal: string, bindingIds: r
   return Number(row?.n ?? 0);
 }
 
-/**
- * Whether the app's log holds a binding's tombstone, its `token.unbind`: what the app trusts of an end, as it does when
- * it reads a binding (`standingBinding`). Written once the vault's end was answered, which waits for its seal.
- */
-export async function bindingTombstoned(db: Queryable, bindingId: string): Promise<boolean> {
-  const [row] = await db.select({ tombstoned: truth(hasTombstone(bindingId)) }).from(sql`(SELECT 1) AS one`);
-  return row?.tombstoned === true;
+/** Whether a binding's end is the vault's (`bindingEndedInLog`): its row revoked, as its newest change, the end, sealed it. */
+export async function bindingEnded(db: Queryable, bindingId: string): Promise<boolean> {
+  const [row] = await db.select({ ended: truth(bindingEndedInLog(serviceBindings.id, serviceBindings.seal)) }).from(serviceBindings)
+    .where(and(eq(serviceBindings.id, bindingId), isNotNull(serviceBindings.revokedAt)));
+  return row?.ended === true;
 }
 
 /**
@@ -1749,44 +1778,38 @@ export async function credentialRows(db: Queryable, ids: readonly string[]): Pro
 }
 
 /**
- * One binding of `principal`'s, by ID: revoked or not, tombstoned or not.
- * Null for none, or for a row that fails its MAC, which is reported.
+ * Whether a binding stands as the log has it (0.16), in the statement it is part of: its row is the one its
+ * newest change sealed (its seal, the vault's MAC over the object, the same bytes as that change's), and no change of
+ * its object ends it (`binding.revoke`). What it replaces, 0.14's tombstone (an allowed `token.unbind`), made a binding
+ * dead once ended, however its row was put back; so does this. A row put back holds its old seal, not its end's; a row
+ * whose columns alone were reset keeps the end's seal, and its end is in the log; a row the log never held (a binding
+ * 0.14 ended, which 0.15's cutover sealed none of) holds no seal. The vault writes nothing of a binding after its end,
+ * so its end is its newest change, and that change alone answers: one step of `log_changes_object_idx`.
+ *
+ * Only the vault's login or the database's owner can write a binding's change (the app's login reads `log_changes`,
+ * and `app_change` makes none of a binding), so one forged after the end, with the row's seal, passes here. This is a
+ * filter of what the app lists and asks about; the gate is the vault's check of the newest change's MAC before it
+ * signs a run in or serves a call through the binding (`workload-exchange.test.ts`, the forged change).
+ *
+ *   binding b, sealed s1 by its make             stands
+ *   unbound: the vault's end, sealed s2          dead
+ *   then its row put back, s1; or revoked_at reset alone, s2: dead either way
  */
-export async function findBinding(db: Queryable, chainKey: Buffer, principal: string, id: string): Promise<BindingRow | null> {
-  const [row] = await db
-    .select()
-    .from(serviceBindings)
-    .where(and(eq(serviceBindings.id, id), eq(serviceBindings.principal, principal)));
-  return row !== undefined && checkAuthRow(chainKey, 'service_bindings', row) ? row : null;
+export function bindingLive(id: SQL | AnyColumn, seal: SQL | AnyColumn): SQL {
+  const newest = changesOf('c', sql`log_object('binding', CAST(${id} AS text))`);
+  // An end's seal matches no row: the row of an ended binding is dead, whatever its columns say.
+  return sql`coalesce(${seal} = (SELECT CASE WHEN c.payload::jsonb ->> 'op' = 'binding.revoke' THEN NULL ELSE c.seal END
+    FROM log_changes c WHERE ${newest.where} ORDER BY ${newest.order} LIMIT 1), false)`;
 }
 
 /**
- * Which of these bindings have a tombstone: an app entry `token.unbind`,
- * allowed, naming the binding's ID. A denied attempt is logged under the
- * same action and never counts. Every such entry counts, never only the
- * latest; their MACs are not checked, since a forged tombstone can only
- * refuse. One read through `audit_log_unbind_idx`, whose expression this
- * repeats.
+ * Whether a binding's end is the vault's: its newest change ends it (`binding.revoke`), and its row, revoked, is the one
+ * that change sealed. What an unbind asked again answers 200 for; a writer who only set the columns made no change, and
+ * gets today's 404.
  */
-export async function tombstoned(db: Queryable, ids: readonly string[]): Promise<Set<string>> {
-  if (ids.length === 0) return new Set();
-  const bindingId = sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`;
-  const rows = await db
-    .select({ id: bindingId })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'token.unbind'), eq(auditLog.decision, 'allow'), inArray(bindingId, [...ids])));
-  return new Set(rows.map((row) => row.id));
-}
-
-/** The expression `audit_log_unbind_idx` indexes: the binding an entry names. */
-function namedBinding(): SQL<string> {
-  return sql<string>`((${auditLog.metadata})::jsonb ->> 'bindingId')`;
-}
-
-/** Whether the binding `id` (a column or a value) has a tombstone: an allowed app `token.unbind` naming it. */
-export function hasTombstone(id: SQL | string): SQL {
-  return sql`EXISTS (SELECT 1 FROM ${auditLog} WHERE ${auditLog.author} = 'app' AND ${auditLog.action} = 'token.unbind'
-    AND ${auditLog.decision} = 'allow' AND ${namedBinding()} = ${id})`;
+export function bindingEndedInLog(id: SQL | AnyColumn, seal: SQL | AnyColumn): SQL {
+  const newest = changesOf('c', sql`log_object('binding', CAST(${id} AS text))`);
+  return sql`coalesce((SELECT c.seal = ${seal} AND c.payload::jsonb ->> 'op' = 'binding.revoke' FROM log_changes c WHERE ${newest.where} ORDER BY ${newest.order} LIMIT 1), false)`;
 }
 
 /**
@@ -1831,11 +1854,14 @@ export async function exchangeCandidates(
       eq(serviceBindings.principal, principal),
       eq(serviceBindings.issuer, issuer),
       isNull(serviceBindings.revokedAt),
-      // Closed by a removal under way (W331): it signs nobody in, so it shadows no binding that would (review r6).
+      // Closed by a removal under way, or its scope never sealed, as an older release left it: it signs
+      // nobody in, so it shadows no binding that would (review r6).
       isNull(serviceBindings.closedAt),
+      not(unsealed(serviceBindings.scope)),
       isNull(serviceBindings.policy),
       inArray(serviceBindings.profile, [...BEARER_PROFILES]),
-      sql`NOT ${hasTombstone(id)}`,
+      // Standing as the log has it, as the vault holds it to after: a row put back over its end matches nothing here.
+      bindingLive(serviceBindings.id, serviceBindings.seal),
     ))
     .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id))
     .limit(max + 1);
@@ -1903,7 +1929,7 @@ function loggedChange(text: string | null): LoggedChange | null {
  */
 export async function standingBinding(db: Queryable, chainKey: Buffer, bindingId: string, principal: string, generation: number): Promise<BindingRow | null> {
   const [row] = await db
-    .select({ binding: serviceBindings, tombstoned: truth(hasTombstone(bindingId)), now: clock() })
+    .select({ binding: serviceBindings, sealed: truth(bindingLive(serviceBindings.id, serviceBindings.seal)), now: clock() })
     .from(serviceBindings)
     .where(eq(serviceBindings.id, bindingId));
   return row !== undefined && bindingStands(chainKey, row, principal, generation) ? row.binding : null;
@@ -1917,36 +1943,10 @@ export async function standingBinding(db: Queryable, chainKey: Buffer, bindingId
  * at most (`EXCHANGED_CREDENTIAL_MS`), whichever comes first. A session of it, which lives hours, the app refuses first
  * (`sessionRowsFor`).
  */
-function bindingStands(chainKey: Buffer, row: { binding: BindingRow; tombstoned: boolean }, principal: string, generation: number): boolean {
-  return !row.tombstoned && row.binding.revokedAt === null
+function bindingStands(chainKey: Buffer, row: { binding: BindingRow; sealed: boolean }, principal: string, generation: number): boolean {
+  return row.sealed && row.binding.revokedAt === null
     && row.binding.principal === principal && row.binding.generation === generation
     && checkAuthRow(chainKey, 'service_bindings', row.binding);
-}
-
-/**
- * What an exchange checks again under the log's head, in one read: that
- * its member is still active in `generation` (`memberStanding`), and that
- * its binding still stands (`standingBinding`).
- */
-export async function exchangeStill(
-  db: Queryable,
-  chainKey: Buffer,
-  binding: { id: string; principal: string; generation: number },
-): Promise<{ stands: boolean; scope: string | null }> {
-  const [row] = await db
-    .select({
-      binding: serviceBindings,
-      tombstoned: truth(hasTombstone(binding.id)),
-      status: principals.status,
-      generation: principals.generation,
-      now: clock(),
-    })
-    .from(serviceBindings)
-    .leftJoin(principals, eq(principals.principal, binding.principal))
-    .where(eq(serviceBindings.id, binding.id));
-  if (row === undefined) return { stands: false, scope: null };
-  const member = row.status === 'active' && row.generation === binding.generation;
-  return { stands: member && bindingStands(chainKey, row, binding.principal, binding.generation), scope: row.binding.scope };
 }
 
 /**
@@ -2037,33 +2037,6 @@ export async function pruneSpentTokens(db: Queryable, atMost: number): Promise<n
 }
 
 /**
- * Spend a token and, only if this spent it, insert the credential its
- * exchange issues and stamp the binding's last use: false, and nothing
- * written, when it was spent already, which the primary key decides. One
- * statement, under the log's head.
- */
-export async function exchangeToken(db: Queryable, token: Buffer, credential: NewRow<Tables['credentials']>, bindingId: string, at: Date): Promise<boolean> {
-  const spend = db.insert(spentIdTokens).values({ hash: token }).onConflictDoNothing().returning({ hash: spentIdTokens.hash });
-  // The credential's row once for each token spent: none, or one. Its other columns take the database's defaults.
-  const columns = Object.entries(getTableColumns(credentials)).filter(([name]) => credential[name as keyof typeof credential] !== undefined);
-  const names = sql.join(columns.map(([, column]) => sql.identifier(column.name)), sql`, `);
-  const values = sql.join(columns.map(([name, column]) => sql.param(credential[name as keyof typeof credential], column)), sql`, `);
-  const stamp = db.update(serviceBindings).set({ lastUsedAt: at }).where(and(eq(serviceBindings.id, bindingId), sql`EXISTS (SELECT 1 FROM spent)`));
-  const [row] = await dialect.rowsOf<{ spent: boolean }>(db, sql`WITH spent AS (${spend.getSQL()}),
-    issued AS (INSERT INTO ${credentials} (${names}) SELECT ${values} FROM spent),
-    stamped AS (${stamp.getSQL()})
-    SELECT EXISTS (SELECT 1 FROM spent) AS spent`);
-  return row!.spent;
-}
-
-export async function insertBinding(db: Queryable, chainKey: Buffer, row: Omit<NewRow<Tables['serviceBindings']>, 'authMac'> & {
-  id: string; principal: string; generation: number; profile: string; issuer: string; jwksUri: string; claims: string;
-}): Promise<void> {
-  const signed = { ...row, revokedAt: null };
-  await insert(db, serviceBindings, { ...signed, authMac: authMac(chainKey, 'service_bindings', signed) });
-}
-
-/**
  * Retire directory records from older memberships, including a sweep that
  * rolled back: the credentials' ids it revoked (`priorCredentials`).
  */
@@ -2145,30 +2118,6 @@ export async function revokeCredentialsWhere(db: Queryable, chainKey: Buffer, wh
   const rows = await liveCredentialsWhere(db, chainKey, where);
   const done = await Promise.all(rows.map((row) => update(db, credentials as Tables['credentials'], { id: row.id, authMac: row.authMac, revokedAt: null }, { ...by, authMac: authMac(chainKey, 'credentials', { ...row, ...by }) })));
   return rows.filter((_, i) => done[i]! > 0).map((row) => row.id);
-}
-
-/**
- * Revoke a member's credentials still live at `at`, or only those
- * `createdBy` issued: not revoked, not expired. Expired ones are dead
- * already, and a CI service's run to thousands; through
- * `credentials_live_idx`, the work is what is live, whatever the history.
- */
-export async function revokeLiveCredentials(
-  db: Queryable,
-  chainKey: Buffer,
-  live: { principal: string; createdBy?: string; at: Date },
-  changes: { revokedAt: Date; revokedBy: string },
-): Promise<string[]> {
-  return revokeCredentialsWhere(db, chainKey, liveCredentialsOf(live), changes);
-}
-
-/** A member's credentials live at `at`, or only those `createdBy` issued (`revokeLiveCredentials`). */
-export function liveCredentialsOf(live: { principal: string; createdBy?: string; at: Date }): CredentialsWhere {
-  return (credentials) => and(
-    eq(credentials.principal, live.principal),
-    gt(credentials.expiresAt, live.at),
-    live.createdBy === undefined ? undefined : eq(credentials.createdBy, live.createdBy),
-  );
 }
 
 // --- MCP clients and connections -------------------------------------------

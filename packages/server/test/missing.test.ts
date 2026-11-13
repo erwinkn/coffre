@@ -5,7 +5,7 @@ import type { CoffreClient } from '@coffre/client';
 import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog } from '@coffre/db/schema';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedSince, logMark, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // Missing keys (docs/design/environments.md): what market/dev lacks of the
 // keys its siblings have, every sibling compared, read or not. Key names are
@@ -22,7 +22,7 @@ let deps: FixtureDeps;
 let root: CoffreClient;
 let dev: CoffreClient;
 let viewer: CoffreClient;
-let firstSeq: bigint;
+let mark: number;
 
 before(async () => {
   db = await openTestDatabase();
@@ -49,8 +49,7 @@ beforeEach(async () => {
   await root.secrets.set('market/staging', { DATABASE_URL: 's', SENTRY_DSN: 's', OLD_FLAG: 's', STRIPE_KEY: 's' });
   await root.secrets.set('market/prod', { DATABASE_URL: 'p', SENTRY_DSN: 'p', PROD_ONLY: 'p' });
   await root.secrets.update('market/staging/STRIPE_KEY', { folder: 'stripe' });
-  const [head] = await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead);
-  firstSeq = head.nextSeq;
+  mark = await logMark(db.owner);
 });
 
 test('missing keys come from every sibling, read or not, never another project, and an archived key is not missing', async () => {
@@ -87,15 +86,11 @@ test('dismissals are shared, logged, listed and undone; dismissing takes write',
   assert.deepEqual((await root.environments.missing('market/dev')).missing.map((key) => key.key), ['PROD_ONLY', 'STRIPE_KEY']);
   assert.deepEqual((await root.environments.dismiss('market/dev', { STRIPE_KEY: true })).keys, { STRIPE_KEY: 'dismissed' });
 
-  const rows = await db.owner
-    .select({ actor: auditLog.actor, action: auditLog.action, decision: auditLog.decision, operationId: auditLog.operationId, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), gte(auditLog.seq, firstSeq)))
-    .orderBy(asc(auditLog.seq));
+  const rows = (await loggedSince(db.owner, mark)).filter((entry) => entry.author === 'app');
   // The viewer's attempt is on the record too, refused.
   assert.deepEqual(rows.filter((row) => row.decision === 'deny').map((row) => [row.actor, row.action]), [[`user:${VIEWER}`, 'missing.dismiss']]);
   const missingRows = rows.filter((row) => row.action.startsWith('missing.') && row.decision === 'allow');
-  assert.deepEqual(missingRows.map((row) => [row.actor, row.action, JSON.parse(row.metadata).key]), [
+  assert.deepEqual(missingRows.map((row) => [row.actor, row.action, row.metadata.key]), [
     [`user:${DEV}`, 'missing.dismiss', 'SENTRY_DSN'],
     [`user:${DEV}`, 'missing.dismiss', 'STRIPE_KEY'],
     [`user:${DEV}`, 'missing.restore', 'STRIPE_KEY'],
@@ -113,4 +108,30 @@ test('a dismissal is listed to every reader, and only while a sibling still has 
     missing: [{ key: 'SENTRY_DSN', in: ['prod', 'staging'], folder: null }, { key: 'STRIPE_KEY', in: ['staging'], folder: 'stripe' }],
     dismissed: [],
   });
+});
+
+test('a dismissal another request made between the read and the lock is read again: each key its one event, none prepared from what moved', async (t) => {
+  // Dev dismisses SENTRY_DSN and restores STRIPE_KEY, which none has dismissed as she reads; the root dismisses
+  // STRIPE_KEY as her events are signed: under the lock, she restores it, an event she did not prepare.
+  const prepare = deps.vault.prepare!.bind(deps.vault);
+  t.after(() => void (deps.vault.prepare = prepare));
+  let compete = true;
+  let prepared = 0;
+  deps.vault.prepare = async (input) => {
+    if (input.actor === `user:${DEV}`) prepared += 1;
+    if (compete && input.actor === `user:${DEV}`) {
+      compete = false;
+      await root.environments.dismiss('market/dev', { STRIPE_KEY: true });
+    }
+    return prepare(input);
+  };
+  assert.deepEqual((await dev.environments.dismiss('market/dev', { SENTRY_DSN: true, STRIPE_KEY: null })).keys, { SENTRY_DSN: 'dismissed', STRIPE_KEY: 'restored' });
+  assert.equal(prepared, 2, 'read and prepared again');
+  const rows = (await loggedSince(db.owner, mark)).filter((entry) => entry.author === 'app' && entry.action.startsWith('missing.'));
+  assert.deepEqual(rows.map((row) => [row.actor, row.action, row.metadata.key]), [
+    [`user:${ROOT}`, 'missing.dismiss', 'STRIPE_KEY'],
+    [`user:${DEV}`, 'missing.dismiss', 'SENTRY_DSN'],
+    [`user:${DEV}`, 'missing.restore', 'STRIPE_KEY'],
+  ]);
+  assert.deepEqual((await root.environments.missing('market/dev')).dismissed.map((key) => key.key), ['SENTRY_DSN']);
 });

@@ -95,6 +95,9 @@ const CHANGES: Record<string, { by: typeof VAULT | typeof SERVER; as: string }> 
   // The offboarding report's: each member's newest change, their removal for one removed, and retention's newest, which
   // names the day it dropped.
   'packages/server/src/db/events.ts#memberKeys': { by: VAULT, as: 'changesOf' },
+  // A binding's newest change, whose seal its row must hold to be live, or to be ended by the vault.
+  'packages/server/src/db/queries.ts#bindingLive': { by: SERVER, as: 'bindingLive' },
+  'packages/server/src/db/queries.ts#bindingEndedInLog': { by: SERVER, as: 'bindingEndedInLog' },
 };
 
 const LOG_STORE = 'packages/vault/test/log-store.test.ts';
@@ -108,7 +111,6 @@ const GATES: Record<string, { by: typeof VAULT | typeof SERVER; as: string } | {
   'packages/db/src/grants.ts#findingsOf': { by: VAULT, as: 'findingsOf' },
   // Whether an append's key was moved from, by `audit_log_subject_idx` keyed by the key.
   'packages/db/src/log.ts#underHead': { by: VAULT, as: 'lockLogHeadRead' },
-  'packages/server/src/db/queries.ts#hasTombstone': { by: SERVER, as: 'hasTombstone' },
   // Whether the log holds 0.15's cutover change, by `log_changes_object_idx` keyed by its object: once per migrate.
   'packages/db/src/migrate.ts#postgresMigrator': { none: 'one probe of the object index, once per migrate, on no request' },
 };

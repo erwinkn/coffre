@@ -3,7 +3,7 @@
 import type { StoredEntry } from '@coffre/core/audit';
 import { type Queryable, type Transaction } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
-import { authoredBy, entriesOf, entryColumns, firstEntryUnder, MOVES_FROM } from '@coffre/db/log';
+import { authoredBy, entriesOf, entryColumns, MOVES_FROM } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 
 import type { AuthRow, AuthTable } from '../auth-rows.ts';
@@ -26,11 +26,6 @@ export async function movedFrom(db: Queryable, keyIds: readonly string[]): Promi
     .from(auditLog)
     .where(and(eq(auditLog.author, 'app'), inArray(auditLog.action, [...MOVES_FROM]), inArray(auditLog.subjectPrincipal, [...keyIds])));
   return new Set(rows.map((row) => row.keyId!));
-}
-
-/** Whether the app wrote any entry under `keyId`: its first, one step of `audit_log_app_key_idx` (`firstEntryUnder`). */
-export async function wroteUnder(db: Queryable, keyId: string): Promise<boolean> {
-  return (await firstEntryUnder(db, 'app', keyId)) !== undefined;
 }
 
 /**

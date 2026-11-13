@@ -13,13 +13,12 @@ import { randomUUID } from 'node:crypto';
 import { createClient, type CoffreClient } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
-import { and, eq, gt } from 'drizzle-orm';
 
 import { Accesses } from '../src/accesses.ts';
 import { coffreRoute } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, entryOf, contextFor, openTestDatabase, refusedIn, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, entryOf, loggedSince, logMark, openTestDatabase, refusedIn, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog } from '@coffre/db/schema';
 import { inBulkPeriod } from './window-fixture.ts';
 
@@ -99,18 +98,14 @@ function bearer(token: string): CoffreClient {
   return createClient({ url: ORIGIN, headers: () => ({ authorization: `Bearer ${token}` }), transport: (request) => coffreRoute(request, runtime, '203.0.113.7').then((response) => response!) });
 }
 
-/** The reader's entries since `seq`, of `action`: allowed and denied. */
-async function entries(since: bigint, action: string): Promise<string[]> {
-  const rows = await db.owner
-    .select({ decision: auditLog.decision, code: auditLog.code })
-    .from(auditLog)
-    .where(and(gt(auditLog.seq, since), eq(auditLog.actor, `user:${READER}`), eq(auditLog.action, action)));
+/** The reader's entries since `since`, of `action`: allowed and denied. */
+async function entries(since: number, action: string): Promise<string[]> {
+  const rows = (await loggedSince(db.owner, since, [action])).filter((entry) => entry.actor === `user:${READER}`);
   return rows.map((row) => `${row.decision} ${row.code ?? ''}`.trim());
 }
 
-async function newestSeq(): Promise<bigint> {
-  const rows = await db.owner.select({ seq: auditLog.seq }).from(auditLog);
-  return rows.reduce((max, row) => (row.seq > max ? row.seq : max), -1n);
+function newestSeq(): Promise<number> {
+  return logMark(db.owner);
 }
 
 /** A reveal's answer, or its refusal's status and reason. */
@@ -144,11 +139,12 @@ test("a read of one key keeps and recalls nothing: the vault's one use by name d
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), 'fake-dev-key');
   assert.deepEqual(calls, ['useNamed']);
   // Revoked: refused at once as they are now, by the same one call; nothing asked first. A caller standing nowhere there
-  // has no key read, so the vault logs no use of theirs: the app's entry records the request.
+  // has no key read, so the vault logs no use of theirs: the app's entry records the request, a `note` of the
+  // vault's after it (V1 has the refusing call write it).
   await root.access.set(`user:${READER}`, { 'market/dev': null, 'market/prod': 'viewer' });
   calls = [];
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), '404 no_grant');
-  assert.deepEqual(calls, ['useNamed']);
+  assert.deepEqual(calls, ['useNamed', 'note']);
   assert.equal((await usesLogged(db.owner)).length, 1, 'the first read (the second rode its cover), and no use of the refusal');
   // Granted elsewhere: read there at once, with no answer kept to refuse it first.
   calls = [];
@@ -164,9 +160,11 @@ test('a grant revoked since: the vault refuses the kept answer, reading and logg
   calls = [];
   assert.equal(await reveal(reader, 'market/dev/API_KEY'), '404 missing_secret_read');
   // The use on the kept answer is refused on its merits, its refusal checked against the reader as they are (an
-  // `access` that differs), and asked again.
-  assert.deepEqual(calls, ['use', 'access', 'access']);
-  assert.deepEqual(await entries(since, 'secret.read'), ['deny']);
+  // `access` that differs), and asked again; the app's entry of the refusal is a `note` (V1's refusing call
+  // writes it).
+  assert.deepEqual(calls, ['use', 'access', 'access', 'note']);
+  // Its reason the event's code, as every refusal on the vault's chain carries it (`eventOf`).
+  assert.deepEqual(await entries(since, 'secret.read'), ['deny missing_secret_read']);
 });
 
 test('a grant given since: the refusal the kept answer would make is checked first, and the read goes through', async () => {

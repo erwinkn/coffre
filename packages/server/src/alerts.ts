@@ -1,5 +1,5 @@
 // A workload's alerts (docs/design/workload-access.md, section 8.3): one
-// `workload.alert` entry of the app's in the log, which is the record that
+// `workload.alert` event of the app's in the log, which is the record that
 // counts and the audit page filters, then the deployment's own `alert`,
 // called in the background after the response (`waitUntil` on Workers):
 //
@@ -13,7 +13,7 @@
 import type { WorkloadAlert } from '@coffre/core/identity';
 
 import type { UnknownKey } from './api/workloads.ts';
-import { appendAudit } from './db/audit.ts';
+import { eventOf, noteEvent } from './db/audit.ts';
 import { claimAlert } from './db/workloads.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
@@ -45,32 +45,34 @@ export function auditAlerter(runtime: Pick<CoffreRuntime, 'auth' | 'waitUntil'>)
 export const UNKNOWN_KEY_ALERT_MS = 60 * 60 * 1000;
 
 /**
- * Log `alert`, in a transaction of its own, then hand it to the
- * deployment's `alert` after the response. Never throws: an alert never
- * turns the answer it rides on into another. A log that refuses it, or a
- * delivery that fails, is said once in the process's log.
+ * Record `alert`, an event the vault writes at once (0.16), then hand
+ * it to the deployment's `alert` after the response. Never throws: an
+ * alert never turns the answer it rides on into another. A log that
+ * refuses it, or a delivery that fails, is said once in the process's log.
  *
- * `details` go in the entry beside the alert's own fields: a limit's count,
- * the credential it was for. `environmentId` is the place it concerns.
+ * `details` go in the event beside the alert's own fields: a limit's count,
+ * the credential it was for. `environmentId` is the place it concerns, and
+ * `requestId` the request it was raised in. Its id is drawn: the request
+ * raises it once.
  */
 export async function raiseAlert(
-  runtime: Pick<CoffreRuntime, 'db' | 'chainKey' | 'auth' | 'waitUntil'>,
+  runtime: Pick<CoffreRuntime, 'vault' | 'auth' | 'waitUntil'>,
   alert: WorkloadAlert,
-  details: Record<string, unknown> = {},
-  environmentId: string | null = null,
+  details: Record<string, unknown>,
+  environmentId: string | null,
+  requestId: string,
 ): Promise<void> {
   try {
-    await runtime.db.transaction((tx) =>
-      appendAudit(tx, runtime.chainKey, [{
-        actorType: 'service',
-        actorId: alert.service.slice('token:'.length),
-        action: 'workload.alert',
-        decision: 'allow',
-        environmentId,
-        sourceIp: alert.ip,
-        metadata: { ...details, kind: alert.kind, service: alert.service, binding: alert.binding, session: alert.session, ip: alert.ip, text: alert.text },
-      }]),
-    );
+    await noteEvent(runtime.vault, eventOf({
+      actorType: 'service',
+      actorId: alert.service.slice('token:'.length),
+      action: 'workload.alert',
+      decision: 'allow',
+      environmentId,
+      requestId,
+      sourceIp: alert.ip,
+      metadata: { ...details, kind: alert.kind, service: alert.service, binding: alert.binding, session: alert.session, ip: alert.ip, text: alert.text },
+    }, alert.session));
   } catch (error) {
     console.error('logging a workload alert failed', logged(error));
   }
@@ -111,17 +113,22 @@ export function limitAlert(
  * once an hour per service at most, whatever the token's `kid`, since
  * anyone who knows a service and its issuer can send one: a conditional
  * write outside any transaction decides (`claimAlert`), so a refusal capped
- * out never takes the log's head, whichever isolate it reaches. Never
+ * out never asks the vault, whichever isolate it reaches. Never
  * throws.
  */
-export async function unknownKeyAlert(runtime: Pick<CoffreRuntime, 'db' | 'chainKey' | 'auth' | 'waitUntil'>, refusal: UnknownKey, sourceIp: string | null): Promise<void> {
+export async function unknownKeyAlert(
+  runtime: Pick<CoffreRuntime, 'db' | 'vault' | 'auth' | 'waitUntil'>,
+  refusal: UnknownKey,
+  sourceIp: string | null,
+  requestId: string,
+): Promise<void> {
   try {
     if (!(await claimAlert(runtime.db, refusal.service, 'unknown_key', new Date(), UNKNOWN_KEY_ALERT_MS))) return;
   } catch (error) {
     console.error('capping a workload alert failed', logged(error));
     return;
   }
-  await raiseAlert(runtime, keyAlert(refusal, sourceIp), { issuer: refusal.issuer, kid: refusal.kid });
+  await raiseAlert(runtime, keyAlert(refusal, sourceIp), { issuer: refusal.issuer, kid: refusal.kid }, null, requestId);
 }
 
 /**

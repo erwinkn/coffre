@@ -2,11 +2,10 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
-import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog, secrets, secretVersions } from '@coffre/db/schema';
 import { withTriggersLifted } from './db/engine.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps, outcomes } from './api-fixture.ts';
+import { clientFor, logMark, loggedSince, openTestDatabase, resetDatabase, testDeps, type FixtureDeps, outcomes } from './api-fixture.ts';
 
 /**
  * Generated values (`@coffre/core/recipe`): a client makes the value and
@@ -21,7 +20,7 @@ const PAIR = { recipe: 'ecdsa:p-256', pair: { private: 'JWT_PRIVATE_KEY', public
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 let root: CoffreClient;
-let firstSeq: bigint;
+let mark: number;
 
 before(async () => {
   db = await openTestDatabase();
@@ -37,8 +36,7 @@ beforeEach(async () => {
   root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/dev', { name: 'Dev' });
-  const [head] = await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead);
-  firstSeq = head.nextSeq;
+  mark = await logMark(db.owner);
 });
 
 async function generatedIn(path: string): Promise<Record<string, unknown>> {
@@ -65,10 +63,9 @@ test('a generated value keeps its recipe, written canonical, until a value is wr
   // Each version says how it was made, and so does its write's audit entry, without the value.
   const history = await root.secrets.history('market/dev/TOKEN');
   assert.deepEqual(history.versions.map(({ version, recipe }) => [version, recipe]), [[3, 'bytes:16:hex'], [2, null], [1, 'bytes:32:base62']]);
-  const entries = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
-    .where(and(eq(auditLog.action, 'secret.write'), gte(auditLog.seq, firstSeq))).orderBy(asc(auditLog.seq));
-  assert.deepEqual(entries.map(({ metadata }) => JSON.parse(metadata).recipe ?? null), ['bytes:32:base62', null, 'bytes:16:hex']);
-  assert.equal(JSON.stringify(entries).includes('made-'), false);
+  const entries = await loggedSince(db.owner, mark, ['secret.write']);
+  assert.deepEqual(entries.map(({ metadata }) => metadata.recipe ?? null), ['bytes:32:base62', null, 'bytes:16:hex']);
+  assert.equal(JSON.stringify(entries.map(({ metadata }) => metadata)).includes('made-'), false);
 });
 
 test("a key pair's halves each name both, while both are of the same pair", async () => {

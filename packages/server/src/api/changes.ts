@@ -1,10 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import { protects } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
-import type { BindingColumns, ConnectionColumns, CredentialColumns, EndedBinding, EnvironmentColumns, MadeBinding, ObjectChange, PreparedChange, RequestTrace, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
+import type { BindingColumns, ConnectionColumns, CredentialColumns, EndedBinding, EnvironmentColumns, MadeBinding, NotedRow, NoteInput, ObjectChange, PreparedChange, RequestTrace, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
-import { holdIssues, isMovedChange, isStaleChange, laterChanges, newestCommitted, type ChangeNumbers } from '@coffre/db/log';
+import { holdIssues, isMovedChange, isStaleChange, laterChanges, laterEvents, newestCommitted, type ChangeNumbers } from '@coffre/db/log';
 
 import { askedOnce, askOnce, type AskedOnce } from '../asked-once.ts';
+import { eventOf, sameEvent, type AuditEntry } from '../db/audit.ts';
 import { authMac } from '../auth-rows.ts';
 import type { BindingRow, CredentialRow, ObjectRead, SecretRead } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
@@ -148,11 +150,21 @@ export class ObjectMoved extends ApiError {
   }
 }
 
-/** The changes of one write, sealed, for its transaction to commit. */
+/**
+ * The changes of one write, sealed, for its transaction to commit; and its events, what it does that no change records
+ * (a project made, a passkey added; 0.16), signed with them, which commit in the same transaction, after them.
+ */
 export class AppChanges {
   readonly #vault: Vault;
   readonly #changes: readonly ObjectChange[];
   readonly #calls: readonly PreparedChange[];
+  /** The events asked for, and as the vault signed them, in the same order. */
+  readonly #asked: readonly NoteInput[];
+  readonly #events: readonly NotedRow[];
+  /** The entries of changes no call carries, each an event signed beside them, by its change's id: they commit with it. */
+  readonly #alone: readonly { id: string; row: NotedRow }[];
+  /** The ones its work's entries are (`entries`): only they commit. */
+  #logged: NotedRow[] = [];
   /** The numbers of the changes its transaction made, which answer with its COMMIT (`commit`). */
   #numbers: ChangeNumbers | null = null;
   /** Whether its transaction reached `commit`: only then can it fail with what `failed` maps. */
@@ -160,10 +172,16 @@ export class AppChanges {
   #dropped = false;
   #only: Set<string> | null = null;
 
-  private constructor(vault: Vault, changes: readonly ObjectChange[], calls: readonly PreparedChange[]) {
+  private constructor(
+    vault: Vault, changes: readonly ObjectChange[], calls: readonly PreparedChange[], asked: readonly NoteInput[] = [], events: readonly NotedRow[] = [],
+    alone: readonly { id: string; row: NotedRow }[] = [],
+  ) {
     this.#vault = vault;
     this.#changes = changes;
     this.#calls = calls;
+    this.#asked = asked;
+    this.#events = events;
+    this.#alone = alone;
   }
 
   /**
@@ -172,21 +190,38 @@ export class AppChanges {
    * of the rows they are of, which 0.14's write does not need. A row the
    * vault refuses (`tampered`: not the vault's) refuses the write; one that
    * is no longer its object's newest change's (`moved`) is read again.
+   * `events`, signed in the same call, commit with them: each its own (`eventOf`), drawn for this attempt.
    */
   static async prepare(
     vault: Vault,
     actor: string | ((changes: readonly ObjectChange[]) => string),
     of: readonly ObjectChange[] | (() => Promise<readonly ObjectChange[]>),
+    events: readonly NoteInput[] = [],
   ): Promise<AppChanges | null> {
-    if (!(await keeps015(vault))) return null;
+    if (!(await keeps015(vault))) {
+      if (events.length > 0) throw new Error('a vault without 0.15\'s log signs no event: the app records nothing without one');
+      return null;
+    }
     const changes = typeof of === 'function' ? await of() : of;
-    if (changes.length === 0) return new AppChanges(vault, [], []);
-    const outcome = await vault.prepare!({ actor: typeof actor === 'function' ? actor(changes) : actor, changes: [...changes] });
+    if (changes.length === 0 && events.length === 0) return new AppChanges(vault, [], []);
+    const by = typeof actor === 'function' ? actor(changes) : actor;
+    const outcome = await vault.prepare!({ actor: by, changes: [...changes], ...(events.length === 0 ? {} : { events: [...events] }) });
     // A row read is no longer its object's newest change's: a write came between, read again (`retrying`), as
     // `app_change` answers a row moved since it was read.
     if (!outcome.ok && outcome.refusal.code === 'moved') throw new ObjectMoved();
     if (!outcome.ok) throw vaultRefused(outcome.refusal);
-    return new AppChanges(vault, changes, outcome.changes);
+    if ((outcome.events?.length ?? 0) !== events.length) throw new Error(`the vault signed ${outcome.events?.length ?? 0} of ${events.length} events`);
+    // An entry rides its change's first logged call. A change that makes none carries it nowhere: a row the log never
+    // held, a key brought back that its log never held, a change that changes nothing (archived meanwhile by another
+    // request). Its entry is then an event of its own, signed now, one more call, and it commits with the change.
+    const unridden = changes.filter((change) => change.entry !== null
+      && !outcome.changes.some((call) => call.kind === change.kind && call.id === change.id && call.payload !== null));
+    if (unridden.length === 0) return new AppChanges(vault, changes, outcome.changes, events, outcome.events ?? []);
+    const signed = await vault.prepare!({ actor: by, changes: [], events: unridden.map((change) => ({ ...change.entry!, id: randomUUID() })) });
+    if (!signed.ok) throw vaultRefused(signed.refusal);
+    if (signed.events?.length !== unridden.length) throw new Error(`the vault signed ${signed.events?.length ?? 0} of ${unridden.length} events`);
+    const alone = unridden.map((change, i) => ({ id: change.id, row: signed.events![i]! }));
+    return new AppChanges(vault, changes, outcome.changes, events, outcome.events ?? [], alone);
   }
 
   /**
@@ -210,7 +245,7 @@ export class AppChanges {
     if (!sameIds([...ids], prepared)) throw new ObjectMoved();
   }
 
-  /** The write ends without writing what these changes are of (a code expired, a token unknown): none is made, unless kept again. */
+  /** The write ends without writing what these changes are of (a code expired, a token unknown): none is made, unless kept again. Its events the work logged still are. */
   drop(): void {
     this.#dropped = true;
   }
@@ -218,6 +253,42 @@ export class AppChanges {
   /** The write writes them after all. */
   keep(): void {
     this.#dropped = false;
+  }
+
+  /**
+   * The entries its work logged, in the transaction, before `commit`: each that is one of the events prepared, field for
+   * field but its id, commits as that event; those it logged none of do not (a project found made already logs no
+   * `project.create`). The others are handed back, for `audit_log` while the app still appends there (until each
+   * change carries its entry): an entry of a prepared action that says otherwise (a slug renamed meanwhile)
+   * is still recorded, as before, never lost. An entry a change carries is not logged: logged too, it is an error.
+   *
+   *   prepared: project.create { slug: 'market' }, project.move { to: 'apps' }
+   *   logged:   project.create { slug: 'market' }               commits project.create alone, as its event
+   */
+  entries(log: readonly AuditEntry[]): AuditEntry[] {
+    const used = new Set<number>();
+    const carried = this.#carried();
+    const rest: AuditEntry[] = [];
+    this.#logged = [];
+    for (const entry of log) {
+      const i = this.#asked.findIndex((asked, j) => !used.has(j) && asked.action === entry.action && sameEvent(eventOf(entry, asked.credential, asked.id), asked));
+      if (i !== -1) {
+        used.add(i);
+        this.#logged.push(this.#events[i]!);
+        continue;
+      }
+      // Once only (#569): a site hands its entry to its change in the commit that stops logging it.
+      if (carried.some((carry) => carry.action === entry.action && sameEvent(eventOf(entry, carry.credential, ''), { ...carry, id: '' }))) {
+        throw new Error(`the entry ${entry.action} is carried by its change and logged too: a site logs it once, on its change`);
+      }
+      rest.push(entry);
+    }
+    return rest;
+  }
+
+  /** The entries the prepared changes carry (`ObjectChange.entry`). */
+  #carried(): Entry[] {
+    return this.#changes.flatMap((change) => change.entry === null ? [] : [change.entry]);
   }
 
   /** Whether a change of this object, by id, was prepared: a write makes no other. */
@@ -255,6 +326,10 @@ export class AppChanges {
     if (calls.length > 0 && this.#changes.some((change) => change.kind === 'environment' && change.before !== null
       && change.before.columns.slug !== change.after.slug && (only === null || only.has(change.id)))) await holdIssues(tx, { final: true });
     this.#numbers = append === undefined ? await laterChanges(tx, calls) : await append(calls);
+    // The events its work logged, after its changes, whether or not it dropped them: a code spent and refused at once
+    // records its refusal with it (`pollDevice`). Then the entries no call carries, of the changes it makes.
+    const alone = this.#dropped ? [] : this.#alone.filter(({ id }) => only === null || only.has(id)).map(({ row }) => row);
+    laterEvents(tx, [...this.#logged, ...alone]);
   }
 
   /**
@@ -353,21 +428,26 @@ export async function revokedByVault(
 /** Each live credential revoked: its change. */
 export function revokes(rows: readonly CredentialRowRead[]): ObjectChange[] {
   const now = new Date();
-  return rows.map((row) => credentialChange(row, { ...row, revokedAt: now }));
+  return rows.map((row) => credentialChange(row, { ...row, revokedAt: now }, null));
 }
 
 type CredentialRowRead = Parameters<typeof credentialColumns>[0] & { seal: Buffer | null };
 
-/** A credential's change: made (no row before), or from its row as read, with its seal. */
+/** What a change carries (`ObjectChange.entry`): its site's entry less its id (`entryOf`), or null for none. */
+export type Entry = Omit<NoteInput, 'id'>;
+
+/** A credential's change: made (no row before), or from its row as read, with its seal; its entry, or null. */
 export function credentialChange(
   before: CredentialRowRead | null,
   after: Parameters<typeof credentialColumns>[0],
+  entry: Entry | null,
 ): ObjectChange {
   return {
     kind: 'credential',
     id: after.id,
     before: before === null ? null : { columns: credentialColumns(before), seal: before.seal === null ? null : before.seal.toString('base64') },
     after: credentialColumns(after),
+    entry,
   };
 }
 
@@ -382,19 +462,20 @@ type ConnectionRowRead = Parameters<typeof connectionColumns>[0] & { seal: Buffe
  * An MCP connection's change (T147): made (no row before), or from its row as read, with its seal. A use through it
  * decides on its object, so each of its ends is a change, under the fence, as a credential's revoke is.
  */
-export function connectionChange(before: ConnectionRowRead | null, after: Parameters<typeof connectionColumns>[0]): ObjectChange {
+export function connectionChange(before: ConnectionRowRead | null, after: Parameters<typeof connectionColumns>[0], entry: Entry | null): ObjectChange {
   return {
     kind: 'connection',
     id: after.id,
     before: before === null ? null : { columns: connectionColumns(before), seal: sealText(before.seal) },
     after: connectionColumns(after),
+    entry,
   };
 }
 
-/** Each live connection revoked: its change. */
+/** Each live connection revoked: its change, carrying no entry (a site whose revoke has one sets it). */
 export function connectionRevokes(rows: readonly ConnectionRowRead[]): ObjectChange[] {
   const now = new Date();
-  return rows.map((row) => connectionChange(row, { ...row, revokedAt: now }));
+  return rows.map((row) => connectionChange(row, { ...row, revokedAt: now }, null));
 }
 
 /** Two sets of ids alike: a set a write chose again under the head, and the one it prepared. */
@@ -422,18 +503,18 @@ function sealText(seal: Buffer | null): string | null {
  * Any other change over an archived key brings its own value or reference,
  * a version or reference row this write made, never its rows'.
  */
-export function secretChange(id: string, before: SecretRead | undefined, after: SecretColumns | null | 'as read'): ObjectChange {
+export function secretChange(id: string, before: SecretRead | undefined, after: SecretColumns | null | 'as read', entry: Entry | null): ObjectChange {
   // Archiving leaves no seal (`secret.delete`): an archived row with one was archived around coffre, and no change moves it.
   if (before?.archived === true && before.seal !== null) throw new Error(`the key ${id} was archived around coffre, its seal kept: its row is not its newest change's`);
   if (after === 'as read') {
     if (before === undefined) throw new Error(`the key ${id} has no row to bring back as read`);
-    if (before.archived) return { kind: 'secret', id, before: null, after: before.columns, restores: true };
-    return { kind: 'secret', id, before: { columns: before.columns, seal: sealText(before.seal) }, after: before.columns };
+    if (before.archived) return { kind: 'secret', id, before: null, after: before.columns, restores: true, entry };
+    return { kind: 'secret', id, before: { columns: before.columns, seal: sealText(before.seal) }, after: before.columns, entry };
   }
   if (before?.archived === true && after !== null && (after.version?.id ?? null) === (before.columns.version?.id ?? null) && after.reference === before.columns.reference) {
     throw new Error(`the key ${id} is archived: brought back as its rows hold it, it restores ('as read'); written, it takes a version or reference of its own`);
   }
-  return { kind: 'secret', id, before: before === undefined || before.archived ? null : { columns: before.columns, seal: sealText(before.seal) }, after };
+  return { kind: 'secret', id, before: before === undefined || before.archived ? null : { columns: before.columns, seal: sealText(before.seal) }, after, entry };
 }
 
 /** A key's columns with a new version of its own: its value, no reference. */
@@ -452,8 +533,8 @@ export function versionColumns(
 }
 
 /** An environment's change: made (no read), or from its row as read, with its seal. */
-export function environmentChange(before: ObjectRead<EnvironmentColumns> | undefined, after: EnvironmentColumns): ObjectChange {
-  return { kind: 'environment', id: after.id, before: before === undefined ? null : { columns: before.columns, seal: sealText(before.seal) }, after };
+export function environmentChange(before: ObjectRead<EnvironmentColumns> | undefined, after: EnvironmentColumns, entry: Entry | null): ObjectChange {
+  return { kind: 'environment', id: after.id, before: before === undefined ? null : { columns: before.columns, seal: sealText(before.seal) }, after, entry };
 }
 
 /**
@@ -471,12 +552,13 @@ export function sealedBinding(row: BindingRow, publicUrl: string): { columns: Bi
   };
 }
 
-/** A binding the vault makes (`changeBindings`) on `origin`, this instance's public URL: its row, as `insertBinding` writes it, and the app's MAC over it. */
-export function madeBinding(chainKey: Buffer, origin: string, row: Omit<BindingRow, 'authMac' | 'lastUsedAt' | 'revokedAt' | 'revokedBy' | 'seal' | 'origin' | 'closedAt' | 'closedBy'>): MadeBinding {
+/** A binding the vault makes (`changeBindings`) on `origin`, this instance's public URL: its row, as the vault writes it, and the app's MAC over it. */
+export function madeBinding(chainKey: Buffer, origin: string, row: Omit<BindingRow, 'authMac' | 'lastUsedAt' | 'revokedAt' | 'revokedBy' | 'seal' | 'origin' | 'closedAt' | 'closedBy'>, entry: Entry | null): MadeBinding {
   const signed = { ...row, revokedAt: null };
   return {
     ...sealedBinding({ ...row, origin, authMac: Buffer.alloc(0), lastUsedAt: null, revokedAt: null, revokedBy: null, seal: null, closedAt: null, closedBy: null }, origin).columns,
     jwks: row.jwks ?? null, label: row.label ?? null, createdBy: row.createdBy, createdAt: row.createdAt.getTime(), authMac: authMac(chainKey, 'service_bindings', signed).toString('base64'),
+    entry,
   };
 }
 
@@ -488,8 +570,9 @@ export function madeBinding(chainKey: Buffer, origin: string, row: Omit<BindingR
  * left to the app could be a binding of the log's whose seal a writer
  * cleared, and its object would stand past its end (reviews r1, r2).
  */
-export function endedBinding(chainKey: Buffer, publicUrl: string, row: BindingRow, credentials: readonly CredentialRow[], at: Date): EndedBinding {
+export function endedBinding(chainKey: Buffer, publicUrl: string, row: BindingRow, credentials: readonly CredentialRow[], at: Date, entry: Entry | null): EndedBinding {
   return {
+    entry,
     before: sealedBinding(row, publicUrl) as EndedBinding['before'],
     authMacFrom: Buffer.from(row.authMac).toString('base64'),
     authMac: authMac(chainKey, 'service_bindings', { ...row, revokedAt: at }).toString('base64'),

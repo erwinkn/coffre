@@ -9,18 +9,18 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { generateToken, github, hashToken, signin, tokenHint } from '@coffre/core/identity';
 import { createDatabase, type Database } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
-import { appendEntries, KeyRetired, lockLogHead } from '@coffre/db/log';
+import { appendEntries, KeyRetired, lockChange, lockLogHead, lockLogHeadIfFree } from '@coffre/db/log';
 import { asc, desc, eq, sql } from 'drizzle-orm';
 
 import { coffreRoute, keyReady, respond, runScheduled, settleKey } from '../src/app.ts';
 import { authMac, signedBy, type AuthTable } from '../src/auth-rows.ts';
 import { resolveConfig } from '../src/config.ts';
 import { appendAudit, appLogKey, CHAIN_START, movedOnIn, verifyAppEntries, walkChain } from '../src/db/audit.ts';
-import { auditRange, insertBinding, insertConnection, insertOauthClient, memberStanding } from '../src/db/queries.ts';
+import { auditRange, insertConnection, insertOauthClient, memberStanding } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { sealAnchor } from '../src/anchor.ts';
 import { toErrorBody } from '../src/api/errors.ts';
-import { finishRotation, keyState, rotateStep, SIGNED_TABLES } from '../src/key-rotation.ts';
+import { finishRotation, keyState, rotateStep, SIGNED_TABLES, type KeyState } from '../src/key-rotation.ts';
 import { newestAppEntry } from '../src/db/rotation.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
@@ -97,10 +97,11 @@ beforeEach(async () => {
   // A binding, a session of it awaiting a person's approval, and an enrollment code of it.
   const { generation } = (await memberStanding(deps.db, SERVICE))!;
   const bindingId = randomUUID();
-  await insertBinding(deps.db, A, {
+  const binding = {
     id: bindingId, principal: SERVICE, generation, profile: 'kubernetes', issuer: 'https://cluster.acme.example', jwksUri: 'https://cluster.acme.example/keys',
     jwks: null, claims: '{"sub":"x"}', scope: null, policy: '{"approve":true}', label: null, createdBy: ROOT,
-  });
+  };
+  await db.owner.insert(serviceBindings).values({ ...binding, authMac: authMac(A, 'service_bindings', { ...binding, revokedAt: null }) });
   const session = generateToken('workload');
   await insertSession(deps.db, A, {
     id: randomUUID(), kind: 'workload', tokenHash: hashToken(session), tokenHint: tokenHint(session), generation, principal: SERVICE, identityId: null,
@@ -488,6 +489,39 @@ test('a step the door takes while another start holds the head leaves it to that
     await held;
   }
   assert.equal(await keyReady(next), null);
+});
+
+test('a step takes the change lock before the head, as the sign-outs it commits do: a change that holds it holds the step back, which holds nothing meanwhile', async () => {
+  const next = startUnder(B, [A]);
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let locked = () => {};
+  const holding = new Promise<void>((resolve) => (locked = resolve));
+  // Another change in flight, under the change lock, not yet committed.
+  const held = db.owner.transaction(async (tx) => {
+    await lockChange(tx);
+    locked();
+    await released;
+  });
+  await holding;
+  let stepping: Promise<KeyState> | undefined;
+  try {
+    // The door's step leaves it at once.
+    assert.deepEqual(await rotateStep(deps.db, next, { wait: false, vault: deps.vault }), { kind: 'busy' });
+    // A start's step waits for the change, and holds neither the head nor the fence while it waits.
+    let done = false;
+    stepping = rotateStep(deps.db, next, { vault: deps.vault }).finally(() => (done = true));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(done, false, 'the step waits for the change lock');
+    assert.equal(await db.owner.transaction((tx) => lockLogHeadIfFree(tx)), true, 'the head is free while the step waits');
+  } finally {
+    release();
+    await held;
+  }
+  const state = await stepping!;
+  assert.notEqual(state.kind, 'busy');
+  const steps = (await appEntries()).filter((entry) => entry.action === 'key.reseal').map((entry) => JSON.parse(entry.metadata) as { signedOut: number });
+  assert.deepEqual(steps.map((step) => step.signedOut), [2], 'the step signed both sessions out');
 });
 
 test('an anchor store that cannot be used holds the rotation back before key.rotate, and Node stops stepping until it can', async () => {

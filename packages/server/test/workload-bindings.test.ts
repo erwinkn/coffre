@@ -6,15 +6,16 @@ import { CoffreError } from '@coffre/client';
 import { DevIdp, fakeInstallations } from '@coffre/conformance/idp';
 import { defineSignin, github, githubApp, MAX_BINDINGS, MAX_ISSUER_BYTES, signin as signinAuth, type BindingClaims } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
-import { asc, eq, sql, type SQL } from 'drizzle-orm';
+import { eq, sql, type SQL } from 'drizzle-orm';
 
-import { auditLog, serviceBindings } from '@coffre/db/schema';
+import { logObject } from '@coffre/db/log';
+import { auditLog, logChanges, serviceBindings } from '@coffre/db/schema';
 import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import { processLimits } from '../src/workloads/limits.ts';
-import { liveBindings, tombstoned } from '../src/db/queries.ts';
+import { bindingEnded, liveBindings } from '../src/db/queries.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, holdSomething, openTestDatabase, resetDatabase, speaking, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, holdSomething, loggedEntries, openTestDatabase, resetDatabase, speaking, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const LEAD = 'lead@acme.example';
@@ -86,14 +87,9 @@ const bind = (claims: BindingClaims = DEPLOY, extra: { label?: string; replaces?
 const branch = (name: string): BindingClaims => ({ ...DEPLOY, ref: `refs/heads/${name}`, workflow_ref: `acme/api/.github/workflows/deploy.yml@refs/heads/${name}` });
 
 async function entries(action?: string) {
-  const rows = await db.owner
-    .select({ actor: auditLog.actor, action: auditLog.action, decision: auditLog.decision, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(eq(auditLog.author, 'app'))
-    .orderBy(asc(auditLog.seq));
-  return rows
-    .filter((row) => action === undefined || row.action === action)
-    .map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  return (await loggedEntries(db.owner, action === undefined ? undefined : [action]))
+    .filter((entry) => entry.author === 'app')
+    .map((entry) => ({ actor: entry.actor, action: entry.action, decision: entry.decision, metadata: entry.metadata }));
 }
 
 const live = async () => (await as(LEAD).bindings.list(MEMBER)).bindings;
@@ -242,12 +238,13 @@ test('removing a binding writes its tombstone; a denied attempt is no tombstone,
 
   // Someone who is not an owner tries: refused and logged, under the same action, and the binding stands.
   await assert.rejects(as(DEV).bindings.remove(MEMBER, binding.id), /only those who manage this service account may remove its trust bindings/);
-  assert.deepEqual(await tombstoned(db.runtime, [binding.id]), new Set());
+  assert.equal(await bindingEnded(db.runtime, binding.id), false);
   assert.deepEqual((await live()).map((candidate) => candidate.id), [binding.id]);
 
   assert.deepEqual(await as(LEAD).bindings.remove(MEMBER, binding.id), { unbound: true });
   assert.deepEqual(await live(), []);
-  assert.deepEqual(await tombstoned(db.runtime, [binding.id]), new Set([binding.id]));
+  // Its tombstone is its end in the log (`binding.revoke`), which carries its `token.unbind`.
+  assert.equal(await bindingEnded(db.runtime, binding.id), true);
   assert.deepEqual(
     (await entries('token.unbind')).map((entry) => [entry.actor, entry.decision, entry.metadata.bindingId, entry.metadata.reason]),
     [[`user:${DEV}`, 'deny', binding.id, 'not_service_manager'], [`user:${LEAD}`, 'allow', binding.id, 'removed']],
@@ -258,6 +255,25 @@ test('removing a binding writes its tombstone; a denied attempt is no tombstone,
   await db.owner.update(serviceBindings).set({ revokedAt: null, revokedBy: null, authMac: row!.authMac }).where(eq(serviceBindings.id, binding.id));
   assert.deepEqual(await live(), []);
   assert.deepEqual(await liveBindings(db.runtime, deps.chainKey, MEMBER, 0), []);
+
+  // Put back with its old seal too: its newest change is its end, which no row matches (`bindingLive`). A change forged
+  // after the end the app lists, and the vault refuses by its MAC (`workload-exchange.test.ts`).
+  await db.owner.update(serviceBindings).set({ seal: row!.seal, closedAt: null, closedBy: null }).where(eq(serviceBindings.id, binding.id));
+  assert.deepEqual(await live(), []);
+  assert.deepEqual(await liveBindings(db.runtime, deps.chainKey, MEMBER, 0), []);
+});
+
+test('a binding the log never held, removed, ends with no change: its token.unbind is an event, written through note (#569)', async () => {
+  const { binding } = await bind(DEPLOY);
+  // As the cutover left one it refused: no seal, no change.
+  await db.owner.update(serviceBindings).set({ seal: null }).where(eq(serviceBindings.id, binding.id));
+  await db.owner.delete(logChanges).where(eq(logChanges.object, logObject('binding', binding.id)));
+  assert.deepEqual(await as(LEAD).bindings.remove(MEMBER, binding.id), { unbound: true });
+  assert.deepEqual(
+    (await entries('token.unbind')).map((entry) => [entry.decision, entry.metadata.bindingId, entry.metadata.reason]),
+    [['allow', binding.id, 'removed']],
+  );
+  assert.deepEqual(await db.owner.select().from(auditLog).where(eq(auditLog.action, 'token.unbind')), [], 'none in the old log');
 });
 
 test('a binding row changed around the app, or made without its key, is passed over', async () => {

@@ -156,7 +156,7 @@ async function write(scene: Scene, app: Scene): Promise<void> {
   // on, a reference's included, against its log.
   const made = await AppChanges.prepare(vault, `user:${ROOT}`, app.envs.map((env) => environmentChange(undefined, {
     id: env.id, projectId: env.projectId, slug: env.slug, owner: env.owner, parentId: env.parentId, protected: false, archived: false, projectArchived: false,
-  })));
+  }, null)));
   await db.transaction((tx) => made!.commit(tx));
   await made!.sealed(db);
   const rows = scene.rows;

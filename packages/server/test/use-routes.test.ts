@@ -18,7 +18,7 @@ import { credential } from '@coffre/client/credential';
 import { github, signin } from '@coffre/core/identity';
 import { derivedSigningKey } from '@coffre/vault';
 import { replayStored, runCheckpointer, type RunningCheckpointer } from '@coffre/vault/node';
-import { and, eq, gt, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import { resolveConfig } from '../src/config.ts';
 import { checkPlugins } from '../src/plugins.ts';
@@ -27,7 +27,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { USES_AT_ONCE } from '../src/api/keys.ts';
-import { aroundNextUseByIds, clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { aroundNextUseByIds, clientFor, contextFor, loggedEntries, loggedSince, logMark, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, environments, bulkCap, logCheckpoints, checkpointFence, logTiles, logUses } from '@coffre/db/schema';
 import { openVaultDatabase } from './db/engine.ts';
 import { answer, type Pages } from './start-fixture.ts';
@@ -184,8 +184,7 @@ async function usesLogged(): Promise<{ number: bigint | number | string; purpose
 
 /** The vault's reads and the proxy's `credential.use` entries: what the log holds of the reads besides the uses. */
 async function readEntries(): Promise<{ action: string; actor: string }[]> {
-  return db.owner.select({ action: auditLog.action, actor: auditLog.actor }).from(auditLog)
-    .where(and(eq(auditLog.decision, 'allow'), sql`${auditLog.action} IN ('secret.read', 'credential.use')`));
+  return (await loggedEntries(db.owner, ['secret.read', 'credential.use'])).filter((entry) => entry.decision === 'allow').map(({ action, actor }) => ({ action, actor }));
 }
 
 const hmacOf = (body: string) => createHmac('sha256', WEBHOOK).update(body).digest('hex');
@@ -239,8 +238,8 @@ test('0.15: a use the rows refuse refuses the request, logged as its request, an
   const issued = await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
   const ci = bearer(issued.token);
   assert.deepEqual((await ci.secrets.reveal('market/dev/API_KEY')).values, { API_KEY });
-  const newest = async () => (await db.owner.select({ seq: auditLog.seq }).from(auditLog)).reduce((max, row) => (row.seq > max ? row.seq : max), -1n);
-  const denied = async (since: bigint) => (await db.owner.select({ decision: auditLog.decision }).from(auditLog).where(gt(auditLog.seq, since))).some((row) => row.decision === 'deny');
+  const newest = () => logMark(db.owner);
+  const denied = async (since: number) => (await loggedSince(db.owner, since)).some((row) => row.decision === 'deny');
   /**
    * A refusal, recorded once: by the vault, its use refused on the rows as they are and replayed so (`code`), when the
    * key's row of the cap's is fresh; or, when the cap's period turned between the two requests (it is the wall clock's,

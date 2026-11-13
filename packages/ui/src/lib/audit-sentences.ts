@@ -219,6 +219,12 @@ function readVerb({ entry }: Facts): [string, string] {
   return READ_VERBS[text(entry.metadata.purpose) ?? 'reveal'] ?? READ_VERBS.reveal!;
 }
 
+/** A key archived until this write, which brought it back (`unarchived`): one change, one entry. */
+const revived = (entry: AuditEntry): string[] => (entry.metadata.unarchived === true ? [', bringing it back from the archive'] : []);
+
+/** A place archived or restored in the same change as its slug's rename. */
+const renamedFrom = ({ entry }: Facts): string[] => (text(entry.metadata.from) === null ? [] : [`, renamed from ${text(entry.metadata.from)}`]);
+
 const placeTemplates = (kind: 'project' | 'environment'): Record<string, Template> => {
   // A personal config by what it is a config of, `market/dev`: its own slug is generated, and shown nowhere else.
   const of = (entry: AuditEntry): string | null => {
@@ -245,8 +251,9 @@ const placeTemplates = (kind: 'project' | 'environment'): Record<string, Templat
             : [`, a fork of ${text(entry.metadata.from)}`],
     },
     [`${kind}.update`]: { did: 'changed', tried: 'change', what },
-    [`${kind}.archive`]: { did: 'archived', tried: 'archive', what },
-    [`${kind}.restore`]: { did: 'restored', tried: 'restore', what },
+    // Re-slugged in the same change, it names the slug it had.
+    [`${kind}.archive`]: { did: 'archived', tried: 'archive', what, then: renamedFrom },
+    [`${kind}.restore`]: { did: 'restored', tried: 'restore', what, then: renamedFrom },
     // Named by its tombstone from then on, `market~deleted-2026-10-05`, as every entry about it is.
     [`${kind}.delete`]: { did: 'deleted', tried: 'delete', what },
   };
@@ -274,8 +281,8 @@ const TEMPLATES: Record<string, Template> = {
       const version = batch.length > 1 || entry.version === null || entry.version === 1 ? [] : [`, now version ${entry.version}`];
       if (batch.length > 1) return version;
       const level = entry.metadata.sensitive === true ? 'sensitive' : entry.metadata.plain === true ? 'plain' : 'secret';
-      if (text(entry.metadata.was) !== null) return [` ${level}`, ...(number(entry.metadata.kept) === null ? [' with a new value'] : []), ...version];
-      return [...version, ...(level === 'plain' ? [', as a plain value, no secret'] : level === 'sensitive' ? [', as a sensitive value, shown to nobody'] : [])];
+      if (text(entry.metadata.was) !== null) return [` ${level}`, ...(number(entry.metadata.kept) === null ? [' with a new value'] : []), ...version, ...revived(entry)];
+      return [...version, ...(level === 'plain' ? [', as a plain value, no secret'] : level === 'sensitive' ? [', as a sensitive value, shown to nobody'] : []), ...revived(entry)];
     },
   },
   // The credential proxy's record beside the vault's read, the vault's own since 0.14.5: which credential the keys went into, where, and by which road.
@@ -328,7 +335,7 @@ const TEMPLATES: Record<string, Template> = {
     then: () => [' as not needed'],
   },
   'missing.restore': { did: 'restored', tried: 'restore', what: (facts) => missingKeys(facts), then: () => [' to the missing keys'] },
-  'secret.reference': { did: 'made', tried: 'make', what: ({ entry }) => referenceTo(entry) },
+  'secret.reference': { did: 'made', tried: 'make', what: ({ entry }) => referenceTo(entry), then: ({ entry }) => revived(entry) },
   'reference.create': { did: 'made', tried: 'make', what: ({ entry }) => referenceTo(entry) },
   'reference.end': {
     did: ({ entry }) => (entry.metadata.reason === 'replaced' ? 'gave a value of its own to' : entry.metadata.reason === 'abandoned' ? 'abandoned' : 'broke'),

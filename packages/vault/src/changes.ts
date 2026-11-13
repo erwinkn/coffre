@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import type { Confirmation, ObjectChange, PreparedChange } from '@coffre/core/vault';
+import type { Confirmation, ObjectChange, PreparedChange, ReportedPayload } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isMovedChange, type ChangeNumbers } from '@coffre/db/log';
 
 import { applyOp, canonical, indexBytes, objectKey, refOf, sealOf, sealed, type Input, type Op, type Ref, type SealKeys } from './inputs.ts';
 import type { LoggedChange } from './log-replay.ts';
 import { entryMac, type LogMacKey } from './log-entry.ts';
+import { reportedPayload } from './note.ts';
 import { connectionObject, credentialObject, environmentObject, secretObject } from './objects.ts';
 import { isStale, laterInputs, loggedChanges, newestChange, readObject, type ChangeCall, type CheckedChange, type NewestChange, type ReadKind } from './store.ts';
 
@@ -405,6 +406,8 @@ export function prepareChanges(
       if (!sameObject(keys.seals[0]!, ref, last.object, after)) throw new NotLogged(ref, 'stale');
       restores = last.seal;
     }
+    // The entry it carries rides its first call, under the vault's MAC (`reported`; A1's stand-in).
+    let reported = change.entry === null ? null : reportedPayload(change.entry, actor, 'app');
     let now: Input | null = before === null ? null : OBJECTS[kind](before.columns as never);
     let from: Buffer | null = before === null ? null : Buffer.from(before.seal!, 'base64');
     if (now !== null && !sealed(keys.seals, ref, now, from)) throw new NotLogged(ref, 'tampered');
@@ -415,8 +418,9 @@ export function prepareChanges(
       const seal = next === null ? null : sealOf(keys.seals[0]!, ref, next);
       const row = {
         at, requestId: request === undefined ? randomUUID() : writeRequestId(request.number, object), object, actor,
-        payload: payloadOf(ref, op, undefined, request === undefined ? undefined : requestPart(request)), seal,
+        payload: payloadOf(ref, op, undefined, request === undefined ? undefined : requestPart(request), reported), seal,
       };
+      reported = null;
       const mac = entryMac(keys.mac, { tree: 'changes', row });
       prepared.push({
         kind, id, ...row, seal: seal?.toString('base64') ?? null, sealFrom: from?.toString('base64') ?? null, mac: mac.toString('base64'),
@@ -533,8 +537,10 @@ function sameObject(key: Buffer, ref: Ref, a: Input | null, b: Input | null): bo
  * Canonical JSON, so that a retry sends the same bytes (`change_input`
  * finds its entry by request id and payload).
  */
-export function payloadOf(ref: Ref, op: Op, old?: bigint, extra?: { request: WriteRequestPart | AdmitRequestPart; inputs: string }): string {
-  return canonical({ ...op, ref: { kind: ref.kind, id: ref.id }, ...(old === undefined ? {} : { old: old.toString() }), ...(extra ?? {}) });
+export function payloadOf(ref: Ref, op: Op, old?: bigint, extra?: { request: WriteRequestPart | AdmitRequestPart; inputs: string }, reported?: ReportedPayload | null): string {
+  return canonical({
+    ...op, ref: { kind: ref.kind, id: ref.id }, ...(old === undefined ? {} : { old: old.toString() }), ...(extra ?? {}), ...(reported == null ? {} : { reported }),
+  });
 }
 
 /** A key write's request, as its changes carry it (`prepareChanges`). */

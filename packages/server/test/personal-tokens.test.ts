@@ -10,14 +10,14 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
 import { defineSignin, github } from '@coffre/core/identity';
 import { logObject } from '@coffre/db/log';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { WINDOW } from '../src/db/events.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { auditEvents, auditLog, credentials, logChanges } from '@coffre/db/schema';
-import { aroundNextUseByIds, clientFor, contextFor, issuesLogged, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { aroundNextUseByIds, clientFor, contextFor, issuesLogged, loggedEntries, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -102,12 +102,8 @@ async function status(call: Promise<unknown>): Promise<number> {
 
 /** The app's refusals of `action`, as reasons, oldest first. */
 async function refusals(action: string): Promise<string[]> {
-  const rows = await db.owner
-    .select({ metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, action), eq(auditLog.decision, 'deny')))
-    .orderBy(asc(auditLog.seq));
-  return rows.map((row) => JSON.parse(row.metadata).reason);
+  const rows = (await loggedEntries(db.owner, [action])).filter((entry) => entry.author === 'app' && entry.decision === 'deny');
+  return rows.map((row) => row.metadata.reason as string);
 }
 
 test('a personal token acts as its person within its scope: it reads what it names, writes nothing a viewer would, and reaches no other place', async () => {
@@ -227,10 +223,10 @@ test('a personal token makes nothing that outlives it: no token, session, app, g
   ];
   for (const [what, call] of refused) assert.equal(await status(call()), 403, what);
   // Each attempt is logged, as the token tried it, naming the route.
-  const used = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog).where(and(eq(auditLog.action, 'token.use'), eq(auditLog.decision, 'deny'))).orderBy(asc(auditLog.seq));
+  const used = (await loggedEntries(db.owner, ['token.use'])).filter((entry) => entry.decision === 'deny');
   assert.equal(used.length, refused.length);
-  assert.ok(used.every((row) => JSON.parse(row.metadata).reason === 'personal_token' && JSON.parse(row.metadata).credentialId === issued.id));
-  assert.deepEqual(JSON.parse(used[0]!.metadata).route, 'POST /members/:member/tokens');
+  assert.ok(used.every((row) => row.metadata.reason === 'personal_token' && row.metadata.credentialId === issued.id));
+  assert.deepEqual(used[0]!.metadata.route, 'POST /members/:member/tokens');
 
   // What its routes reach, its scope holds to: a project needs an Admin's instance role, which a scope never carries.
   assert.equal(await status(token.projects.create('billing', {})), 403);
@@ -252,14 +248,10 @@ test('every entry made with a personal token names its person and the token, the
   await bearer(issued.token).secrets.set('market/dev', { API_KEY: 'from-agent' });
   assert.equal(await reads(issued.token, 'dev'), 'from-agent');
 
-  const written = await db.owner
-    .select({ author: auditLog.author, actor: auditLog.actor, action: auditLog.action, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.actor, ADA)))
-    .orderBy(asc(auditLog.seq));
-  const made = written.filter((row) => JSON.parse(row.metadata).credentialId === issued.id).map((row) => `${row.author} ${row.action}`);
-  // The read is a use, its credential the token's: no entry here.
-  // The write goes down the two-trip path, which writes no 0.14 entry:
+  const written = (await loggedEntries(db.owner)).filter((entry) => entry.actor === ADA);
+  const made = written.filter((row) => row.metadata.credentialId === issued.id).map((row) => `${row.author} ${row.action}`);
+  // The read, under 0.15's log, is a use, its credential the token's: no entry here.
+  // Under 0.15's log the write goes down the two-trip path, which since 0.16.0 writes no 0.14 entry:
   // its record is the key's change in 0.15's log, which names her and the token it was decided for.
   assert.deepEqual(made.filter((action) => action === 'app secret.write' || action === 'vault key.wrap'), []);
   const changes = await db.owner.select({ actor: logChanges.actor, payload: logChanges.payload }).from(logChanges)
@@ -445,10 +437,10 @@ test("a person's token issues, revokes and sign-outs are counted on the page of 
   };
   const tokens = (page: Page) => Object.fromEntries((page.hidden ?? []).filter(({ action }) => TOKENS.has(action)).map(({ action, count }) => [action, count]));
   // Ada's pages, a write a page, counted: none after the newest; then the second token's issue and revoke, and the
-  // first's sign-out, between the second write and the third; then the first's issue. A full page of 0.14's says there
-  // may be more, so the last is empty.
+  // first's sign-out, between the second write and the third; then the first's issue. A full page says there may be more,
+  // so the last is empty.
   const activity = await walk({ actor: ADA, hidden: '1' }, 1);
-  assert.deepEqual(activity.map((page) => page.entries.map((entry) => `${entry.action} ${entry.log}`)), [['secret.write 0.14'], ['secret.write 0.14'], ['secret.write 0.14'], []]);
+  assert.deepEqual(activity.map((page) => page.entries.map((entry) => `${entry.action} ${entry.log}`)), [['secret.write 0.15'], ['secret.write 0.15'], ['secret.write 0.15'], []]);
   assert.deepEqual(activity.map(tokens), [{}, { 'token.create': 1, 'token.revoke': 1, sign_out: 1 }, { 'token.create': 1 }, {}]);
 
   // Asked for, each is listed.

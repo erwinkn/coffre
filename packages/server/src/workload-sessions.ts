@@ -232,9 +232,11 @@ function live(row: SessionRow, now: number): boolean {
  */
 export async function standingSession(
   request: Request,
-  runtime: Pick<CoffreRuntime, 'db' | 'chainKey' | 'publicUrl' | 'gates' | 'auth' | 'waitUntil'>,
+  runtime: Pick<CoffreRuntime, 'db' | 'chainKey' | 'vault' | 'publicUrl' | 'gates' | 'auth' | 'waitUntil'>,
   token: string,
   sourceIp: string | null,
+  /** The request's id, which an alert it raises names (`raiseAlert`). */
+  requestId: string,
   ask: SessionAsk,
 ): Promise<StandingSession> {
   const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
@@ -278,7 +280,7 @@ export async function standingSession(
         case 'limit':
           // Its window's first refusal alerts, once (section 8.1); the rest are refused as quietly.
           if (admitted.first) {
-            await raiseAlert(runtime, limitAlert({ principal: row.principal, bindingId: binding.id, session: row.id, sourceIp }, admitted), { credential: ask.credential, count: admitted.key, retryAfterMs: admitted.retryAfterMs }, place);
+            await raiseAlert(runtime, limitAlert({ principal: row.principal, bindingId: binding.id, session: row.id, sourceIp }, admitted), { credential: ask.credential, count: admitted.key, retryAfterMs: admitted.retryAfterMs }, place, requestId);
           }
           throw new SessionRefused(
             errorResponse(new ApiError('too_many_requests', `past this workload's limit for ${admitted.key}`, 'limit'), { 'retry-after': String(Math.ceil(admitted.retryAfterMs / 1000)) }),

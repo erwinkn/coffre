@@ -1,11 +1,10 @@
 import test, { after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { asc, eq } from 'drizzle-orm';
 
 import { auditLog } from '@coffre/db/schema';
 import { serveApi } from '../src/api/router.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, outcomes } from './api-fixture.ts';
+import { loggedEntries, clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, outcomes } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
@@ -29,10 +28,7 @@ async function raw(method: string, path: string, body?: unknown): Promise<Respon
 
 /** The log's actions, the app's and the vault's. */
 async function actions(): Promise<string[]> {
-  const rows = await db.owner
-    .select({ action: auditLog.action, decision: auditLog.decision })
-    .from(auditLog)
-    .orderBy(asc(auditLog.seq));
+  const rows = await loggedEntries(db.owner);
   return rows.map((row) => `${row.decision} ${row.action}`);
 }
 
@@ -209,10 +205,7 @@ test('values leave only through POST /reveals, and each one is logged', async ()
   const before = (await actions()).filter((action) => action === 'allow secret.read').length;
   const revealed = await root.secrets.reveal('market/prod/DATABASE_URL');
   assert.deepEqual({ ...revealed.values }, { DATABASE_URL: 'postgres://secret-value' });
-  const logged = await db.owner
-    .select({ operationId: auditLog.operationId })
-    .from(auditLog)
-    .where(eq(auditLog.action, 'secret.read'));
+  const logged = await loggedEntries(db.owner, ['secret.read']);
   assert.equal(logged.length, before + 1);
   assert.equal(logged.at(-1)?.operationId, revealed.operationId);
 });

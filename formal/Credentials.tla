@@ -13,9 +13,12 @@
 (*     it takes first (vault store.ts, lockMembers): FOR NO KEY UPDATE, or *)
 (*     FOR SHARE for a read, which its other reads share and a change to   *)
 (*     the account waits for, queued behind a change that asked first;     *)
-(*   - the log's head, audit_chain_head, which every app transaction takes *)
-(*     first (server api/context.ts, audited) and every vault decision     *)
-(*     after the rows (vault vault.ts, #decideOnce).                       *)
+(*   - the change lock (Coffre.tla; before 0.16 the log's head), which     *)
+(*     every app transaction that changes something takes first (server    *)
+(*     api/context.ts, audited) and every vault decision after the rows    *)
+(*     (vault vault.ts, #decideOnce). 0.14's unwrap took it too, in the    *)
+(*     reads' line (UseChangeLock, Uses015 off): those steps leave       *)
+(*     with that path. A 0.15 use takes neither lock (UseOne).             *)
 (*                                                                         *)
 (* An exchange inserts the credential's row, whose foreign key takes a KEY *)
 (* SHARE lock on the account's row: that never waits for NO KEY UPDATE, so *)
@@ -42,10 +45,13 @@ CONSTANTS
     \* token's hash (server api/workloads.ts, #exchange, exchangeToken). Off,
     \* only the read before it (exchangeCandidates) stands in its way.
     SpentTokenInsertedWithCredential,
-    \* The exchange reads its binding again under the head (#exchange,
-    \* exchangeStill), not only before it (exchangeCandidates).
-    BindingRecheckUnderHead,
-    \* And the account's standing and generation (#exchange, exchangeStill).
+    \* The exchange reads its binding again under the change lock (#signIn,
+    \* standingBinding; on the vault's paths sign_in, under the binding's row
+    \* lock, Lifecycle.tla's BindingLocked), not only before it
+    \* (exchangeCandidates).
+    BindingRecheckUnderChangeLock,
+    \* And the account's standing and generation (#signIn, stillMember; on the
+    \* vault's paths sign_in, under the account's row lock, MemberLocked).
     MemberRecheckInExchange,
     \* Untrusting or replacing a binding revokes the live credentials it
     \* issued (workloads.ts, #revoke, revokeLiveCredentials).
@@ -56,11 +62,9 @@ CONSTANTS
     BindingCheckedAtUse,
     \* Once the vault has released a value, the app reads the credential and
     \* the account's generation again before it answers (server
-    \* api/context.ts, recorded, credentialStill): under the head when it
-    \* commits entries of its own, as through the proxy when the vault did
-    \* not log its use, and with no lock when it has none, as an export and
-    \* a use the vault logged.
-    CredentialFenceUnderHead,
+    \* api/context.ts, recorded, credentialStill), with no lock: an export, a
+    \* use the vault logged, and a proxied use it did not, which the app notes
+    \* once the check stands.
     CredentialFenceUnlocked,
     \* A use may decide on the vault's answer about the account kept from an
     \* earlier request (server accesses.ts, accessFor), which its unwrap
@@ -121,7 +125,7 @@ VARIABLES
     \* locks
     rowLock,        \* the process holding the account's row alone, or None
     rowShared,      \* the processes sharing it
-    head,           \* the process holding the log's head, or None
+    changeLock,           \* the process holding the change lock, or None
     \* processes
     pc, op, l, left,
     \* history, for the invariants
@@ -129,7 +133,7 @@ VARIABLES
     revealed        \* a record per use whose value reached its caller
 
 rows == <<binding, creds, consumed, status, gen>>
-locks == <<rowLock, rowShared, head>>
+locks == <<rowLock, rowShared, changeLock>>
 procs == <<pc, op, l, left>>
 history == <<issued, revealed>>
 vars == <<rows, log, locks, procs, history>>
@@ -138,7 +142,7 @@ vars == <<rows, log, locks, procs, history>>
 (* Credentials and bindings *)
 
 \* The binding stands: made, not revoked, at the account's generation as it
-\* was made (exchangeCandidates and exchangeStill read all three).
+\* was made (exchangeCandidates and standingBinding read all three).
 Stands(b, g) == binding[b].made /\ ~binding[b].revoked /\ binding[b].gen = g
 
 Cred(c) == CHOOSE r \in creds : r.id = c
@@ -183,14 +187,14 @@ Goto(p, label) == pc' = [pc EXCEPT ![p] = label]
 Release(p) ==
     /\ rowLock' = IF rowLock = p THEN None ELSE rowLock
     /\ rowShared' = rowShared \ {p}
-    /\ head' = IF head = p THEN None ELSE head
+    /\ changeLock' = IF changeLock = p THEN None ELSE changeLock
 
 TakeRow(p, then) ==
     /\ rowLock \in {None, p}
     /\ rowShared \subseteq {p}
     /\ rowLock' = p
     /\ Goto(p, then)
-    /\ UNCHANGED <<rows, log, rowShared, head, op, l, left, history>>
+    /\ UNCHANGED <<rows, log, rowShared, changeLock, op, l, left, history>>
 
 \* Share the row, waiting while another holds it alone, or is about to.
 ShareRow(p, then) ==
@@ -198,11 +202,11 @@ ShareRow(p, then) ==
     /\ ~\E q \in Procs \ {p} : pc[q] \in {"remove.lock", "restore.lock"}
     /\ rowShared' = rowShared \cup {p}
     /\ Goto(p, then)
-    /\ UNCHANGED <<rows, log, rowLock, head, op, l, left, history>>
+    /\ UNCHANGED <<rows, log, rowLock, changeLock, op, l, left, history>>
 
-TakeHead(p, then) ==
-    /\ head \in {None, p}
-    /\ head' = p
+TakeChangeLock(p, then) ==
+    /\ changeLock \in {None, p}
+    /\ changeLock' = p
     /\ Goto(p, then)
     /\ UNCHANGED <<rows, log, rowLock, rowShared, op, l, left, history>>
 
@@ -223,8 +227,8 @@ Entry(kind, p) == [kind |-> kind, id |-> l[p].id, cred |-> NoCred, b |-> None, t
 FirstLabel(kind) ==
     CASE kind = "exchange" -> "ex.candidates"
       [] kind = "use"      -> "use.verify"
-      [] kind = "revoke"   -> "revoke.head"
-      [] kind = "unbind"   -> "unbind.head"
+      [] kind = "revoke"   -> "revoke.changelock"
+      [] kind = "unbind"   -> "unbind.changelock"
       [] kind = "replace"  -> "replace.plan"
       [] kind = "remove"   -> "remove.lock"
       [] kind = "restore"  -> "restore.lock"
@@ -268,18 +272,19 @@ ExSpent(p) ==
 ExAccess(p) ==
     /\ pc[p] = "ex.access"
     /\ IF status = "active" /\ gen = l[p].bgen
-         THEN Read(p, "ex.head", [l[p] EXCEPT !.gen = gen])
+         THEN Read(p, "ex.changelock", [l[p] EXCEPT !.gen = gen])
          ELSE Refuse(p)
 
-ExHead(p) == pc[p] = "ex.head" /\ TakeHead(p, "ex.commit")
+ExChangeLock(p) == pc[p] = "ex.changelock" /\ TakeChangeLock(p, "ex.commit")
 
-\* Under the head: the account and the binding again, the token spent, the credential issued and `token.exchange` logged, or none of it.
+\* Under the change lock: the account and the binding again, the token spent, the credential issued and `token.exchange`
+\* logged, or none of it.
 ExCommit(p) ==
     /\ pc[p] = "ex.commit"
     /\ LET b == l[p].b
            new == [id |-> l[p].id, by |-> b, gen |-> l[p].bgen, revoked |-> FALSE]
        IN IF \/ MemberRecheckInExchange /\ ~(status = "active" /\ gen = l[p].gen)
-             \/ BindingRecheckUnderHead /\ ~Stands(b, l[p].bgen)
+             \/ BindingRecheckUnderChangeLock /\ ~Stands(b, l[p].bgen)
              \/ SpentTokenInsertedWithCredential /\ op[p].token \in consumed
             THEN Refuse(p)
             ELSE /\ consumed' = consumed \cup {op[p].token}
@@ -298,7 +303,8 @@ ExCommit(p) ==
 (* and #keys; api/context.ts, recorded). Through the credential proxy the  *)
 (* vault appends the app's `credential.use` with its read, and the app     *)
 (* commits nothing more, as an export; an older vault's use, or one of     *)
-(* plain values only, the app commits itself under the head.               *)
+(* plain values only, the app re-checks with no lock, and the vault notes  *)
+(* it outside any transaction (UseNote).                                   *)
 (***************************************************************************)
 
 \* The credential's row, unlocked (findCredential), and for one a binding
@@ -332,12 +338,12 @@ UseAccess(p) ==
           /\ Cred(l[p].cred).gen <= gen
           /\ Read(p, next, [l[p] EXCEPT !.recalled = TRUE, !.kept = Cred(l[p].cred).gen])
 
-UseLock(p) == pc[p] = "use.lock" /\ ShareRow(p, "use.head")
+UseLock(p) == pc[p] = "use.lock" /\ ShareRow(p, "use.changelock")
 
-UseHead(p) == pc[p] = "use.head" /\ TakeHead(p, "use.decide")
+UseChangeLock(p) == pc[p] = "use.changelock" /\ TakeChangeLock(p, "use.decide")
 
-\* Under the row and the head, the vault decides on the account's standing
-\* and grants, appends `secret.read` and commits. It is told which
+\* Under the row and the change lock, the vault decides on the account's
+\* standing and grants, appends `secret.read` and commits. It is told which
 \* credential the request came in on, and only copies it into the entry
 \* (vault.ts, traced): its row is the app's, and nothing here reads it.
 UseDecide(p) ==
@@ -350,35 +356,34 @@ UseDecide(p) ==
               /\ UNCHANGED <<rows, log, op, left, history>>
          ELSE IF status # "active"
          THEN Refuse(p)
-         \* A release on a kept answer is the model's to see when that answer is not the account's now.
-         \* Through the proxy, the vault appends the app's `credential.use` beside its read, in the same step
-         \* (vault.ts, unwrap's `use`), and the app checks the credential with no lock, as an export does; or,
-         \* a vault older than 0.14.5, a use of plain values only or a record too long for the vault, the app appends
-         \* it under the head itself.
+         \* A release on a kept answer is the model's to see when that answer is not the account's now. Through the
+         \* proxy, the vault appends the app's `credential.use` beside its read, in the same step (vault.ts, unwrap's
+         \* `use`), and the app checks the credential with no lock, as an export does; or, a use of plain values only
+         \* or a record too long for the vault, the app makes the same check and then notes `credential.use` itself,
+         \* in no transaction.
          ELSE \E byVault \in (IF op[p].proxy THEN BOOLEAN ELSE {FALSE}) :
               LET read == Append(log, [Entry("secret.read", p) EXCEPT !.cred = l[p].cred, !.stale = l[p].recalled /\ gen # l[p].kept])
               IN /\ log' = IF byVault THEN Append(read, [Entry("credential.use", p) EXCEPT !.cred = l[p].cred]) ELSE read
                  /\ l' = [l EXCEPT ![p].at = Len(log) + 1]
                  /\ Release(p)
-                 /\ Goto(p, IF op[p].proxy /\ ~byVault THEN "use.apphead" ELSE "use.fence")
+                 /\ Goto(p, IF op[p].proxy /\ ~byVault THEN "use.note" ELSE "use.fence")
                  /\ UNCHANGED <<rows, op, left, history>>
 
 \* 0.15's read (Uses015): one `use_credential` call, which logs the request
-\* (`use`) and decides on the credential's row and the account's as they
-\* are, under the fence shared, which every change to either takes
-\* exclusive: one step here, ordered against each change by the log alone
-\* (HotPathOne.tla, TotalOrder). It holds neither the account's row nor the
-\* head, never decides on a kept answer, and the proxy's `credential.use` is
-\* no entry of its own: the use is the record. Its credential object has
-\* no generation (packages/vault/src/objects.ts): a removal ends the
-\* account's credentials by revoking each, in its sweep, after its
-\* `member.remove`. Allowed, the app checks the credential with no lock,
-\* as after 0.14's unwrap: a use between the removal and its sweep, the
-\* account admitted again meanwhile, is allowed on a credential the
-\* removal ended, and only that check withholds the value (TLC, Revoking015
-\* without CredentialFenceUnlocked). Or the use decides on the generations
-\* too, sealed (UseDecidesGeneration), and the app makes no read after it
-\* (FencedInUse): without them, the same use goes through (TLC,
+\* (`use`) and decides on the credential's row and the account's as they are,
+\* under the fence shared, which every change to either takes exclusive: one
+\* step here, ordered against each change by the log alone (HotPathOne.tla,
+\* TotalOrder). It holds neither the account's row nor the change lock, never
+\* decides on a kept answer, and the proxy's `credential.use` is no entry of
+\* its own: the use is the record. Its credential object has no generation
+\* (packages/vault/src/objects.ts): a removal ends the account's credentials by
+\* revoking each, in its sweep, after its `member.remove`. Allowed, the app
+\* checks the credential with no lock, as after 0.14's unwrap: a use between
+\* the removal and its sweep, the account admitted again meanwhile, is allowed
+\* on a credential the removal ended, and only that check withholds the value
+\* (TLC, Revoking015 without CredentialFenceUnlocked). Or the use decides on
+\* the generations too, sealed (UseDecidesGeneration), and the app makes no
+\* read after it (FencedInUse): without them, the same use goes through (TLC,
 \* Revoking015Folded without UseDecidesGeneration).
 UseOne(p) ==
     /\ pc[p] = "use.use"
@@ -389,13 +394,11 @@ UseOne(p) ==
        IN Goto(p, IF ~allowed THEN "idle" ELSE IF FencedInUse THEN "use.answer" ELSE "use.fence")
     /\ UNCHANGED <<rows, locks, op, left, history>>
 
-\* Through the proxy, its use not logged by the vault: the app's own
-\* transaction, under the head, appends `credential.use`, after the fence.
-UseAppHead(p) == pc[p] = "use.apphead" /\ TakeHead(p, "use.commit")
-
-UseCommit(p) ==
-    /\ pc[p] = "use.commit"
-    /\ IF CredentialFenceUnderHead /\ ~StillLive(Cred(l[p].cred))
+\* Through the proxy, its use not logged by the vault: the app checks the
+\* credential with no lock, as an export does, then notes `credential.use`.
+UseNote(p) ==
+    /\ pc[p] = "use.note"
+    /\ IF CredentialFenceUnlocked /\ ~StillLive(Cred(l[p].cred))
          THEN Refuse(p)
          ELSE /\ log' = Append(log, [Entry("credential.use", p) EXCEPT !.cred = l[p].cred])
               /\ Release(p)
@@ -423,10 +426,10 @@ UseAnswer(p) ==
 (* Ending credentials.                                                     *)
 (***************************************************************************)
 
-\* Revoking one credential (signin.ts, revokeCredential): under the head,
+\* Revoking one credential (signin.ts, revokeCredential): under the change lock,
 \* its row, then revoked_at and `token.revoke`. Of "exchanged": any one an
 \* exchange issued, as found then.
-RevokeHead(p) == pc[p] = "revoke.head" /\ TakeHead(p, "revoke.commit")
+RevokeChangeLock(p) == pc[p] = "revoke.changelock" /\ TakeChangeLock(p, "revoke.commit")
 
 RevokeCommit(p) ==
     /\ pc[p] = "revoke.commit"
@@ -440,10 +443,10 @@ RevokeCommit(p) ==
                 /\ Goto(p, "idle")
                 /\ UNCHANGED <<binding, consumed, status, gen, op, l, left, history>>
 
-\* Untrusting a binding (workloads.ts, unbind): under the head, it must
+\* Untrusting a binding (workloads.ts, unbind): under the change lock, it must
 \* still be live; it is revoked with what it issued (#revoke), and
 \* `token.unbind` logged.
-UnbindHead(p) == pc[p] = "unbind.head" /\ TakeHead(p, "unbind.commit")
+UnbindChangeLock(p) == pc[p] = "unbind.changelock" /\ TakeChangeLock(p, "unbind.commit")
 
 UnbindCommit(p) ==
     /\ pc[p] = "unbind.commit"
@@ -457,15 +460,15 @@ UnbindCommit(p) ==
               /\ Goto(p, "idle")
               /\ UNCHANGED <<consumed, status, gen, op, l, left, history>>
 
-\* Replacing the issuer's keys (workloads.ts, replaceKeys): the live
-\* bindings listed before the head, the same found under it or 409, then a
-\* new binding for each, at its generation, and the old one revoked as an
-\* untrust revokes it.
+\* Replacing the issuer's keys (workloads.ts, replaceKeys): the live bindings
+\* listed before the change lock, the same found under it or 409, then a new
+\* binding for each, at its generation, and the old one revoked as an untrust
+\* revokes it.
 ReplacePlan(p) ==
     /\ pc[p] = "replace.plan"
-    /\ Read(p, "replace.head", [l[p] EXCEPT !.plan = {b \in Bindings : binding[b].made /\ ~binding[b].revoked}])
+    /\ Read(p, "replace.changelock", [l[p] EXCEPT !.plan = {b \in Bindings : binding[b].made /\ ~binding[b].revoked}])
 
-ReplaceHead(p) == pc[p] = "replace.head" /\ TakeHead(p, "replace.commit")
+ReplaceChangeLock(p) == pc[p] = "replace.changelock" /\ TakeChangeLock(p, "replace.commit")
 
 ReplaceCommit(p) ==
     /\ pc[p] = "replace.commit"
@@ -480,12 +483,12 @@ ReplaceCommit(p) ==
               /\ UNCHANGED <<consumed, status, gen, op, l, left, history>>
 
 \* Removing the account (vault vault.ts, remove; server api/members.ts,
-\* removeMember): the vault, under its row and the head, moves its
+\* removeMember): the vault, under its row and the change lock, moves its
 \* generation on and logs `member.remove`; then the app, in a transaction
 \* of its own, revokes the credentials below that generation.
-RemoveLock(p) == pc[p] = "remove.lock" /\ TakeRow(p, "remove.head")
+RemoveLock(p) == pc[p] = "remove.lock" /\ TakeRow(p, "remove.changelock")
 
-RemoveHead(p) == pc[p] = "remove.head" /\ TakeHead(p, "remove.commit")
+RemoveChangeLock(p) == pc[p] = "remove.changelock" /\ TakeChangeLock(p, "remove.commit")
 
 RemoveCommit(p) ==
     /\ pc[p] = "remove.commit"
@@ -495,10 +498,10 @@ RemoveCommit(p) ==
               /\ gen' = gen + 1
               /\ log' = Append(log, [Entry("member.remove", p) EXCEPT !.gen = gen + 1])
               /\ Release(p)
-              /\ Goto(p, "remove.sweephead")
+              /\ Goto(p, "remove.sweeplock")
               /\ UNCHANGED <<binding, creds, consumed, op, l, left, history>>
 
-RemoveSweepHead(p) == pc[p] = "remove.sweephead" /\ TakeHead(p, "remove.sweep")
+RemoveSweepChangeLock(p) == pc[p] = "remove.sweeplock" /\ TakeChangeLock(p, "remove.sweep")
 
 RemoveSweep(p) ==
     /\ pc[p] = "remove.sweep"
@@ -508,10 +511,10 @@ RemoveSweep(p) ==
     /\ UNCHANGED <<binding, consumed, status, gen, log, op, l, left, history>>
 
 \* Admitting it again (vault.ts, setAccess with admit): under its row and
-\* the head, active, at the generation the removal moved on to.
-RestoreLock(p) == pc[p] = "restore.lock" /\ TakeRow(p, "restore.head")
+\* the change lock, active, at the generation the removal moved on to.
+RestoreLock(p) == pc[p] = "restore.lock" /\ TakeRow(p, "restore.changelock")
 
-RestoreHead(p) == pc[p] = "restore.head" /\ TakeHead(p, "restore.commit")
+RestoreChangeLock(p) == pc[p] = "restore.changelock" /\ TakeChangeLock(p, "restore.commit")
 
 RestoreCommit(p) ==
     /\ pc[p] = "restore.commit"
@@ -534,7 +537,7 @@ Init ==
     /\ log = <<>>
     /\ rowLock = None
     /\ rowShared = {}
-    /\ head = None
+    /\ changeLock = None
     /\ pc = [p \in Procs |-> "idle"]
     /\ op = [p \in Procs |-> NoOp]
     /\ l = [p \in Procs |-> L0]
@@ -544,14 +547,14 @@ Init ==
 
 Step(p) ==
     \/ Begin(p)
-    \/ ExCandidates(p) \/ ExSpent(p) \/ ExAccess(p) \/ ExHead(p) \/ ExCommit(p)
-    \/ UseVerify(p) \/ UseAccess(p) \/ UseLock(p) \/ UseHead(p) \/ UseDecide(p) \/ UseOne(p)
-    \/ UseAppHead(p) \/ UseCommit(p) \/ UseFence(p) \/ UseAnswer(p)
-    \/ RevokeHead(p) \/ RevokeCommit(p)
-    \/ UnbindHead(p) \/ UnbindCommit(p)
-    \/ ReplacePlan(p) \/ ReplaceHead(p) \/ ReplaceCommit(p)
-    \/ RemoveLock(p) \/ RemoveHead(p) \/ RemoveCommit(p) \/ RemoveSweepHead(p) \/ RemoveSweep(p)
-    \/ RestoreLock(p) \/ RestoreHead(p) \/ RestoreCommit(p)
+    \/ ExCandidates(p) \/ ExSpent(p) \/ ExAccess(p) \/ ExChangeLock(p) \/ ExCommit(p)
+    \/ UseVerify(p) \/ UseAccess(p) \/ UseLock(p) \/ UseChangeLock(p) \/ UseDecide(p) \/ UseOne(p)
+    \/ UseNote(p) \/ UseFence(p) \/ UseAnswer(p)
+    \/ RevokeChangeLock(p) \/ RevokeCommit(p)
+    \/ UnbindChangeLock(p) \/ UnbindCommit(p)
+    \/ ReplacePlan(p) \/ ReplaceChangeLock(p) \/ ReplaceCommit(p)
+    \/ RemoveLock(p) \/ RemoveChangeLock(p) \/ RemoveCommit(p) \/ RemoveSweepChangeLock(p) \/ RemoveSweep(p)
+    \/ RestoreLock(p) \/ RestoreChangeLock(p) \/ RestoreCommit(p)
 
 Finished == \A p \in Procs : pc[p] = "idle" /\ left[p] = 0
 
@@ -570,7 +573,7 @@ TypeOK ==
     /\ rowLock \in Procs \cup {None}
     /\ rowShared \subseteq Procs
     /\ rowLock # None => rowShared \subseteq {rowLock}
-    /\ head \in Procs \cup {None}
+    /\ changeLock \in Procs \cup {None}
 
 \* An ID token buys one credential, however many runs present it at once.
 SingleUse ==

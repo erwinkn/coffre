@@ -10,6 +10,7 @@ import { generateKeyPairSync, randomUUID, sign as signWith, type KeyObject } fro
 
 import { createProof, generateProofKey } from '@coffre/client/dpop';
 import { github, signin, type Gate, type WorkloadAlert } from '@coffre/core/identity';
+import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { eq, sql } from 'drizzle-orm';
 
@@ -20,7 +21,7 @@ import { keyReady } from '../src/app.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { contextFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { contextFor, holdSomething, loggedEntries, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { auditChainHead, auditLog, cappedAlerts } from '@coffre/db/schema';
 import { answer, type Pages } from './start-fixture.ts';
 
@@ -113,8 +114,7 @@ async function signIn(jwt: string, service = SERVICE): Promise<{ status: number;
 
 /** The app's alerts in the log, oldest first. */
 async function logged(): Promise<Record<string, unknown>[]> {
-  const rows = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog).where(eq(auditLog.action, 'workload.alert')).orderBy(auditLog.seq);
-  return rows.map((row) => JSON.parse(row.metadata) as Record<string, unknown>);
+  return (await loggedEntries(db.owner, ['workload.alert'])).map((entry) => entry.metadata);
 }
 
 /** The deployment's deliveries, once the background has run. */
@@ -164,7 +164,7 @@ test("a token signed by a key the uploaded ones lack alerts the service's manage
       + `If that issuer rotated its keys, upload them again: kubectl get --raw /openid/v1/jwks > keys.json, then coffre trust api-prod --issuer ${CLUSTER} --replace-keys --jwks-file keys.json --apply. `
       + 'Said once an hour at most.',
   );
-  const [actor] = await db.owner.select({ actor: auditLog.actor, sourceIp: auditLog.sourceIp }).from(auditLog).where(eq(auditLog.action, 'workload.alert'));
+  const [actor] = (await loggedEntries(db.owner, ['workload.alert'])).map((entry) => ({ actor: entry.actor, sourceIp: entry.sourceIp }));
   assert.deepEqual(actor, { actor: `token:${SERVICE}`, sourceIp: IP });
 });
 
@@ -203,23 +203,34 @@ test('two connections claiming at once raise one alert, first and after the hour
   assert.equal(await claim(db.runtime, new Date(later.getTime() + 1000)), false, 'within the next hour');
 });
 
-test('a refusal capped out opens no transaction: the one that alerts opens its own', async () => {
+test('a refusal capped out opens no transaction and asks the vault nothing: the one that alerts notes its event, in no transaction of the app\'s', async (t) => {
   await bindCluster();
   // The door's read of where the app key stands is the isolate's, once, in a snapshot of its own (app.ts): not a refusal's.
   assert.equal(await keyReady(runtime), null);
   let opened = 0;
   const transaction = deps.db.transaction.bind(deps.db);
   deps.db.transaction = ((work: never, ...rest: never[]) => (opened++, transaction(work, ...rest))) as typeof deps.db.transaction;
+  const noted = t.mock.method(deps.vault as Required<Vault>, 'note');
   try {
     assert.equal((await signIn(podToken('forged-a'))).reason, 'unknown_key');
-    assert.equal(opened, 1, "the alert's entry");
-    opened = 0;
+    assert.deepEqual([opened, noted.mock.callCount()], [0, 1], "the alert's event, the vault's to write");
     for (const kid of ['forged-b', 'forged-c']) assert.equal((await signIn(podToken(kid))).reason, 'unknown_key');
   } finally {
     deps.db.transaction = transaction;
   }
-  assert.equal(opened, 0);
-  assert.equal((await logged()).length, 1);
+  assert.deepEqual([opened, noted.mock.callCount()], [0, 1]);
+  const [event] = await loggedEntries(db.owner, ['workload.alert']);
+  assert.equal(typeof event?.requestId, 'string', 'it names the sign-in it was raised in');
+});
+
+test('an alert the vault does not write never fails the sign-in it rides on: said in the process log, and delivered still', async (t) => {
+  await bindCluster();
+  t.mock.method(deps.vault as Required<Vault>, 'note', async () => ({ ok: false as const, refusal: { code: 'invalid' as const, message: 'refused for the test' } }));
+  const { result: refused, lines } = await consoleLines(() => signIn(podToken('forged-a')));
+  assert.equal(refused.reason, 'unknown_key');
+  assert.ok(lines.some(([message]) => message === 'logging a workload alert failed'), JSON.stringify(lines));
+  assert.deepEqual(await logged(), []);
+  assert.equal((await delivered()).length, 1);
 });
 
 test('a refusal capped out answers while another transaction holds the log\'s head', async () => {

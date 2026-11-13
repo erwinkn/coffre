@@ -1387,3 +1387,17 @@ function bytes(value: Buffer | Uint8Array | null): Buffer | null {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+/** An event's row as `note` signs it (`eventRow`, note.ts). */
+type EventRow = { requestId: string; at: number; actor: string; payload: string; mac: Buffer };
+
+/**
+ * An event's row written (`log_events`, migration 0086): its number, the same event's again for a retry. A stand-in of
+ * A1's for V1's `note`, which V1 replaces with its own: the app's sites and tests need an event written now.
+ */
+export async function callEvent(db: Queryable, row: EventRow): Promise<bigint> {
+  const [written] = await rowsOf<{ n: string }>(db, sql`SELECT CAST((log_events(
+    ARRAY[${row.requestId}]::text[], ARRAY[${String(row.at)}]::bigint[], ARRAY[${row.actor}]::text[], ARRAY[${row.payload}]::text[], ARRAY[${row.mac}]::bytea[]
+  ))[1] AS text) AS n`);
+  return BigInt(written!.n);
+}

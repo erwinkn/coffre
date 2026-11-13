@@ -27,6 +27,7 @@ import type { BindingColumns, ChangeBindingsInput, CredentialColumns, IssueToken
 import type { Database } from '@coffre/db';
 
 import { NotLogged, payloadOf, type ChangeKeys } from './changes.ts';
+import { reportedPayload } from './note.ts';
 import { applyOp, canonical, objectKey, sealed, sealOf, type Op, type Ref } from './inputs.ts';
 import { bindingsOnPostgres, issueOnPostgres, revokeOnPostgres, signInOnPostgres } from './credentials.postgres.ts';
 import { changeHolds, entryMac, MAC_BYTES, type LogMacKey } from './log-entry.ts';
@@ -632,6 +633,8 @@ export function bindingsCall(
   const { actor, make, ends, reason } = input;
   const principal = make?.principal ?? ends[0]!.before.columns.principal;
   const changes: BindingsCall['changes'] = [];
+  // Each change's entry rides its payload, under the vault's MAC (`reported`; A1's stand-in), as `prepare`'s does.
+  const reportedOf = (entry: MadeBinding['entry']) => entry === null ? null : reportedPayload(entry, actor, 'app');
   const change = (ref: Ref, payload: string, seal: Buffer) => {
     const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload, seal };
     changes.push({ requestId: row.requestId, object: row.object, payload, seal, mac: entryMac(keys.mac, { tree: 'changes', row }) });
@@ -643,7 +646,7 @@ export function bindingsCall(
     const seal = sealOf(keys.seals[0]!, ref, value);
     // What the change records besides: who made it, on which credential, its label, and those it replaces. A
     // replacement's sweep makes it too, as it closes those it replaces (Unbinding.tla's MakesAtClose).
-    change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.make', value })), bind: { by: actor, via: input.via, label: make.label, replaces: ends.map((end) => end.before.columns.id) } }), seal);
+    change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.make', value }, undefined, undefined, reportedOf(make.entry))), bind: { by: actor, via: input.via, label: make.label, replaces: ends.map((end) => end.before.columns.id) } }), seal);
     made = { row: make, authMac: Buffer.from(make.authMac, 'base64'), seal, read: read!, via: input.via, connection: input.connection };
   }
   // Whom the scheduled run continues, in each change's record: who asked for the removal, and when it closed.
@@ -667,7 +670,7 @@ export function bindingsCall(
       const before = bindingObject(columns);
       if (!sealed(keys.seals, ref, before, sealFrom)) return { refused: 'tampered' };
       const seal = sealOf(keys.seals[0]!, ref, applyOp(before, ref, { op: 'binding.revoke' })!);
-      change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.revoke' })), unbind: { by: actor, reason, replacedBy: make?.id ?? null, ...continuing } }), seal);
+      change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.revoke' }, undefined, undefined, reportedOf(end.entry))), unbind: { by: actor, reason, replacedBy: make?.id ?? null, ...continuing } }), seal);
       ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom, authMac: Buffer.from(end.authMac, 'base64'), seal });
     }
     for (const credential of end.credentials) {

@@ -15,8 +15,7 @@ import { McpService } from '../src/mcp/service.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 
-import { contextFor, openTestDatabase, refusedIn, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { auditLog } from '@coffre/db/schema';
+import { contextFor, loggedEntries, openTestDatabase, refusedIn, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 export const ORIGIN = 'https://secrets.acme.example';
 export const RESOURCE = `${ORIGIN}/mcp`;
@@ -156,9 +155,9 @@ export async function client(token: string, mode: 'modern' | 'legacy', options: 
 
 export type Result = { structuredContent?: Record<string, unknown>; content: { type: string; text?: string }[]; isError?: boolean };
 
+/** The log's entries of `action`, the vault's and the app's events alike (`loggedEntries`). */
 export async function entries(action: string) {
-  const rows = await db.owner.select().from(auditLog).where(eq(auditLog.action, action)).orderBy(auditLog.seq);
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  return loggedEntries(db.owner, [action]);
 }
 
 /** The proxy's one "no" for a key its request may not have, whichever reason its entry gives. */

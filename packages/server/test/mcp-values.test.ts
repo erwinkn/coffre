@@ -5,8 +5,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 
-import { clientFor, usesLogged } from './api-fixture.ts';
-import { auditLog, mcpApprovals } from '@coffre/db/schema';
+import { clientFor, loggedEntries, usesLogged } from './api-fixture.ts';
+import { auditLog, mcpApprovals, mcpConnections } from '@coffre/db/schema';
 import { ALPHABETS, randomValue } from '../src/mcp/changes.ts';
 import { browserFor, callRaw, connect, db, deps, DEV, entries, fromPage, ROOT, route, useMcp } from './mcp-fixture.ts';
 
@@ -45,9 +45,11 @@ test('values reach the model only with Reveal values, with a warning first, and 
   const revealed = await callRaw(revealing, 'reveal_secret_values', { path: 'market/prod' });
   assert.deepEqual(revealed.body.result!.structuredContent!.values, { API_KEY: VALUE });
   assert.match(revealed.body.result!.content[0]!.text!, /^These values are now part of this conversation and its history\./);
-  // The vault's use is the record of the read, the connection its way in, its kind in the purpose's bits above 512.
-  const [call] = await entries('mcp.read');
-  const connectionId = (call!.metadata.via as { connectionId: string }).connectionId;
+  // The vault's use is the record of the read, the connection its way in, its kind in the purpose's bits above
+  // 512; the call itself, a read, records nothing of its own.
+  assert.deepEqual(await entries('mcp.read'), []);
+  const [connection] = (await db.owner.select().from(mcpConnections)).filter((row) => row.scopes.split(' ').includes('reveal'));
+  const connectionId = connection!.id;
   const uses = await usesLogged(db.owner);
   assert.deepEqual(uses.map((use) => [use.credential, Math.floor(use.purpose / 512)]), [[connectionId, 1]]);
 });
@@ -81,7 +83,7 @@ test('generate_secret_value makes the value on the server when the person approv
   assert.match(made, /^[0-9a-f]{64}$/);
   const reported = await callRaw(token, 'generate_secret_value', { secret: 'market/prod/SESSION_SECRET', alphabet: 'hex' });
   assert.equal((reported.body.result!.structuredContent!.result as { version: number }).version, 1);
-  const seen = JSON.stringify([asked.body, reported.body, decision, await db.owner.select().from(mcpApprovals), await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)]);
+  const seen = JSON.stringify([asked.body, reported.body, decision, await db.owner.select().from(mcpApprovals), (await loggedEntries(db.owner)).map(({ metadata }) => ({ metadata }))]);
   assert.equal(seen.includes(made), false);
 });
 

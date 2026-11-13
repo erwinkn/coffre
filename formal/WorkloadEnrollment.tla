@@ -8,10 +8,11 @@
 (*                                                                         *)
 (* One step is one SQL statement, or a run of statements nothing else can  *)
 (* interleave with because the step holds the lock they need, as in        *)
-(* Coffre.tla. Isolation is READ COMMITTED. One lock matters, the log's    *)
-(* head, which the exchange's commit, a mint's and a promote's take, and   *)
-(* renewal does not. Time is the database's statement clock, one tick at a *)
-(* time: a session is live while `expires_at` is past it.                  *)
+(* Coffre.tla. Isolation is READ COMMITTED. One lock matters, the change   *)
+(* lock (Coffre.tla; before 0.16 the log's head), which the exchange's     *)
+(* commit, a mint's and a promote's take, and renewal does not. Time is    *)
+(* the database's statement clock, one tick at a time: a session is live   *)
+(* while `expires_at` is past it.                                          *)
 (*                                                                         *)
 (* The service is `token:api`, with one enrollment binding. Its codes are  *)
 (* "c1", "c2" and "c3"; CI minted some before the scenario starts.         *)
@@ -34,9 +35,10 @@ CONSTANTS
 (* The protections the design has, each a switch, as in Coffre.tla.        *)
 (***************************************************************************)
 CONSTANTS
-    \* The exchange counts the code's live roots inside its commit, under
-    \* the head (4.4, item 2). Off, it counts before it takes the head.
-    CountUnderHead,
+    \* The exchange counts the code's live roots inside its commit, under the
+    \* change lock (4.4, item 2). Off, it counts before it takes the change
+    \* lock.
+    CountUnderChangeLock,
     \* A renewal updates only a row still live at the update's own
     \* statement clock, and still at the expiry it read: `WHERE expires_at =
     \* $old AND $old > statement_timestamp() + 5s AND revoked_at IS NULL`
@@ -98,7 +100,7 @@ VARIABLES
     holdings,       \* holdings[principal]: what the vault answers it holds
     owners,         \* the Owners of the project, as people
     log,            \* the audit log, in seq order
-    head,           \* the process holding the log's head, or None
+    changeLock,           \* the process holding the change lock, or None
     pc, op, l, left,
     minted,         \* history: per code, what its minter held at the commit
     renewals        \* history: per renewal that updated, where in the log
@@ -106,7 +108,7 @@ VARIABLES
 rows == <<codes, mintedBy, sessions, held, holdings, owners>>
 procs == <<pc, op, l, left>>
 history == <<minted, renewals>>
-vars == <<now, rows, log, head, procs, history>>
+vars == <<now, rows, log, changeLock, procs, history>>
 
 -----------------------------------------------------------------------------
 (* Codes and sessions *)
@@ -150,20 +152,20 @@ L0 == [id |-> <<None, 0>>, count |-> 0, old |-> 0, new |-> 0, s |-> NoSession, e
 
 Goto(p, label) == pc' = [pc EXCEPT ![p] = label]
 
-Release(p) == head' = IF head = p THEN None ELSE head
+Release(p) == changeLock' = IF changeLock = p THEN None ELSE changeLock
 
-TakeHead(p, then) ==
-    /\ head \in {None, p}
-    /\ head' = p
+TakeChangeLock(p, then) ==
+    /\ changeLock \in {None, p}
+    /\ changeLock' = p
     /\ Goto(p, then)
     /\ UNCHANGED <<now, rows, log, op, l, left, history>>
 
 Read(p, then, locals) ==
     /\ Goto(p, then)
     /\ l' = [l EXCEPT ![p] = locals]
-    /\ UNCHANGED <<now, rows, log, head, op, left, history>>
+    /\ UNCHANGED <<now, rows, log, changeLock, op, left, history>>
 
-\* Refused, or rolled back: the head goes.
+\* Refused, or rolled back: the change lock goes.
 Refuse(p) ==
     /\ Release(p)
     /\ Goto(p, "idle")
@@ -172,12 +174,12 @@ Refuse(p) ==
 Entry(kind, p) == [kind |-> kind, id |-> l[p].id, code |-> None, who |-> None, by |-> None, time |-> now]
 
 FirstLabel(kind) ==
-    CASE kind = "enroll"  -> IF CountUnderHead THEN "ex.head" ELSE "ex.count"
+    CASE kind = "enroll"  -> IF CountUnderChangeLock THEN "ex.changelock" ELSE "ex.count"
       [] kind = "renew"   -> IF SupersedeCheckInUpdate THEN "renew.clock" ELSE "renew.check"
-      [] kind = "logout"  -> "logout.head"
+      [] kind = "logout"  -> "logout.changelock"
       [] kind = "mint"    -> "mint.entry"
       [] kind = "promote" -> "promote.access"
-      [] kind = "demote"  -> "demote.head"
+      [] kind = "demote"  -> "demote.changelock"
 
 Begin(p) ==
     /\ pc[p] = "idle"
@@ -187,28 +189,28 @@ Begin(p) ==
          /\ l' = [l EXCEPT ![p] = [L0 EXCEPT !.id = <<p, left[p]>>]]
          /\ Goto(p, FirstLabel(o.kind))
     /\ left' = [left EXCEPT ![p] = @ - 1]
-    /\ UNCHANGED <<now, rows, log, head, history>>
+    /\ UNCHANGED <<now, rows, log, changeLock, history>>
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
-(* The exchange of a code (4.1, step 7): under the head, the tombstone,    *)
-(* the count of the code's live roots, then the session and                *)
+(* The exchange of a code (4.1, step 7): under the change lock, the        *)
+(* tombstone, the count of the code's live roots, then the session and     *)
 (* `token.exchange`. The steps before (limiters, shape, binding, the       *)
 (* code's hash, vault.access) decide nothing here: left out. A process     *)
 (* that enrolls again has restarted: its old session renews no more.       *)
 (***************************************************************************)
 
-\* Off CountUnderHead: the count, before the head.
+\* Off CountUnderChangeLock: the count, before the change lock.
 ExCount(p) ==
     /\ pc[p] = "ex.count"
-    /\ Read(p, "ex.head", [l[p] EXCEPT !.count = Cardinality(LiveRoots(op[p].code))])
+    /\ Read(p, "ex.changelock", [l[p] EXCEPT !.count = Cardinality(LiveRoots(op[p].code))])
 
-ExHead(p) == pc[p] = "ex.head" /\ TakeHead(p, "ex.commit")
+ExChangeLock(p) == pc[p] = "ex.changelock" /\ TakeChangeLock(p, "ex.commit")
 
 ExCommit(p) ==
     /\ pc[p] = "ex.commit"
     /\ LET c == op[p].code
-           count == IF CountUnderHead THEN Cardinality(LiveRoots(c)) ELSE l[p].count
+           count == IF CountUnderChangeLock THEN Cardinality(LiveRoots(c)) ELSE l[p].count
        IN IF \/ ~codes[c].minted
              \/ SupersedeCheckedAtExchange /\ Tombstoned(c)
              \/ count >= 2 * Replicas
@@ -254,10 +256,10 @@ RenewUpdate(p) ==
          ELSE /\ sessions' = (sessions \ {r}) \cup {[r EXCEPT !.expires = l[p].new]}
               /\ renewals' = renewals \cup {[s |-> r.id, code |-> r.code, at |-> Len(log)]}
               /\ Goto(p, "idle")
-              /\ UNCHANGED <<now, codes, mintedBy, held, holdings, owners, log, head, op, l, left, minted>>
+              /\ UNCHANGED <<now, codes, mintedBy, held, holdings, owners, log, changeLock, op, l, left, minted>>
 
-\* A graceful stop logs out at once: `token.revoke` under the head.
-LogoutHead(p) == pc[p] = "logout.head" /\ TakeHead(p, "logout.commit")
+\* A graceful stop logs out at once: `token.revoke` under the change lock.
+LogoutChangeLock(p) == pc[p] = "logout.changelock" /\ TakeChangeLock(p, "logout.commit")
 
 LogoutCommit(p) ==
     /\ pc[p] = "logout.commit"
@@ -274,8 +276,8 @@ LogoutCommit(p) ==
 -----------------------------------------------------------------------------
 (***************************************************************************)
 (* Minting a code (4.4): the newest entry about the minter's access, the   *)
-(* vault's answer, then under the head the fence and the row, its scope    *)
-(* the binding's intersected with what the minter holds.                   *)
+(* vault's answer, then under the change lock the fence and the row, its   *)
+(* scope the binding's intersected with what the minter holds.             *)
 (***************************************************************************)
 
 MintEntry(p) ==
@@ -286,11 +288,11 @@ MintAccess(p) ==
     /\ pc[p] = "mint.access"
     /\ LET k == Caller(op[p].caller) IN
        IF MayMint(op[p].caller)
-         THEN Read(p, "mint.head", [l[p] EXCEPT !.have = holdings[k.principal],
+         THEN Read(p, "mint.changelock", [l[p] EXCEPT !.have = holdings[k.principal],
                                                !.owner = k.person /\ k.principal \in owners])
          ELSE Refuse(p)
 
-MintHead(p) == pc[p] = "mint.head" /\ TakeHead(p, "mint.commit")
+MintChangeLock(p) == pc[p] = "mint.changelock" /\ TakeChangeLock(p, "mint.commit")
 
 MintCommit(p) ==
     /\ pc[p] = "mint.commit"
@@ -309,16 +311,16 @@ MintCommit(p) ==
 
 -----------------------------------------------------------------------------
 (***************************************************************************)
-(* Promoting a code (4.4, item 4): under the head, one                     *)
+(* Promoting a code (4.4, item 4): under the change lock, one              *)
 (* `enrollment.supersede` per other code, and with `--now` their sessions  *)
 (* revoked.                                                                *)
 (***************************************************************************)
 
 PromoteAccess(p) ==
     /\ pc[p] = "promote.access"
-    /\ IF MayMint(op[p].caller) THEN Read(p, "promote.head", l[p]) ELSE Refuse(p)
+    /\ IF MayMint(op[p].caller) THEN Read(p, "promote.changelock", l[p]) ELSE Refuse(p)
 
-PromoteHead(p) == pc[p] = "promote.head" /\ TakeHead(p, "promote.commit")
+PromoteChangeLock(p) == pc[p] = "promote.changelock" /\ TakeChangeLock(p, "promote.commit")
 
 PromoteCommit(p) ==
     /\ pc[p] = "promote.commit"
@@ -336,8 +338,8 @@ PromoteCommit(p) ==
                  /\ Goto(p, "idle")
                  /\ UNCHANGED <<now, codes, mintedBy, held, holdings, owners, op, l, left, history>>
 
-\* Demoting an Owner, in the vault, under the head: `member.role`.
-DemoteHead(p) == pc[p] = "demote.head" /\ TakeHead(p, "demote.commit")
+\* Demoting an Owner, in the vault, under the change lock: `member.role`.
+DemoteChangeLock(p) == pc[p] = "demote.changelock" /\ TakeChangeLock(p, "demote.commit")
 
 DemoteCommit(p) ==
     /\ pc[p] = "demote.commit"
@@ -355,7 +357,7 @@ DemoteCommit(p) ==
 Tick ==
     /\ now < MaxTime
     /\ now' = now + 1
-    /\ UNCHANGED <<rows, log, head, procs, history>>
+    /\ UNCHANGED <<rows, log, changeLock, procs, history>>
 
 Init ==
     /\ now = 0
@@ -366,7 +368,7 @@ Init ==
     /\ holdings = [m \in Principals |-> IF m = "vic" THEN {"r"} ELSE {"r", "s"}]
     /\ owners = {"omar"}
     /\ log = <<>>
-    /\ head = None
+    /\ changeLock = None
     /\ pc = [p \in Procs |-> "idle"]
     /\ op = [p \in Procs |-> NoOp]
     /\ l = [p \in Procs |-> L0]
@@ -376,12 +378,12 @@ Init ==
 
 Step(p) ==
     \/ Begin(p)
-    \/ ExCount(p) \/ ExHead(p) \/ ExCommit(p)
+    \/ ExCount(p) \/ ExChangeLock(p) \/ ExCommit(p)
     \/ RenewCheck(p) \/ RenewClock(p) \/ RenewUpdate(p)
-    \/ LogoutHead(p) \/ LogoutCommit(p)
-    \/ MintEntry(p) \/ MintAccess(p) \/ MintHead(p) \/ MintCommit(p)
-    \/ PromoteAccess(p) \/ PromoteHead(p) \/ PromoteCommit(p)
-    \/ DemoteHead(p) \/ DemoteCommit(p)
+    \/ LogoutChangeLock(p) \/ LogoutCommit(p)
+    \/ MintEntry(p) \/ MintAccess(p) \/ MintChangeLock(p) \/ MintCommit(p)
+    \/ PromoteAccess(p) \/ PromoteChangeLock(p) \/ PromoteCommit(p)
+    \/ DemoteChangeLock(p) \/ DemoteCommit(p)
 
 Finished == \A p \in Procs : pc[p] = "idle" /\ left[p] = 0
 
@@ -396,7 +398,7 @@ Spec == Init /\ [][Next]_vars
 
 TypeOK ==
     /\ now \in 0..MaxTime
-    /\ head \in Procs \cup {None}
+    /\ changeLock \in Procs \cup {None}
     /\ mintedBy \in Principals
 
 \* A code has at most twice `replicas` live roots, under concurrent

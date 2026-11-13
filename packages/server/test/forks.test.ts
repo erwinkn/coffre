@@ -2,10 +2,9 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
-import { and, asc, eq, gte } from 'drizzle-orm';
 
 import { auditChainHead, auditLog, environments, secretVersions } from '@coffre/db/schema';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedSince, logMark, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const MAINTAINER = 'maintainer@acme.example';
@@ -16,7 +15,7 @@ let deps: FixtureDeps;
 let root: CoffreClient;
 let maintainer: CoffreClient;
 let owner: CoffreClient;
-let firstSeq: bigint;
+let mark: number;
 
 before(async () => {
   db = await openTestDatabase();
@@ -41,17 +40,11 @@ beforeEach(async () => {
   await root.secrets.set('market/prod', { STRIPE_KEY: 'sk_live_2' });
   await root.secrets.update('market/prod/OLD_KEY', { archived: true });
   await root.secrets.update('market/prod/DATABASE_URL', { folder: 'database' });
-  const [head] = await db.owner.select({ nextSeq: auditChainHead.nextSeq }).from(auditChainHead);
-  firstSeq = head.nextSeq;
+  mark = await logMark(db.owner);
 });
 
 async function entries(author: 'app' | 'vault', action: string) {
-  const rows = await db.owner
-    .select({ actor: auditLog.actor, decision: auditLog.decision, code: auditLog.code, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, author), eq(auditLog.action, action), gte(auditLog.seq, firstSeq)))
-    .orderBy(asc(auditLog.seq));
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  return (await loggedSince(db.owner, mark, [action])).filter((entry) => entry.author === author);
 }
 
 test('a fork copies each live key, with its value and folder, and none of its history', async () => {

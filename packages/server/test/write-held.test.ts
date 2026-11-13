@@ -32,7 +32,7 @@ import { parsePath } from '../src/api/paths.ts';
 import { acceptance } from '../src/named-use.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { REFUSAL_UNSEALED_MESSAGE } from '../src/api/errors.ts';
-import { clientFor, entryOf, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, stallingSeal, testDeps, testVault, outcomes } from './api-fixture.ts';
+import { clientFor, entryOf, loggedEntries, loggedSince, logMark, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, stallingSeal, testDeps, testVault, outcomes } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
 import { credentials, grants, principals, secrets, secretVersions } from '@coffre/db/schema';
 
@@ -512,9 +512,12 @@ test("the read moves with every part a key write's decision weighs, its numbers 
 async function since<T>(work: () => Promise<T>): Promise<{ result: T; entries: string[]; changes: number; wraps: { seq: string; operation: string | null }[] }> {
   const [{ seq }] = await run(db.owner, sql`SELECT coalesce(max(seq), 0)::text AS seq FROM audit_log`) as { seq: string }[];
   const [{ number }] = await run(db.owner, sql`SELECT coalesce(max(number), 0)::text AS number FROM log_changes`) as { number: string }[];
+  const mark = await logMark(db.owner);
   const result = await work();
-  const entries = await run(db.owner, sql`SELECT author, action, decision FROM audit_log WHERE seq > ${seq} ORDER BY seq`) as { author: string; action: string; decision: string }[];
-  const [{ changes }] = await run(db.owner, sql`SELECT count(*)::int AS changes FROM log_changes WHERE number > ${number}`) as { changes: number }[];
+  // Its entries in either log: 0.14's, and those of the chain, each an event or carried by its change.
+  const entries = await loggedSince(db.owner, mark);
+  // Its changes, the events aside.
+  const [{ changes }] = await run(db.owner, sql`SELECT count(*)::int AS changes FROM log_changes WHERE number > ${number} AND payload::jsonb ->> 'op' IS DISTINCT FROM 'event'`) as { changes: number }[];
   const wraps = await run(db.owner, sql`SELECT seq::text AS seq, operation_id AS operation FROM audit_log WHERE seq > ${seq} AND author = 'vault' AND action = 'key.wrap' ORDER BY seq`) as { seq: string; operation: string | null }[];
   return { result, entries: entries.map((entry) => `${entry.author} ${entry.action} ${entry.decision}`), changes: Number(changes), wraps };
 }
@@ -669,8 +672,8 @@ test("a try the vault served, abandoned at its hold, then not served (the key ma
   assert.ok(answer.served);
   const row = (await keyRow('API_KEY'))!;
   assert.equal((await versionOf(row.currentVersionId))?.createdBy, ADA);
-  // One write of Ada's, one change of hers for the key, its entry naming a wrap of its own operation.
-  const writes = await run(db.owner, sql`SELECT related_seq::text AS related, operation_id AS operation FROM audit_log WHERE action = 'secret.write' AND decision = 'allow' AND actor = ${`user:${ADA}`}`) as { related: string; operation: string }[];
+  // One write of Ada's, one change of hers for the key, its entry (which its change carries) naming its wrap's operation.
+  const writes = (await loggedEntries(db.owner, ['secret.write'])).filter((entry) => entry.decision === 'allow' && entry.actor === `user:${ADA}`);
   assert.equal(writes.length, 1);
   const changes = async (id: string) => (await run(db.owner, sql`SELECT payload FROM log_changes WHERE object = ${logObject('secret', id)} AND actor = ${`user:${ADA}`} ORDER BY number`) as { payload: string }[])
     .map(({ payload }) => (JSON.parse(payload) as { op: string }).op);
@@ -688,8 +691,7 @@ test("a try the vault served, abandoned at its hold, then not served (the key ma
   // try appended nothing (0.16.0), so the one wrap is today's path's own, which its write names.
   assert.deepEqual(made.entries, ['vault reference.create allow', 'app secret.reference allow', ...today.entries]);
   assert.equal(made.wraps.length, 1);
-  assert.equal(made.wraps[0]!.seq, writes[0]!.related);
-  assert.equal(made.wraps[0]!.operation, writes[0]!.operation);
+  assert.equal(made.wraps[0]!.operation, writes[0]!.operationId);
   assert.equal(verified, true);
 });
 
@@ -703,9 +705,10 @@ test("a key write down the two-trip path, recorded in 0.15's log alone, is liste
   const written = async (client: Client, query: Record<string, string | undefined>) => (await client.audit.list({ limit: 50, ...query })).entries.filter((entry) => entry.action === 'secret.write');
   for (const query of [{}, { path: 'market' }, { path: 'market/dev' }, { path: 'market/dev/API_KEY' }, { actor: `user:${ADA}` }, { actor: ADA }, { path: 'market/dev', actor: ADA }]) {
     const shown = await written(w.root, query);
-    const fast = shown.filter((entry) => entry.log === '0.15');
-    assert.equal(fast.length, 1, JSON.stringify(query));
-    const [entry] = fast;
+    assert.ok(shown.every((entry) => entry.log === '0.15'), JSON.stringify(query));
+    const hers = shown.filter((entry) => entry.actorId === ADA);
+    assert.equal(hers.length, 1, JSON.stringify(query));
+    const [entry] = hers;
     assert.deepEqual(
       { actor: entry!.actorId, project: entry!.project, environment: entry!.environment, key: entry!.key, version: entry!.version, author: entry!.author, forged: entry!.forged, detail: entry!.detail },
       { actor: ADA, project: 'market', environment: 'dev', key: 'API_KEY', version: 2, author: 'vault', forged: undefined, detail: false },
@@ -715,20 +718,20 @@ test("a key write down the two-trip path, recorded in 0.15's log alone, is liste
     assert.match(String(entry!.requestId), /^[0-9a-f-]{36}$/);
     // Ada's session, which 0.14's entry never named (only a run's credential or a personal token's): nor does this.
     assert.deepEqual([entry!.metadata.credentialId, entry!.token, entry!.run], [undefined, null, null], JSON.stringify(query));
-    // No 0.14 entry of it: of the key's two versions, 0.14's log holds the root's first alone, down today's path.
-    assert.deepEqual(shown.filter((one) => one.log === '0.14').map((one) => one.version), 'actor' in query ? [] : [1], JSON.stringify(query));
+    // Beside it, the root's write of the key's first version, on a page that is not Ada's alone.
+    assert.deepEqual(shown.filter((one) => one.actorId !== ADA).map((one) => one.version), 'actor' in query ? [] : [1], JSON.stringify(query));
   }
   for (const query of [{ path: 'market/prod' }, { actor: ROOT }, { decision: 'deny' }]) {
-    assert.deepEqual((await written(w.root, query)).filter((entry) => entry.log === '0.15'), [], JSON.stringify(query));
+    assert.deepEqual((await written(w.root, query)).filter((entry) => entry.actorId === ADA), [], JSON.stringify(query));
   }
   // A reader of market/dev alone (an auditor there) reads it, on the whole log and the project's page; of prod alone, not.
   const bob = 'bob@acme.example';
   await w.root.members.add(`user:${bob}`);
   await w.root.access.set(`user:${bob}`, { 'market/dev': 'auditor' });
   const reader = clientFor(w.deps, bob);
-  for (const query of [{}, { path: 'market' }, { path: 'market/dev' }]) assert.equal((await written(reader, query)).filter((entry) => entry.log === '0.15').length, 1, JSON.stringify(query));
+  for (const query of [{}, { path: 'market' }, { path: 'market/dev' }]) assert.equal((await written(reader, query)).filter((entry) => entry.actorId === ADA).length, 1, JSON.stringify(query));
   await w.root.access.set(`user:${bob}`, { 'market/dev': null, 'market/prod': 'auditor' });
-  for (const query of [{}, { path: 'market' }]) assert.deepEqual((await written(reader, query)).filter((entry) => entry.log === '0.15'), [], JSON.stringify(query));
+  for (const query of [{}, { path: 'market' }]) assert.deepEqual((await written(reader, query)), [], JSON.stringify(query));
   // The offboarding report names the value she wrote, still current, as one to rotate.
   assert.deepEqual((await w.root.members.get(`user:${ADA}`)).exposed.map(({ key, version, how }) => `${key} v${version} ${how}`), ['API_KEY v2 wrote']);
   // Read again later: the report names when she last saw it, the read, though the write is listed after it (review r2 of #490).
@@ -738,8 +741,8 @@ test("a key write down the two-trip path, recorded in 0.15's log alone, is liste
   const [seen] = (await w.root.members.get(`user:${ADA}`)).exposed;
   assert.deepEqual([seen?.how, Date.parse(seen!.at) > Number(wroteAt)], ['wrote', true], JSON.stringify({ seen, wroteAt }));
   // Its row of the projection edited around coffre is listed marked: the vault does not vouch for it.
-  await run(db.owner, sql`UPDATE audit_events SET actor = ${`user:${ROOT}`} WHERE log = 15 AND action = 'secret.write'`);
-  const [edited] = (await written(w.root, { path: 'market/dev/API_KEY' })).filter((entry) => entry.log === '0.15');
+  await run(db.owner, sql`UPDATE audit_events SET actor = ${`user:${ROOT}`} WHERE log = 15 AND action = 'secret.write' AND actor = ${`user:${ADA}`}`);
+  const [edited] = (await written(w.root, { path: 'market/dev/API_KEY' })).filter((entry) => entry.forged);
   assert.deepEqual([edited?.actorId, edited?.forged], [ROOT, true]);
 });
 
@@ -844,14 +847,14 @@ test("a key write the router let through, refused on a later try's read, its tic
   // The router's check passes on the first try's answer; the grant taken at its hold, the second try's read refuses.
   const w = await world();
   w.between(async () => void (await w.root.access.set(`user:${ADA}`, { 'market/dev': null })));
-  const { seq } = (await run(db.owner, sql`SELECT coalesce(max(seq), 0)::text AS seq FROM audit_log`) as { seq: string }[])[0]!;
+  const mark = await logMark(db.owner);
   // The vault finds the ticket expired: nothing recorded, and the app appends the entry it stands for.
   w.deps.vault.recordRefusal = async () => ({ recorded: false, why: 'expired' });
   assert.equal((await w.write({ API_KEY: 'fake-ada' })).status, 403);
   assert.deepEqual(served(w.answers), ['served', 'refused']);
-  const denies = await run(db.owner, sql`SELECT operation_id AS operation FROM audit_log WHERE seq > ${seq} AND action = 'secret.write' AND decision = 'deny'`) as { operation: string | null }[];
+  const denies = (await loggedSince(db.owner, mark, ['secret.write'])).filter((entry) => entry.decision === 'deny');
   assert.equal(denies.length, 1);
-  assert.match(String(denies[0]!.operation), /^[0-9a-f-]{36}$/);
+  assert.match(String(denies[0]!.operationId), /^[0-9a-f-]{36}$/);
   assert.deepEqual(await refusalRecords(), []);
 });
 

@@ -449,9 +449,10 @@ test("a refusal is answered as today's path answers it, status and body: one who
       assert.deepEqual({ entries: fast.entries, changes: fast.changes }, { entries: today.entries, changes: today.changes }, what);
       continue;
     }
-    // Today's deny entry, Bob's; the vault's record in its place, and nothing else of either log's.
+    // Today's deny, Bob's: the vault's entry, or the app's event; the vault's record in its place, and nothing else of either log's.
     assert.deepEqual(fast.answers, ['refused'], what);
-    assert.deepEqual(today.entries, [`${entry} user:${BOB}`], what);
+    const events = today.changes.filter((change) => change.payload.op === 'event').map((change) => `app ${String(change.payload.action)} ${change.payload.allowed === true ? 'allow' : 'deny'} ${change.actor}`);
+    assert.deepEqual([...today.entries, ...events], [`${entry} user:${BOB}`], what);
     assert.deepEqual(fast.entries, [], what);
     assert.equal(fast.changes.length, 1, what);
     const [record] = fast.changes;

@@ -336,7 +336,7 @@ async function authenticateWorkload(
 ): Promise<AuthenticatedIdentity | Response> {
   let session: StandingSession;
   try {
-    session = await standingSession(request, runtime, token, sourceIp, { place: null, credential: null });
+    session = await standingSession(request, runtime, token, sourceIp, requestId, { place: null, credential: null });
   } catch (error) {
     if (error instanceof SessionRefused) return error.response;
     if (deployingIn(error) !== null) return errorResponse(deployingIn(error));

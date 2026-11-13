@@ -53,14 +53,15 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
     [`formal/Keyring.tla`](../formal/Keyring.tla), its keyring across two.
 - [`formal/Writing.tla`](../formal/Writing.tla) holds a change in two round
   trips (T179, [below](#writingtla)), the design 0.16's change routes follow,
-  and [`formal/WriteLocks.tla`](../formal/WriteLocks.tla) the locks of its key
-  write, with Postgres's lock queue.
+  and [`formal/WriteLocks.tla`](../formal/WriteLocks.tla) the order a change
+  takes its locks in, 0.16's change lock first
+  ([below](#016-the-change-lock)), with Postgres's lock queue.
 - One holds 0.16's proxy definitions edited in the UI, before they are
   built: [`formal/Routing.tla`](../formal/Routing.tla), where a key may go
   when its route is a row an Owner edits ([below](#routingtla)).
 - One holds 0.16's passkeys: [`formal/Factor.tla`](../formal/Factor.tla),
   a person's factor lock, which the vault's issues and every change to
-  their passkeys take, the log's head, which orders the app's own issues
+  their passkeys take, the change lock, which orders the app's own issues
   against a change, the check of every request, and the sign-in's decision
   whether a person adds a passkey first ([below](#factortla)).
 - One holds 0.16's roles split out of `log_config`, while 0.15.0's code still
@@ -86,23 +87,23 @@ models' are [below](#credentials-issuing-and-the-bulk-limit).
 
 | Protection, in the code | Turned off, TLC finds | Found by |
 |---|---|---|
-| A deletion re-reads the place's grants under the head (`projects.ts`, `granted_meanwhile`) | a grant left on a deleted place, which no path can revoke (`EveryGrantRevocable`) | #134's review |
-| `setAccess` reads whether the place is deleted after taking the head | the same, from the other order | #134 |
-| A deletion re-checks under the head that the place is archived (`restored`) | a place erased after it was restored (`DeletedOnlyWhenArchived`) | #134's review |
-| A rename, archive or restore resolves the place again under the head (`stillThere`) | a tombstone given back a live slug, or un-archived (`TombstonesKeepTheirSlug`, `TombstonesStayArchived`) | this model, fixed in #147 |
-| A key decision re-checks the place under the head (`#keys`; with a key in memory, it decides under the head from the start) | a key released after its place's deletion committed (`NothingReleasedAfterDeletion`, `DeletedStaysUnreachable`) | this model, fixed in #147 |
-| Adding an environment resolves its project again under the head, and reads whether it is archived there (`putEnvironment`, `stillThere`) | an environment added to a deleted project (`DeletedStaysUnreachable`) | reported with #147, fixed in #149 |
-| Renaming, archiving or restoring a key resolves its environment again under the head (`patchSecret`, `checkEnvironment`) | a key renamed in a deleted place, its tombstone's names changed (`DeletedStaysUnreachable`) | reported with #147, fixed in #149 |
-| Sign-in re-reads the member's generation under the head (`#stillMember`) | a credential issued at a generation a removal had moved past (`CredentialsAtCurrentGeneration`) | |
+| A deletion re-reads the place's grants under the change lock (`projects.ts`, `granted_meanwhile`) | a grant left on a deleted place, which no path can revoke (`EveryGrantRevocable`) | #134's review |
+| `setAccess` reads whether the place is deleted after taking the change lock | the same, from the other order | #134 |
+| A deletion re-checks under the change lock that the place is archived (`restored`) | a place erased after it was restored (`DeletedOnlyWhenArchived`) | #134's review |
+| A rename, archive or restore resolves the place again under the change lock (`stillThere`) | a tombstone given back a live slug, or un-archived (`TombstonesKeepTheirSlug`, `TombstonesStayArchived`) | this model, fixed in #147 |
+| A key decision re-checks the place under 0.14's head, until the head goes, and the change lock for a decision that changes something (`#keys`; with a key in memory, it decides under the lock from the start) | a key released after its place's deletion committed (`NothingReleasedAfterDeletion`, `DeletedStaysUnreachable`) | this model, fixed in #147 |
+| Adding an environment resolves its project again under the change lock, and reads whether it is archived there (`putEnvironment`, `stillThere`) | an environment added to a deleted project (`DeletedStaysUnreachable`) | reported with #147, fixed in #149 |
+| Renaming, archiving or restoring a key resolves its environment again under the change lock (`patchSecret`, `checkEnvironment`) | a key renamed in a deleted place, its tombstone's names changed (`DeletedStaysUnreachable`) | reported with #147, fixed in #149 |
+| Sign-in re-reads the member's generation under the change lock (`#stillMember`) | a credential issued at a generation a removal had moved past (`CredentialsAtCurrentGeneration`) | |
 | Member rows are locked in principal order (`lockMembers`) | two decisions waiting on each other (`NoWaitCycle`) | |
-| A read or a wrap with a key service checks its reader's standing again where it commits, under their row and the head, once the key service has answered: its first check, the intent's, holds no lock across the key service (`#keys`, the outcome's decision; R75, W331) | a value released to a member after their removal committed (`NothingReleasedAfterRevocation`, in `Members` and `Sharing`) | W331, which dropped the row held across the key service (`ReaderRowLocked`) |
+| A read or a wrap with a key service checks its reader's standing again where it commits, under their row and the change lock, once the key service has answered: its first check, the intent's, holds no lock across the key service (`#keys`, the outcome's decision; R75, W331) | a value released to a member after their removal committed (`NothingReleasedAfterRevocation`, in `Members` and `Sharing`) | W331, which dropped the row held across the key service (`ReaderRowLocked`) |
 | A rotation to a new vault key logs, under the new key, an outcome for every key service's intent still open (`#rotate`, `#closeIntents`): no lock it waits for is held across the key service, and the vault on the retired key can log nothing after it | an intent with no outcome, which verification reports as missing once overdue (`IntentsAccounted`, in `Members`) | W331, review r2 |
-| A read through a reference checks again, under the head, that it has not ended (`unwrap`'s `vet`, run again in `underLock`) | a value read through a reference after it was broken (`NothingReleasedThroughEndedReference`) | |
-| Making a reference checks its source again under the head (`secrets.ts`, `setSecrets`) | a reference made to a source archived or deleted meanwhile (`ReferencedSourcesStayLive`) | #152 |
+| A read through a reference checks again, under the change lock, that it has not ended (`unwrap`'s `vet`, run again in `underLock`) | a value read through a reference after it was broken (`NothingReleasedThroughEndedReference`) | |
+| Making a reference checks its source again under the change lock (`secrets.ts`, `setSecrets`) | a reference made to a source archived or deleted meanwhile (`ReferencedSourcesStayLive`) | #152 |
 | Archiving is refused while a live reference held in an unarchived place elsewhere reads the place (`references.ts`, `archiveBlockers`) | a reference in a live holder reading an archived source (`ReferencedSourcesStayLive`) | #152 |
-| A deletion re-reads the references into and out of the place under the head (`projects.ts`, `referenced_meanwhile`) | a reference held in a deleted place, which no path can break, and whose source can never be archived (`EveryReferenceBreakable`) | this model, fixed in #155 |
-| Demoting or removing an Owner of the whole instance counts the others under the head (`vault.ts`, `#keepAnOwner`) | two Owners, each leaving or stepping down at once, under rows the other does not lock: none left (`OwnerStays`) | |
-| A regenerate in a fork resolves each key it replaces again under the head, the parent's rows included (`secrets.ts`, `setSecrets`, `regenerated`) | an override written under a key name the parent renamed meanwhile, beside the renamed key the fork still inherits (`RegeneratesReplaceWhatTheyListed`) | #244's review |
+| A deletion re-reads the references into and out of the place under the change lock (`projects.ts`, `referenced_meanwhile`) | a reference held in a deleted place, which no path can break, and whose source can never be archived (`EveryReferenceBreakable`) | this model, fixed in #155 |
+| Demoting or removing an Owner of the whole instance counts the others under the change lock (`vault.ts`, `#keepAnOwner`) | two Owners, each leaving or stepping down at once, under rows the other does not lock: none left (`OwnerStays`) | |
+| A regenerate in a fork resolves each key it replaces again under the change lock, the parent's rows included (`secrets.ts`, `setSecrets`, `regenerated`) | an override written under a key name the parent renamed meanwhile, beside the renamed key the fork still inherits (`RegeneratesReplaceWhatTheyListed`) | #244's review |
 
 Here is #134's first race, as `scripts/formal.sh` prints it, with the grant
 re-read turned off:
@@ -115,13 +116,13 @@ re-read turned off:
   revoke it.
 
 ```
-  4. deleter   DeleteScope     delete proj by olga     -> delete.next
- 11. deleter   CallCommit      delete proj by olga     -> delete.next     grants -ada@env; log +access.revoke ada@env (deleter); head deleter -> none
- 12. deleter   DeleteNext      delete proj by olga     -> delete.head
- 14. admin     GrantResolve    grant ada@proj by omar  -> call.lock
- 20. admin     CallCommit      grant ada@proj by omar  -> idle            log +access.grant ada@proj (admin); grants +ada@proj
- 21. deleter   DeleteHead      delete proj by olga     -> delete.commit   head none -> deleter
- 22. deleter   DeleteCommit    delete proj by olga     -> idle            log +delete proj (deleter); slug[proj] s1 -> tomb; held true -> false
+  4. deleter   DeleteScope       delete proj by olga    -> delete.next
+ 11. deleter   CallCommit        delete proj by olga    -> delete.next         grants -ada@env; log +access.revoke ada@env (deleter); changeLock deleter -> none
+ 12. deleter   DeleteNext        delete proj by olga    -> delete.changelock
+ 14. admin     GrantResolve      grant ada@proj by omar -> call.lock
+ 20. admin     CallCommit        grant ada@proj by omar -> idle                log +access.grant ada@proj (admin); grants +ada@proj
+ 21. deleter   DeleteChangeLock  delete proj by olga    -> delete.commit       changeLock none -> deleter
+ 22. deleter   DeleteCommit      delete proj by olga    -> idle                log +delete proj (deleter); slug[proj] s1 -> tomb; held true -> false
 ```
 
 And the second, with the archived re-check turned off: Omar restores the
@@ -129,10 +130,10 @@ project after Olga's revocations and before her transaction, and the
 deletion erases a live project.
 
 ```
- 12. deleter   DeleteNext      delete proj by olga     -> delete.head
- 16. admin     PatchCommit     unarchive proj by omar  -> idle            archived[proj] true -> false
- 17. deleter   DeleteHead      delete proj by olga     -> delete.commit   head none -> deleter
- 18. deleter   DeleteCommit    delete proj by olga     -> idle            log +delete proj (deleter); slug[proj] s1 -> tomb; held true -> false
+ 12. deleter   DeleteNext        delete proj by olga    -> delete.changelock
+ 16. admin     PatchCommit       unarchive proj by omar -> idle                archived[proj] true -> false
+ 17. deleter   DeleteChangeLock  delete proj by olga    -> delete.commit       changeLock none -> deleter
+ 18. deleter   DeleteCommit      delete proj by olga    -> idle                log +delete proj (deleter); slug[proj] s1 -> tomb; held true -> false
 ```
 
 And the race this model found in references, with the re-read turned
@@ -144,11 +145,11 @@ tombstone: no path names its holder to break it, and archiving its source
 is refused while it reads it.
 
 ```
-  8. deleter   DeleteScope       delete hold by olga        -> delete.next
- 14. admin     PatchCommit       unarchive hold by olga     -> idle            head admin -> none; archived[hold] true -> false
- 23. maker     ReferCommit       refer hold by olga         -> idle            ref none -> maker; head maker -> none
- 25. admin     PatchCommit       archive hold by olga       -> idle            head admin -> none; archived[hold] false -> true
- 27. deleter   DeleteCommit      delete hold by olga        -> idle            head deleter -> none; slug[hold] s1 -> tomb; log +delete hold (deleter)
+  8. deleter   DeleteScope   delete hold by olga    -> delete.next
+ 13. admin     PatchCommit   unarchive hold by olga -> idle          changeLock admin -> none; archived[hold] true -> false
+ 23. maker     ReferCommit   refer hold by olga     -> idle          refRow[1] none -> maker; refRow[2] 0 -> 1; changeLock maker -> none
+ 25. admin     PatchCommit   archive hold by olga   -> idle          changeLock admin -> none; archived[hold] false -> true
+ 27. deleter   DeleteCommit  delete hold by olga    -> idle          changeLock deleter -> none; slug[hold] s1 -> tomb; log +delete hold (deleter)
 ```
 
 Each line is one step:
@@ -189,7 +190,7 @@ Traces are shortened here; the script prints every step.
   Isolation is READ COMMITTED: a statement reads what was committed when it
   ran, and a transaction's writes become visible when it commits. A
   statement that takes a lock and reads other tables in the same go, as a
-  vault decision takes the head with all it decides on, reads them as of
+  vault decision takes the change lock with all it decides on, reads them as of
   the lock only because it never waits for it (`SKIP LOCKED`; held, it
   waits in a statement of its own and reads again:
   [single-database.md](design/single-database.md), rule 4). So the model
@@ -198,12 +199,16 @@ Traces are shortened here; the script prints every step.
   - a member's row, taken one row at a time, in principal order: alone,
     or shared by a read or a wrap with others like it, never across a key
     service (R75): a read or a wrap with one checks first holding nothing
-    after, asks the key service, then takes the row and the head and checks
+    after, asks the key service, then takes the row and the change lock and checks
     again;
-  - the log's head.
-- **Giving up.** A read waiting for the head another holds may give up
+  - the change lock, which every change takes in its first statement, after
+    the members' rows, and holds to its commit. It is what 0.14's head was
+    (`audited`, `#decideOnce`, `lockLogHead`), kept in 0.16 without its row
+    and what was read under it: ["0.16: the change lock"](#016-the-change-lock)
+    says who takes it.
+- **Giving up.** A read waiting for the change lock another holds may give up
   instead (`ReadGivesUp`): its statement's bound ran out, its call's
-  deadline passed, or every place in the head's line was taken
+  deadline passed, or every place in the change lock's line was taken
   (`lockLogHeadQueued`). It rolls back having released nothing and
   appended no `secret.read` (a key service's intent, committed before, is
   accounted for as after any failure), and every invariant holds with or
@@ -238,21 +243,21 @@ Traces are shortened here; the script prints every step.
   - the app resolves the path outside any transaction;
   - the vault reads the version, unlocked;
   - the vault shares the reader's row and checks their standing and the place;
-  - it takes the head, appends `secret.read` and commits;
+  - it takes the change lock, appends `secret.read` and commits;
   - the app decrypts.
 
   A read through a reference takes the same steps. The reader's grants on
   the holder decide, and both places, and whether the reference ended, are
-  checked under the row and again under the head.
+  checked under the row and again under the change lock.
 
   A deletion reads its scope and the references into and out of the
   place. It revokes through `setAccess` (the same steps as a grant), ends
-  the references through the vault's `endReferences`, then takes the head
+  the references through the vault's `endReferences`, then takes the change lock
   and re-checks, erases and renames in one transaction.
 
   Making a reference: the app checks both places, the vault seals it with
-  `reference.create` under the maker's row and the head, the reference it
-  replaces is ended, then the app writes its row under the head.
+  `reference.create` under the maker's row and the change lock, the reference it
+  replaces is ended, then the app writes its row under the change lock.
 
 ### The scenarios
 
@@ -276,18 +281,18 @@ reference to that secret in `References`, and none yet elsewhere.
 
 ## What it abstracts
 
-- **App rows.** Each is locked only under the head, which every app
+- **App rows.** Each is locked only under the change lock, which every app
   transaction takes first (`audited`), so they never decide who waits.
   Foreign-key share locks (`KEY SHARE`) are compatible with `FOR NO KEY
   UPDATE` and with `FOR SHARE`, and are left out too.
 - **Refusal entries.** A refusal rolls back and appends its entries in a
-  transaction that takes the head alone. It can wait for nobody and decides
+  transaction that takes the change lock alone. It can wait for nobody and decides
   nothing, so it is left out.
 - **Roles.** A grant is a grant. Which role allows what is a pure function,
   which the property tests check ([property-tests.md](property-tests.md)).
 - **Instance roles and their scopes.** A role reaches places by its scope,
   the ones made later too, and is set under the same locks as a grant (the
-  member's row, then the head): the model's grant on every project, `"*"`,
+  member's row, then the change lock): the model's grant on every project, `"*"`,
   stands for one, scoped or not. Which places a scope takes in is a pure
   function, which the property tests check. The vault replacing the grants
   on every project of 0.4 is one decision per member, under those same
@@ -298,7 +303,7 @@ reference to that secret in `References`, and none yet elsewhere.
   of the model; during a deploy an old process and a new one may name
   different people, which changes who is refused, never which locks are
   taken. Refusing to demote or remove someone on it takes no lock, and
-  making them an Owner takes their row, then the head, whoever else owns
+  making them an Owner takes their row, then the change lock, whoever else owns
   the instance. Who may unmake an Owner,
   an Owner of the whole instance (`ChangesOwners`), is read under the
   actor's row, as the rest of the check is; making one is admission,
@@ -311,7 +316,7 @@ reference to that secret in `References`, and none yet elsewhere.
 - **Admission and restoring a member**, checkpoints, sessions beyond their
   generation, and lapsed grants. A service account admitted with its first
   grants (`setAccess` with `admit`) takes a grant's locks, the member's row
-  and then the head, in one decision, so it is a grant to the model.
+  and then the change lock, in one decision, so it is a grant to the model.
 - **References, to their shape.**
   - There is one holder and one source, in different projects. A holder
     inside what is archived, which doesn't block the archive, is left out.
@@ -340,7 +345,7 @@ reference to that secret in `References`, and none yet elsewhere.
   `services.ts` or `context.ts`, `Credentials.tla` or `Issuing.tla`; one in
   the vault's count, `Bulk.tla`; one in `plugins/audit-watch.ts`, `anchor.ts`, `audit.ts` or
   the vault's `checkpoint`, `Audit.tla`; one in the proxy's `watch`, `Tunnel.tla`;
-  one in `key-rotation.ts`, or in what an append reads under the head
+  one in `key-rotation.ts`, or in what an append reads under the change lock
   (`log.ts`), `AppKey.tla`.
 - **Beyond the bounds.** The bounds are three places, a few members, and three
   or four requests of one to three operations each. Races that need more are
@@ -356,7 +361,7 @@ reference to that secret in `References`, and none yet elsewhere.
 
 Three protocols outside the locking one, each modelled on its own, with the
 same steps (one SQL statement each, READ COMMITTED), the same two locks
-(members' rows, then the head) and the same discipline: every scenario
+(members' rows, then the change lock) and the same discipline: every scenario
 holds, and fails without each protection.
 
 ### Credentials.tla
@@ -368,7 +373,7 @@ Each CI run holds an ID token, good for one credential.
   1. the live bindings, unlocked;
   2. whether the token is spent, a read;
   3. the vault's answer about the account;
-  4. then, under the head, the account and the binding again, the token
+  4. then, under the change lock, the account and the binding again, the token
      spent, the credential issued and `token.exchange` logged. No count
      of the binding's credentials (W331, D177: its rate, `RateHeld`, went
      with it).
@@ -377,7 +382,7 @@ Each CI run holds an ID token, good for one credential.
   1. its row, unlocked;
   2. the vault's answer, or one kept from an earlier request
      (`accesses.ts`, `accessFor`) at the generation the credential names;
-  3. the vault's decision, under the account's row and the head; on a
+  3. the vault's decision, under the account's row and the change lock; on a
      kept answer that is no longer the vault's, none: the use starts
      over, asking (`#keys`, `accessRevision`; `AccessChanged`);
   4. through the credential proxy, `credential.use`: appended by the vault
@@ -385,7 +390,7 @@ Each CI run holds an ID token, good for one credential.
      credential then checked again with no lock, as an export's; or,
      with a vault older than 0.14.5, plain values only, or a record too
      long for the vault, by the app,
-     under the head, the credential checked again under it;
+     under the change lock, the credential checked again under it;
   5. the value answered.
 - **Using a credential under 0.15's log** (`Uses015`; `keys.ts`,
   `useValues`; docs/design/0.15-plan.md, PR 5b):
@@ -413,9 +418,9 @@ Each CI run holds an ID token, good for one credential.
 | Protection, in the code | Turned off, TLC finds | Found by |
 |---|---|---|
 | The exchange spends the ID token in the transaction that issues its credential, a primary key on its hash (`exchangeToken`) | one ID token bought two credentials (`SingleUse`) | |
-| It reads its binding again under the head (`exchangeStill`) | a credential issued after its binding's `token.unbind` (`NoExchangeAfterUnbind`) | |
-| And the account, in the same read (`exchangeStill`) | a credential at a generation a removal had moved past (`ExchangedAtCurrentGeneration`) | |
-| Once the vault has released, the app reads the credential and the member's generation again before it answers (`credentialStill`), under the head when it appends a use of its own (a vault older than 0.14.5, plain values only, or a record too long for the vault) | a value released through a token revoked after it was checked (`NoReleaseAfterEnd`) | this model, fixed with it |
+| It reads its binding again under the change lock (`standingBinding`; on the vault's paths, `sign_in` under the binding's row lock, Lifecycle.tla's BindingLocked) | a credential issued after its binding's `token.unbind` (`NoExchangeAfterUnbind`) | |
+| And the account (`stillMember`; on the vault's paths, `sign_in` under the account's row lock, MemberLocked) | a credential at a generation a removal had moved past (`ExchangedAtCurrentGeneration`) | |
+| Once the vault has released, the app reads the credential and the member's generation again before it answers (`credentialStill`) | a value released through a token revoked after it was checked (`NoReleaseAfterEnd`) | this model, fixed with it |
 | And with no lock for an export, and for a use the vault appended, which commit nothing more | the same, by an export (`NoReleaseAfterEnd`) | this model, fixed with it |
 | Untrusting or replacing a binding revokes the credentials it issued (`#revoke`) | the same, through a credential whose binding was untrusted (`NoReleaseAfterEnd`) | |
 | A read on a kept answer is decided only while that is still the vault's answer, under the account's row (`#keys`, `accessRevision`) | a `secret.read` logged on an answer kept from before a removal and an admission (`NoReadOnStaleAnswer`, which states the check itself: a wiring check, as this model carries no grants or policy, what the check is for); the fence still withholds the value, so `NoReleaseAfterEnd` holds without it | |
@@ -432,12 +437,12 @@ the value (10). Removed and admitted again meanwhile, the account is
 active to the vault too, at a generation the token was not issued at.
 
 ```
-  3. owner     RevokeHead        revoke cred tok            -> revoke.commit   head none -> owner
-  5. reader    UseVerify         use cred tok               -> use.access
-  6. owner     RevokeCommit      revoke cred tok            -> idle            log +token.revoke cred <<tok, 0>> gen 0 (owner); head owner -> none
-  8. reader    UseLock           use cred tok               -> use.head        rowShared +reader
- 10. reader    UseDecide         use cred tok               -> use.fence       log +secret.read cred <<tok, 0>> gen 0 (reader); rowShared -reader; head reader -> none
- 12. reader    UseAnswer         use cred tok               -> idle
+  3. owner     RevokeChangeLock  revoke cred tok -> revoke.commit    changeLock none -> owner
+  5. reader    UseVerify         use cred tok    -> use.access
+  6. owner     RevokeCommit      revoke cred tok -> idle             log +token.revoke cred <<tok, 0>> gen 0 (owner); changeLock owner -> none
+  8. reader    UseLock           use cred tok    -> use.changelock   rowShared +reader
+ 10. reader    UseDecide         use cred tok    -> use.fence        log +secret.read cred <<tok, 0>> gen 0 (reader); rowShared -reader; changeLock reader -> none
+ 12. reader    UseAnswer         use cred tok    -> idle
 ```
 
 ### Issuing.tla
@@ -450,12 +455,12 @@ sealed yet.
   the same way, `bind`, `replaceKeys`):
   1. the newest entry about the issuer's access, before the vault is asked;
   2. the vault's answers about the issuer and the account;
-  3. under the head, both again, then the token.
+  3. under the change lock, both again, then the token.
 - **Sealing the older token at its first use** (`services.ts`,
   `sealCredentials`):
   1. the row;
   2. the vault's answer about its issuer;
-  3. under the head, the issuer again, then the row, only as read.
+  3. under the change lock, the issuer again, then the row, only as read.
 - **Changing access, in the vault:** demoting Olga, removing her and
   admitting her again, an Owner again, at a new generation, removing the
   account.
@@ -464,23 +469,23 @@ sealed yet.
 |---|---|---|
 | The issuer is weighed from the vault's answer, read after the newest entry about their access, and committed only while that entry is still the newest (`issuerNow`, `issuerStill`) | a token reading sensitive values issued by someone demoted before it committed (`SensitiveOnlyFromOwners`) | this model, fixed with it |
 | And so is a seal's (`sealCredentials`) | the older token sealed reading them, for someone demoted meanwhile (`SensitiveOnlyFromOwners`) | this model, fixed with it |
-| Issuing reads the account's standing again under the head (`#stillMember`) | a token at a generation a removal had moved past (`TokensAtCurrentGeneration`) | |
+| Issuing reads the account's standing again under the change lock (`#stillMember`) | a token at a generation a removal had moved past (`TokensAtCurrentGeneration`) | |
 | A seal updates the row only as it read it (`updateAuth`, matched on its scope) | the older token sealed twice (`SealedOnce`) | |
-| The vault's answer about the issuer counts only at the generation the request came in at (`issuerNow`), and under the head the request's credential and member still stand at it (`credentialStill`): each covers for the other | a token issued by a membership the request did not come in as, Olga removed and admitted again meanwhile, with what she holds now (`IssuedAsAuthenticated`) | #292's review |
+| The vault's answer about the issuer counts only at the generation the request came in at (`issuerNow`), and under the change lock the request's credential and member still stand at it (`credentialStill`): each covers for the other | a token issued by a membership the request did not come in as, Olga removed and admitted again meanwhile, with what she holds now (`IssuedAsAuthenticated`) | #292's review |
 
 The race it found, with the fence off. Olga's request is weighed as an
-Owner's (steps 3 and 4), Omar demotes her (9), and her token commits
-reading the project's sensitive values (11). A demotion is no
+Owner's (steps 4 and 5), Omar demotes her (10), and her token commits
+reading the project's sensitive values (12). A demotion is no
 `policy.change`, so `policyStill` let it through. Before the fix the
 request was weighed on the answer its authentication got; the same held
 for a binding, and for a seal, where the code said so and let it be.
 
 ```
-  3. olga      IssueLoad         issue actor olga who svc   -> issue.access
-  4. olga      IssueAccess       issue actor olga who svc   -> issue.head
-  9. omar      DemoteCommit      demote actor omar who olga -> idle            owners -olga; log +member.role who olga (omar); head omar -> none
- 10. olga      IssueHead         issue actor olga who svc   -> issue.commit    head none -> olga
- 11. olga      IssueCommit       issue actor olga who svc   -> idle            log +token.create who olga sensitive true (olga); head olga -> none
+  4. olga      IssueLoad        issue actor olga who svc   -> issue.access
+  5. olga      IssueAccess      issue actor olga who svc   -> issue.changelock
+ 10. omar      DemoteCommit     demote actor omar who olga -> idle               owners -olga; log +member.role who olga (omar); changeLock omar -> none
+ 11. olga      IssueChangeLock  issue actor olga who svc   -> issue.commit       changeLock none -> olga
+ 12. olga      IssueCommit      issue actor olga who svc   -> idle               log +token.create who olga sensitive true (olga); changeLock olga -> none
 ```
 
 ### Bulk.tla
@@ -1000,11 +1005,11 @@ workload's own.
 
 The service `api` has one enrollment binding with one replica, and codes
 `c1`, `c2` and `c3`. Each step is one SQL statement, as in the other models.
-The exchange's commit, a mint and a promote take the head. Renewal does not.
+The exchange's commit, a mint and a promote take the change lock. Renewal does not.
 Time is the database's statement clock, and a session is live while its
 `expires_at` is ahead of it.
 
-- **The exchange** (4.1, step 7) runs under the head. It checks the code's
+- **The exchange** (4.1, step 7) runs under the change lock. It checks the code's
   tombstone and counts the code's live roots, then inserts the session and
   `token.exchange`. An instance that enrolls again has restarted, and its old
   session renews no more.
@@ -1014,16 +1019,16 @@ Time is the database's statement clock, and a session is live while its
   update's own clock. The tombstone is checked in that same statement.
 - **Minting** (4.4) is weighed like issuing a token (`Issuing.tla`). It
   reads the newest entry about the minter's access, then the vault's answer.
-  Under the head it checks that entry again and writes the row, whose scope
+  Under the change lock it checks that entry again and writes the row, whose scope
   is the binding's intersected with the minter's holdings. The scope reads
   sensitive values only if the minter is an Owner, as a person.
-- **Promote** (4.4, item 4) runs under the head. It writes one
+- **Promote** (4.4, item 4) runs under the change lock. It writes one
   `enrollment.supersede` per other code, and with `--now` it also revokes
   their sessions.
 
 | Protection, in the design | Turned off, TLC finds |
 |---|---|
-| The exchange counts live roots inside its commit, under the head | two exchanges each counting one live root, both admitted: three live roots (`Capacity`) |
+| The exchange counts live roots inside its commit, under the change lock | two exchanges each counting one live root, both admitted: three live roots (`Capacity`) |
 | A renewal updates only a row still live at its own statement's clock (`$old > statement_timestamp() + 5s`) | a renewal that read the clock in time, then updated a session the count had already seen as dead: three live roots (`Capacity`) |
 | The exchange refuses a code a supersede names | a session made from a superseded code (`Superseded`) |
 | So does renewal | a superseded code's session renewed (`Superseded`) |
@@ -1069,7 +1074,7 @@ the run fits in the rule's hour.
 | The count of roots made, more than `4 × replicas` | a thief enrolling and leaving within one renewal, five times, never frozen (`TripwireFires`) |
 | Only roots count, never children | a deployment that narrows and redeploys, frozen (`NoFalseContention`) |
 | A full code answers `full` | under review r1's rule (admit, and fence the oldest live root): the new instance of a redeploy crashes, its restart is admitted, and the old instance, still serving its requests, is fenced (`NoFalseContention`) |
-| A run's freeze commits under the head only while the binding's newest freeze or lift is the one the run read | two runs count the code contended; the first freezes it, Omar lifts the freeze, and the second freezes it again on the history the lift discarded (`LiftHolds`, in `WorkloadLifting`) |
+| A run's freeze commits under the change lock only while the binding's newest freeze or lift is the one the run read | two runs count the code contended; the first freezes it, Omar lifts the freeze, and the second freezes it again on the history the lift discarded (`LiftHolds`, in `WorkloadLifting`) |
 | The run reads that entry before it counts the rows | a run counts the rows, Omar lifts the freeze, and the run then reads the lift: its fence passes, and its freeze stands on the history before the lift (`LiftHolds`, in `WorkloadLifting`) |
 | A `full` answer is no signal | under review r2's rule (two `full` in a row freeze), two redeploys refused during a crash's tail freezing the code (`NoFalseContention`) |
 
@@ -1180,8 +1185,8 @@ reference as a copy, and so is any copy or reference of that one.
   undone by the same hour's history" fails. With `replicas: 2` a run starts
   every 15 seconds or so, so every lift has the window. Section 4.4 now
   says the run reads the binding's newest freeze or lift before it counts
-  the rows, from that lift, and its freeze commits under the head only
-  while that entry is still the newest (the shape of `MinterFence`). Read
+  the rows, from that lift, and its freeze commits under the change lock
+  only while that entry is still the newest (the shape of `MinterFence`). Read
   after the rows, a lift between the two reads passes the fence. A run on
   a frozen binding does nothing. This is for PR 3.
 - **A tunnel stops when its last good check is older than its recheck
@@ -1216,7 +1221,7 @@ reference as a copy, and so is any copy or reference of that one.
     each statement at the clock it reads, so it assumes that delay stays
     under the margin.
   - A renewal's `UPDATE` whose snapshot predates a promote may commit just
-    after it: the promote takes the head, renewal does not, and without
+    after it: the promote takes the change lock, renewal does not, and without
     `--now` the promote writes no session row. So "none renews after" and
     the drain hold up to the promote transaction's length, milliseconds.
   - `approve` and `pending` are left out, and so are `sources`, which is a
@@ -1857,14 +1862,14 @@ suites' `replayAgrees` for these objects (`packages/vault/test/app-places.test.t
 **What it does not cover.** Each change here is one step on one object: a
 project's archive is the fork's change alone. That the app changes *every*
 live environment of the project, one made meanwhile included (the set read
-again under 0.14's head), is an app-level guard of the kind of PR 4b's
+again under the change lock), is an app-level guard of the kind of PR 4b's
 `expectRevoked` and `Erasure.hold`, held by
 `packages/server/test/app-places.test.ts` (an environment made while its
 project is archived), not by this model. The holder's own value is not
 modelled: an unarchive holds the whole object to the kept one, so an edited
 version is refused as an edited reference is (the vault's tests hold both).
 Nor an environment made or deleted: a new one is made in a live project only
-(each maker checks under the head), and a deleted one holds no project's
+(each maker checks under the change lock), and a deleted one holds no project's
 archival (`environmentObject`, `environment.delete`), both held by the same
 tests and by the replay's `applyOp`.
 
@@ -2464,9 +2469,9 @@ id under the vault's MAC; nothing after the check resolves the token again
 
 **The model.** Ada writes key k (twice at once in `WritingRevoke`) from her
 session; the vault's statement reads and numbers the request; the Worker
-decides on the read; the app's statement takes 0.14's head and the fence,
+decides on the read; the app's statement takes the change lock and the fence,
 holds the read and commits. The hold and the commit are two steps: nothing
-that takes the head or the fence comes between them (`held`), but a
+that takes the change lock or the fence comes between them (`held`), but a
 database writer, who takes neither, may (round 7). Beside her: her grant taken away and her
 session revoked (`WritingRevoke`), her grant taken away and given back
 (`WritingABA`), her role redefined, the policy changed and the environment
@@ -2481,7 +2486,10 @@ the log, or her grant taken and her member row put back so, and Bob's row
 put back so after his demotion while he adds svc (`WritingForge`, T190),
 her write while the key is made a reference, the roles redefined and her
 session revoked, a try the vault served abandoned at its hold and the next
-not served, down today's path (`WritingFallBack`, PR 3), or while the key
+not served, down today's path (`WritingFallBack`, PR 3), the same while the
+policy is changed and the environment protected, and a database writer puts
+the environment's row back, which the policy's digest stops, read from the
+log (`WritingDigest`), or while the key
 is made a reference and her session revoked before that path
 (`WritingCallerShape`, review r2 of #469); her write while her grant is
 taken and given back and her session revoked, a try abandoned at its hold
@@ -2529,7 +2537,7 @@ before PR 6 (RefusalLogged off), a write the vault refuses.
 The vault decides on the rows as they are (`WToday`), holding each object
 but the credential to its newest change's seal, and that change to its
 MAC once T190 is in it (TodayChangeMacChecked), and wraps the key; then the
-app's transaction, under 0.14's head and the fence, finds the environment
+app's transaction, under the change lock and the fence, finds the environment
 still live and the key's row where the decision found it, and writes on
 that decision (`WTodayCommit`). The caller's credential it does not weigh:
 the request goes on with the caller the app authenticated (`Auth`), on the
@@ -2570,7 +2578,7 @@ it.
 | the commit holds the read (ReadHeld) | `WritesStandAtCommit` (Revoke, Names), `AddsStandAtCommit` (Protect) |
 | ... every part of it (`Unheld={...}`, each of 21 parts left out in turn: a read function that missed it) | the adversary that moves it: `WritesStandAtCommit` after a revoke, an end, a role redefined, a policy change, an archive of the environment or its parent, a write of the replaced key or a new level on the inherited one, a rename, the parent gaining the key, the personal config deleted; `KeyChangesFlip` without the key; `AddsStandAtCommit` after a demotion, a policy change, a role redefined, the setting closed, the place archived, an environment protected, a protected fork made, the grant's or the scope's slug moved; `AddsFlip` without svc's row |
 | the decision weighs the read and nothing else (DecideOnRead) | `WritesStandAtCommit`: the roles taken from the isolate's cache; the read and its hold agree, and the role redefined before both is missed |
-| the write's hold runs once its statement holds the fence (HoldAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not 0.14's head, between the hold and the write |
+| the write's hold runs once its statement holds the fence (HoldAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not the change lock, between the hold and the write |
 | the read's numbers from the log's newest change, not the row's seal column (ReadOnLog) | `WritesStandAtCommit`: a database writer puts the revoked session's row back, and the hold passes |
 | the hold compares numbers, not values alone (ReadByNumber) | `CommitsReplay`: the grant taken and given back; the write commits on equal values, and the log replayed at its commit finds the member changed since the read |
 | the app checks the caller's `auth_mac` on the rows as read (AuthChecked) | `CommitsAuthentic` (Tamper, Add): a token hash copied onto an Owner's credential; the vault resolves the token to the Owner, read and hold agree, and the write or the add commits as the Owner (round 6) |
@@ -2579,6 +2587,8 @@ it.
 | today's path holds each object's newest change to its MAC too (TodayChangeMacChecked, T190 on that path) | `TodayStandsAtDecision` (Forge): Ada's grant revoked and her member row put back with its seal forged; the two-trip path refuses it (`tampered`) and sends it down today's path, which decides on it |
 | a request goes down today's path only from a try that committed nothing (FallBackUncommitted) | `OneWritePerRequest` (FallBack): a seal wait failing after the COMMIT taken for `served: false`, and the key written twice |
 | today's commit holds to the policy the caller was loaded with (TodayPolicyHeld: `audited`'s `policyStill`) | `TodayPolicyStandsAtCommit` (FallBack): the roles redefined after today's wrap, and the write commits on a right the caller no longer has (review r3 of #469) |
+| that policy is all the request read of it, compared as a digest: the roles, the policy row and the environment's protection, each by the number of its newest change (`TodayUnheld = {}`; 0.16, where 0.15 held one number, the seq of the newest `policy.change`) | `TodayPolicyStandsAtCommit` (Digest): with the protection left out, an Owner protects the environment after the front door and today's commit writes there all the same; with the roles or the policy row left out, that change is missed as without `TodayPolicyHeld`. And `WritesStandAtCommit` with the two-trip hold skipping the protection (`Unheld = {"protected"}`) |
+| the digest's numbers are the log's, each object's newest change's, never the seal its row stores (TodayPolicyOnLog; expert review of #573) | `TodayPolicyStandsAtCommit` (Digest): an Owner protects the environment after today's decision, and a database writer puts its row back, unprotected, with the seal it had; read from the rows, the digest is the one the caller was loaded with, and the commit writes there |
 | a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
 | a refused try is answered by the vault's record of it, and goes nowhere else (RefusalLogged, PR 6) | `TodayCallerStandsAtDecision` (Caller): the refusal down today's path, after a try abandoned at its hold, goes on with the caller the first try checked, and writes once her grant is back, her session revoked since (review r2 of #469) |
 | the record ends the request (RefusalEnds) | `RefusedOrWritten` (Caller): a refusal recorded, and then a write down today's path |
@@ -2617,11 +2627,11 @@ start with seal 0, so a key that appears in the parent, a protected fork
 made in a project or a project made under an old slug is not an object
 here: it is a move of `names`, as a rename is (a key's object holds no
 name). Names are app rows, unsealed, as today; each move of one is an app
-write under 0.14's head. A session's revoke takes the fence and not 0.14's
-head, the stronger adversary: 0047's `revoke_credential` takes the head
-too, which only adds order, and keeps it in 0.16.0 (EntryLessHead). The app's statement is two steps: its
-hold (the head, the issue lock, the fence, the read again) and its COMMIT
-(the rows, the change). Between them `held` names who holds the head and
+write under the change lock. A session's revoke takes the fence and not the
+change lock, the stronger adversary: `revoke_credential` takes it too in the
+code, which only adds order. The app's statement is two steps: its
+hold (the change lock, the issue lock, the fence, the read again) and its COMMIT
+(the rows, the change). Between them `held` names who holds the change lock and
 the fence, and every change that takes one of them (a revoke, a give-back,
 a rename, another write or add) waits for it. A database writer takes no
 lock, so its moves (`Tamper`, `Substitute`) can still come between the
@@ -2630,21 +2640,22 @@ Owner's credential after the hold, and why the change names the caller the
 app checked, by id, and never resolves the token again (`ActorFromRead`).
 Its rows come after the fence, as `app_change`
 already updates a key's row after it; every statement that locks a key's
-row holds 0.14's head first, so this adds no wait for a `NoWaitCycle` to
-check. Its credential's last use, when due,
+row holds the change lock first, and so does the write: without it, it would
+wait for a key's row with the fence held (WriteLocks.tla's
+`WriteTakesChangeLock`, below). Its credential's last use, when due,
 is an UPDATE of the credential's row, which `issue_token` takes shared
-before the issue lock: the write makes it before the hold, after 0.14's
-head, the order WriteLocks.tla checks (below). An add's write takes its rows, in
-principal order, then the head, then the fence, as `change_input` does, and
-holds after them. As built, the rows and the head are the first statements
+before the issue lock: the write makes it before the hold, after the change
+lock, the order WriteLocks.tla checks (below). An add's write takes its rows, in
+principal order, then the change lock, then the fence, as `change_input` does, and
+holds after them. As built, the rows and the change lock are the first statements
 of its one Sync, locks with nothing read under them (0.16.0's contraction:
-no `member.add` entry, whose MAC needed the head's read, a round trip
+no `member.add` entry, whose MAC needed the change lock's read, a round trip
 before the rest, in PR 5): taken first, they only add order (a change that
 takes either waits; one that takes neither, a session's revoke, is what
 the hold after the fence weighs), so `AWrite` stays one step, and whether
 those locks can close a cycle is WriteLocks.tla's `AddLocks`. Today's add
 (`admit`) decides and writes in one transaction under the rows and the
-head, which every change of what it weighs takes but a session's revoke:
+change lock, which every change of what it weighs takes but a session's revoke:
 one step too (`AToday`). Its caller's session it does not weigh again, as
 today's key write does not (`TodayCallerStandsAtDecision`). An app and a vault of different versions are refused
 while both deploy (503 `deploying`), so the model has one version. The seal
@@ -2653,50 +2664,75 @@ number.
 
 ### WriteLocks.tla
 
-The locks of the two-trip key write (PR 3; one Sync since 0.16.0), against the transactions that take the same
-ones, with what Writing.tla leaves out: Postgres's lock queue. A request
-waits for every holder of its lock in a conflicting mode, and also for every
-request queued ahead of it that conflicts: a shared request queues behind a
-waiting exclusive one. Postgres breaks such a cycle only after
-`deadlock_timeout` (1 s), by reordering the queue or failing one, the fence
-held exclusive meanwhile and every use waiting on it.
+The order a change takes its locks in, with what the other models leave out:
+Postgres's lock queue. A request waits for every holder of its lock in a
+conflicting mode, and also for every request queued ahead of it that
+conflicts: a shared request queues behind a waiting exclusive one. Postgres
+breaks such a cycle only after `deadlock_timeout` (1 s), by reordering the
+queue or failing one, the fence held exclusive meanwhile and every use
+waiting on it.
 
-**The model.** Seven transactions, each its locks in order, a lock and its
-mode: the key write (0.14's head; its credential's row, the last-use
-UPDATE; `hold_inputs`' issue lock shared, then the fence exclusive), an
-issue on that credential (`issue_token`: the credential's row shared, then
-the issue lock shared), the checkpointer's barrier (the issue lock
-exclusive, then the fence), a revoke of the credential (`revoke_credential`:
-0.14's head, the row, the fence), a policy change (0.14's head, the issue
-lock exclusive, the fence), a sign-in that ends the account's earlier
-sessions (0.14's head, then its entries' trigger: the issue lock shared, the
-fence) and a use (the fence shared). Each asks
-for its next lock at the end of that lock's queue, is granted it once no
-holder and no request ahead of it conflicts, and commits with them all.
-`NoWaitCycle`: nobody waits, through others, for itself. 104,928 states.
+**The model.** Transactions, each its locks in order, a lock and its mode.
+Each asks for its next lock at the end of that lock's queue, is granted it
+once no holder and no request ahead of it conflicts, and commits with them
+all. `NoWaitCycle`: nobody waits, through others, for itself. Three flows,
+each a set of transactions that take the same locks.
+
+**The order** (`ChangeLocks.cfg`, `Flow = "change"`): the rows a flow
+shares with an issue, the change lock, the issue lock, the fence. The vault's
+change of a member (`#decideOnce`, `change_input`: the member's row, the
+change lock, the issue lock shared, the fence; see below for where its issue
+lock comes from), the app's change (`audited`,
+`app_change`: the change lock, a credential's row, the issue lock shared,
+the fence), the two changes that take the issue lock exclusive, since an
+issue compares what they move (`holdIssues`: the vault's change of the
+policy, after its actor's row and the change lock; the app's change of a
+protected environment's slug, after the change lock; each then the fence), a
+token issued to that member (`issue_token`: the member's row shared, the
+credential's, the issue lock shared), the checkpointer's barrier (the issue
+lock exclusive, then the fence; never the change lock) and a use (the fence
+shared). 133,936 states.
 
 | protection | turned off, TLC finds |
 |---|---|
-| the write updates its credential's row before the hold, as the issue and the revoke take it: row, issue lock, fence (TouchFirst) | `NoWaitCycle`: the write holds the issue lock and the fence and waits for the row, which the issue holds shared, queued for the issue lock behind the barrier, which waits for the write's issue lock (review r1 of #469, which saw it stall a write and a use 908 ms) |
-| the barrier takes the issue lock exclusive before the fence (BarrierIssueFirst) | `NoWaitCycle`: the barrier holds the fence and waits for the issue lock, which the write holds shared while it waits for the fence |
-| a policy change takes the issue lock exclusive after 0.14's head and before the fence (PolicyIssueFirst, T149) | `NoWaitCycle`: it holds the fence and waits for the issue lock, which the barrier holds while it waits for the fence |
-| a sign-in that ends the account's earlier sessions takes the issue lock before the fence (IssueBeforeFence, T123: its entries' trigger, `app_change`) | `NoWaitCycle`: it holds the fence and waits for the issue lock, which the barrier holds while it waits for the fence |
+| a change takes the change lock before the issue lock (ChangeLockFirst) | `NoWaitCycle`: the app's change, an entry numbered before its lock, holds the issue lock shared and waits for the change lock; the vault's change holds it and is queued for the issue lock behind the barrier, which waits for the app's |
+| it takes the issue lock before the fence (IssueBeforeFence) | `NoWaitCycle`: it holds the fence and waits for the issue lock, which the barrier holds while it waits for the fence |
+| the barrier takes the issue lock before the fence (BarrierIssueFirst) | `NoWaitCycle`: the barrier holds the fence and waits for the issue lock, which a change holds shared while it waits for the fence |
+| the policy's change takes the issue lock exclusive before the fence (PolicyIssueFirst) | `NoWaitCycle`: it holds the fence and waits for the issue lock, which the barrier holds while it waits for the fence |
 
-Until 0.16.0, `Migration015.tla` checked these three orders beside 0.15's
-cutover from 0.14; the cutover's deletion (T273) moved them here.
+`change_input` takes the member's row, the change lock, the issue lock
+shared, then the fence: the order checked here.
+
+**A key write's** (PR 3, `WriteLocks.cfg`, `Flow = "write"`; one Sync since
+0.16.0): the change lock; its credential's row, the last-use UPDATE;
+`hold_inputs`' issue lock shared, then the fence exclusive; then the key's
+row, whose current version it updates. Against another change of that key
+down today's path (`setSecrets`, `patchSecret`: the change lock, the key's
+row `FOR UPDATE`, then `app_change`'s issue lock and fence), an issue on that
+credential (`issue_token`: the credential's row shared, then the issue lock
+shared), the barrier, a revoke of the credential (`revoke_credential`: the
+change lock, the row, the fence) and a use. 24,828 states.
+
+| protection | turned off, TLC finds |
+|---|---|
+| the write updates its credential's row before the hold, as the issue and the revoke take it: row, issue lock, fence (TouchFirst) | `NoWaitCycle`: the write holds the issue lock and the fence and waits for the row, which the issue holds shared, queued for the issue lock behind the barrier, which waits for the write's issue lock (review r1 of #469) |
+| the write takes the change lock first, as it took 0.14's head (WriteTakesChangeLock) | `NoWaitCycle`: the write holds the issue lock and the fence and waits for the key's row; another change of that key holds the row, under the change lock, and is queued for the issue lock behind the barrier, which waits for the write's (with no barrier about, that change waits for the write's fence instead). So the two-trip write keeps the lock: its hold orders it against what a change commits, not against the rows a change locks before its last statement |
 
 **A member add's** (PR 5, `AddLocks.cfg`, `Flow = "add"`): it locks the
-members' rows (`lockMembers`) and 0.14's head, then `admit_hold` takes the
-issue lock shared and then the fence, and holds the read (until 0.16.0, a
-`member.add` append's trigger took those two). Against a change of the
-adder's member (`#decide`, `change_input`: the row, the head, the issue
-lock, the fence), a token issued to the adder (`issue_token`: the members'
-rows shared, the credential's, the issue lock), the barrier, a revoke and
-a use. 28,408 states.
+members' rows (`lockMembers`) and the change lock, then `admit_hold` takes the
+issue lock shared and then the fence, and holds the read. Against a change of
+the adder's member (`#decide`, `change_input`: the row, the change lock, the
+issue lock, the fence), a token issued to the adder (`issue_token`: the
+members' rows shared, the credential's, the issue lock), the barrier, a
+revoke and a use. 28,408 states.
 
 | protection | turned off, TLC finds |
 |---|---|
-| the add locks the members' rows before the head, as every flow that takes both does (MembersFirst) | `NoWaitCycle`: the add holds the head and waits for the adder's row, which a demotion holds while it waits for the head |
+| the add locks the members' rows before the change lock, as every flow that takes both does (MembersFirst) | `NoWaitCycle`: the add holds the change lock and waits for the adder's row, which a demotion holds while it waits for the change lock |
+
+The add takes the change lock as every change does: one rule, no exemption.
+No wait cycle needs it there, the rows it locks first being every lock it
+shares with a change before the fence.
 
 ### Findings.tla
 
@@ -2925,30 +2961,30 @@ wait, READ COMMITTED:
 - `old`, the previous release's vault during a rollout, calling the same
   statement through its old signature, which carries no passkey: `h2`;
 - `chg`, a change to Ada's passkeys, the app's transaction (PR 4): the
-  factor lock, the log's head (`audited`), the read of her live
+  factor lock, the change lock (`audited`), the read of her live
   credentials, then for each one it ends the member's row exclusive and the
   credential's, and the new session it issues to the browser that touched,
   `n`. Her first passkey when she had none, a removal of `pa` keeping `pb`,
   or an Owner's reset. The first is built (PR 4b: the enrollment at sign-in,
-  `audited`'s `factor` taking the lock before the head; the member's row is
+  `audited`'s `factor` taking the lock before the change lock; the member's row is
   `app_change`'s, as its prepared changes commit), and the other two in PR
   6a, the same way: a removal at the passkey page's door
   (`SigninService.removePasskey`), whose new session is `n`, and a reset
   (`resetPasskeys`, `DELETE /api/members/:member/passkeys`), which issues
-  none. Each reads under the head every row of the person's passkeys and
+  none. Each reads under the change lock every row of the person's passkeys and
   every credential of theirs it ends. Who may reset is not this model's:
-  the Owner is held to the vault's answer under the head as an issuer is
+  the Owner is held to the vault's answer under the change lock as an issuer is
   (`Issuing.tla`, `IssuerFence`).
 
 `FactorApp` (PR 4a) puts the app's side beside the change instead:
 
 - `app`, the app's own issue on `cA` (an MCP connection, a token the vault
-  leaves to the app), carrying its passkey: the log's head, as every
-  `audited` transaction takes it first, and no factor lock; under the head,
+  leaves to the app), carrying its passkey: the change lock, as every
+  `audited` transaction takes it first, and no factor lock; under the change lock,
   `cA` checked live and backed (the passkey it names live, or none while
   Ada holds none), then the insert of `s`;
 - `prev`, the previous release's app signing Ada in during a rollout, or
-  any app while the policy is `off`: the head, and `o`, naming no passkey,
+  any app while the policy is `off`: the change lock, and `o`, naming no passkey,
   with no rule;
 - `req`, a request with `s` or `o`, its one statement reading the row, the
   passkey it names and whether Ada holds a live one.
@@ -2959,11 +2995,11 @@ Developer with no passkey:
 
 - `sgn`, the sign-in: one read of her access's sequence (`signinMembers`),
   then the vault's answer, which decides (an Owner of the whole instance
-  adds a passkey first, and no session is made); else the head, and under
+  adds a passkey first, and no session is made); else the change lock, and under
   it the sequence read again (`#stillMember`), which, moved, sends the
   sign-in back to decide again from the reads; then a session the provider
   alone signed in;
-- `pro`, an Owner promoting her: the vault's change under the head, which
+- `pro`, an Owner promoting her: the vault's change under the change lock, which
   moves her sequence.
 
 | Protection | Turned off, TLC finds |
@@ -2972,10 +3008,10 @@ Developer with no passkey:
 | A change takes it before it reads what to end (`ChangeTakesFactor`) | `ChangeEndsAll`, the same interleaving from the other side |
 | `issue_token` takes it first, before the members' rows (`FactorFirst`) | `NoWaitCycle`: the issue holds Ada's member row shared and waits for the factor lock, which the change holds while it waits for her member row exclusive |
 | `issue_token` goes ahead only while `cA` names the passkey the issue carries (`IssueChecksPasskey`) | `NamesItsSource`: the previous release's vault issues `h2` naming no passkey from a session `pa` confirmed |
-| A change takes the log's head before it reads what to end (`ChangeTakesHead`; `FactorApp`) | `ChangeEndsAll`: the first passkey's change reads Ada's credentials, `prev` takes the head and commits `o`, the change commits with `o` live |
-| The app's issue checks its source and the passkey rule under the head (`AppIssueChecks`; `FactorApp`) | `IssuedBacked`: `s` committed naming none after Ada's first passkey; and `LiveFromLive`: `s` issued from `cA` after a removal revoked it |
+| A change takes the change lock before it reads what to end (`ChangeTakesChangeLock`; `FactorApp`) | `ChangeEndsAll`: the first passkey's change reads Ada's credentials, `prev` takes the change lock and commits `o`, the change commits with `o` live |
+| The app's issue checks its source and the passkey rule under the change lock (`AppIssueChecks`; `FactorApp`) | `IssuedBacked`: `s` committed naming none after Ada's first passkey; and `LiveFromLive`: `s` issued from `cA` after a removal revoked it |
 | Every request holds its credential to a live passkey, or to none while its person holds none (`RequestChecks`; `FactorApp`) | `ServedBacked`: a request served on `o`, which the previous release issued after Ada's first passkey |
-| The sign-in holds the vault's answer to the access sequence it read, under the head (`SigninHoldsAccess`; `FactorSignin`) | `OwnersEnroll`: the vault answers that Ada is a Developer, `pro` promotes her and commits, `sgn` takes the head and commits a session the provider alone signed in, for an Owner |
+| The sign-in holds the vault's answer to the access sequence it read, under the change lock (`SigninHoldsAccess`; `FactorSignin`) | `OwnersEnroll`: the vault answers that Ada is a Developer, `pro` promotes her and commits, `sgn` takes the change lock and commits a session the provider alone signed in, for an Owner |
 
 **The invariants.** `ChangeEndsAll`: once a change commits, every
 credential of Ada's its rule names is revoked but the session it issued.
@@ -2990,8 +3026,8 @@ behind, whoever issued it. `OwnersEnroll`: no session the provider alone
 signed in is committed for someone who is an Owner of the whole instance
 when it commits, whatever role they held when the callback read them.
 
-No app issue takes the factor lock, and no invariant needs it to: the head
-orders it against a change, which takes the head right after the factor
+No app issue takes the factor lock, and no invariant needs it to: the change lock
+orders it against a change, which takes the change lock right after the factor
 lock, and the vault's issue, which takes no head, is what the factor lock
 is for. So the app adds no lock order: the change's factor-then-head is
 the only one that names both, and nothing takes them the other way.
@@ -3008,7 +3044,7 @@ Lifecycle.tla and Issuing.tla hold. The passkey's own liveness, which the
 statement checks too but which a removal makes moot by revoking `cA` under
 the lock. Each of the app's issues as a process of its own: `app` stands
 for them all (a browser session at sign-in, a CLI session at its poll, an
-MCP connection, a device decision), whose checks under the head are held
+MCP connection, a device decision), whose checks under the change lock are held
 by tests (`passkey-check.test.ts`, `mcp-oauth.test.ts`).
 The requests whose credential the vault reads in its own call (a use by
 name, a key write, an add), which run the check in that call (T216;
@@ -3042,7 +3078,7 @@ only a 0.16 precedes.
 
 **The model.** Two roles, one shipped (`dev`, which 0.15.0 left edited) and
 one an Owner makes (`c`); no row of either at first, as the migration makes
-none. Every change and every use is one step, as each holds the head and
+none. Every change and every use is one step, as each holds the change lock and
 the fence:
 
 - `OldEdit`, 0.15.0's change of one role: a change of the whole object, and
@@ -3097,6 +3133,117 @@ HotPathOne.tla's `CapFromPolicy` and `CapSealed` hold unchanged. What a
 role grants, which `@coffre/core/access` decides and the Lean proofs hold.
 0.17's foreign key, which adds no step: a grant names a row 0.16 made.
 0.18, which drops `log_config` and the whole object.
+
+## 0.16: the change lock
+
+0.14's head, the row `audit_chain_head`, did two jobs. It ordered the appends
+to 0.14's chain, which ends with the chain. And it ordered changes against
+each other, from a change's first statement to its commit: every "re-read
+under the head" in the tables above is a read a change makes between that
+first statement and its last, which alone takes the fence. The fence cannot
+do the second job where it sits. Take `Owners` without
+`LastOwnerCheckUnderChangeLock`: Olga and Omar, the two Owners, each remove
+themselves; each locks their own row and counts the other as an Owner; then
+each commits, and no Owner is left.
+
+So 0.16 keeps one lock for it, the **change lock**: an advisory lock
+(`pg_advisory_xact_lock`, transaction-scoped, a key of its own), taken where
+`lockLogHead` was, with the same bound on its wait (`boundLockWaits`,
+`retryingLocks`). No row, and nothing read under it. The models call it that
+everywhere, and the protections that rely on it end in `UnderChangeLock`
+(`ChangeTakesChangeLock` in Factor.tla).
+
+**A statement of its own.** Under READ COMMITTED a statement reads the
+database as it was when the statement began, however long it then waits for
+a lock. The head made up for that: its row came back as its last holder left
+it, whatever the snapshot, so a commit the snapshot had missed showed as a
+head ahead of the log it read (`snapshot.ts`, `current`). An advisory lock
+returns nothing to compare. So the wait for the change lock ends in one
+statement, and
+every read it orders is in a later one: a statement of the transaction's, or
+of a `VOLATILE` plpgsql function's body, each of which reads afresh. Never
+the same statement, a CTE of it, or a `STABLE` function, and no
+`pg_try_advisory_xact_lock` folded into the snapshot's read. Sent under one
+Sync with the members' rows, it is still its own statement; a member with no
+row yet is decided on from a read after it, since locking no row held
+nothing.
+
+**Who takes it.** Every holder of the head on `main` at `7aee14e6c`:
+
+| Holder today | What it is | In 0.16 |
+|---|---|---|
+| `vault.ts`, `#decideOnce` (the snapshot's head, `snapshot.ts:121`) | every change the vault decides: `setAccess`, `remove`, `admit`, `reference`, `endReferences`, `changePolicy`, `#declare` | the change lock, after the members' rows |
+| the same with `reads` (`#keys`), for `wrap` and `rewrap` | the vault's half of a key write down today's path | 0.14's head, which every change of several statements still takes, until it goes; then the change lock, with a change's wait (`LOCK_WAIT_MS`, retried), and the reads' line of 16 places goes |
+| the same with `reads`, for `unwrap` | 0.14's read | deleted with that path; a 0.15 use never took it |
+| `vault.ts:1686`, `#rotate` | the vault's row key moved | the change lock, after every member's row, until the rotation is a change of `log_keys` |
+| `context.ts:273`, `audited` | every transaction of the app's | the change lock first, when its work changes rows; one that only logs becomes an event (`note`) and takes none |
+| `secrets.ts:1074`, `vault.ts:4345` (`laterHead`) | the two-trip key write, the member add | the change lock, kept (WriteLocks.tla) |
+| SQL: `app_change`, `change_input`, `change_bindings`, `revoke_credential` | a change's last statement, or its only one | the change lock where each took the head: held already by a change of several statements, taken there by a change of one. `change_bindings` took it in every call but one: a bind that only makes a binding takes neither the head nor the fence, ordered by the account's and the actor's rows and by what it compares, and stays so. An unbind, a bind that replaces a binding and a sweep keep the lock, the sweep that only closes bindings too, which takes no fence but writes their rows |
+| `vault.ts:5102`, `reserveProxy` (`#decide` with `CODE_QUEUE`) | the code's proxy names reserved, a change when it adds one: a read before any lock answers every call but the first, and one call at a time waits for the head, in a line of one place (`lockLogHeadQueued`, `HeadBusy`) | the change lock, behind the same read and the same line of one place |
+| `key-rotation.ts`, `headFor` | a step of the app key's rotation, which signs 0.14's entries again and signs sessions out | the change lock first, as the changes it makes take it, then 0.14's head while that chain is written; AppKey.tla is as it was |
+| `vault.ts:3715`, `checkpoint` | a checkpoint of 0.14's chain | the change lock, as every decision takes it (`#decide([])`), until the chain's last append; Audit.tla is as it was |
+| `vault.ts:3558`, `#checkKeks` | a key's check value, recorded once | none: an event. The head only kept a second record out |
+| `vault.ts:1042`, `:1383`, `:4076`; `context.ts:616`, `alerts.ts:64`, `watch.ts:183`, `db/audit.ts:59` | an entry that changes nothing: a refusal's record, a report, an alert | none: an event, under the fence shared |
+| `vault.ts:3960`, `#cutOver` | 0.15's cutover | deleted |
+| `log.ts:258` (`lockLogHeadQueued`), `:339` (`appendEntries`) | the reads' line of 16 places; 0.14's append | deleted; the line itself stays for `reserveProxy`'s one place, in front of the change lock |
+| `snapshot.postgres.ts:44` (`FOR UPDATE SKIP LOCKED`) | the Postgres half of the snapshot's head above: the row taken in the statement that reads | goes with the row; the change lock is a statement of its own, before the read |
+| `verify-runtime.ts:103` | `coffre-server verify`'s probe that the runtime login can update the head, rolled back | deleted with the row |
+| 0.15's checkpointer (its barrier), a 0.15 use, and in 0.16 the projector and the audit page's check | | never took the head, never take the change lock |
+
+**The order.** The rows a flow shares with an issue, the change lock, the
+issue lock, the fence; the checkpointer's barrier takes the issue lock, then
+the fence. WriteLocks.tla's `ChangeLocks` checks it, with one run per lock
+taken out of turn.
+
+**The two-trip paths keep it.** Each holds what it read in its last
+statement, under the fence, so its own decision needs no lock before. But a
+key write then updates the key's row, and another change of that key locks
+the row under the change lock before it asks for the fence: without the
+lock, the write waits for the row with the fence held (`WriteLocks`,
+`WriteTakesChangeLock`). The member add takes it as every change does,
+though no wait cycle needs it there.
+
+**The policy revision.** A change that decided on the policy commits only
+while that policy is in force. 0.15 compared one number, the seq of the
+newest `policy.change` in 0.14's log. 0.16 compares two: the number of the
+newest change, in `log_changes`, of the roles object and of the policy
+object, as `hold_inputs` compares numbers already (`ReadOnLog`,
+`ReadByNumber`). The protected environments are the policy object's, one
+list on its row, so a protect moves the policy's number as a change of the
+cap does, and no request has a set of environments to compare. The slugs of
+the protected environments the caller was loaded with are read again, as
+before.
+
+Never the seal a row stores, though the design calls this a digest of seals.
+A seal is a MAC over the row's values, so the same values have the same
+seal: a database writer who puts an old row back puts its genuine seal back
+with it. Take an environment that was unprotected when the caller was
+loaded. An Owner protects it, which changes the policy's row, and the
+writer puts that row back as it was. A commit that compares the rows' seals
+finds the one it loaded, and writes to a protected environment; the log's
+newest change of the policy is the protection, with another number. A number also tells a policy changed and changed back
+from one that never moved, as 0.15's seq did: both answer 409
+`policy_changed`.
+
+Writing.tla's `WritingDigest` holds today's commit to each number
+(`TodayUnheld`, one run per object left out) and to the log
+(`TodayPolicyOnLog`, with that writer). The model keeps an environment's
+protection an object apart from the policy row, three numbers where the
+code has two: the code's two differ whenever the model's three do, and
+when any other environment's protection moves too. Lifecycle.tla's issue holds to the
+roles under the issue lock (`IssuePolicyHeld`) and its revoke under the fence
+(`RevokePolicyHeld`). Its runs have no such writer and compare what is true
+of the roles; the statements they stand for compare the roles' number, never
+their seal.
+
+**What still says "head".** Bulk.tla (the bulk limit of 0.14's read),
+Audit.tla (0.14's chain and its checkpoints) and AppKey.tla (the app key's
+rotation over 0.14's entries) model flows that end with 0.14's chain; their
+head is that chain's, and they go or change with the code that ends it.
+Seal.tla's head is a tree's, and no lock. The read in
+Coffre.tla and the unwrap in Credentials.tla (`Uses015` off) are 0.14's too:
+their steps take the lock as they took the head, and leave with that path.
+What HotPathOne.tla says of 0.14's head goes with that path too.
 
 ## TLC
 
@@ -3395,7 +3542,7 @@ the store builds, one row an id.
   ciphertext to the key, whose returned `KeyId` the code checks; and
   `kekIntegrity`'s adversary is anyone without `kms:Encrypt` on the key.
 - **The rewrap rule.** `rewrap` wraps a sensitive version's key again only as
-  sensitive (`LOOSER`, re-checked under the head), but for an Owner's
+  sensitive (`LOOSER`, re-checked under the change lock), but for an Owner's
   loosening: what makes `sensitive_value_never_reaches_a_person`'s hypothesis
   hold. Neither is modelled or compared.
 - **Freshness.** Rolling back the log and all its checkpoints together needs

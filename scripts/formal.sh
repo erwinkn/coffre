@@ -37,29 +37,28 @@ TLA_URL="https://github.com/tlaplus/tlaplus/releases/download/v$TLA_VERSION/tla2
 # cover for each other, and the invariant TLC must find broken without it.
 REMOVALS=(
   "Deletion GrantRereadInDeletion EveryGrantRevocable"
-  "Deletion PlaceReadUnderHead EveryGrantRevocable"
+  "Deletion PlaceReadUnderChangeLock EveryGrantRevocable"
   "Deletion ArchivedRecheckInDeletion DeletedOnlyWhenArchived"
-  "Deletion PatchRecheckUnderHead TombstonesKeepTheirSlug"
-  "Deletion PatchRecheckUnderHead TombstonesStayArchived"
-  "Reading KeyPlaceRecheckUnderHead NothingReleasedAfterDeletion"
-  "Reading KeyPlaceRecheckUnderHead DeletedStaysUnreachable"
-  "Reading EnvCreateRecheckUnderHead DeletedStaysUnreachable"
-  "Reading SecretPatchRecheckUnderHead DeletedStaysUnreachable"
+  "Deletion PatchRecheckUnderChangeLock TombstonesKeepTheirSlug"
+  "Deletion PatchRecheckUnderChangeLock TombstonesStayArchived"
+  "Reading KeyPlaceRecheckUnderChangeLock NothingReleasedAfterDeletion"
+  "Reading KeyPlaceRecheckUnderChangeLock DeletedStaysUnreachable"
+  "Reading EnvCreateRecheckUnderChangeLock DeletedStaysUnreachable"
+  "Reading SecretPatchRecheckUnderChangeLock DeletedStaysUnreachable"
   "Members MemberRecheckInSignin CredentialsAtCurrentGeneration"
   "Locks SortedMemberLocks NoWaitCycle"
-  "Members StandingRecheckUnderHead NothingReleasedAfterRevocation"
-  "Sharing StandingRecheckUnderHead NothingReleasedAfterRevocation"
+  "Members StandingRecheckUnderChangeLock NothingReleasedAfterRevocation"
+  "Sharing StandingRecheckUnderChangeLock NothingReleasedAfterRevocation"
   "Members RotationClosesIntents IntentsAccounted"
-  "References EndRecheckUnderHead NothingReleasedThroughEndedReference"
+  "References EndRecheckUnderChangeLock NothingReleasedThroughEndedReference"
   "Referencing SourceRecheckInReference ReferencedSourcesStayLive"
   "Referencing ArchiveRefusedWhileRead ReferencedSourcesStayLive"
   "Referencing ReferenceRereadInDeletion EveryReferenceBreakable"
-  "Owners LastOwnerCheckUnderHead OwnerStays"
-  "Regenerating InheritedRecheckUnderHead RegeneratesReplaceWhatTheyListed"
+  "Owners LastOwnerCheckUnderChangeLock OwnerStays"
+  "Regenerating InheritedRecheckUnderChangeLock RegeneratesReplaceWhatTheyListed"
   "Exchanging SpentTokenInsertedWithCredential SingleUse"
-  "Exchanging BindingRecheckUnderHead NoExchangeAfterUnbind"
+  "Exchanging BindingRecheckUnderChangeLock NoExchangeAfterUnbind"
   "Exchanging MemberRecheckInExchange ExchangedAtCurrentGeneration"
-  "Revoking CredentialFenceUnderHead NoReleaseAfterEnd"
   "Revoking CredentialFenceUnlocked NoReleaseAfterEnd"
   "Revoking RevokeIssuedCredentials NoReleaseAfterEnd"
   "Revoking KeptAnswerChecked NoReadOnStaleAnswer"
@@ -139,23 +138,22 @@ REMOVALS=(
   "BatchingRefused AnswerWhole AllOrNothing"
   # A use by name holds its rows to the names (Naming.tla; review r2 of #412): an id kept is used only while it is still named so.
   "Naming HeldToNames UsedAsNamed"
-  "Proxying CredentialFenceUnderHead NoReleaseAfterEnd"
   "Proxying CredentialFenceUnlocked NoReleaseAfterEnd"
   "Revoking RevokeIssuedCredentials+BindingCheckedAtUse UnboundStayUnusable"
   "Issuing IssuerFence SensitiveOnlyFromOwners"
   "Issuing SealIssuerFence SensitiveOnlyFromOwners"
   "Issuing ServiceRecheckInIssue TokensAtCurrentGeneration"
   "Issuing SealCompareAndSet SealedOnce"
-  "Issuing IssuerGenerationKept+IssuerStandsUnderHead IssuedAsAuthenticated"
+  "Issuing IssuerGenerationKept+IssuerStandsUnderChangeLock IssuedAsAuthenticated"
   # A person's factor lock (Factor.tla, T176 PR 3): every issue of theirs and every change to their passkeys takes it, the issue first.
   "Factor IssueTakesFactor ChangeEndsAll"
   "Factor IssueTakesFactor LiveFromLive"
   "Factor ChangeTakesFactor ChangeEndsAll"
   "Factor FactorFirst NoWaitCycle"
   "Factor IssueChecksPasskey NamesItsSource"
-  # The app's own issues (T176 PR 4): the head orders them against a change, which takes it after the factor lock; each
+  # The app's own issues: the change lock orders them against a change, which takes it after the factor lock; each
   # checks its source and the passkey rule under it; and every request refuses what the previous release issued past it.
-  "FactorApp ChangeTakesHead ChangeEndsAll"
+  "FactorApp ChangeTakesChangeLock ChangeEndsAll"
   "FactorApp AppIssueChecks IssuedBacked"
   "FactorApp AppIssueChecks LiveFromLive"
   "FactorApp RequestChecks ServedBacked"
@@ -183,7 +181,7 @@ REMOVALS=(
   "WorkloadNarrow TargetResolvedBeforeConstraints+EncodedSegmentsRefused NarrowSubset"
   "WorkloadNarrow EncodedSegmentsRefused NarrowSubset"
   "WorkloadNarrow ChildOpsRefused NarrowSubset"
-  "WorkloadCapacity CountUnderHead Capacity"
+  "WorkloadCapacity CountUnderChangeLock Capacity"
   "WorkloadCapacity RenewOnlyLive Capacity"
   "WorkloadCapacity SupersedeCheckedAtExchange Superseded"
   "WorkloadCapacity SupersedeCheckedAtRenewal Superseded"
@@ -504,7 +502,7 @@ REMOVALS=(
   # The decision weighing anything but the read (the roles from its isolate's cache): the hold holds the read, and
   # the role redefined before both is missed.
   "WritingPlace DecideOnRead WritesStandAtCommit"
-  # The hold before the fence: a session's revoke, which takes the fence and not the head, between it and the write.
+  # The hold before the fence: a session's revoke, which takes the fence and not the change lock, between it and the write.
   "WritingRevoke HoldAfterFence WritesStandAtCommit"
   # The read's numbers from the row's own seal column: a database writer puts a revoked session back, live.
   "WritingTamper ReadOnLog WritesStandAtCommit"
@@ -531,14 +529,19 @@ REMOVALS=(
   # fence and waits for an issue's shared hold on its credential, that issue queued behind the barrier, which waits
   # for the write's issue lock.
   "WriteLocks TouchFirst NoWaitCycle"
-  # The issue lock before the fence, everywhere (T123, T149): the barrier, a policy change, a sign-in's trigger. Each
-  # without it holds one of the two and waits for the other, held by the barrier or the write that waits for the first.
-  "WriteLocks BarrierIssueFirst NoWaitCycle"
-  "WriteLocks PolicyIssueFirst NoWaitCycle"
-  "WriteLocks IssueBeforeFence NoWaitCycle"
-  # A member add taking 0.14's head before the members' rows (AddLocks, T179 PR 5): a demotion holds the row and
-  # waits for the head, which the add holds while it waits for the row.
+  # The key write without the change lock: it holds the fence and waits for the key's row, which another change
+  # of that key holds, under the lock, while it waits for the fence. So the two-trip write keeps the lock.
+  "WriteLocks WriteTakesChangeLock NoWaitCycle"
+  # A member add taking the change lock before the members' rows (AddLocks): a demotion holds the row and
+  # waits for the lock, which the add holds while it waits for the row.
   "AddLocks MembersFirst NoWaitCycle"
+  # The order of a change's locks (ChangeLocks): the change lock, the issue lock, the fence. An entry numbered
+  # before the change lock; the fence before the issue lock; the barrier taking the fence first: each closes a cycle.
+  "ChangeLocks ChangeLockFirst NoWaitCycle"
+  "ChangeLocks IssueBeforeFence NoWaitCycle"
+  "ChangeLocks BarrierIssueFirst NoWaitCycle"
+  # The policy's change taking the fence before the issue lock: the barrier holds the issue lock while it waits for it.
+  "ChangeLocks PolicyIssueFirst NoWaitCycle"
   # A finding about a member weighed by 0.14's rule (Findings.tla, T179 PR 4a): under 0.16 no access entry follows a
   # change, and a change above the finding settles nothing.
   "Findings WeighsChanges Settles"
@@ -555,6 +558,17 @@ REMOVALS=(
   # Today's commit not holding to the policy the caller was loaded with (`policyStill`): a roles change after its
   # decision does not stop it (review r3 of #469).
   "WritingFallBack TodayPolicyHeld TodayPolicyStandsAtCommit"
+  # The policy that commit holds to is a digest of numbers (each its object's newest change's), the roles', the policy row's and the environment's
+  # protection, where 0.15 held one number: a digest that leaves one out lets that change past. The two-trip hold
+  # reads the protection too.
+  'WritingDigest TodayUnheld={"protected"} TodayPolicyStandsAtCommit'
+  'WritingDigest TodayUnheld={"roles"} TodayPolicyStandsAtCommit'
+  'WritingDigest TodayUnheld={"policy"} TodayPolicyStandsAtCommit'
+  # That digest read from the seals the rows store (expert review of #573): a seal is a MAC over its row's values, so
+  # a database writer who puts env's row back, unprotected, puts back the seal the caller was loaded with, and the
+  # commit writes there. The numbers are the log's, each object's newest change's.
+  "WritingDigest TodayPolicyOnLog TodayPolicyStandsAtCommit"
+  'WritingDigest Unheld={"protected"} WritesStandAtCommit'
   # A refusal down today's path, as before PR 6: a try the vault served, abandoned at its hold, then refused, goes on
   # there with the caller the first try checked, and writes once the grant is back, the session revoked since (review
   # r2 of #469). The refusal's record ends the request instead.

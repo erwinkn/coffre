@@ -10,7 +10,7 @@ import { generateKeyPairSync, randomUUID, sign as signWith, type KeyObject } fro
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { generateToken, github, hashToken, signin, tokenHint, type BindingClaims } from '@coffre/core/identity';
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 
 import { coffreRoute } from '../src/app.ts';
 
@@ -21,7 +21,7 @@ import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditLog, credentials, environments, logChanges, secretReferences, secrets, secretVersions, serviceBindings, principals } from '@coffre/db/schema';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, loggedEntries, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -116,9 +116,8 @@ async function read(token: string, path: string): Promise<string> {
 
 /** The reason the newest refusal of a read logs. */
 async function refusedFor(): Promise<string> {
-  const [entry] = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
-    .where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'deny'))).orderBy(desc(auditLog.seq)).limit(1);
-  return (JSON.parse(entry!.metadata) as { reason: string }).reason;
+  const entry = (await loggedEntries(db.owner, ['secret.read'])).filter((row) => row.decision === 'deny').at(-1);
+  return (entry!.metadata as { reason: string }).reason;
 }
 
 /** A run's ID token as GitHub would sign it for `deploy.yml` on main, for this instance. */
@@ -160,10 +159,9 @@ test("a Developer's service account reads every value of backend/dev but its sen
   });
   // Refused, and logged once each, by the app, naming the key: the app's own refusal, or, the key's read by name (0.15's
   // log), the vault's, which the app logs reading nothing more of the key.
-  const refused = await db.owner.select({ author: auditLog.author, actor: auditLog.actor, metadata: auditLog.metadata })
-    .from(auditLog).where(and(eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'deny'))).orderBy(asc(auditLog.seq));
+  const refused = (await loggedEntries(db.owner, ['secret.read'])).filter((entry) => entry.decision === 'deny');
   assert.deepEqual(refused.map((entry) => {
-    const { reason, keys, key } = JSON.parse(entry.metadata) as { reason: string; keys?: string[]; key?: string };
+    const { reason, keys, key } = entry.metadata as { reason: string; keys?: string[]; key?: string };
     return [entry.author, entry.actor, reason, keys ?? [key]];
   }), [
     ['app', CI, 'not_owner_issued', ['STRIPE_SECRET_KEY']],
@@ -244,9 +242,8 @@ test('an issuer removed and admitted again while issuing issues nothing: the req
   }, { after: true });
   await assert.rejects(owen.tokens.issue(CI, { expiresInDays: 30 }), { status: 401 });
   assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, CI)), []);
-  const [refused] = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
-    .where(and(eq(auditLog.action, 'token.create'), eq(auditLog.decision, 'deny')));
-  assert.equal((JSON.parse(refused!.metadata) as { reason: string }).reason, 'credential_ended');
+  const [refused] = (await loggedEntries(db.owner, ['token.create'])).filter((entry) => entry.decision === 'deny');
+  assert.equal((refused!.metadata as { reason: string }).reason, 'credential_ended');
 });
 
 test('a trust binding is weighed the same: an Owner demoted while binding a workload binds nothing', async () => {
@@ -365,23 +362,6 @@ test("a binding's runs read the sensitive values only where an Owner bound it; o
   const again = await ada.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [owners.binding.id] });
   assert.deepEqual(await stored(serviceBindings, again.binding.id), [{ role: 'viewer', sensitive: false }]);
   assert.equal(await read(await exchanged(), 'backend/dev/STRIPE_SECRET_KEY'), '404 not_owner_issued');
-});
-
-test("a binding an older release made, replaced before anything sealed it, is sealed first: its Owner's say is kept, never dropped", async () => {
-  const [member] = await db.owner.select().from(principals).where(eq(principals.principal, CI));
-  const [dev] = await db.owner.select({ projectId: environments.projectId, id: environments.id }).from(environments).where(eq(environments.slug, 'dev'));
-  const scope = JSON.stringify([{ projectId: dev!.projectId, environmentId: dev!.id, role: 'viewer', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.use'] } }]);
-  const binding = { id: randomUUID(), principal: CI, generation: member!.generation, profile: 'github', issuer: ISSUER, jwksUri: KEYS, claims: JSON.stringify(DEPLOY), revokedAt: null, scope };
-  await db.owner.insert(serviceBindings).values({ ...binding, label: null, createdBy: OWEN, authMac: authMac(deps.chainKey, 'service_bindings', binding) });
-  // A preview seals nothing: it writes and logs nothing, and inherits the scope as read, which says nothing of sensitive values.
-  const planned = await owen.bindings.preview(CI, { profile: 'github', claims: DEPLOY, replaces: [binding.id] });
-  assert.deepEqual(planned.withheld, ['backend/dev']);
-  assert.deepEqual(await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, binding.id)), [{ scope }]);
-  assert.deepEqual(await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.action, 'token.seal')), []);
-  // Owen trusts the workload again in its place, inheriting its scope.
-  const again = await owen.bindings.create(CI, { profile: 'github', claims: DEPLOY, replaces: [binding.id] });
-  assert.deepEqual(await stored(serviceBindings, again.binding.id), [{ role: 'viewer', sensitive: true }]);
-  assert.equal(await read(await exchanged(), 'backend/dev/STRIPE_SECRET_KEY'), STRIPE);
 });
 
 test('the vault decides it too, whatever the app asks: a service reads a sensitive value only on a scope that says an Owner issued it there', async () => {

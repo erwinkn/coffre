@@ -381,8 +381,8 @@ credential's entries carry theirs. The audit page shows "ada@acme.example via Cl
 | `mcp.connect` | consent approved, with scopes asked and granted, or denied |
 | `mcp.token` | a code redeemed, a refresh (detail) |
 | `mcp.disconnect` | a connection ended, with its reason: `person`, `owner`, `revocation_endpoint`, `code_reused`, `refresh_reused`, `superseded` |
-| `mcp.read` | a read-only tool's call that went through (detail) |
-| `mcp.call` | a change's call that opens an approval, and every refusal: scope, too many approvals, a bad `requestState`, the API's own |
+| `mcp.read` | a read-only tool's call that went through (detail), as written before 0.16: since 0.16 a call that returns no secret value writes no entry of its own, as a page view never did, and a value read is recorded by the vault, under the connection's credential |
+| `mcp.call` | a change's call that opens an approval, and every refusal of MCP's own: scope, too many approvals, a bad `requestState`. A refusal the API or the vault gave is the entry that route or the vault writes, once, under the client |
 | `mcp.approve`, `mcp.deny`, `mcp.cancel` | the person's decision, or the client's decline |
 | the change's own entries | `secret.write`, `access.grant`, …, with `via` |
 

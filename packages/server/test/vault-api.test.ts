@@ -25,6 +25,7 @@ import {
   waitUntil,
   testVault,
   type FixtureDeps,
+  loggedEntries,
 } from './api-fixture.ts';
 import { appLogKey } from '../src/db/audit.ts';
 import { withLogUnlocked } from './db/engine.ts';
@@ -89,12 +90,8 @@ async function vaultEntries(client = root) {
 
 /** Why the app's own entries say `action` was denied, oldest first. */
 async function appDenials(action: string): Promise<unknown[]> {
-  const rows = await db.owner
-    .select({ metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, action), eq(auditLog.decision, 'deny')))
-    .orderBy(asc(auditLog.seq));
-  return rows.map((row) => JSON.parse(row.metadata).reason);
+  const rows = (await loggedEntries(db.owner, [action])).filter((entry) => entry.author === 'app' && entry.decision === 'deny');
+  return rows.map((row) => row.metadata.reason);
 }
 
 // --- keys ---------------------------------------------------------------------

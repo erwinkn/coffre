@@ -699,6 +699,39 @@ test('a 0.15 change beside a 0.14 decision holding its member\'s row: row, head,
   }
 });
 
+test("a vault change takes its lock bound and its members' rows before the change lock (MembersFirst)", { timeout: 30_000 }, async () => {
+  const w = await world();
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
+  const [holder, prober] = [postgresSession(OWNER_URL), postgresSession(OWNER_URL)];
+  const tryChangeLock = async () => {
+    await prober.unsafe('BEGIN');
+    const [row] = await prober.unsafe<[{ held: boolean }]>('SELECT pg_try_advisory_xact_lock(1668244070, 2) AS held');
+    await prober.unsafe('ROLLBACK');
+    return row.held;
+  };
+  const access = { actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer' as const, expiresAt: null }] };
+  try {
+    // Ada's row held: the change waits for it holding no change lock, so an app change is not held up behind it.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT 1 FROM principals WHERE principal = $1 FOR NO KEY UPDATE', [ADA]);
+    const changed = w.vault.setAccess(access);
+    await waitFor(async () => (await waiting()) > 0, 'the change waits for the row');
+    assert.equal(await tryChangeLock(), true);
+    await holder.unsafe('ROLLBACK');
+    assert.ok((await changed).ok);
+    // The change lock held: the change waits for it under its lock bound, and gives up within the call's deadline
+    // rather than at the login's statement timeout.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT pg_advisory_xact_lock(1668244070, 2)');
+    const started = Date.now();
+    const settled = await w.vault.setAccess({ ...access, changes: [{ ...access.changes[0]!, role: null }] }).then(() => 'answered', () => 'failed');
+    assert.ok(Date.now() - started < 15_000, `${settled} after ${Date.now() - started} ms`);
+    await holder.unsafe('ROLLBACK');
+  } finally {
+    await Promise.all([holder.end(), prober.end()]);
+  }
+});
+
 test('changes and reads at once, on the same members, all answer, and the log replays to the rows', async () => {
   const w = await world();
   const vaults = await Promise.all([1, 2, 3].map(async () => openLocalVault(await db.connect(4), w.config, { sealThrough: sealed, heldOutside: nothingHeld })));

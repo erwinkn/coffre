@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import type { CoffreClient } from '@coffre/client';
 import { defineSignin, github, type BindingClaims } from '@coffre/core/identity';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
@@ -12,7 +12,7 @@ import { updateAuth } from '../src/db/queries.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditLog, credentials, principals, projects, serviceBindings } from '@coffre/db/schema';
-import { clientFor, issuesLogged, openTestDatabase, resetDatabase, revokesLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, issuesLogged, loggedEntries, openTestDatabase, resetDatabase, revokesLogged, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // People who set up service accounts without running the instance:
 // docs/design/instance-roles.md, "Setting up service accounts".
@@ -91,12 +91,8 @@ beforeEach(async () => {
 
 /** Each of these actions' entries, oldest first: who, what, allowed or not, and why not. */
 async function logged(...actions: string[]) {
-  const rows = await db.owner
-    .select({ actor: auditLog.actor, action: auditLog.action, decision: auditLog.decision, code: auditLog.code, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(inArray(auditLog.action, actions))
-    .orderBy(asc(auditLog.seq));
-  return rows.map((row) => [row.actor, row.action, row.decision, row.code ?? JSON.parse(row.metadata).reason ?? null]);
+  const rows = await loggedEntries(db.owner, actions);
+  return rows.map((row) => [row.actor, row.action, row.decision, row.code ?? row.metadata.reason ?? null]);
 }
 
 test('a Developer of dev sets up CI for dev: the account, its grant, a token and a trust binding, each in the log', async () => {
@@ -282,13 +278,9 @@ test('the setting keeps prod to Admins: a prod Developer sets up dev only, an Ad
   await assert.rejects(ada.members.add('token:ci-2'), { status: 403 });
   assert.equal((await boss.me()).setsUpServices, true);
 
-  const changes = await db.owner
-    .select({ actor: auditLog.actor, decision: auditLog.decision, author: auditLog.author, metadata: auditLog.metadata })
-    .from(auditLog)
-    .where(and(eq(auditLog.action, 'settings.change'), eq(auditLog.author, 'vault')))
-    .orderBy(asc(auditLog.seq));
+  const changes = (await loggedEntries(db.owner, ['settings.change'])).filter((entry) => entry.author === 'vault');
   assert.deepEqual(changes.map((row) => [row.actor, row.decision]), [[`user:${ROOT}`, 'allow'], [`user:${ROOT}`, 'allow']]);
-  assert.deepEqual(JSON.parse(changes[0].metadata).previous, { serviceAccounts: { projects: 'all', environments: 'all' } });
+  assert.deepEqual(changes[0]!.metadata.previous, { serviceAccounts: { projects: 'all', environments: 'all' } });
   assert.deepEqual(await logged('settings.change').then((entries) => entries.filter(([, , decision]) => decision === 'deny').map(([actor]) => actor)), [ADA, BOSS]);
   assert.equal((await root.audit.verify()).ok, true);
 });

@@ -110,7 +110,7 @@ before(async () => {
   connectionId = randomUUID();
   const expiresAt = new Date(Date.now() + 86_400_000);
   const member = `user:${DEV}`;
-  const changes = await AppChanges.prepare(deps.vault, member, [connectionChange(null, { id: connectionId, principal: member, generation: 0, expiresAt, revokedAt: null })]);
+  const changes = await AppChanges.prepare(deps.vault, member, [connectionChange(null, { id: connectionId, principal: member, generation: 0, expiresAt, revokedAt: null }, null)]);
   await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (tx) => {
     await insertConnection(tx, deps.chainKey, {
       id: connectionId, principal: member, generation: 0, clientId: 'https://client.example/meta', clientName: 'Client', clientHost: 'client.example', registration: 'cimd',

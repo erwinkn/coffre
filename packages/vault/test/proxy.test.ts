@@ -271,7 +271,7 @@ test('what a save refuses before it reads: a definition the rules refuse, an ite
   const { prepareChanges } = await import('../src/changes.ts');
   const { appChanges } = await import('@coffre/db/log');
   const calls = prepareChanges({ seals: w.keys, mac: (await import('../src/log-entry.ts')).logMacKey(w.config.signingKeys[0]!) }, Date.now(), ROOT,
-    [{ kind: 'environment', id: personal, before: null, after: { id: personal, projectId: w.project, slug: `p-${personal.slice(0, 8)}`, owner: ROOT, parentId: w.dev, protected: null, archived: false, projectArchived: false } }], new Map());
+    [{ kind: 'environment', entry: null, id: personal, before: null, after: { id: personal, projectId: w.project, slug: `p-${personal.slice(0, 8)}`, owner: ROOT, parentId: w.dev, protected: null, archived: false, projectArchived: false } }], new Map());
   await db.owner.transaction((tx) => appChanges(tx, calls));
   refusedWith(await w.save({ seal: null, items: { openai: route('openai') } }, personal), 'invalid', /personal config/);
   assert.equal(await stored(w.dev), undefined);

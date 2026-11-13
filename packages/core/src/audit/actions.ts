@@ -13,7 +13,8 @@ export const DETAIL_ACTIONS = [
   'device.deny',
   // An MCP client's code redeemed, or its tokens refreshed: every hour of its use.
   'mcp.token',
-  // A read-only tool's call through MCP that went through. Its refusals, and every change, are `mcp.call`, shown.
+  // A read-only tool's call through MCP that went through, as written before 0.16: a call that returns no value writes
+  // nothing of its own now, as a page view does not.
   'mcp.read',
   'account.link',
   'account.unlink',

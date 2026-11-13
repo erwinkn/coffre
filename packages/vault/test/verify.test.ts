@@ -74,7 +74,7 @@ type World = Awaited<ReturnType<typeof world>>;
 /** A binding of CI's the Owner makes, sealed: a CI run's of `ISSUER`, whose keys it publishes, unless `as` says otherwise. */
 async function bound(w: World, as: Partial<MadeBinding> = {}): Promise<MadeBinding> {
   const made: MadeBinding = {
-    id: randomUUID(), principal: CI, generation: 0, profile: 'github', issuer: ISSUER, origin: ORIGIN, jwksUri: KEYS, claims: JSON.stringify({ repository_id: '1' }),
+    entry: null, id: randomUUID(), principal: CI, generation: 0, profile: 'github', issuer: ISSUER, origin: ORIGIN, jwksUri: KEYS, claims: JSON.stringify({ repository_id: '1' }),
     scope: storedScope([{ ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }), sensitive: false }]), policy: null, revoked: false,
     jwks: null, label: 'deploys', createdBy: 'root@acme.example', createdAt: Date.now(), authMac: randomBytes(32).toString('base64'), ...as,
   };

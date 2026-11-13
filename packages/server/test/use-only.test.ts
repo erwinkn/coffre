@@ -18,7 +18,7 @@ import { serveApi } from '../src/api/router.ts';
 import { parsePath } from '../src/api/paths.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { auditLog, environments, projects, secrets } from '@coffre/db/schema';
-import { clientFor, contextFor, openTestDatabase, refusedIn, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, loggedEntries, openTestDatabase, refusedIn, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const API = 'api';
@@ -115,9 +115,8 @@ test('a workload reads plain values and the keys its binding lists; the rest it 
   assert.deepEqual(Object.keys((await client(await byId({ 'market/prod': '*' })).secrets.reveal('market/prod')).values).sort(), ['DATABASE_URL', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'TWILIO_SID']);
 
   // The single read refused is logged, naming the key.
-  const [entry] = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
-    .where(and(eq(auditLog.author, 'app'), eq(auditLog.action, 'secret.read'), eq(auditLog.decision, 'deny')));
-  assert.deepEqual(JSON.parse(entry!.metadata), { reason: 'use_only', keys: ['STRIPE_SECRET_KEY'] });
+  const [entry] = (await loggedEntries(db.owner, ['secret.read'])).filter((row) => row.author === 'app' && row.decision === 'deny');
+  assert.deepEqual(entry!.metadata, { reason: 'use_only', keys: ['STRIPE_SECRET_KEY'] });
 });
 
 test('renaming a key onto a listed name leaves it unreadable: reads list IDs, not names', async () => {

@@ -1,13 +1,13 @@
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, randomBytes, sign as signWith, type KeyObject } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 
 import { shownMember, SIGN_IN_BODY_BYTES } from '@coffre/core/schemas';
 import type { Role } from '@coffre/core/access';
 import { createClient } from '@coffre/client';
-import { github, MAX_BINDINGS, signin, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
+import { generateToken, github, hashToken, MAX_BINDINGS, signin, tokenHint, type BindingClaims, type RateLimiter, type WorkloadProfile } from '@coffre/core/identity';
 import { createDatabase, type Client, type Database } from '@coffre/db';
 import type { PostgresClient } from '@coffre/db/connect';
 import { versioned, type Vault, type VaultEntry } from '@coffre/core/vault';
@@ -22,13 +22,13 @@ import { AFTER_REMOVAL_CALLS, UNBIND_BATCH } from '../src/api/workloads.ts';
 import { countedEntry, countingCalls, WORKERS_BATCH, workersRemovalBudget } from '../src/removal.ts';
 import { serveApi } from '../src/api/router.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
-import { exchangeCandidates, exchangeStill, exchangeToken, issuedSoonest, liveIssued, pruneSpentTokens } from '../src/db/queries.ts';
+import { exchangeCandidates, issuedSoonest, liveBindings, liveIssued, pruneSpentTokens, standingBinding } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
-import { clientFor, contextFor, entryOf, decisionInputs, holdSomething, openTestDatabase, resetDatabase, revokesLogged, signInsLogged, speaking, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, decisionInputs, entryOf, holdSomething, loggedEntries, openTestDatabase, resetDatabase, revokesLogged, signInsLogged, speaking, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { keeps015 } from '../src/api/changes.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
@@ -176,6 +176,25 @@ async function bind(claims: BindingClaims, replaces: string[] = [], profile: Wor
   return made.binding.id;
 }
 
+/**
+ * A binding as a release before 0.11 left one in the log: the vault's, sealed and live, its scope naming each
+ * place but not whether it reads sensitive values there (`unsealedScope`).
+ */
+async function bindUnsealed(claims: BindingClaims): Promise<string> {
+  const real = deps.vault.changeBindings!;
+  deps.vault.changeBindings = (input) => {
+    const make = input.make!;
+    const scope = JSON.stringify((JSON.parse(make.scope!) as Record<string, unknown>[]).map(({ sensitive: _, ...grant }) => grant));
+    const row = { ...make, scope, revokedAt: null };
+    return real.call(deps.vault, { ...input, make: { ...make, scope, authMac: authMac(deps.chainKey, 'service_bindings', row as never).toString('base64') } });
+  };
+  try {
+    return await bind(claims);
+  } finally {
+    deps.vault.changeBindings = real;
+  }
+}
+
 const ui = {} as Pages;
 
 async function exchange(body: unknown, sourceIp: string | null = IP): Promise<{ status: number; body: Record<string, string>; retryAfter: string | null }> {
@@ -199,9 +218,8 @@ async function caller(credential: string): Promise<number | string> {
 }
 
 async function appEntries(action: string) {
-  const rows = await db.owner.select({ actor: auditLog.actor, decision: auditLog.decision, metadata: auditLog.metadata })
-    .from(auditLog).where(eq(auditLog.action, action)).orderBy(asc(auditLog.seq));
-  return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
+  const rows = await loggedEntries(db.owner, [action]);
+  return rows.map(({ actor, decision, metadata }) => ({ actor, decision, metadata }));
 }
 
 test("a run's token buys a five-minute credential of the service, logged with its run, reading as the service", async () => {
@@ -747,37 +765,16 @@ test('a binding removed, or a member removed or admitted again, while an exchang
   await nothingWritten();
 });
 
-test('the spend writes the credential and stamps the binding only when it spent the token itself', async () => {
-  const [before] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
-  const row = () => runtime.signin!.exchangedCredential(SERVICE, { generation: before!.generation, bindingId: bound, label: null, expiresAt: new Date(Date.now() + 300_000) }).row;
-  const credentialRows = async (id: string) => (await db.owner.select({ id: credentials.id }).from(credentials).where(eq(credentials.id, id))).length;
-  const lastUsed = async () => (await db.owner.select({ at: serviceBindings.lastUsedAt }).from(serviceBindings).where(eq(serviceBindings.id, bound)))[0]!.at?.getTime() ?? null;
-  // A token spent already: refused, no credential, the binding's last use as it was.
-  const spentHash = randomBytes(32);
-  await db.owner.insert(spentIdTokens).values({ hash: spentHash });
-  const refused = row();
-  assert.equal(await exchangeToken(db.runtime, spentHash, refused, bound, new Date(Date.now() + 1000)), false);
-  assert.equal(await credentialRows(refused.id!), 0);
-  assert.equal(await lastUsed(), before!.lastUsedAt?.getTime() ?? null);
-  // A fresh one: spent, the credential written, the binding stamped.
-  const fresh = randomBytes(32);
-  const issued = row();
-  const at = new Date(Date.now() + 2000);
-  assert.equal(await exchangeToken(db.runtime, fresh, issued, bound, at), true);
-  assert.equal(await credentialRows(issued.id!), 1);
-  assert.equal((await db.owner.select().from(spentIdTokens).where(eq(spentIdTokens.hash, fresh))).length, 1);
-  assert.equal(await lastUsed(), at.getTime());
-});
-
-test("the re-check under the head stands only for the binding's own principal and a binding whose MAC is the app's", async () => {
+test("the binding's re-check under the change lock stands only for the binding's own principal and a binding whose MAC is the app's", async () => {
   const [binding] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
-  assert.equal((await exchangeStill(db.runtime, deps.chainKey, binding!)).stands, true);
-  // Another principal than the binding's: refused (a foreign key keeps a member row for every binding; the member's status and
-  // generation are driven to refusals through the exchange itself, in the test above).
-  assert.equal((await exchangeStill(db.runtime, deps.chainKey, { ...binding!, principal: 'token:ghost' })).stands, false);
+  const standing = (principal: string) => standingBinding(db.runtime, deps.chainKey, bound, principal, binding!.generation);
+  assert.notEqual(await standing(binding!.principal), null);
+  // Another principal than the binding's: refused (the member's own status and generation are `stillMember`'s beside it,
+  // and the vault's `sign_in`'s on its paths).
+  assert.equal(await standing('token:ghost'), null);
   // The member's binding, its MAC not the app's.
   await db.owner.update(serviceBindings).set({ authMac: Buffer.alloc(32) }).where(eq(serviceBindings.id, bound));
-  assert.equal((await exchangeStill(db.runtime, deps.chainKey, binding!)).stands, false);
+  assert.equal(await standing(binding!.principal), null);
 });
 
 test('one binding trusts a workflow on several events: a pull request into its branch, by its own run, and the push, but no other event', async () => {
@@ -949,9 +946,8 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   assert.equal((await reveal('market/prod/API_KEY')).status, 200);
   // And one refused: every entry the run caused names its credential, the app's and the vault's, allowed or not.
   assert.equal((await reveal('market/nowhere/API_KEY')).status, 404);
-  const caused = (await db.owner.select({ author: auditLog.author, action: auditLog.action, decision: auditLog.decision, metadata: auditLog.metadata })
-    .from(auditLog).where(eq(auditLog.actor, MEMBER)).orderBy(asc(auditLog.seq)))
-    .map((entry) => ({ ...entry, credentialId: (JSON.parse(entry.metadata) as { credentialId?: string }).credentialId }));
+  const caused = (await loggedEntries(db.owner)).filter((entry) => entry.actor === MEMBER)
+    .map((entry) => ({ author: entry.author, action: entry.action, decision: entry.decision, credentialId: (entry.metadata as { credentialId?: string }).credentialId }));
   // The read is a use, and names the credential as its own column: the vault's read is no entry here.
   assert.deepEqual(caused.map(({ author, action, decision }) => `${author} ${action} ${decision}`), ['app secret.read deny']);
   assert.ok(caused.every((entry) => entry.credentialId === credentialId));
@@ -972,7 +968,7 @@ test('every entry a run\'s credential causes names it, the vault\'s too; the aud
   assert.equal(reads.length, 2);
   for (const shown of reads) assert.deepEqual(shown.run, signedIn.run);
   assert.deepEqual(reads.map((read) => [read.log, read.decision, read.actorId, read.key]),
-    [['0.14', 'deny', SERVICE, null], ['0.15', 'allow', SERVICE, 'API_KEY']]);
+    [['0.15', 'deny', SERVICE, null], ['0.15', 'allow', SERVICE, 'API_KEY']]);
   // An entry no exchanged credential wrote has no run.
   assert.equal(entries.find((entry) => entry.action === 'secret.write')!.run, null);
 });
@@ -2020,3 +2016,70 @@ test("a binding a removal closed shadows no other: a run another binding takes s
   assert.equal(made!.createdBy, `binding:${newer}`);
 });
 
+
+test("a binding an older release left with a scope that says nothing of sensitive values signs no run in, shadows none bound again, and its Owner still lists and removes it", async () => {
+  const ctx = () => contextFor(deps, ROOT);
+  await runtime.workloads!.unbind(await ctx(), SERVICE, bound);
+  const unknown = await trade(token(rsa));
+  const old = await bindUnsealed(DEPLOY);
+  const scopeOf = async () => (await db.owner.select({ scope: serviceBindings.scope }).from(serviceBindings).where(eq(serviceBindings.id, old)))[0]!.scope!;
+  const scope = await scopeOf();
+  assert.ok(scope.includes('"projectId"') && !scope.includes('"sensitive":'), scope);
+  const held = () => db.owner.select({ id: credentials.id }).from(credentials).where(eq(credentials.principal, MEMBER));
+  const before = await held();
+
+  // Alone, it is no binding: refused as an unknown one is, and nothing is written, its scope sealed from nothing.
+  assert.deepEqual(await trade(token(rsa)), unknown);
+  assert.deepEqual(await held(), before);
+  assert.deepEqual(await loggedEntries(db.owner, ['token.seal']), []);
+  assert.equal(await scopeOf(), scope);
+
+  // A credential it issued before, its scope the binding's, signs nobody in either.
+  const credential = generateToken('service');
+  const [member] = await db.owner.execute<{ generation: number }>(sql`SELECT generation FROM principals WHERE principal = ${MEMBER}`);
+  const issued = {
+    id: randomUUID(), kind: 'service', tokenHash: hashToken(credential), generation: member!.generation, tokenHint: tokenHint(credential), principal: MEMBER,
+    identityId: null, label: null, createdBy: `binding:${old}`, expiresAt: new Date(Date.now() + 300_000), revokedAt: null, passkeyId: null, confirmedAt: null, scope,
+  };
+  await db.owner.insert(credentials).values({ ...issued, authMac: authMac(deps.chainKey, 'credentials', issued) });
+  assert.equal(await caller(credential), 401);
+  assert.deepEqual(await loggedEntries(db.owner, ['token.seal']), []);
+
+  // Bound again, on the same claims: the run signs in through the new binding, which the old one does not shadow.
+  const fresh = await bind(DEPLOY);
+  const { status, body } = await trade(token(rsa));
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(await caller(body.token!), `service:${SERVICE}`);
+  const [made] = await db.owner.select({ createdBy: credentials.createdBy }).from(credentials).where(eq(credentials.tokenHash, hashToken(body.token!)));
+  assert.equal(made!.createdBy, `binding:${fresh}`);
+
+  // Its Owner still sees it beside the new one, and removes it.
+  const listed = async () => (await runtime.workloads!.listBindings(await ctx(), SERVICE)).map((binding) => binding.id);
+  assert.deepEqual(await listed(), [old, fresh]);
+  assert.deepEqual(await runtime.workloads!.unbind(await ctx(), SERVICE, old), { unbound: true });
+  assert.deepEqual(await listed(), [fresh]);
+});
+
+test("a binding ended, its row put back with its old seal and a change of it forged after its end with that seal: the app lists it, and the vault signs no run in, by that change's MAC", async () => {
+  const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, bound));
+  await runtime.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, bound);
+  const unknown = await trade(token(rsa));
+  assert.notEqual(unknown.status, 200, JSON.stringify(unknown.body));
+
+  // The database's owner puts the row back as it was, MAC and seal, and writes a change of it after its end that carries
+  // that seal: `bindingLive` reads it as the binding's newest, and passes the binding. It is a filter, not the gate.
+  const { id: _, ...columns } = row!;
+  await db.owner.update(serviceBindings).set(columns).where(eq(serviceBindings.id, bound));
+  await db.owner.execute(sql`
+    INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+    SELECT max(number) + 1, max(at) + 1, gen_random_uuid()::text, log_object('binding', ${bound}), 'user:forger', '{"op":"binding.make"}',
+      ${row!.seal}, '\\x00000000000000000000000000000000'::bytea FROM log_changes`);
+  assert.deepEqual((await liveBindings(db.runtime, deps.chainKey, MEMBER, row!.generation)).map((binding) => binding.id), [bound]);
+
+  // The vault holds the binding's newest change to its MAC before it signs a run in: refused, and no credential made.
+  const held = () => db.owner.select({ id: credentials.id }).from(credentials).where(eq(credentials.principal, MEMBER));
+  const before = await held();
+  const forged = await trade(token(rsa));
+  assert.equal(forged.status, unknown.status, JSON.stringify(forged.body));
+  assert.deepEqual(await held(), before);
+});

@@ -886,12 +886,8 @@ export async function removeMember(
       ...through(ctx.caller),
     });
     if (!result.ok) {
-      if (result.refusal.code === 'not_a_member' || result.refusal.code === 'removed') {
-        throw new Refusal(
-          notFound('no such member'),
-          denied(ctx, 'member.remove', 'unknown_principal', { metadata: fields }),
-        );
-      }
+      // The vault's entry records the refusal (`not_a_member`, `removed`): no second one of the app's.
+      if (result.refusal.code === 'not_a_member' || result.refusal.code === 'removed') throw new ApiError('not_found', 'no such member', 'unknown_principal');
       throw vaultRefused(result.refusal);
     }
     const { generation } = result;
