@@ -1,10 +1,15 @@
+import { open, seal as sealValue, type Envelope } from '@coffre/core/envelope';
+import type { KekRegistry } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
 import { gaveUpCode, rowsOf } from '@coffre/db/dialect';
 import { later, laterRows } from '@coffre/db/later';
+import { secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
+import type { PgTable } from 'drizzle-orm/pg-core';
 
 import { pending, type Entry, type Said } from './entry.ts';
 import { fromWire, nameOf, seal, sealedBy, shapeOf, toWire, type Fresh, type Key, type Row, type Sealed, type Wire } from './rows.ts';
+import { contextOf, type Held } from './value.ts';
 
 /**
  * A change: anything that writes (docs/design/0.16.md, "Operations"). Every
@@ -28,16 +33,22 @@ import { fromWire, nameOf, seal, sealedBy, shapeOf, toWire, type Fresh, type Key
  * again, comparing, writing, sealing each row and logging what it replaced
  * are here, once.
  *
+ * A value is the one thing a change writes that carries no MAC: a version's
+ * encryption names what it is. The decision says what the version holds,
+ * and the value is sealed here, after it and before the write, since
+ * sealing draws a key and may call a key service, which no decision does.
+ *
  * Nothing else writes what a MAC covers. A use moves a row's last-seen
  * columns on, one row a statement, and the signer's upkeep is changes like
  * any other. So under the lock, the rows a write compared are the rows it
  * writes over.
  */
 
-/** The vault as it runs: its database, its keys (the first seals, each verifies), its clock, and the signer's wake-up. */
+/** The vault as it runs: its database, its keys (the first seals, each verifies), the keys values are wrapped under, its clock, and the signer's wake-up. */
 export type Running = {
   db: Database;
   keys: readonly Key[];
+  keks: KekRegistry;
   now(): number;
   /** Told the hash of each entry once it is committed. It does not hold the reply. */
   wake(hash: Buffer): void;
@@ -76,10 +87,23 @@ export function drop<T extends Sealed>(table: T, was: Row<T>): Write {
   return { table, row: null, was };
 }
 
+/**
+ * A version a change writes: its row but for the encryption, the secret
+ * that holds it, as the change leaves it, and a personal config's owner.
+ * Its value is the text given, or a stored version's, opened as its own
+ * rows say it is: a restore, or a fork's copy.
+ */
+export type Value = {
+  secret: Held;
+  owner: string | null;
+  version: Omit<Row<typeof secretVersions>, keyof Envelope>;
+  text: Buffer | { secret: Held; owner: string | null; version: Row<typeof secretVersions> };
+};
+
 /** Why a change is not made. It writes nothing, the log included. */
 export type Refusal = { refused: string };
 
-export type Plan<A> = { writes: readonly Write[]; entry: Said; answer: A };
+export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; entry: Said; answer: A };
 
 export type Operation<P extends Parts, A> = {
   read: P;
@@ -225,14 +249,22 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     const mac = (row as { mac: Buffer }).mac.toString('hex');
     if (!rows.some((other) => other.row === name)) rows.push({ row: name, was: mac, now: mac });
   }
-  const entry = pending(key, plan.entry, at, rows);
+  const versions: Wire[] = [];
+  for (const { secret, owner, version, text } of plan.values ?? []) {
+    if (version.secretId !== secret.id) throw new Error('a change writes a version of another secret than the one it names');
+    const plain = Buffer.isBuffer(text) ? text : await open(text.version, contextOf(text.secret, text.version, text.owner), vault.keks);
+    versions.push(toWire(secretVersions, { ...version, ...(await sealValue(plain, contextOf(secret, version, owner), vault.keks)) }));
+  }
+  // Dated now, as the write is sent: sealing a value, through a key service, takes as long as it takes.
+  const entry = pending(key, plan.entry, vault.now(), rows);
 
   // The same rows, read again by the same conditions: one that changed, went or came since makes the lists differ.
   const again = sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || encode(${table}.mac, 'hex') FROM ${table} WHERE ${where}`), sql` UNION ALL `);
   const statements: SQL[] = [sql`same AS (SELECT (SELECT coalesce(array_agg(x ORDER BY x COLLATE "C"), '{}') FROM (${again}) seen (x)) = ${sql.param(tokens.sort())}::text[] AS ok)`];
+  const fromRows = (table: PgTable, wires: Wire[]) => sql`jsonb_populate_recordset(null::${table}, ${JSON.stringify(wires)}::jsonb) j, same WHERE same.ok`;
   for (const { table, inserts, updates, deletes } of written.values()) {
     const shape = shapeOf(table);
-    const from = (wires: Wire[]) => sql`jsonb_populate_recordset(null::${table}, ${JSON.stringify(wires)}::jsonb) j, same WHERE same.ok`;
+    const from = (wires: Wire[]) => fromRows(table, wires);
     const onKey = sql.join(shape.key.map(({ name }) => sql`${table}.${id(name)} = j.${id(name)}`), sql` AND `);
     const stored = shape.columns.filter((column) => !column.generated);
     // A row keeps its key, and what only says when it was last seen, which a use may have moved on since the read.
@@ -240,6 +272,11 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     if (inserts.length > 0) statements.push(sql`w${sql.raw(String(statements.length))} AS (INSERT INTO ${table} (${list(stored)}) SELECT ${list(stored, 'j')} FROM ${from(inserts)})`);
     if (updates.length > 0) statements.push(sql`w${sql.raw(String(statements.length))} AS (UPDATE ${table} SET (${list(set)}) = ROW(${list(set, 'j')}) FROM ${from(updates)} AND ${onKey})`);
     if (deletes.length > 0) statements.push(sql`w${sql.raw(String(statements.length))} AS (DELETE FROM ${table} USING ${from(deletes)} AND ${onKey})`);
+  }
+  // In the statement that writes its secret's row: the two are there together, or neither.
+  if (versions.length > 0) {
+    const stored = shapeOf(secretVersions).columns;
+    statements.push(sql`versions AS (INSERT INTO ${secretVersions} (${list(stored)}) SELECT ${list(stored, 'j')} FROM ${fromRows(secretVersions, versions)})`);
   }
   statements.push(sql`entry AS (INSERT INTO log_pending (kept, body, mac) SELECT ${entry.kept}, ${entry.body}, decode(${entry.mac.toString('hex')}, 'hex') FROM same WHERE same.ok)`);
   return { answer: plan.answer, statement: sql`WITH ${sql.join(statements, sql`, `)} SELECT ok FROM same`, hash: entry.hash };

@@ -1,15 +1,16 @@
 import { allows, readsSensitive, useOnly, withinCredential, type Place } from '@coffre/core/access';
-import { open, ownerKey } from '@coffre/core/envelope';
-import { KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
+import { open } from '@coffre/core/envelope';
+import { KekUnavailableError } from '@coffre/core/kek';
 import { rowsOf } from '@coffre/db/dialect';
 import type { BindingPolicy, Constraints } from '@coffre/core/identity';
 import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { callerOf, type Caller, type Workloads } from './caller.ts';
+import { callerOf, ID, type Caller, type Workloads } from './caller.ts';
 import { bounded, type Refusal, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts';
+import { contextOf } from './value.ts';
 
 /**
  * A use: anything that opens a value (docs/design/0.16.md, "A use"). A
@@ -65,7 +66,6 @@ export type Answer = {
 
 /** What a use needs of the vault as it runs, past a change's. */
 export type Serving = Running & {
-  keks: KekRegistry;
   /** The bulk cap: how many distinct keys one principal is given within the window. */
   cap: { count: number; windowMs: number };
   workloads: Workloads;
@@ -118,8 +118,6 @@ export function recall(vault: Serving, ask: Ask): Read | undefined {
   return undefined;
 }
 
-/** A UUID as the vault writes one, for the statement to tell before it casts. */
-const ID = sql.raw('[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}');
 
 /** A use's one read. */
 export async function read(vault: Serving, ask: Ask): Promise<Read> {
@@ -299,8 +297,7 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
     let value = found.opened.get(version.id);
     try {
       // As its rows say it is: a version relabelled, plain or not sensitive, to be handed to someone else, does not open.
-      const nature = version.sensitive ? { sensitive: true as const } : version.plaintext !== null ? { plain: true as const } : {};
-      value ??= await open(version, { projectId: held.projectId, environmentId: held.environmentId, secretId: held.id, version: version.version, ...(item.owner === null ? {} : { owner: ownerKey(item.owner) }), ...nature }, vault.keks);
+      value ??= await open(version, contextOf(held, version, item.owner), vault.keks);
     } catch (error) {
       // A key service that cannot answer is an outage. Anything else is a row that is not what it says: moved, relabelled, erased.
       if (error instanceof KekUnavailableError) throw error;

@@ -4,7 +4,7 @@ import type { Database } from '@coffre/db';
 import { openVault, type PreparedVault, type VaultOptions } from './vault.ts';
 
 /** Every call the vault answers, in the order of the `Vault` interface. */
-export const METHODS = ['use'] as const satisfies readonly (keyof Vault)[];
+export const METHODS = ['use', 'change'] as const satisfies readonly (keyof Vault)[];
 
 export type LocalVault = Vault & { close(): Promise<void> };
 

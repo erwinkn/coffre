@@ -380,3 +380,11 @@ test('a change that keeps losing answers busy', async () => {
   assert.equal(writes, 5);
   assert.equal((await seenOf(principals, eq(principals.id, bo)))[0]!.generation, 5, 'none of its own writes landed');
 });
+
+test('a value is sealed for the secret its version names, or the change is a fault', async () => {
+  const [one, other] = [randomUUID(), randomUUID()];
+  const held = { id: one, projectId: randomUUID(), environmentId: randomUUID() };
+  const version = { id: randomUUID(), secretId: other, version: 1, createdAt: at, createdBy: ada, recipe: null, pairId: null, pairHalf: null, plaintext: null, sensitive: false };
+  await assert.rejects(change(vault, { read: nothing, decide: () => ({ writes: [], values: [{ secret: held, owner: null, version, text: Buffer.from('x') }], entry: said('test.write'), answer: null }) }), /another secret/);
+  assert.equal(vault.woken.length, 0);
+});

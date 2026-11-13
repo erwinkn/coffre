@@ -29,6 +29,11 @@ export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames
 export interface Vault {
   /** Open values for whoever presented a token: a reveal, `coffre run`, an export, a proxied request, a signature. */
   use(input: UseInput): Promise<Used | Refused>;
+  /**
+   * Make a change: one operation, named as its log entry's action is, with
+   * its input. All of it, or none: a refusal wrote nothing.
+   */
+  change<O extends Change['op']>(input: Presented & Extract<Change, { op: O }>): Promise<{ answer: Answers[O] } | Refused>;
 }
 
 /**
@@ -88,6 +93,26 @@ export type Used = {
 
 /** Why a call is not answered. It wrote nothing, the log included. */
 export type Refused = { refused: string };
+
+/** Every change the vault makes: its operation, and what that one takes. */
+export type Change = SecretWrite;
+
+/** What each change answers once it is made. */
+export type Answers = {
+  /** The version each key is at now. */
+  'secret.write': { versions: Record<string, number> };
+};
+
+/** How a value is kept: a secret, a sensitive one that no person is handed back, or a plain one that whoever lists its environment sees. */
+export type Nature = 'secret' | 'sensitive' | 'plain';
+
+/** Write values in one environment: each key's next version, the key made if the environment has none by that name. */
+export type SecretWrite = {
+  op: 'secret.write';
+  project: string;
+  environment: string;
+  values: { key: string; value: string; nature: Nature }[];
+};
 
 // 0.14's contract, from here on: each type goes with the last of the server's code that names it.
 

@@ -1,7 +1,9 @@
 import { EVERYWHERE, isCredentialScope, isInstanceRole, isScope, scopeWithReads, type CredentialScope, type Holdings, type Permission, type Policy, type RoleDefinition } from '@coffre/core/access';
 import { addressWithin, checkConstraints, type BindingPolicy, type Constraints } from '@coffre/core/identity';
-import type { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
+import { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
+import { sql, type SQL } from 'drizzle-orm';
 
+import { part, type Seen } from './change.ts';
 import type { Row } from './rows.ts';
 
 /**
@@ -212,4 +214,36 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
       kind: workload !== null ? 'workload' : service ? 'bearer' : 'person',
     },
   };
+}
+
+/** A UUID as the vault writes one, for a statement to tell before it casts: a row is read before its MAC is checked. */
+export const ID = sql.raw('[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}');
+
+/**
+ * The caller's rows as a change reads them, by the token's hash: what a
+ * use reads in its one statement (use.ts). Of their grants and roles, only
+ * those that bear on `project`, given as SQL for its id: the entry names
+ * every row read, and an Owner's hundred grants elsewhere decide nothing
+ * here.
+ */
+export function callerParts(token: Buffer, project: SQL) {
+  const own = (column: string) => sql`(SELECT c.${sql.identifier(column)} FROM credentials c WHERE c.token_hash = decode(${token.toString('hex')}, 'hex'))`;
+  const here = sql`(g.project_id = ${project} OR g.environment_id IN (SELECT e.id FROM environments e WHERE e.project_id = ${project}))`;
+  return {
+    credential: part(credentials, sql`${credentials.tokenHash} = decode(${token.toString('hex')}, 'hex')`),
+    principal: part(principals, sql`${principals.id} = ${own('principal')}`),
+    identity: part(identities, sql`${identities.id} = ${own('identity_id')}`),
+    grant: part(grants, sql`${grants.id} IN (SELECT g.id FROM grants g WHERE g.principal = ${own('principal')} AND ${here})`),
+    // The roles those grants name, and the member's own in the instance: a role with no row is no role.
+    role: part(roles, sql`(NOT ${roles.instance} AND ${roles.id} IN (SELECT g.role FROM grants g WHERE g.principal = ${own('principal')} AND ${here})) OR (${roles.instance} AND ${roles.id} = (SELECT p.role FROM principals p WHERE p.id = ${own('principal')}))`),
+    // What a trust binding issued names it, and a narrowed session the sessions above it: only what is shaped like ids is cast.
+    binding: part(bindings, sql`${bindings.id} = (SELECT CASE WHEN c.created_by ~ '^binding:${ID}$' THEN substr(c.created_by, 9)::uuid END FROM credentials c WHERE c.token_hash = decode(${token.toString('hex')}, 'hex'))`),
+    ancestor: part(credentials, sql`${credentials.id} = ANY(ARRAY(SELECT above.id::uuid FROM credentials c, jsonb_array_elements_text(CASE WHEN c.kind = 'workload' AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id) WHERE c.token_hash = decode(${token.toString('hex')}, 'hex')))`),
+    policy: part(policy, sql`${own('kind')} = 'workload'`),
+  };
+}
+
+/** The caller a change's read found, as `callerOf` decides: `about` are the environments the change is about. */
+export function callerFrom(seen: Seen<ReturnType<typeof callerParts>>, about: readonly Row<typeof environments>[], shown: Shown, workloads: Workloads, at: number): Caller | null {
+  return callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: about, binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy }, shown, workloads, at);
 }
