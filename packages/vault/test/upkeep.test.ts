@@ -154,17 +154,18 @@ test('the re-check walks the log round and round, three blocks a minute, and fin
   const walked: Finding[][] = [];
   for (let n = 0; n < 4; n += 1) walked.push(await minute());
   assert.deepEqual(walked, [[], [], [], []]);
-  // The writer edits a change of block 1 and deletes a use of block 3; replaces a tile of the aging tree's block 0.
+  // The writer edits a change of block 1, deletes a use of block 3 and all of block 2; replaces a tile of the aging tree's block 0.
   const [{ edited }] = (await rowsOf<{ edited: string }>(vault.owner, sql`SELECT body AS edited FROM log WHERE kept AND leaf = 300`)) as [{ edited: string }];
   await vault.owner.execute(sql`UPDATE log SET body = replace(body, 'member.role', 'member.gone') WHERE kept AND leaf = 300`);
   const [{ deleted }] = (await rowsOf<{ deleted: string }>(vault.owner, sql`DELETE FROM log WHERE NOT kept AND leaf = 800 RETURNING body AS deleted`)) as [{ deleted: string }];
+  await vault.owner.execute(sql`DELETE FROM log WHERE NOT kept AND leaf BETWEEN 512 AND 767`);
   await vault.owner.execute(sql`UPDATE log_tiles SET hashes = overlay(hashes PLACING '\\x00'::bytea FROM 1 FOR 1) WHERE NOT kept AND level = 0 AND number = 0`);
   // The next walk starts a day after the last, and takes four minutes: ten blocks, three a minute.
   vault.tick(DAY);
   const found: Finding[][] = [];
   for (let n = 0; n < 5; n += 1) found.push(await minute());
   const hash = (body: string) => leafHash(Buffer.from(body)).toString('hex');
-  assert.deepEqual(found, [[{ found: 'lost', of: hash(edited) }], [{ found: 'lost', of: 'aging 0-255' }], [{ found: 'lost', of: hash(deleted) }], [], []]);
+  assert.deepEqual(found, [[{ found: 'lost', of: hash(edited) }], [{ found: 'lost', of: 'aging 0-255' }], [{ found: 'lost', of: 'aging 512-767' }, { found: 'lost', of: hash(deleted) }], [], []]);
 });
 
 test('a walk ends where the log was when it began: a log growing faster than the re-check reads still comes round to the changes, across a restart', async () => {
@@ -238,13 +239,46 @@ test('a signer that dies between pruning\'s writes is finished by the next, whic
     const recorded = dies === 'at the record' ? [undefined, undefined] : [3 * 256, 0];
     assert.deepEqual([store.kept.get('agingFrom'), (store.kept.get('moving') as { pruning: number } | undefined)?.pruning], recorded);
     assert.equal((await left()).leaf, dies === 'after it' ? 3 * 256 : 0);
+    // Meanwhile a writer swaps bodies to go for ones that do not parse, in block 0 with the tile to hash to one of them: not as
+    // signed, they stay, all of block 0, and stop nothing.
+    const swapped = dies === 'before the delete' ? [...Array.from({ length: 256 }, (_, leaf) => leaf), 300] : [];
+    if (swapped.length > 0) {
+      await vault.owner.execute(sql`UPDATE log SET body = CASE leaf WHEN 5 THEN 'x' ELSE '{"objects": 5}' END WHERE NOT kept AND leaf IN (5, 6, 300)`);
+      await vault.owner.execute(sql`UPDATE log_tiles SET hashes = overlay(hashes PLACING sha256(decode('00', 'hex') || convert_to('{"objects": 5}', 'UTF8')) FROM 6 * 32 + 1 FOR 32) WHERE NOT kept AND level = 0 AND number = 0`);
+    }
     // The next signer finishes it, once, and finds nothing: not the rows that were to go, nor their absence.
     signer = await open();
     assert.deepEqual(await minute(), []);
+    const stayed = await rowsOf<{ leaf: number }>(vault.owner, sql`SELECT leaf::int FROM log WHERE NOT kept AND leaf < ${3 * 256} ORDER BY leaf`);
+    assert.deepEqual(stayed.map(({ leaf }) => leaf), swapped);
+    await vault.owner.execute(sql`WITH gone AS (DELETE FROM log WHERE NOT kept AND leaf < ${3 * 256} RETURNING seq) DELETE FROM log_index WHERE seq IN (SELECT seq FROM gone)`);
     assert.equal((await proven()).agingFrom, 3 * 256);
     assert.deepEqual(await left(), { leaf: 3 * 256, indexed: 3 * 256, tiles: [3] });
     assert.equal(store.kept.has('moving'), false);
     vault.tick(DAY);
     assert.deepEqual(await minute(), []);
   }
+});
+
+test('a minute whose upkeep fails is not checked: a writer who holds what it reads has the signer said stopped, as when its check fails', async () => {
+  // A block before the last, not yet past the keep: each minute's pruning reads it.
+  await write(257);
+  assert.deepEqual(await minute(), []);
+  const checked = signer.checked;
+  let release!: () => void;
+  const locked = vault.owner.transaction(async (tx) => {
+    await tx.execute(sql`LOCK TABLE log_tiles IN ACCESS EXCLUSIVE MODE`);
+    await new Promise<void>((resolve) => (release = resolve));
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    vault.tick(60_000);
+    await assert.rejects(signer.run(true));
+    assert.equal(signer.checked, checked);
+  } finally {
+    release();
+    await locked;
+  }
+  assert.deepEqual(await minute(), []);
+  assert.equal(signer.checked, vault.now());
 });

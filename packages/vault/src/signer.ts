@@ -1,4 +1,4 @@
-import { Edge, leafHash, tileMap, WIDTH } from '@coffre/core/log';
+import { Edge, HASH_SIZE, leafHash, tileMap, WIDTH } from '@coffre/core/log';
 import type { Database } from '@coffre/db';
 import * as schema from '@coffre/db/schema';
 import { is, sql, type SQL } from 'drizzle-orm';
@@ -136,8 +136,12 @@ type Move = {
   taken: { id: string; kept: boolean; seq: number; leaf: number; hash: string }[];
   refused: string[];
   tiles: { kept: boolean; level: number; number: number; hashes: string }[];
-  /** The first use kept before: the uses from it to the head's `agingFrom` are pruned, with their index rows and tiles. */
+  /**
+   * The first use kept before: the uses from it to the head's `agingFrom` are pruned, with their index rows and tiles.
+   * Each of their blocks' tile as the signer proved it, by its SHA-256, hex: only the entries that hash to it go.
+   */
   pruning: number;
+  pruned: string[];
   head: { size: number; keptSize: number; keptRoot: string; agingSize: number; agingRoot: string; agingFrom: number; signedAt: number; mac: string };
 };
 
@@ -410,8 +414,6 @@ export class Signer {
         for (const { found, of } of stands) if (!known.has(`${found} ${of}`)) this.#find(changes, found, of);
         if (stands.length > 0 || this.#stands.length > 0) changes.set('stands', stands.length > 0 ? stands : undefined);
         this.#stands = stands;
-        this.#checked = snapshot.at;
-        changes.set('checked', snapshot.at);
       }
 
       const tiles: Move['tiles'] = [];
@@ -429,9 +431,9 @@ export class Signer {
           changes.set(`signed ${hex}`, undefined);
         }
       }
-      if (taken.length > 0 || refused.length > 0) this.#move(changes, { taken, refused, tiles, pruning: this.#agingFrom });
-      // With an entry or a finding, never alone: an idle run writes at most when it checked, and its storage's window is only wider for it.
-      if ([...changes.keys()].every((key) => key === 'checked')) return;
+      if (taken.length > 0 || refused.length > 0) this.#move(changes, { taken, refused, tiles, pruning: this.#agingFrom, pruned: [] });
+      // With an entry or a finding, never alone: an idle run writes nothing here, and its storage's window is only wider for it.
+      if (changes.size === 0) return;
       const trees = Object.fromEntries(TREES.map((tree) => [tree, { size: this.#trees[tree].size, last: this.#last[tree], tiles: this.#trees[tree].edgeTiles().map(({ level, index, hashes: tile }) => ({ level, index, hashes: tile.toString('hex') })) }])) as Kept['trees'];
       changes.set('state', { drained: this.#drained, trees } satisfies Kept);
     });
@@ -469,12 +471,23 @@ export class Signer {
           INSERT INTO log_index (object, seq) SELECT DISTINCT mentioned.object, moved.seq FROM moved JOIN logged USING (seq), jsonb_array_elements_text(moved.body::jsonb -> 'objects') AS mentioned(object)
           ON CONFLICT DO NOTHING),
         refused AS (DELETE FROM log_pending p USING jsonb_array_elements_text(${JSON.stringify(moving.refused)}::jsonb) AS r(id) WHERE p.id = r.id::bigint),
-        pruned AS (DELETE FROM log l WHERE l.kept = false AND l.leaf >= ${moving.pruning} AND l.leaf < ${head.agingFrom} RETURNING l.seq, l.body),
+        -- Each block's tile goes, and of its entries those that hash to it as the signer proved it: a body swapped since stays,
+        -- and is never parsed, so no row a writer plants stops the move. The tiles proven apart, and the entries by their
+        -- range: joined on a list the planner cannot count, it hashes each tile once per entry, and compiles every move.
+        untiled AS (
+          DELETE FROM log_tiles t WHERE t.kept = false AND t.level = 0 AND t.number >= ${moving.pruning / WIDTH} AND t.number < ${head.agingFrom / WIDTH}
+          RETURNING t.number, t.hashes, sha256(t.hashes) AS digest),
+        proven AS MATERIALIZED (
+          SELECT u.number, u.hashes FROM untiled u, jsonb_array_elements_text(${JSON.stringify(moving.pruned)}::jsonb) WITH ORDINALITY AS d(digest, n)
+          WHERE u.number = ${moving.pruning / WIDTH} + d.n - 1 AND u.digest = decode(d.digest, 'hex')),
+        pruned AS (
+          DELETE FROM log l USING proven t WHERE l.kept = false AND l.leaf >= ${moving.pruning} AND l.leaf < ${head.agingFrom} AND t.number = l.leaf / ${WIDTH}
+            AND ${leafOf('l.body')} = substring(t.hashes FROM ((l.leaf - t.number * ${WIDTH}) * ${HASH_SIZE} + 1)::int FOR ${HASH_SIZE})
+          RETURNING l.seq, l.body),
         -- By each entry's own keys, one probe each, however many rows of an object lie between them. Unnested from arrays, a
         -- list the planner takes for short: from the entries' lists, it counts a hundred each and reads all of the index.
         mentions AS (SELECT array_agg(o.object) AS objects, array_agg(p.seq) AS seqs FROM pruned p, jsonb_array_elements_text(p.body::jsonb -> 'objects') AS o(object)),
         unindexed AS (DELETE FROM log_index i USING mentions m, unnest(m.objects, m.seqs) AS k(object, seq) WHERE i.object = k.object AND i.seq = k.seq),
-        untiled AS (DELETE FROM log_tiles t WHERE t.kept = false AND t.level = 0 AND t.number >= ${moving.pruning / WIDTH} AND t.number < ${head.agingFrom / WIDTH}),
         tiled AS (
           INSERT INTO log_tiles (kept, level, number, hashes) SELECT kept, level, number, decode(hashes, 'hex') FROM jsonb_to_recordset(${JSON.stringify(moving.tiles)}::jsonb) AS t(kept boolean, level smallint, number bigint, hashes text)
           ON CONFLICT (kept, level, number) DO UPDATE SET hashes = excluded.hashes),
@@ -499,15 +512,15 @@ export class Signer {
    * what is kept from is in its storage before anything goes; then a slice
    * of the log held to what it signed.
    */
-  async #upkeep(): Promise<void> {
+  async #upkeep(at: number): Promise<void> {
     const ask = <Row>(statement: SQL) => this.#ask<Row>(statement);
     const from = this.#agingFrom;
-    const to = await pruned(ask, this.#on, this.#trees, from);
+    const { to, tiles } = await pruned(ask, this.#on, this.#trees, from);
     if (to > from) {
       await this.#step((changes) => {
         this.#agingFrom = to;
         changes.set('agingFrom', to);
-        this.#move(changes, { taken: [], refused: [], tiles: [], pruning: from });
+        this.#move(changes, { taken: [], refused: [], tiles: [], pruning: from, pruned: tiles });
       });
       await this.move();
     }
@@ -516,6 +529,9 @@ export class Signer {
       for (const { of } of found) this.#find(changes, 'lost', of);
       this.#walk = walk;
       changes.set('walk', walk);
+      // Checked once its upkeep ended too: one that fails, on a row or a lock a writer holds, is said stopped as a check that fails is.
+      this.#checked = at;
+      changes.set('checked', at);
     });
   }
 
@@ -555,7 +571,7 @@ export class Signer {
       // Done, or failed: a check that fails is tried again by the next minute's run, not by every run until then.
       if (failed !== null || (snapshot.drained && snapshot.rows !== null)) this.#owed = false;
       if (failed !== null) throw failed;
-      if (snapshot.drained && snapshot.rows !== null) await this.#upkeep();
+      if (snapshot.drained && snapshot.rows !== null) await this.#upkeep(snapshot.at);
       return this.#behind || this.#owed;
     } finally {
       this.#running = false;

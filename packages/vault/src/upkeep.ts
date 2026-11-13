@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { HASH_SIZE, inclusionProof, nodesFrom, leafHash, tileKey, tilesFor, verifyInclusion, WIDTH, type Edge } from '@coffre/core/log';
 import { sql, type SQL } from 'drizzle-orm';
 
@@ -21,7 +23,7 @@ import type { Finding, Signing, Tree } from './signer.ts';
 const PRUNE_MOST = 40;
 /**
  * The blocks one minute re-checks: 768 entries, so a walk of a log of a
- * million takes 1,302 minutes, under a day, and a minute reads the same
+ * million takes 1,303 minutes, under a day, and a minute reads the same
  * however long the log.
  */
 const RECHECK = 3;
@@ -42,9 +44,10 @@ export type Walk = Block & { since: number; ends: Record<Tree, number> };
 /**
  * A block as read: the bodies of its entries, and what of it is not there as
  * signed, each entry by the hash it was signed under, or the block by its
- * leaves when its tiles do not prove.
+ * leaves when its tiles do not prove or none of its entries is there; and
+ * its tile, once proven.
  */
-type Held = { bodies: string[]; lost: string[] };
+type Held = { bodies: string[]; lost: string[]; tile?: Buffer };
 
 /**
  * The blocks, in one statement: their entries and the tiles that prove
@@ -79,12 +82,12 @@ async function read(ask: Ask, trees: Record<Tree, Edge>, blocks: readonly Block[
       // A tile on the way up is missing or short: not as signed.
     }
     const bodies = Array.from({ length: last - first + 1 }, (_, n) => entries[tree].get(first + n));
-    if (!proven) return { bodies: [], lost: [`${tree} ${first}-${last}`] };
+    if (!proven || bodies.every((body) => body === undefined)) return { bodies: [], lost: [`${tree} ${first}-${last}`] };
     const lost = bodies.flatMap((body, n) => {
       const hash = tile!.subarray(n * HASH_SIZE, (n + 1) * HASH_SIZE);
       return body !== undefined && leafHash(Buffer.from(body)).equals(hash) ? [] : [hash.toString('hex')];
     });
-    return { bodies: bodies.filter((body) => body !== undefined), lost };
+    return { bodies: bodies.filter((body) => body !== undefined), lost, tile };
   });
 }
 
@@ -93,10 +96,14 @@ async function read(ask: Ask, trees: Record<Tree, Edge>, blocks: readonly Block[
  * whose every entry is there as signed, and older than the keep by its date
  * as signed. 40 blocks at most, and never the block of the tree's last
  * entry, which the check reads where the log ends. One block read first,
- * the rest only if it goes: most minutes have none to prune.
+ * the rest only if it goes: most minutes have none to prune. With it, each
+ * pruned block's tile as proven, by its SHA-256, hex: the delete takes only
+ * the entries that hash to it, so a body swapped since this read stays,
+ * and is never parsed.
  */
-export async function pruned(ask: Ask, { keepUsesDays, now }: Signing, trees: Record<Tree, Edge>, from: number): Promise<number> {
-  if (keepUsesDays === null) return from;
+export async function pruned(ask: Ask, { keepUsesDays, now }: Signing, trees: Record<Tree, Edge>, from: number): Promise<{ to: number; tiles: string[] }> {
+  const tiles: string[] = [];
+  if (keepUsesDays === null) return { to: from, tiles };
   const before = now() - keepUsesDays * DAY_MS;
   const end = Math.floor((trees.aging.size - 1) / WIDTH);
   let block = from / WIDTH;
@@ -104,11 +111,12 @@ export async function pruned(ask: Ask, { keepUsesDays, now }: Signing, trees: Re
     const next = Array.from({ length: Math.max(0, Math.min(block + count, end) - block) }, (_, n) => ({ tree: 'aging' as const, block: block + n }));
     if (next.length === 0) break;
     for (const held of await read(ask, trees, next)) {
-      if (held.lost.length > 0 || held.bodies.some((body) => (JSON.parse(body) as Entry).at >= before)) return block * WIDTH;
+      if (held.lost.length > 0 || held.bodies.some((body) => (JSON.parse(body) as Entry).at >= before)) return { to: block * WIDTH, tiles };
+      tiles.push(createHash('sha256').update(held.tile!).digest('hex'));
       block += 1;
     }
   }
-  return block * WIDTH;
+  return { to: block * WIDTH, tiles };
 }
 
 /**
