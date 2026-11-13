@@ -38,7 +38,7 @@ async function world() {
   const link = secret(prod, 'LINK', { sourceId: token.id });
   const hollow = secret(prod, 'HOLLOW');
   const forked = await value(vault, secret(staging, 'DATABASE_URL'), 'postgres://staging');
-  const own = await value(vault, secret(adas, 'DATABASE_URL'), 'postgres://ada', { owner: ada });
+  const own = await value(vault, secret(adas, 'DATABASE_URL'), 'postgres://ada');
   const root = await value(vault, secret(guarded, 'ROOT'), 'root-key');
 
   const scope = (more: object = {}) => JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer', ...more }]);

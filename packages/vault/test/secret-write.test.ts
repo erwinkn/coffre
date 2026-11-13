@@ -5,13 +5,15 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
-import type { Nature, Presented, SecretWrite, UseInput } from '@coffre/core/vault';
+import { allows } from '@coffre/core/access';
 import { KekUnavailableError } from '@coffre/core/kek';
+import type { Nature, Presented, SecretWrite, UseInput } from '@coffre/core/vault';
 import { rowsOf } from '@coffre/db/dialect';
-import { bindings } from '@coffre/db/schema';
+import { bindings, environments } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
 
-import { commit, prepare } from '../src/change.ts';
+import { callerFrom, callerParts, type Asking } from '../src/caller.ts';
+import { commit, part, prepare } from '../src/change.ts';
 import { entryOf } from '../src/entry.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
 import { openLocalVault } from '../src/local.ts';
@@ -129,7 +131,7 @@ test('a row someone wrote around the vault is no row: a role edited in place gra
   assert.deepEqual(await vault.change(writing('ada-cli', { DATABASE_URL: 'x' })), { refused: 'no_access' });
   await world.owner.execute(sql`DELETE FROM roles WHERE id = 'owner' AND instance`);
   assert.deepEqual(await vault.change(writing('dee-cli', { DATABASE_URL: 'x' })), { refused: 'no_access' });
-  await world.owner.execute(sql`DELETE FROM projects WHERE slug = 'market'`).catch(() => world.owner.execute(sql`UPDATE projects SET name = 'Market!' WHERE slug = 'market'`));
+  await world.owner.execute(sql`UPDATE projects SET name = 'Market!' WHERE slug = 'market'`);
   assert.deepEqual(await vault.change(writing('cy-cli', { DATABASE_URL: 'x' })), { refused: 'no_access' });
 });
 
@@ -198,4 +200,24 @@ test('a workload\'s session writes as its service may, with its key; one that is
   assert.deepEqual(await by('tool'), { refused: 'narrowed' });
   await amend(world, 'bindings', eq(bindings.id, bound.id), { frozenAt: new Date(world.now()) });
   assert.deepEqual(await by('pod'), { refused: 'frozen' });
+});
+
+test('what a caller holds is weighed with the environments asked about: which are protected, and where a grant on one is', async () => {
+  const project = sql`(SELECT p.id FROM projects p WHERE p.slug = 'market')`;
+  const asking = async (label: string) => {
+    let found!: { caller: Asking; rows: Parameters<Asking['holding']>[0] };
+    const read = { ...callerParts(tokenOf(label), project), environment: part(environments, sql`${environments.projectId} = ${project}`) };
+    await prepare(world, { read, decide: (seen, at) => ((found = { caller: callerFrom(seen, { proof: null, ip: null }, world.workloads, at)!, rows: seen.environment }), { refused: 'only a read' }) });
+    return found;
+  };
+  const { caller: cy, rows } = await asking('cy-cli');
+  const [prod, guarded] = ['prod', 'guarded'].map((slug) => rows.find((row) => row.slug === slug)!);
+  const whole = cy.holding(rows);
+  assert.deepEqual(whole.policy!.protected, [guarded!.id]);
+  assert.deepEqual(whole.policy!.protectedIn, { [market.id]: [{ environmentId: guarded!.id, slug: 'guarded' }] });
+  assert.deepEqual([cy.may('secret.write', prod!), cy.may('secret.write', guarded!)], [true, false]);
+  // A grant on one environment is in that environment's project, as its row says, and nowhere without it.
+  const { caller: eve } = await asking('eve-cli');
+  const there = { projectId: market.id, environmentId: prod!.id, environmentSlug: 'prod' };
+  assert.deepEqual([allows(eve.holding([prod!]), 'secret.write', there), allows(eve.holding([]), 'secret.write', there), eve.may('secret.write', guarded!)], [true, false, false]);
 });

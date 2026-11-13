@@ -47,7 +47,7 @@ export function secretWrite(input: Presented & SecretWrite, vault: Deciding): Op
   return {
     read,
     decide(seen: Seen<typeof read>, at: number) {
-      const caller = callerFrom(seen, seen.environment, shown, vault.workloads, at);
+      const caller = callerFrom(seen, shown, vault.workloads, at);
       if (caller === null) return { refused: 'unauthenticated' };
       if (caller.workload?.stop != null) return { refused: caller.workload.stop };
       // A narrowed session uses values, and changes nothing.
@@ -71,7 +71,6 @@ export function secretWrite(input: Presented & SecretWrite, vault: Deciding): Op
         const secret: Fresh<typeof secrets> = { ...kept, versions: version, currentVersion: version, updatedAt: now, sourceId: null };
         writes.push(put(secrets, secret, was));
         sealed.push({
-          owner: null,
           version: { id: ids.version, secretId: secret.id, version, createdAt: now, createdBy: caller.principal, recipe: null, pairId: null, pairHalf: null, plaintext: nature === 'plain' ? value : null, sensitive: nature === 'sensitive' },
           text: Buffer.from(value),
         });

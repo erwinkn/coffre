@@ -83,12 +83,16 @@ export const TABLES = { projects, environments, secrets, principals, grants, rol
 /** Rows of one table, as writes of a change. */
 export const rows = <K extends keyof typeof TABLES>(table: K, ...of: Fresh<(typeof TABLES)[K]>[]): Write[] => of.map((row) => put(TABLES[table], row as never));
 
-/** Values for the next `write` to seal: a version's row is written with its secret's. */
-const values: Value[] = [];
+/** Values for the next `write` to seal, each with its environment: a version's row is written with its secret's. */
+const values: { value: Value; environment: string }[] = [];
 
-/** One change that writes them all, with the values given for them. */
+/** One change that writes them all, with the values given for them. It reads the values' environments, where it does not make them: a value is sealed under what its environment's row says. */
 export async function write(vault: TestVault, ...writes: Write[]): Promise<void> {
-  const result = await change(vault, { read: { none: part(principals, sql`false`) }, decide: () => ({ writes, values: values.splice(0), entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null }) });
+  const queued = values.splice(0);
+  const result = await change(vault, {
+    read: { places: part(environments, sql`${environments.id} = ANY(${sql.param(queued.map((item) => item.environment))}::uuid[])`) },
+    decide: () => ({ writes, values: queued.map((item) => item.value), entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null }),
+  });
   if ('refused' in result) throw new Error(result.refused);
 }
 
@@ -106,12 +110,11 @@ export async function amend<K extends keyof typeof TABLES>(vault: TestVault, tab
  * sealed under its secret, number and nature, and the secret's row moved on
  * to it. The next `write` seals and stores it.
  */
-export function value(_vault: TestVault, of: Fresh<typeof secrets>, text: string, more: { sensitive?: boolean; plain?: boolean; owner?: string } = {}): Fresh<typeof secrets> {
+export function value(_vault: TestVault, of: Fresh<typeof secrets>, text: string, more: { sensitive?: boolean; plain?: boolean } = {}): Fresh<typeof secrets> {
   const version = of.versions + 1;
   values.push({
-    owner: more.owner ?? null,
-    version: { id: randomUUID(), secretId: of.id, version, createdAt: at, createdBy: root, recipe: null, pairId: null, pairHalf: null, plaintext: more.plain === true ? text : null, sensitive: more.sensitive === true },
-    text: Buffer.from(text),
+    value: { version: { id: randomUUID(), secretId: of.id, version, createdAt: at, createdBy: root, recipe: null, pairId: null, pairHalf: null, plaintext: more.plain === true ? text : null, sensitive: more.sensitive === true }, text: Buffer.from(text) },
+    environment: of.environmentId,
   });
   return { ...of, versions: version, currentVersion: version };
 }
@@ -120,13 +123,14 @@ export function value(_vault: TestVault, of: Fresh<typeof secrets>, text: string
 export async function rewrite(vault: TestVault, of: { id: string }, text: string): Promise<Fresh<typeof secrets>> {
   let written!: Fresh<typeof secrets>;
   const result = await change(vault, {
-    read: { found: part(secrets, eq(secrets.id, of.id)) },
+    // Its environment too: the engine seals a value under what that row says.
+    read: { found: part(secrets, eq(secrets.id, of.id)), place: part(environments, sql`${environments.id} = (SELECT s.environment_id FROM secrets s WHERE s.id = ${of.id})`) },
     decide: ({ found: [was] }) => {
       const { mac: _, ...kept } = was!;
       const version = kept.versions + 1;
       written = { ...kept, versions: version, currentVersion: version };
       const row = { id: randomUUID(), secretId: kept.id, version, createdAt: at, createdBy: root, recipe: null, pairId: null, pairHalf: null, plaintext: null, sensitive: false };
-      return { writes: [put(secrets, written, was!)], values: [{ owner: null, version: row, text: Buffer.from(text) }], entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null };
+      return { writes: [put(secrets, written, was!)], values: [{ version: row, text: Buffer.from(text) }], entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null };
     },
   });
   if ('refused' in result) throw new Error(result.refused);

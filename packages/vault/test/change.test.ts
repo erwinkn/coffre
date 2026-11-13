@@ -381,19 +381,28 @@ test('a change that keeps losing answers busy', async () => {
   assert.equal((await seenOf(principals, eq(principals.id, bo)))[0]!.generation, 5, 'none of its own writes landed');
 });
 
-test('a value is the current version of a secret the same change writes, or the change is a fault', async () => {
-  const [environment, id] = [randomUUID(), randomUUID()];
-  const secret = (versions: number, currentVersion: number | null): Fresh<typeof secrets> => ({ id, projectId: randomUUID(), environmentId: environment, key: 'A', createdAt: at, updatedAt: at, versions, currentVersion, archivedAt: null, folder: null, sourceId: null });
-  const version = (of: string, number: number) => ({ owner: null, version: { id: randomUUID(), secretId: of, version: number, createdAt: at, createdBy: ada, recipe: null, pairId: null, pairHalf: null, plaintext: null, sensitive: false }, text: Buffer.from('x') });
-  const tries: [string, Write[], ReturnType<typeof version>][] = [
-    ['no secret written', [], version(id, 1)],
-    ['another secret written', [put(secrets, secret(1, 1))], version(randomUUID(), 1)],
-    ['not the number its secret is at', [put(secrets, secret(2, 2))], version(id, 1)],
-    ['a secret left with no value', [put(secrets, secret(1, null))], version(id, 1)],
+test('a value is the current version of a secret the same change writes, in an environment it read, or the change is a fault', async () => {
+  const [place, id] = [randomUUID(), randomUUID()];
+  const environment: Fresh<typeof environments> = { id: place, projectId: randomUUID(), slug: 'prod', name: 'prod', createdAt: at, archivedAt: null, parentId: null, owner: null, protected: false, frozenCredentials: [] };
+  const secret = (versions: number, currentVersion: number | null): Fresh<typeof secrets> => ({ id, projectId: environment.projectId, environmentId: place, key: 'A', createdAt: at, updatedAt: at, versions, currentVersion, archivedAt: null, folder: null, sourceId: null });
+  const version = (of: string, number: number, plaintext: string | null = null) => ({ version: { id: randomUUID(), secretId: of, version: number, createdAt: at, createdBy: ada, recipe: null, pairId: null, pairHalf: null, plaintext, sensitive: false }, text: Buffer.from('x') });
+  const here = put(environments, environment);
+  const tries: [string, Write[], ReturnType<typeof version>, RegExp][] = [
+    ['no secret written', [here], version(id, 1), /current version of a secret it writes/],
+    ['another secret written', [here, put(secrets, secret(1, 1))], version(randomUUID(), 1), /current version/],
+    ['an older number than its secret is at', [here, put(secrets, secret(2, 2))], version(id, 1), /current version/],
+    ['a number its secret counts past', [here, put(secrets, secret(2, 1))], version(id, 1), /current version/],
+    ['a secret left with no value', [here, put(secrets, secret(1, null))], version(id, 1), /current version/],
+    ['an environment neither read nor written', [put(secrets, secret(1, 1))], version(id, 1), /in an environment it read/],
+    ['a plain copy that is not the value', [here, put(secrets, secret(1, 1))], version(id, 1, 'y'), /copy is the value/],
   ];
-  for (const [what, writes, value] of tries) {
-    await assert.rejects(change(vault, { read: nothing, decide: () => ({ writes, values: [value], entry: said('test.write'), answer: null }) }), /current version of a secret it writes/, what);
+  for (const [what, writes, value, why] of tries) {
+    await assert.rejects(change(vault, { read: nothing, decide: () => ({ writes, values: [value], entry: said('test.write'), answer: null }) }), why, what);
   }
   assert.equal(vault.woken.length, 0);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT 1 FROM secrets UNION ALL SELECT 1 FROM secret_versions`), []);
+  // And as it should be: written with its secret and its environment, plain or not.
+  const project = put(projects, { id: environment.projectId, slug: 'market', name: 'Market', createdAt: at, archivedAt: null, folder: null });
+  const done = await change(vault, { read: nothing, decide: () => ({ writes: [project, here, put(secrets, secret(1, 1))], values: [version(id, 1, 'x')], entry: said('test.write'), answer: null }) });
+  assert.ok('answer' in done);
 });

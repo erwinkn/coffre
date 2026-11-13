@@ -3,7 +3,7 @@ import type { KekRegistry } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
 import { gaveUpCode, rowsOf } from '@coffre/db/dialect';
 import { later, laterRows } from '@coffre/db/later';
-import { secrets, secretVersions } from '@coffre/db/schema';
+import { environments, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
@@ -88,15 +88,12 @@ export function drop<T extends Sealed>(table: T, was: Row<T>): Write {
 }
 
 /**
- * A value a change writes: its version's row but for the encryption, its
- * text, and a personal config's owner. It is the current version of a
- * secret the same change writes, whose row says where it is held.
+ * A value a change writes: its version's row but for the encryption, and
+ * its text. It is the current version of a secret the same change writes,
+ * in an environment the change read or makes: those two rows say what its
+ * encryption names, and nothing the operation says beside them.
  */
-export type Value = {
-  owner: string | null;
-  version: Omit<Row<typeof secretVersions>, keyof Envelope>;
-  text: Buffer;
-};
+export type Value = { version: Omit<Row<typeof secretVersions>, keyof Envelope>; text: Buffer };
 
 /** Why a change is not made. It writes nothing, the log included. */
 export type Refusal = { refused: string };
@@ -248,11 +245,23 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     if (!rows.some((other) => other.row === name)) rows.push({ row: name, was: mac, now: mac });
   }
   const versions: Wire[] = [];
-  for (const { owner, version, text } of plan.values ?? []) {
-    // Sealed under what its secret's row says, as this change leaves it: a use opens it by the same row.
+  /** A row of `table` this change writes, or else read, by its key. */
+  const rowOf = <T extends Sealed>(table: T, key: object): Fresh<T> | undefined => {
+    const name = nameOf(table, key);
+    const made = plan.writes.find((write) => write.table === table && write.row !== null && nameOf(table, write.row) === name);
+    if (made !== undefined) return made.row as Fresh<T>;
+    for (const [row, of] of read) if (of === name) return row as Fresh<T>;
+    return undefined;
+  };
+  for (const { version, text } of plan.values ?? []) {
+    // Sealed under what its secret's row and its environment's say, as this change leaves them: a use opens it by the same rows.
     const held = plan.writes.find((write) => write.table === secrets && (write.row as { id?: string } | null)?.id === version.secretId)?.row as Fresh<typeof secrets> | undefined;
-    if (held === undefined || held.currentVersion !== version.version || held.versions !== version.version) throw new Error('a change writes a value as the current version of a secret it writes');
-    versions.push(toWire(secretVersions, { ...version, ...(await sealValue(text, contextOf(held, version, owner), vault.keks)) }));
+    const place = held && rowOf(environments, { id: held.environmentId });
+    if (held === undefined || place === undefined || held.currentVersion !== version.version || held.versions !== version.version) {
+      throw new Error('a change writes a value as the current version of a secret it writes, in an environment it read');
+    }
+    if (version.plaintext !== null && version.plaintext !== text.toString('utf8')) throw new Error("a plain value's copy is the value");
+    versions.push(toWire(secretVersions, { ...version, ...(await sealValue(text, contextOf(held, version, place.owner), vault.keks)) }));
   }
   // Dated now, as the write is sent: sealing a value, through a key service, takes as long as it takes.
   const entry = pending(key, plan.entry, vault.now(), rows);

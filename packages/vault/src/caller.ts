@@ -72,8 +72,8 @@ export type Caller = {
   /** `user:<email>` or `token:<name>`. */
   principal: string;
   credential: Row<typeof credentials>;
-  /** What they hold, as `@coffre/core/access` decides on it. */
-  holds: Holdings;
+  /** What they hold, as `@coffre/core/access` decides on it, with the roles and the protected environments of the rows read. */
+  holds: Holdings & { policy: Policy };
   /** For a workload's session; null for any other credential. */
   workload: Workload | null;
 };
@@ -226,9 +226,9 @@ export const live = (row: { slug: string; archivedAt: Date | null }) => row.arch
  * The caller's rows as a change reads them, by the token's hash: what a
  * use reads in its one statement (use.ts). Of their grants and roles, only
  * those that bear on the projects the change is about, given as SQL for a
- * set of ids (none, for a change of the instance's own): the entry names
- * every row read, and an Owner's hundred grants elsewhere decide nothing
- * here.
+ * set of ids (`NO_PROJECT` for a change of the instance's own): the entry
+ * names every row read, and an Owner's hundred grants elsewhere decide
+ * nothing here.
  */
 export function callerParts(token: Buffer, projects: SQL) {
   const hash = sql`decode(${token.toString('hex')}, 'hex')`;
@@ -248,26 +248,42 @@ export function callerParts(token: Buffer, projects: SQL) {
   };
 }
 
-/**
- * Who asks a change. `may` is how an operation asks what they hold in an
- * environment: by the environment's own row, which says whether it is
- * protected, so no operation decides on an environment it did not read.
- */
-export type Asking = Caller & { may(permission: Permission, environment: Row<typeof environments>): boolean };
+/** The projects of a change that is about none: a member's role, the instance's policy. */
+export const NO_PROJECT = sql`(SELECT NULL::uuid WHERE false)`;
 
 /**
- * The caller a change's read found, as `callerOf` decides. `about` are the
- * environments the change is about: a grant on one of them names it alone,
- * and its project is the row's. A handle is the proxy's, for uses: it
- * changes nothing, whatever its scope says.
+ * Who asks a change. What they hold is weighed with the rows of the
+ * environments it is asked about, never without: a row says whether its
+ * environment is protected, and which project a grant on it is in. `may`
+ * asks about one environment, by its row. `holding` is for a decision
+ * about a whole project: given every environment of it, since one left out
+ * counts as unprotected.
  */
-export function callerFrom(seen: Seen<ReturnType<typeof callerParts>>, about: readonly Row<typeof environments>[], shown: Shown, workloads: Workloads, at: number): Asking | null {
-  const caller = callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: about, binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy }, shown, workloads, at);
+export type Asking = Omit<Caller, 'holds'> & {
+  /** What they hold, among these environments. */
+  holding(rows: readonly Row<typeof environments>[]): Holdings;
+  /** Whether they hold `permission` in this environment. */
+  may(permission: Permission, environment: Row<typeof environments>): boolean;
+};
+
+/**
+ * The caller a change's read found, as `callerOf` decides. A handle is the
+ * proxy's, for uses: it changes nothing, whatever its scope says.
+ */
+export function callerFrom(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, workloads: Workloads, at: number): Asking | null {
+  const caller = callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: [], binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy }, shown, workloads, at);
   if (caller === null || caller.credential.kind === 'handle') return null;
-  const { holds } = caller;
-  return {
-    ...caller,
-    may: (permission, environment) =>
-      allows({ ...holds, policy: { ...holds.policy!, protected: environment.protected ? [environment.id] : [] } }, permission, { projectId: environment.projectId, environmentId: environment.id, environmentSlug: environment.slug }),
+  const { holds, ...who } = caller;
+  const holding = (rows: readonly Row<typeof environments>[]): Holdings => {
+    const guarded = rows.filter((row) => row.protected);
+    const within: Record<string, { environmentId: string; slug: string | null }[]> = {};
+    for (const row of guarded) (within[row.projectId] ??= []).push({ environmentId: row.id, slug: row.slug });
+    return {
+      ...holds,
+      // A grant on an environment names only it: its project is the row's.
+      grants: holds.grants.map((grant) => (grant.projectId === null ? { ...grant, projectId: rows.find((row) => row.id === grant.environmentId)?.projectId ?? null } : grant)),
+      policy: { ...holds.policy, protected: guarded.map((row) => row.id), protectedIn: within },
+    };
   };
+  return { ...who, holding, may: (permission, environment) => allows(holding([environment]), permission, { projectId: environment.projectId, environmentId: environment.id, environmentSlug: environment.slug }) };
 }
