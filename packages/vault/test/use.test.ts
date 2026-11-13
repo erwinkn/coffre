@@ -408,7 +408,7 @@ test('a workload\'s session is its key\'s: it uses what its service does, and is
   assert.deepEqual(given(result.values), { DATABASE_URL: 'postgres://prod', STRIPE_KEY: 'refused: use_only', FLAG: 'on' });
   // What only the app can hold the request to comes back with it.
   assert.deepEqual([result.principal, result.credential, result.workload], [api, pod.id, { binding: bound.id, profile: 'kubernetes', policy: JSON.parse(bound.policy!), constraints: null }]);
-  assert.deepEqual(await got(ask('pod', 'market/prod', ['STRIPE_KEY'], { ...keyed, purpose: 'use', credential: 'stripe' })), { STRIPE_KEY: 'sk_live' });
+  assert.deepEqual(await got(ask('pod', 'market/prod', ['STRIPE_KEY'], { ...keyed, purpose: 'use', upstream: 'stripe' })), { STRIPE_KEY: 'sk_live' });
   assert.equal((await logged()).at(-1)!.detail.credential, 'stripe');
   // Listed where the value is held, never where a request names it: staging inherits prod's, and its own is not listed.
   assert.deepEqual(await got(ask('pod', 'market/staging', ['DATABASE_URL', 'STRIPE_KEY'], keyed)), { DATABASE_URL: 'refused: use_only', STRIPE_KEY: 'refused: use_only' });
@@ -467,11 +467,11 @@ test('a narrowed session uses values within its limits, is handed none, and stan
   const stray = credential('stray', ci, { kind: 'workload', jkt: 'stray', notAfter: new Date(Date.UTC(2027, 0, 1)) });
   await write(vault, ...rows('credentials', agent, narrowed('tool', [pod.id, agent.id], limits), narrowed('free', [pod.id]), session('limited', bound, { constraints: JSON.stringify(limits) }), stray, narrowed('adopted', [stray.id]), narrowed('deep', [pod.id, pod.id, pod.id, pod.id, pod.id])));
   await settled();
-  const uses = (label: string, place: string, credential: string | null, purpose = 'use') => got(ask(label, place, ['STRIPE_KEY'], { proof: label, purpose, credential }));
+  const uses = (label: string, place: string, credential: string | null, purpose = 'use') => got(ask(label, place, ['STRIPE_KEY'], { proof: label, purpose, upstream: credential }));
 
   assert.deepEqual(await uses('agent', 'market/prod', 'stripe'), { STRIPE_KEY: 'sk_live' });
   // Handed nothing, a plain value included; and nothing past the places and credentials it was narrowed to.
-  assert.equal(await got(ask('agent', 'market/prod', ['FLAG'], { proof: 'agent', credential: 'stripe' })), 'narrowed');
+  assert.equal(await got(ask('agent', 'market/prod', ['FLAG'], { proof: 'agent', upstream: 'stripe' })), 'narrowed');
   for (const [place, credential] of [['market/staging', 'stripe'], ['market/prod', 'openai'], ['market/prod', null]] as const) assert.equal(await uses('agent', place, credential), 'narrowed', `${place} ${credential}`);
   // One narrowed with no limit uses what its service does; and limits bind whatever the row says of sessions above it.
   assert.deepEqual(await uses('free', 'market/staging', null), { STRIPE_KEY: 'sk_live' });
@@ -499,14 +499,14 @@ test('a handle reaches what its scope does; an upstream credential frozen in an 
   // `coffre run` reads its plan through the handle: what its person reads where it was made, and nothing elsewhere.
   assert.deepEqual(await got(ask('handle', 'market/prod', ['DATABASE_URL'], { purpose: 'expose' })), { DATABASE_URL: 'postgres://prod' });
   assert.equal(await got(ask('handle', 'market/staging', ['DATABASE_URL'], { purpose: 'expose' })), 'no_access');
-  assert.deepEqual(await got(ask('handle', 'market/prod', ['DATABASE_URL'], { purpose: 'use', credential: 'stripe' })), { DATABASE_URL: 'postgres://prod' });
+  assert.deepEqual(await got(ask('handle', 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: 'stripe' })), { DATABASE_URL: 'postgres://prod' });
 
   await amend(vault, 'environments', sql`id = ${w.prod.id}`, { frozenCredentials: ['stripe'] });
   await settled();
-  for (const label of ['handle', 'ada', 'cy']) assert.equal(await got(ask(label, 'market/prod', ['DATABASE_URL'], { purpose: 'use', credential: 'stripe' })), 'frozen', label);
+  for (const label of ['handle', 'ada', 'cy']) assert.equal(await got(ask(label, 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: 'stripe' })), 'frozen', label);
   // Another credential there, and the same one elsewhere, are not.
-  assert.deepEqual(await got(ask('ada', 'market/prod', ['DATABASE_URL'], { purpose: 'use', credential: 'openai' })), { DATABASE_URL: 'postgres://prod' });
-  assert.deepEqual(await got(ask('ada', 'market/staging', ['DATABASE_URL'], { purpose: 'use', credential: 'stripe' })), { DATABASE_URL: 'postgres://staging' });
+  assert.deepEqual(await got(ask('ada', 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: 'openai' })), { DATABASE_URL: 'postgres://prod' });
+  assert.deepEqual(await got(ask('ada', 'market/staging', ['DATABASE_URL'], { purpose: 'use', upstream: 'stripe' })), { DATABASE_URL: 'postgres://staging' });
   // Nobody is told a credential is frozen in a place they hold nothing in.
-  assert.equal(await got(ask('dee', 'market/prod', ['DATABASE_URL'], { purpose: 'use', credential: 'stripe' })), 'no_access');
+  assert.equal(await got(ask('dee', 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: 'stripe' })), 'no_access');
 });

@@ -44,7 +44,7 @@ function asked(input: UseInput): Ask {
   if (!text(token) || !TOKEN.test(token) || !text(project) || !text(environment) || typeof mine !== 'boolean' || !named || !PURPOSES.includes(purpose) || !optional) {
     throw new TypeError('a use names a token by its SHA-256 in lowercase hex, a place by its slugs, 1,000 keys at most, and a purpose the contract has');
   }
-  return { token: Buffer.from(token, 'hex'), proof, request, ip, project, environment, mine, keys: keys as string[] | null, purpose, credential: upstream };
+  return { token: Buffer.from(token, 'hex'), proof, request, ip, project, environment, mine, keys: keys as string[] | null, purpose, upstream };
 }
 
 export function openVault(db: Database, prepared: PreparedVault, { wake, now = Date.now }: VaultOptions): Vault {
