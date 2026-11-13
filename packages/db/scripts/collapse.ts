@@ -1,0 +1,407 @@
+// The collapse of the numbered migrations (T285; 0.16's clean break, D197): one baseline for a new database and
+// one upgrade from 0.15.0, each SQL function written once, in its final form, in a file of its own that both name.
+// A tool for that one collapse, rerun on the day it lands: the pull request that deletes the numbered migrations
+// deletes it too, and keeps the parity test (test/collapse.test.ts).
+//
+// It parses no SQL. It replays the migrations a statement at a time on a scratch database and reads, after each,
+// which functions it made, replaced, altered, granted or dropped (`pg_proc`). Every statement about functions alone
+// is then left out, and each function that lives to the end is written where the path first made or changed it,
+// as the catalog holds it at the end (`pg_get_functiondef`, with its grants); one that does not is dropped where
+// the path last touched it, and, if the path made it too and an object held it meanwhile (0047's trigger, which 0085
+// drops with its function), is made where the path made it, in the form it last had. Every other statement stays, in its order. So does every row a migration writes, and so
+// does a function of the session's own (`pg_temp`, 0084's), which lives only for the statements of its migration that
+// call it, and which the migration's one session runs as the collapsed one does.
+//
+// Also left out: the DO blocks that grant a function's owner what it calls or reads (0057 to 0081's), for an owner
+// that was not the login migrating. Since T193 the migrator hands each of coffre's objects to the ledger's owner in
+// the migrations' own transaction (`HANDED_OVER`, migrate.ts), so they are moot, and they name each function by a
+// signature of the time, which the collapsed upgrade no longer makes.
+//
+// An index the path builds online (CONCURRENTLY, after the migrations' transaction) is built plainly where it stands,
+// for 0.16.0's upgrade is offline; one the path drops later is left out. A statement holds one command (`several`).
+//
+// What proves the output is the parity test, not this script: the two paths leave the same database, on an empty
+// one, on a seeded 0.15.0 database where each data statement writes rows, and on a restored one when a test names it.
+//
+//   pnpm collapse:migrations <dir>   writes <dir>/baseline.sql, <dir>/upgrade.sql and <dir>/functions/<name>.sql
+import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { migrationsFolder } from '../src/migrate.ts';
+import { onlineIndex, type OnlineIndex } from '../src/online-indexes.ts';
+import { postgresClient, quoteIdentifier, type PostgresClient } from '../src/postgres.ts';
+
+export const BREAK = '--> statement-breakpoint';
+/** The release the upgrade starts from, as its tag holds its migrations (0022 was rewritten since: migrate.ts, `REWRITTEN`). */
+export const RELEASE = 'v0.15.0';
+/** Where a function's file goes in a migration: the line `-- @function <name>`, a statement of its own. */
+const MARKER = /^-- @function (\S+)$/gm;
+
+export type Migration = { tag: string; sql: string };
+export type Collapsed = { baseline: string; upgrade: string; functions: Map<string, string> };
+
+const root = fileURLToPath(new URL('../../..', import.meta.url));
+const folder = 'packages/db/src/migrations/postgres';
+
+/** This checkout's numbered migrations, in the journal's order. */
+export async function numbered(): Promise<Migration[]> {
+  const { entries } = JSON.parse(await readFile(`${migrationsFolder()}/meta/_journal.json`, 'utf8')) as { entries: { tag: string }[] };
+  return Promise.all(entries.map(async ({ tag }) => ({ tag, sql: await readFile(`${migrationsFolder()}/${tag}.sql`, 'utf8') })));
+}
+
+/** 0.15.0's migrations, from its tag: what every database the upgrade meets has applied. */
+export function released(): Migration[] {
+  const show = (path: string) => {
+    try {
+      return execFileSync('git', ['show', `${RELEASE}:${folder}/${path}`], { cwd: root, encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (error) {
+      throw new Error(`cannot read ${path} at ${RELEASE}: fetch the tag (git fetch --depth=1 origin tag ${RELEASE})`, { cause: error });
+    }
+  };
+  const { entries } = JSON.parse(show('meta/_journal.json')) as { entries: { tag: string }[] };
+  return entries.map(({ tag }) => ({ tag, sql: show(`${tag}.sql`) }));
+}
+
+/** A migration's statements, as the migrator splits them. */
+export function statements(sql: string): string[] {
+  return sql.split(BREAK).map((statement) => statement.trim()).filter((statement) => statement !== '');
+}
+
+/** A migration with each `-- @function` line replaced by that function's file. */
+export function assemble(sql: string, functions: ReadonlyMap<string, string>): string {
+  return sql.replace(MARKER, (_, name: string) => {
+    const file = functions.get(name);
+    if (file === undefined) throw new Error(`no function file for ${name}`);
+    return file;
+  });
+}
+
+/** The statement without the comment lines before it. */
+const bare = (statement: string) => statement.replace(/^(?:\s*--[^\n]*\n)*\s*/, '');
+/**
+ * A statement that holds more than one command: a `;` with more than blanks after it, once its comments and
+ * dollar-quoted bodies are gone, read left to right so that a `$$` or `--` inside a string is the string's (a `;`
+ * inside one is refused too). The parity test holds each data statement to the seed by its command, which is the
+ * statement's first. A guard against a slip, not a parser.
+ */
+export const several = (statement: string) =>
+  /;\s*\S/.test(statement.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|--[^\n]*|\/\*[\s\S]*?\*\/|\$(\w*)\$[\s\S]*?\$\1\$/g, (token) => (/^['"]/.test(token) ? token : ' ')));
+/** A statement about a function of the session's own (`pg_temp`), which a migration makes to run its own statements. */
+const temporary = (statement: string) => /^(?:CREATE (?:OR REPLACE )?FUNCTION|DROP FUNCTION(?: IF EXISTS)?|ALTER FUNCTION)\s+pg_temp\./i.test(bare(statement));
+const aboutFunctions = (statement: string) =>
+  !temporary(statement) &&
+  /^(?:CREATE (?:OR REPLACE )?FUNCTION|DROP FUNCTION|ALTER FUNCTION|(?:GRANT|REVOKE)\s[^;]*?\sON (?:FUNCTION|ALL (?:FUNCTIONS|ROUTINES) IN SCHEMA))\s/i.test(bare(statement));
+const ownerGrant = (statement: string) => /^DO\s/.test(bare(statement)) && statement.includes('pg_get_userbyid(proowner)');
+
+/**
+ * Each function, by its signature (`regprocedure`, as the default search path writes it): its schema and owner, a
+ * digest of its whole definition, what CREATE OR REPLACE refuses to change (its kind, its arguments' names, modes
+ * and types, its result) and how many of its arguments have defaults (a replace may add one, not remove one), and
+ * the roles other than its owner that may execute it (null: everyone, Postgres's default).
+ */
+type Fn = { name: string; schema: string; owner: string; digest: string; head: string; defaults: number; grantees: string[] | null };
+type Snapshot = Map<string, Fn>;
+
+const FUNCTIONS = `
+  SELECT p.oid::regprocedure::text AS id, p.oid::text AS oid, p.proname::text AS name, p.pronamespace::regnamespace::text AS schema,
+         pg_get_userbyid(p.proowner)::text AS owner, md5(pg_get_functiondef(p.oid)) AS digest,
+         concat_ws(' ', p.prokind, p.proargnames::text, p.proargmodes::text, coalesce(p.proallargtypes, p.proargtypes::oid[])::regtype[]::text,
+                   p.prorettype::regtype::text, p.proretset) AS head,
+         p.pronargdefaults::int AS defaults,
+         CASE WHEN p.proacl IS NOT NULL THEN ARRAY(
+           SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(a.grantee)) END
+                  || CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END
+             FROM aclexplode(p.proacl) a WHERE a.grantee <> p.proowner ORDER BY 1) END AS grantees
+    FROM pg_proc p WHERE p.pronamespace NOT IN ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)
+     AND p.pronamespace <> pg_my_temp_schema() AND NOT pg_is_other_temp_schema(p.pronamespace)`;
+
+/** The functions, and each one's object ID, which a rename or a move keeps. */
+async function snapshot(client: PostgresClient): Promise<{ fns: Snapshot; oids: Map<string, string> }> {
+  const rows = await client.unsafe<({ id: string; oid: string } & Fn)[]>(FUNCTIONS);
+  return { fns: new Map(rows.map(({ id, oid: _, ...fn }) => [id, fn])), oids: new Map(rows.map(({ id, oid }) => [id, oid])) };
+}
+
+/** The functions whose definition, owner, grants or existence differ between two snapshots. */
+function changed(before: Snapshot, after: Snapshot): string[] {
+  return [...new Set([...before.keys(), ...after.keys()])].filter((id) => JSON.stringify(before.get(id)) !== JSON.stringify(after.get(id))).sort();
+}
+
+/** `index` built plainly, in the transaction: 0.16.0's upgrade is offline (D197), so it builds no index online. */
+const plain = (index: OnlineIndex) => `CREATE ${index.unique ? 'UNIQUE ' : ''}INDEX ${quoteIdentifier(index.name)} ON ${quoteIdentifier(index.table)} ${index.body}`;
+const run = (client: PostgresClient, statement: string) => {
+  const online = onlineIndex(statement);
+  return client.unsafe(online === null ? statement : plain(online));
+};
+const INDEXES = `SELECT oid::text FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind IN ('i', 'I')`;
+const indexes = async (client: PostgresClient) => new Set((await client.unsafe<{ oid: string }[]>(INDEXES)).map(({ oid }) => oid));
+
+/** The functions an object depends on, as Postgres records it: a trigger's, a default's, a view's (not a body's calls). */
+const HELD = `SELECT DISTINCT refobjid::regprocedure::text AS id FROM pg_depend WHERE refclassid = 'pg_proc'::regclass AND refobjid >= 16384`;
+
+/** Besides the functions: the indexes (object IDs) each statement made and removed, and those left at the end. */
+type Replayed = {
+  start: Snapshot;
+  steps: Snapshot[];
+  touched: string[][];
+  end: Snapshot;
+  made: string[][];
+  gone: string[][];
+  kept: Set<string>;
+  /** The last definition of each function the path made and dropped again, while an object held it (a trigger). */
+  dead: Map<string, string>;
+};
+
+/**
+ * `list` run one at a time, autocommitted, a CONCURRENTLY index built plainly: the functions after each statement,
+ * which each changed, and the indexes it made and removed. Refused: a function outside the public schema, which the
+ * collapse does not write, and a function renamed or moved, which the collapse would drop and make anew, breaking
+ * what holds it by its object ID (a trigger, a view).
+ */
+async function replay(client: PostgresClient, where: readonly string[], list: readonly string[]): Promise<Replayed> {
+  const outside = (fns: Snapshot, at: string) => {
+    for (const [id, fn] of fns) if (fn.schema !== 'public') throw new Error(`${at} makes ${id} outside the public schema, which the collapse does not write`);
+  };
+  const first = await snapshot(client);
+  outside(first.fns, 'the database the replay starts from');
+  let before = first;
+  let had = await indexes(client);
+  const steps: Snapshot[] = [];
+  const touched: string[][] = [];
+  const made: string[][] = [];
+  const gone: string[][] = [];
+  const defs = new Map<string, string>();
+  const held = new Set<string>();
+  for (const [index, statement] of list.entries()) {
+    await run(client, statement);
+    const after = await snapshot(client);
+    const now = await indexes(client);
+    made.push([...now].filter((oid) => !had.has(oid)));
+    gone.push([...had].filter((oid) => !now.has(oid)));
+    had = now;
+    outside(after.fns, where[index]!);
+    for (const [id, oid] of before.oids) {
+      const now = after.oids.has(id) ? undefined : [...after.oids].find(([, other]) => other === oid);
+      if (now !== undefined) throw new Error(`${where[index]} renames or moves ${id} to ${now[0]}, which the collapse would drop and make anew`);
+    }
+    const ids = changed(before.fns, after.fns);
+    for (const id of ids.filter((id) => after.fns.has(id) && !first.fns.has(id))) {
+      const [{ def }] = await client.unsafe<[{ def: string }]>('SELECT pg_get_functiondef($1::regprocedure) AS def', [id]);
+      defs.set(id, def.trimEnd());
+    }
+    for (const { id } of await client.unsafe<{ id: string }[]>(HELD)) held.add(id);
+    touched.push(ids);
+    steps.push(after.fns);
+    before = after;
+  }
+  const dead = new Map([...defs].filter(([id]) => held.has(id) && !before.fns.has(id)));
+  return { start: first.fns, steps, touched, end: before.fns, made, gone, kept: had, dead };
+}
+
+const everyone = (grantees: string[] | null) => grantees ?? ['PUBLIC'];
+const qualified = (id: string) => (id.startsWith('public.') ? id : `public.${id}`);
+
+/**
+ * Where the collapse writes each function of `end` (by name: every overload, its file) and drops each of `start` that
+ * `end` lacks. A name goes where the path first changed it, but one with an overload CREATE OR REPLACE cannot turn
+ * into its final form (its head changed, or a default went) is dropped and made where the path itself dropped that
+ * overload, not before, when what the path dropped with it may still hold it. A function `end` lacks is dropped where
+ * the path last touched it; one the path made and dropped again while an object held it (a trigger) is made where the
+ * path first made it, in the form it last had, and dropped where the path last touched it.
+ */
+function placement({ start, steps, touched, end }: Replayed) {
+  const placeAt = new Map<string, number>();
+  const first = new Map<string, number>();
+  const last = new Map<string, number>();
+  touched.forEach((ids, index) =>
+    ids.forEach((id) => {
+      if (!first.has(id)) first.set(id, index);
+      last.set(id, index);
+      const name = end.get(id)?.name;
+      if (name !== undefined && !placeAt.has(name)) placeAt.set(name, index);
+    }),
+  );
+  const remade = (id: string) => {
+    const was = start.get(id);
+    const now = end.get(id);
+    return was !== undefined && now !== undefined && (was.head !== now.head || now.defaults < was.defaults);
+  };
+  for (const [id, fn] of end) {
+    if (!remade(id)) continue;
+    const dropped = steps.findIndex((step) => !step.has(id));
+    if (dropped === -1) throw new Error(`${id} changes in a way CREATE OR REPLACE refuses, yet the numbered path never drops it`);
+    placeAt.set(fn.name, Math.max(placeAt.get(fn.name)!, dropped));
+  }
+  return { placeAt, first, last, remade };
+}
+
+/**
+ * `list`, from the database `start` describes to the one `end` does: each statement about functions alone left
+ * out, each function of `end` written under its marker and each of `start` that `end` lacks dropped, as `placement`
+ * says. A function remade is dropped before its file makes it again; one only replaced keeps its grants, and loses
+ * those `end` does not give.
+ */
+function collapse(where: readonly string[], list: readonly string[], replayed: Replayed): string {
+  const { start, touched, end, made, gone, kept, dead } = replayed;
+  const { placeAt, first, last, remade } = placement(replayed);
+  // An online index the path drops (by DROP INDEX or with its table) is left out, with a DROP INDEX that would fail
+  // without it: building one on audit_log only to drop it would cost the upgrade's downtime for nothing.
+  const left = new Set(list.flatMap((statement, index) => (onlineIndex(statement) !== null && !made[index]!.some((oid) => kept.has(oid)) ? made[index]! : [])));
+  const out: string[] = [];
+  const placed = new Set<string>();
+  list.forEach((statement, index) => {
+    if (!aboutFunctions(statement) && !ownerGrant(statement)) {
+      if (touched[index]!.length > 0) throw new Error(`${where[index]} changes ${touched[index]!.join(', ')} but is no statement about functions`);
+      const online = onlineIndex(statement);
+      const lost = gone[index]!.filter((oid) => left.has(oid));
+      if (online !== null) {
+        if (!left.has(made[index]![0]!)) out.push(`${statement.slice(0, statement.length - bare(statement).length)}${plain(online)};`);
+      } else if (lost.length > 0 && /^DROP INDEX\s(?!IF EXISTS\s)/i.test(bare(statement))) {
+        if (lost.length < gone[index]!.length) throw new Error(`${where[index]} drops an index the collapse leaves out with others: give it a statement of its own`);
+      } else out.push(statement);
+      return;
+    }
+    for (const id of touched[index]!) {
+      const final = end.get(id);
+      if (final === undefined) {
+        if (dead.has(id) && first.get(id) === index) out.push(`${dead.get(id)!};`);
+        if ((start.has(id) || dead.has(id)) && last.get(id) === index) out.push(`DROP FUNCTION ${qualified(id)};`);
+        continue;
+      }
+      if (placed.has(final.name) || placeAt.get(final.name) !== index) continue;
+      placed.add(final.name);
+      const overloads = [...end].filter(([, fn]) => fn.name === final.name);
+      for (const [other] of overloads) if (remade(other)) out.push(`DROP FUNCTION ${qualified(other)};`);
+      out.push(`-- @function ${final.name}`);
+      for (const [other, fn] of overloads) {
+        const was = start.get(other);
+        if (was === undefined || remade(other)) continue;
+        const now = everyone(fn.grantees);
+        const lost = everyone(was.grantees).filter((grantee) => grantee !== 'PUBLIC' && !now.includes(grantee));
+        if (lost.length > 0) out.push(`REVOKE ALL ON FUNCTION ${qualified(other)} FROM ${lost.map((grantee) => grantee.split(' ')[0]).join(', ')};`);
+        if (now.includes('PUBLIC') && !everyone(was.grantees).includes('PUBLIC')) out.push(`GRANT EXECUTE ON FUNCTION ${qualified(other)} TO PUBLIC;`);
+      }
+    }
+  });
+  // A function is written where the path first made it, in the form it last had, which may name what is made later
+  // (a table 0076 renamed, an overload made after it): Postgres checks a body as it is made, so the check waits
+  // until the transaction ends, as a restore of pg_dump's does. Each body was checked where the path made it.
+  return [UNCHECKED, ...out, CHECKED].join(`\n${BREAK}\n`) + '\n';
+}
+const UNCHECKED = 'SET LOCAL check_function_bodies = off;';
+const CHECKED = 'RESET check_function_bodies;';
+
+/**
+ * Each function's file: every overload of its name, in its final form, with its grants, after the comment the
+ * statement that last wrote it had (`comments`, by signature).
+ */
+async function files(client: PostgresClient, end: Snapshot, comments: ReadonlyMap<string, string>): Promise<Map<string, string>> {
+  const rows = await client.unsafe<{ id: string; def: string }[]>(
+    `SELECT p.oid::regprocedure::text AS id, pg_get_functiondef(p.oid) AS def FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace`,
+  );
+  const defs = new Map(rows.map(({ id, def }) => [id, def.trimEnd()]));
+  const out = new Map<string, string[]>();
+  for (const [id, fn] of [...end].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const parts = out.get(fn.name) ?? [];
+    const grantees = fn.grantees;
+    parts.push(`${comments.get(id) ?? ''}${defs.get(id)!};`);
+    if (grantees !== null && !grantees.includes('PUBLIC')) parts.push(`REVOKE ALL ON FUNCTION ${qualified(id)} FROM PUBLIC;`);
+    for (const grantee of grantees?.filter((grantee) => !grantee.startsWith('PUBLIC')) ?? []) parts.push(`GRANT EXECUTE ON FUNCTION ${qualified(id)} TO ${grantee};`);
+    out.set(fn.name, parts);
+  }
+  return new Map([...out].map(([name, parts]) => [name, parts.join(`\n${BREAK}\n`)]));
+}
+
+/** The comment lines before the last statement that made each function what it is at the end. */
+function lastComments(list: readonly string[], touched: readonly string[][]): Map<string, string> {
+  const comments = new Map<string, string>();
+  list.forEach((statement, index) => {
+    if (!/^CREATE\s/i.test(bare(statement))) return;
+    const comment = statement.slice(0, statement.length - bare(statement).length);
+    for (const id of touched[index]!) comments.set(id, comment);
+  });
+  return comments;
+}
+
+/** The migrator's ledger, which it makes before the first migration, and which 0000 and 0019 grant. */
+export const LEDGER = 'CREATE SCHEMA IF NOT EXISTS drizzle; CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at bigint)';
+
+/** A database of its own on the cluster `cluster` (a URL to its `postgres` database) for `work`, dropped after. */
+async function scratch<T>(cluster: string, work: (client: PostgresClient) => Promise<T>): Promise<T> {
+  const name = `coffre_collapse_${randomBytes(6).toString('hex')}`;
+  const admin = postgresClient(cluster, { max: 1 });
+  try {
+    await admin.unsafe(`CREATE DATABASE ${quoteIdentifier(name)}`);
+    const client = postgresClient(Object.assign(new URL(cluster), { pathname: `/${name}` }).toString(), { max: 1, onnotice: () => {} });
+    try {
+      await client.unsafe(LEDGER);
+      return await work(client);
+    } finally {
+      await client.end();
+    }
+  } finally {
+    await admin.unsafe(`DROP DATABASE IF EXISTS ${quoteIdentifier(name)} WITH (FORCE)`);
+    await admin.end();
+  }
+}
+
+const located = (migrations: readonly Migration[]) =>
+  migrations.flatMap(({ tag, sql }) => statements(sql).map((statement, index) => ({ where: `${tag} statement ${index + 1}`, statement })));
+
+/**
+ * The collapse of this checkout's numbered migrations (or of `migrations`), made on the cluster `cluster` (a URL to its `postgres`
+ * database, as the owner: the runtime logins must be there, as `scripts/setup-test-database.sh` makes them).
+ */
+export async function collapseMigrations(cluster: string, migrations?: readonly Migration[]): Promise<Collapsed> {
+  const all = migrations ?? (await numbered());
+  const release = released();
+  release.forEach(({ tag }, index) => {
+    if (all[index]?.tag !== tag) throw new Error(`the journal does not start with ${RELEASE}'s: ${all[index]?.tag ?? 'nothing'} where it has ${tag}`);
+  });
+  const whole = located(all);
+  const after = located(all.slice(release.length));
+  for (const { where, statement } of after) if (several(statement)) throw new Error(`${where} holds more than one command: give each a statement of its own`);
+
+  const owned = async (client: PostgresClient, fns: Snapshot) => {
+    // A function's file sets no owner: the login migrating owns what it makes, so the path must leave it that.
+    const [{ login }] = await client.unsafe<{ login: string }[]>('SELECT current_user::text AS login');
+    for (const [id, fn] of fns) if (fn.owner !== login) throw new Error(`${id} ends owned by ${fn.owner}, not by ${login}, which migrates; its file sets no owner`);
+  };
+  const fromEmpty = await scratch(cluster, async (client) => {
+    const replayed = await replay(client, whole.map(({ where }) => where), whole.map(({ statement }) => statement));
+    await owned(client, replayed.end);
+    return { replayed, functions: await files(client, replayed.end, lastComments(whole.map(({ statement }) => statement), replayed.touched)) };
+  });
+  const fromRelease = await scratch(cluster, async (client) => {
+    for (const { statement } of located(release)) await run(client, statement);
+    return replay(client, after.map(({ where }) => where), after.map(({ statement }) => statement));
+  });
+  // Both paths end in the same functions, or the numbered migrations disagree with themselves.
+  const differ = changed(fromEmpty.replayed.end, fromRelease.end);
+  if (differ.length > 0) throw new Error(`0.15.0 then its successors and the whole path end in different functions: ${differ.join(', ')}`);
+
+  return {
+    baseline: collapse(whole.map(({ where }) => where), whole.map(({ statement }) => statement), fromEmpty.replayed),
+    upgrade: collapse(after.map(({ where }) => where), after.map(({ statement }) => statement), fromRelease),
+    functions: fromEmpty.functions,
+  };
+}
+
+/** The local cluster the tests use, as its owner. */
+export const LOCAL_CLUSTER = `postgresql://coffre_owner:local-dev-only@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/postgres`;
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const dir = process.argv[2];
+  if (dir === undefined) throw new Error('usage: pnpm collapse:migrations <dir>');
+  const { baseline, upgrade, functions } = await collapseMigrations(LOCAL_CLUSTER);
+  await rm(join(dir, 'functions'), { recursive: true, force: true });
+  await mkdir(join(dir, 'functions'), { recursive: true });
+  await writeFile(join(dir, 'baseline.sql'), baseline);
+  await writeFile(join(dir, 'upgrade.sql'), upgrade);
+  for (const [name, text] of functions) await writeFile(join(dir, 'functions', `${name}.sql`), `${text}\n`);
+  const lines = (text: string) => text.split('\n').length - 1;
+  const ofFunctions = [...functions.values()].reduce((sum, text) => sum + lines(`${text}\n`), 0);
+  console.log(`baseline.sql ${lines(baseline)} lines, upgrade.sql ${lines(upgrade)}, ${functions.size} function files ${ofFunctions}`);
+}
