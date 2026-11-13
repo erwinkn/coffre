@@ -230,6 +230,9 @@ test('what a caller holds in a change\'s project is whole, whatever else the ope
   const fay = await asking('fay-cli');
   const row = (of: ReturnType<typeof environment>, more: object = {}) => ({ ...of, mac: Buffer.alloc(36), ...more });
   assert.deepEqual([fay.may('secret.write', row(elsewhere)), fay.may('secret.write', row(elsewhere, { protected: false }))], [false, true]);
+  // Archived, an environment protects as before: it may be brought back.
+  await amend(world, 'environments', eq(environments.id, guarded!), { archivedAt: new Date(world.now()) });
+  assert.deepEqual((await asking('cy-cli')).holds.policy, cy.holds.policy);
   // A deleted environment protects nothing: its tombstone is not among them, a grant on it or not.
   await amend(world, 'environments', eq(environments.id, guarded!), { slug: 'guarded~1' });
   assert.deepEqual((await asking('cy-cli')).holds.policy, { ...cy.holds.policy, protected: [], protectedIn: {} });

@@ -266,7 +266,8 @@ export function callerFrom(seen: Seen<ReturnType<typeof callerParts>>, shown: Sh
   const caller = callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: seen.places, binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy }, shown, workloads, at);
   if (caller === null || caller.credential.kind === 'handle') return null;
   const protectedIn: Record<string, { environmentId: string; slug: string | null }[]> = {};
-  for (const row of seen.places) if (row.protected && live(row)) (protectedIn[row.projectId] ??= []).push({ environmentId: row.id, slug: row.slug });
+  // Archived, an environment still protects: it may be brought back. Only a deleted one's tombstone does not.
+  for (const row of seen.places) if (row.protected && !row.slug.includes('~')) (protectedIn[row.projectId] ??= []).push({ environmentId: row.id, slug: row.slug });
   const holds = { ...caller.holds, policy: { ...caller.holds.policy, protectedIn } };
   return {
     ...caller,
