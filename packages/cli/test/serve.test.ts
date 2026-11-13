@@ -13,8 +13,8 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import pg from 'pg';
 import { credential } from '@coffre/client/credential';
+import { postgresClient } from '@coffre/db/connect';
 
 import { fakeCoffre, fakePostgres } from './workload-fake.ts';
 
@@ -74,9 +74,8 @@ test("coffre serve forwards the app's requests signed, as sent, carries a tunnel
 
   // No password: the sidecar's boundary is the pod.
   assert.match(databaseUrl!, /^postgres:\/\/app@127\.0\.0\.1:\d+\/app\?sslmode=disable$/);
-  const client = new pg.Client({ connectionString: databaseUrl });
-  await client.connect();
-  assert.deepEqual((await client.query('select three')).rows, [{ value: 'select three' }]);
+  const client = postgresClient(databaseUrl!, { max: 1 });
+  assert.deepEqual([...await client.unsafe('select three')], [{ value: 'select three' }]);
   await client.end();
 
   run.child.kill('SIGTERM');
@@ -131,11 +130,10 @@ test("a service's run, key-bound: the values it may read, its credentials and da
   t.after(() => coffre.close());
   const app = `
     const { credential } = await import('@coffre/client/credential');
-    const pg = (await import('pg')).default;
+    const { postgresClient } = await import('@coffre/db/connect');
     const models = await credential('openai').fetch('/models', { headers: { accept: 'application/json' } });
-    const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
-    await client.connect();
-    const { rows } = await client.query('select four');
+    const client = postgresClient(process.env.DATABASE_URL, { max: 1 });
+    const rows = await client.unsafe('select four');
     await client.end();
     console.log(JSON.stringify({ sid: process.env.TWILIO_SID, credentials: JSON.parse(process.env.COFFRE_CREDENTIALS), models: models.status, rows }));
   `;
@@ -192,9 +190,8 @@ test('coffre serve sends no proof to an instance outside TLS, and survives a req
   for await (const chunk of raw) answer += String(chunk);
   assert.match(answer, /^HTTP\/1\.1 400/);
   assert.equal((await fetch(`${listener}/use/market/staging/openai/models`)).status, 200);
-  const client = new pg.Client({ connectionString: databaseUrl });
-  await client.connect();
-  assert.deepEqual((await client.query('select five')).rows, [{ value: 'select five' }]);
+  const client = postgresClient(databaseUrl!, { max: 1 });
+  assert.deepEqual([...await client.unsafe('select five')], [{ value: 'select five' }]);
   await client.end();
   assert.ok(coffre.log.includes('GET /use/market/staging/db upgrade'), coffre.log.join('\n'));
 });
@@ -235,11 +232,11 @@ test('through the sidecar: a redirect within coffre comes back to it, a SigV4 up
   assert.equal(coffre.forwarded.at(-1)!.length, String(size));
 
   // The gate restarts: the next upgrade is refused for its nonce, and the one after it signs with the nonce that refusal gave.
+  // The sidecar closes the app's connection it could not carry: that query fails, and the next connection answers.
   coffre.gate.restart();
-  await assert.rejects(new pg.Client({ connectionString: databaseUrl }).connect());
-  const client = new pg.Client({ connectionString: databaseUrl });
-  await client.connect();
-  assert.deepEqual((await client.query('select six')).rows, [{ value: 'select six' }]);
+  const client = postgresClient(databaseUrl!, { max: 1 });
+  await assert.rejects(client.unsafe('select five'), { code: 'CONNECTION_CLOSED' });
+  assert.deepEqual([...await client.unsafe('select six')], [{ value: 'select six' }]);
   await client.end();
   assert.deepEqual(coffre.log.filter((line) => line.startsWith('GET /use/market/prod/db')), ['GET /use/market/prod/db use_dpop_nonce', 'GET /use/market/prod/db upgrade']);
 });

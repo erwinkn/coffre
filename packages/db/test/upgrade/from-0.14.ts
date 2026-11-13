@@ -3,11 +3,23 @@ import assert from 'node:assert/strict';
 import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import pg from 'pg';
-import { drizzle } from 'drizzle-orm/node-postgres';
-import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import { migrate } from 'drizzle-orm/postgres-js/migrator';
 
+import { createDatabase } from '../../src/database.ts';
+import { canonicalTimestamp } from '../../src/dialect.ts';
 import { migrateDatabase, migrationsFolder } from '../../src/migrate.ts';
+import { postgresClient } from '../../src/postgres.ts';
+
+/**
+ * One session, opened at once, whose `query` runs text as written, several
+ * statements too, and answers the last one's rows.
+ */
+async function session(url: string) {
+  const client = postgresClient(url, { max: 1 });
+  const query = async (text: string) => ({ rows: [...(await client.unsafe(text))] as Record<string, any>[] });
+  await query('SELECT 1');
+  return { query, client, end: () => client.end() };
+}
 
 /**
  * The upgrade from 0.14 (docs/design/0.16.md, "Upgrade from 0.14"): a 0.14
@@ -177,26 +189,26 @@ const SEED = `
   INSERT INTO capped_alerts (service, kind, raised_at) VALUES ('${API}', 'unknown_key', now());
 `;
 
-const ms = (value: unknown) => (value as Date).getTime();
+/** A time as the driver gives one, Postgres's own text, in milliseconds. */
+const ms = (value: unknown) => new Date(canonicalTimestamp(value as string)).getTime();
 
 test('a 0.14 database upgrades in place, only with coffre offline, and every row becomes what the design says', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-upgrade-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const admin = new pg.Client({ connectionString: urlOf('postgres') });
-  await admin.connect();
+  const admin = await session(urlOf('postgres'));
   t.after(() => admin.end());
   await admin.query(`DROP DATABASE IF EXISTS ${UPGRADED}`);
   await admin.query(`CREATE DATABASE ${UPGRADED}`);
   const login = (canLogin: boolean) => admin.query(`ALTER ROLE coffre_runtime ${canLogin ? 'LOGIN' : 'NOLOGIN'}; ALTER ROLE coffre_vault_runtime ${canLogin ? 'LOGIN' : 'NOLOGIN'}`);
   await login(true);
 
-  const db = new pg.Client({ connectionString: urlOf(UPGRADED) });
-  await db.connect();
+  const db = await session(urlOf(UPGRADED));
   t.after(() => db.end());
   const rows = async <R = Record<string, unknown>>(text: string) => (await db.query(text)).rows as R[];
   const one = async <R = Record<string, unknown>>(text: string) => (await rows<R>(text))[0]!;
 
-  await migrate(drizzle(db), { migrationsFolder: before(dir) });
+  // Drizzle's migrator on coffre's own driver, as `migrateDatabase` runs it.
+  await migrate(createDatabase(db.client) as unknown as Parameters<typeof migrate>[0], { migrationsFolder: before(dir) });
   await db.query(SEED);
   const count = async (table: string) => Number((await one<{ n: string }>(`SELECT count(*) AS n FROM ${table}`)).n);
 
@@ -205,8 +217,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
   assert.equal(await count('vault_members'), 4);
 
   // A session a runtime login still holds refuses it too.
-  const session = new pg.Client({ connectionString: urlOf(UPGRADED, { name: 'coffre_runtime', password: 'local-runtime-only' }) });
-  await session.connect();
+  const held = await session(urlOf(UPGRADED, { name: 'coffre_runtime', password: 'local-runtime-only' }));
   try {
     await login(false);
     await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /coffre_runtime still has a session open/.test(String((error as { cause?: unknown }).cause ?? error)));
@@ -217,7 +228,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
     // A host's administrator is not: Postgres 16 makes whoever created a role its member, and some hosts have that inherit.
     await admin.query(`DROP ROLE IF EXISTS host_admin; CREATE ROLE host_admin LOGIN CREATEROLE; GRANT coffre_app, coffre_vault TO host_admin`);
   } finally {
-    await session.end();
+    await held.end();
   }
   // Postgres drops the session from its list a moment after the client goes.
   for (let i = 0; i < 50 && (await rows(`SELECT 1 FROM pg_stat_activity WHERE usename = 'coffre_runtime'`)).length > 0; i += 1) await new Promise((done) => setTimeout(done, 100));
@@ -334,8 +345,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
 
   await t.test('the vault\'s login writes, and the app\'s only reads', async () => {
     const as = async (name: string, password: string, text: string) => {
-      const client = new pg.Client({ connectionString: urlOf(UPGRADED, { name, password }) });
-      await client.connect();
+      const client = await session(urlOf(UPGRADED, { name, password }));
       try {
         return await client.query(text);
       } finally {

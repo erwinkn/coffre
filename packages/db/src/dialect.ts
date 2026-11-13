@@ -31,7 +31,7 @@ export function forUpdate<Query extends { for: (strength: 'update' | 'no key upd
  * names are the query's own, unmapped.
  */
 export async function rowsOf<Row>(db: Queryable, query: SQL): Promise<Row[]> {
-  return (await (db as unknown as { execute(query: SQL): Promise<{ rows: Row[] }> }).execute(query)).rows;
+  return [...(await (db as unknown as { execute(query: SQL): Promise<Row[]> }).execute(query))];
 }
 
 /** Insert the rows whose unique keys are free; returns how many that was. */
@@ -72,7 +72,7 @@ export function truth(condition: SQL): SQL<boolean> {
 
 /** How many rows an insert, update or delete touched. */
 export function changedRows(result: unknown): number {
-  return (result as { rowCount?: number | null }).rowCount ?? 0;
+  return (result as { count?: number | null }).count ?? 0;
 }
 
 /** Whether an insert or update failed on a unique constraint: SQLSTATE 23505, anywhere in its causes. */
@@ -83,16 +83,25 @@ export function isUniqueViolation(error: unknown): boolean {
   return false;
 }
 
-/** The network's codes for a server that is not there, and Postgres's for one that will not take the connection, or has none left (53300). */
-const UNREACHABLE = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', '53300', '57P01', '57P02', '57P03']);
+/**
+ * The network's codes for a server that is not there, postgres.js's for a
+ * connection lost, cut short or never made, and Postgres's for one that will
+ * not take the connection, or has none left (53300).
+ */
+const UNREACHABLE = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE',
+  'CONNECTION_CLOSED', 'CONNECTION_DESTROYED', 'CONNECTION_ENDED', 'CONNECT_TIMEOUT',
+  '53300', '57P01', '57P02', '57P03',
+]);
 
-/** Hyperdrive's words for having no connection to give, beside pg's and Workers' for one lost. */
+/** Hyperdrive's words for having no connection to give, beside Workers' for one lost. */
 const UNREACHABLE_WORDS = /connection terminated|network connection lost|connect(ion)? timeout|open slot in the pool|acquire a connection from the pool|server connection attempt failed/i;
 
 /**
  * Whether a query failed because the database could not be reached or
  * dropped the connection: an outage, not an answer. Postgres's connection
- * exceptions are class 08; pg and Workers' sockets say so in words, and so
+ * exceptions are class 08; postgres.js says so in codes of its own, Workers'
+ * sockets in words, and so
  * does Hyperdrive when it has no connection to the database to give: every
  * one of its pool busy for 15 s ("Timed out while waiting for an open slot
  * in the pool", FATAL 58000; "Failed to acquire a connection from the

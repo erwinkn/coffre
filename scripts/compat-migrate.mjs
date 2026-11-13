@@ -5,7 +5,7 @@
 // synthetic destructive migration.
 //
 //   node --conditions=coffre:source scripts/compat-migrate.mjs <url>
-//   node scripts/compat-migrate.mjs --only <url> <file.sql>
+//   node --conditions=coffre:source scripts/compat-migrate.mjs --only <url> <file.sql>
 import { readFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
@@ -17,11 +17,10 @@ if (args[0] === '--only') {
 }
 
 async function apply(url, text) {
-    const { default: pg } = await import('pg');
-    const client = new pg.Client({ connectionString: url });
-    await client.connect();
+    const { postgresClient } = await import('@coffre/db/connect');
+    const client = postgresClient(url, { max: 1 });
     try {
-        await client.query(text);
+        await client.unsafe(text);
     } finally {
         await client.end();
     }
