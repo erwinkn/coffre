@@ -25,7 +25,7 @@ after(() => app.close());
 
 const [ada, al, aud, bo, cy, ed] = ['ada', 'al', 'aud', 'bo', 'cy', 'ed'].map(user) as [string, string, string, string, string, string];
 
-type Entry = { seq: number; action: string; decision: string; reason: string | null; actorId: string; project: string | null; environment: string | null; key: string | null; version: number | null; detail: boolean; proof: string; token: { id: string; label: string } | null };
+type Entry = { seq: number; action: string; decision: string; reason: string | null; actorId: string; project: string | null; environment: string | null; key: string | null; version: number | null; detail: boolean; proof: string; token: { id: string; label: string } | null; secrets: { key: string | null; version: number | null }[] | null };
 type Page = { entries: Entry[]; more: boolean; next: number | null; hidden?: { action: string; count: number }[]; head: { size: number; signedAt: string } | null; holes: { above: number | null; below: number | null; kept: number; aging: number }[] | null };
 type Body = { error?: string; reason?: string; message?: string } & Record<string, unknown>;
 
@@ -291,6 +291,62 @@ test('a path reads that place, an environment or a key of it; one the caller may
   for (const path of ['market/nowhere', 'gone', 'market/dev/NOPE']) assert.equal((await call('aud-cli', 'GET', `/audit?path=${path}`))[0], 404, path);
   // What names no place reaches no statement.
   for (const path of ['market/de%00v', 'Market', 'market/dev/a-b', 'market/dev/%ED%A0%80']) assert.equal((await call('aud-cli', 'GET', `/audit?path=${path}`))[0], 400, path);
+});
+
+test("a key's path finds each read that gave that key, an environment's whole read through each of its keys, and none that did not", async () => {
+  // Ed reads market/dev whole while it holds API_KEY and OTHER; LATER comes after, and Ed reads it alone.
+  assert.equal((await call('cy-cli', 'PATCH', '/secrets/market/dev', { OTHER: 'o1' }))[0], 200);
+  assert.equal((await call('ed-cli', 'POST', '/reveals', { path: 'market/dev' }))[0], 200);
+  assert.equal((await call('cy-cli', 'PATCH', '/secrets/market/dev', { LATER: 'l1' }))[0], 200);
+  assert.equal((await call('ed-cli', 'POST', '/reveals', { path: 'market/dev/LATER' }))[0], 200);
+  await sign();
+  const reads = async (key: string) => (await page('aud-cli', `?path=market/dev/${key}`))[0].entries.filter((entry) => entry.action === 'secret.read' && entry.actorId === ed.slice('user:'.length));
+  const [whole, ...rest] = await reads('API_KEY');
+  assert.deepEqual([rest, [whole!.key, whole!.version, whole!.secrets]], [[], [null, null, [{ key: 'API_KEY', version: 1 }, { key: 'OTHER', version: 1 }]]]);
+  // The same entry, by OTHER's path.
+  assert.deepEqual(await reads('OTHER'), [whole]);
+  // The whole read gave no LATER: LATER's page shows Ed's read of it alone.
+  const later = (await page('aud-cli', '?path=market/dev/LATER'))[0];
+  assert.deepEqual(brief(later), ['secret.read market/dev/LATER proven', 'secret.write market/dev/LATER proven']);
+  assert.ok(!later.entries.some((entry) => entry.seq === whole!.seq));
+});
+
+test('the longest path there is, 256 characters, reads its key; one character more names no key', async () => {
+  const [project, environment, key] = ['p'.repeat(63), 'e'.repeat(63), `K${'_'.repeat(127)}`];
+  for (const [method, path, body] of [['PUT', `/projects/${project}`, { name: 'Long' }], ['PUT', `/projects/${project}/${environment}`, {}], ['PATCH', `/secrets/${project}/${environment}`, { [key]: 'v' }]] as const) {
+    const [status, answer] = await call('cy-cli', method, path, body);
+    assert.equal(status, 200, `${method} ${path}: ${JSON.stringify(answer)}`);
+  }
+  await sign();
+  const path = `${project}/${environment}/${key}`;
+  assert.equal(path.length, 256);
+  assert.deepEqual(brief((await page('aud-cli', `?path=${path}`))[0]), [`secret.write ${path} proven`]);
+  assert.equal((await call('aud-cli', 'GET', `/audit?path=${path}_`))[0], 400);
+});
+
+test('an audit.read grant on an archived environment still reads its log, and /me still says it reads one', async () => {
+  assert.equal((await call('cy-cli', 'PATCH', '/projects/market/dev', { archived: true }))[0], 200);
+  await sign();
+  const before = ['secret.read market/dev/API_KEY proven', 'secret.write market/dev/API_KEY proven'];
+  // Each the whole of what Ed reads: the archiving is market/dev's, not API_KEY's.
+  for (const [query, shown] of [['', ['environment.archive market/dev proven', ...before]], ['?path=market/dev', ['environment.archive market/dev proven', ...before]], ['?path=market/dev/API_KEY', before]] as const) {
+    assert.deepEqual(brief((await page('ed-cli', query))[0]), shown, query);
+  }
+  // No environment Ed may work in is left; the log they may read is.
+  const [status, me] = await call('ed-cli', 'GET', '/me');
+  assert.deepEqual([status, me.canReadAudit, me.environments], [200, true, []]);
+});
+
+test("an entry a personal token wrote names the token, by its id and label, a read's and a change's; its person's own session names none", async () => {
+  const [made, issued] = await call('bo-cli', 'POST', `/members/${encodeURIComponent(bo)}/tokens`, { label: 'laptop', expiresInMinutes: 60, scope: { market: 'lead' } });
+  assert.equal(made, 200, JSON.stringify(issued));
+  const { id, token } = issued as unknown as { id: string; token: string };
+  assert.equal((await call(token, 'PATCH', '/secrets/market/dev', { API_KEY: 'v2' }))[0], 200);
+  assert.equal((await call(token, 'POST', '/reveals', { path: 'market/dev/API_KEY' }))[0], 200);
+  await sign();
+  const shown = (await page('aud-cli', '?path=market/dev/API_KEY'))[0].entries.filter((entry) => entry.actorId === bo.slice('user:'.length));
+  const laptop = { id, label: 'laptop' };
+  assert.deepEqual(shown.map((entry) => [entry.action, entry.token]), [['secret.read', laptop], ['secret.write', laptop], ['secret.read', null]]);
 });
 
 test("a path's entry that names another project too is the caller's if they read that one's log as well, and no one else's", async () => {
