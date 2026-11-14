@@ -13,7 +13,7 @@ entries in the shared log), `packages/client` (the typed API client the CLI and 
 (`coffre`, including `coffre init`), `packages/conformance` (`@coffre/conformance`:
 `coffre-conformance`, which boots a deployment and holds it to what it must never do,
 and the dev IdP, `@coffre/conformance/idp`, the local stand-in for Cloudflare Access,
-GitHub and OIDC), and `packages/core` (`@coffre/core`: access rules, the audit chain,
+GitHub and OIDC), and `packages/core` (`@coffre/core`: access rules, the log's Merkle trees,
 envelope encryption, vault keys, identity and sign-in, and the contract between server and
 vault in `src/vault.ts`). `examples/workers` and `examples/node` are deployments,
 exactly what `coffre init` writes (a test diffs them); each one's `app/` is a
@@ -171,8 +171,8 @@ opened several Hyperdrive connections at once was now and then cancelled
 as hung on Cloudflare (`packages/vault/test/workers.test.ts` counts them).
 A request asks the vault about its caller once: a page's render checks its
 credential once for all its API calls (`pageClient`), and a read of values
-asks nothing first when the app kept the vault's last answer, which its
-unwrap checks (`Accesses`).
+is one `use`, which asks it again: the vault's own memory of a use's rows
+(`memorySeconds`) is the only one.
 
 **Tests / checks.**
 `Validate` runs the full CI suite except for a proven, synchronized version
