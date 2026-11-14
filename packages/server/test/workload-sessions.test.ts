@@ -216,6 +216,39 @@ test("`use` takes back only the caller coffre made for its own request: not a lo
   assert.equal(app.calls.length, calls + 1, 'one vault call: the later caller\'s own use');
 });
 
+// 0.14.7 answered 409 to a plugin that asked `workload` for one place and read another with the caller it got: its
+// statement had checked the first by ID. 0.16's `workload` checks no place, it only names one (`WorkloadUse.path`), and
+// the vault decides the use at the place it names, on the scope it sealed on the session (docs/design/0.16.md, "the
+// place"), as it would a URL naming staging.
+test("a plugin that asks `workload` for prod and uses staging gets the vault's answer for staging: refused, nothing logged, for a session scoped to prod", async () => {
+  const staging = environment(market, 'staging');
+  await write(world, ...rows('environments', staging), ...rows('secrets', value(world, secret(staging, STRIPE), 'sk_live_staging')));
+  /** The log's entries, those the signer has yet to take included. */
+  const entries = async () => (await rowsOf<{ n: number }>(world.owner, sql`SELECT ((SELECT count(*) FROM log) + (SELECT count(*) FROM log_pending))::int AS n`))[0]!.n;
+  const useStaging = (made: { caller: WorkloadUse | null; context: PluginContext }) => made.context.use(made.caller!, { path: 'market/staging', keys: [STRIPE], purpose: 'use', upstream: { credential: 'probe' } });
+  const ONLY_PROD = JSON.stringify([{ projectId: market.id, environmentId: prod.id, role: 'viewer' }]);
+  const all = token;
+  token = generateToken('workload');
+  await write(world, ...rows('credentials', session(token, keyed, { jkt: await thumbprint(key.jwk), scope: ONLY_PROD, places: JSON.stringify([{ environmentId: prod.id }]), expiresAt: new Date(Date.now() + 3_600_000) })));
+
+  assert.equal((await asSession('POST', `${PUBLIC_URL}/probe`)).status, 200);
+  const prodOnly = seen.at(-1)!;
+  assert.equal(prodOnly.caller!.path, 'market/prod');
+  const logged = await entries();
+  const refused = await useStaging(prodOnly).then(() => null, (error: { status: number; reason?: string }) => [error.status, error.reason]);
+  assert.deepEqual(refused, [403, 'no_access']);
+  assert.equal(await entries(), logged, 'nothing logged');
+
+  // The service's session scoped to the whole project: staging is in its scope, and the vault gives it.
+  token = all;
+  assert.equal((await asSession('POST', `${PUBLIC_URL}/probe`)).status, 200);
+  const project = seen.at(-1)!;
+  assert.equal(project.caller!.path, 'market/prod');
+  const used = await useStaging(project);
+  assert.deepEqual([used.values[STRIPE], used.environment.path], ['sk_live_staging', 'market/staging']);
+  assert.equal(await entries(), logged + 1, "the use's one entry");
+});
+
 test("a proof signs the request on coffre's public URL, its path and query as received, whatever host it came in on; one naming that host is refused", async () => {
   const inside = 'http://10.0.0.7:8080/api/me?full=1';
   const signed = `${PUBLIC_URL}/api/me?full=1`;

@@ -43,3 +43,33 @@ test("a gate that admits the hour's alert: the isolate keeps quiet until the clo
     mock.timers.reset();
   }
 });
+
+test("with no gate, or one that fails, the isolate caps each service on its own for an hour from its alert", async (t) => {
+  t.mock.method(console, 'error', () => {});
+  mock.timers.enable({ apis: ['Date'] });
+  try {
+    const failing: Gates = () => ({ admit: async () => Promise.reject(new Error('the gate is down')) }) as unknown as ReturnType<Gates>;
+    for (const gates of [null, failing]) {
+      mock.timers.setTime(10 * HOUR + 30 * 60_000);
+      const alerts: WorkloadAlert[] = [];
+      const workloads = alerting(alerts);
+      const raise = (service: string, kid: string) => unknownKeyAlert(workloads, gates, { ...refusal, service, kid }, null, () => {});
+      await raise(SERVICE, 'a');
+      // Another key of the same service within the hour: quiet, whatever the key.
+      await raise(SERVICE, 'b');
+      // Another service is capped on its own.
+      await raise('token:worker', 'c');
+      assert.deepEqual(alerts.map((alert) => alert.service), [SERVICE, 'token:worker']);
+      // Past the clock's hour, short of an hour from the alert: still quiet. An hour on, said again.
+      mock.timers.tick(59 * 60_000);
+      await raise(SERVICE, 'd');
+      assert.equal(alerts.length, 2);
+      mock.timers.tick(60_001);
+      await raise(SERVICE, 'e');
+      assert.deepEqual(alerts.map((alert) => alert.service), [SERVICE, 'token:worker', SERVICE]);
+      assert.match(alerts[2]!.text, /names key "e"/);
+    }
+  } finally {
+    mock.timers.reset();
+  }
+});
