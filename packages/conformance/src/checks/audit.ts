@@ -144,13 +144,27 @@ type LogRow = { seq: string; kept: boolean; leaf: string; body: string };
  * not within a run (docs/conformance.md).
  */
 export async function logCut(deployment: Deployment, { admin }: People): Promise<string> {
-  // Each alert the signer sent, in order: one per check that found something, its findings one per line.
-  // Read as it arrives, in chunks: an alert is complete once its header's count of findings is all there.
-  const alerts = () => deployment.output().split("coffre's signer reports (").slice(1).map((text) => {
-    const count = Number(/^(\d+)\):/.exec(text)?.[1]);
-    const findings = text.split('\n').filter((line) => line.startsWith('- ')).slice(0, count);
-    return { text, count, findings, complete: findings.length === count };
-  });
+  // Each alert the signer sent, in order: one per check that found something, a header counting its
+  // findings and, on the lines right after it, one per finding it names (`NAMED` at most), then `and n more`
+  // for the rest. Output arrives in chunks: a line has arrived once another follows it in its process's
+  // output, so the last line before each `--- <process>` and the very last may still be growing. An alert
+  // is complete once its header and every line it owes have arrived and read as such; one still arriving,
+  // or garbled, is counted among those sent, so it is never fresh later, and is never read.
+  const alerts = () => {
+    const lines = deployment.output().split('\n');
+    const arrived = (at: number) => at + 1 < lines.length && !lines[at + 1].startsWith('--- ');
+    return lines.flatMap((line, at) => {
+      const header = /coffre's signer reports \((\d+)\):$/.exec(line);
+      if (header === null && !line.includes("coffre's signer reports (")) return [];
+      const count = Number(header?.[1]);
+      const named = lines.slice(at + 1, at + 1 + Math.min(count, NAMED));
+      const rest = count > NAMED ? lines[at + 1 + NAMED] : undefined;
+      const owed = Math.min(count, NAMED) + (count > NAMED ? 1 : 0);
+      const complete = Number.isInteger(count) && count > 0 && arrived(at) && Array.from({ length: owed }, (_, i) => at + 1 + i).every(arrived)
+        && named.every((each) => each.startsWith('- ')) && (rest === undefined || rest === `and ${count - NAMED} more`);
+      return [{ text: [line, ...named, ...(rest === undefined ? [] : [rest])].join('\n'), count, findings: named, complete }];
+    });
+  };
   const trees = ['kept', 'aging'] as const;
   const out: LogRow[] = [];
   const seqs = new Set<number>();
@@ -165,7 +179,8 @@ export async function logCut(deployment: Deployment, { admin }: People): Promise
       out.push(row);
       let alert: ReturnType<typeof alerts>[number] | undefined;
       const names = (found: string[], other: string) => found.some((line) => line.startsWith(`- cut ${other}:`));
-      await until(`the signer's whole alert naming - cut ${tree}:`, async () => (alert = alerts().slice(before).find((each) => each.complete && names(each.findings, tree))) !== undefined, PUBLISHED_SECONDS);
+      // One that counts more than it names is read too, and fails below: it cannot say what it leaves out.
+      await until(`the signer's whole alert naming - cut ${tree}:`, async () => (alert = alerts().slice(before).find((each) => each.complete && (each.count > NAMED || names(each.findings, tree)))) !== undefined, PUBLISHED_SECONDS);
       // Found afresh: the check that names it names no cut put back before, so a finding let go is not one said again.
       // Every finding is named, so none put back hides among those it only counts.
       expect(alert!.count <= NAMED, 'the signer names too few of its findings to tell what it found again', { tree, alert: alert!.text });
