@@ -267,7 +267,9 @@ function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Par
  * deployment names. A service account, whoever manages it too
  * (`managesService`), on a session, as 0.14.7 allowed: what it holds, the
  * places and roles it holds them as and the instance's setting are read
- * with the change.
+ * with the change. Beside the read, how many ways in the move ends, by
+ * kind, which the answer says, as 0.14.7's did: a credential issued or
+ * ended meanwhile starts the change over.
  */
 function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operation<Parts, AccessAnswers['member.remove']> {
   const shown = presented(input);
@@ -284,10 +286,20 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
     // this read and the write is found by the write's read again, and the removal starts over and revokes it too.
     accounts: part(identities, eq(identities.principal, principal)),
   };
+  // Their live credentials at their generation, by kind, on `credentials_live_idx`: no decision goes by them.
+  const beside = {
+    ending: sql`SELECT jsonb_build_object(
+      'sessions', count(*) FILTER (WHERE c.kind IN ('browser', 'cli')),
+      'tokens', count(*) FILTER (WHERE c.kind NOT IN ('browser', 'cli', 'mcp')),
+      'apps', count(*) FILTER (WHERE c.kind = 'mcp' AND c.ancestors IS NULL AND c.challenge IS NULL)) AS row
+      FROM credentials c JOIN principals m ON m.id = c.principal AND m.generation = c.generation
+      WHERE c.principal = ${principal} AND c.revoked_at IS NULL AND c.expires_at > now()`,
+  };
   return {
     read,
+    beside,
     denied: deniedTo('member.remove', shown, vault),
-    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>, _checked, rode) {
       const caller = managing(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       if (!runs(caller)) {
@@ -320,10 +332,16 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
           ...seen.held.map((grant) => (grant.projectId === null ? `environment:${grant.environmentId}` : `project:${grant.projectId}`)),
           ...live.map((account) => `identity:${account.id}`),
         ], { member: principal, generation, revoked }),
-        answer: { revoked: revoked.length },
+        answer: { revoked: revoked.length, ...ending(rode?.ending?.[0]), identities: live.length },
       };
     },
   };
+}
+
+/** What a removal ends, as the count beside its read said it. */
+function ending(counted: unknown): { sessions: number; tokens: number; apps: number } {
+  const { sessions, tokens, apps } = (counted ?? {}) as Record<string, unknown>;
+  return { sessions: Number(sessions ?? 0), tokens: Number(tokens ?? 0), apps: Number(apps ?? 0) };
 }
 
 /** The most places one change of grants names: as many as a credential's scope does. */

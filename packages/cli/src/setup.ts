@@ -23,7 +23,7 @@ import { migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
 import { cappedLimit, type Connections, connectionsOf, hyperdriveLimit, limitReason, tooFewConnections } from './connections.ts';
 import { readDatabaseUrl } from './database-url.ts';
 import { deploymentKind, install, installAsLocked, installed } from './deployment.ts';
-import { init, KINDS, type Kind } from './init.ts';
+import { init, KINDS, UNRELEASED, type Kind } from './init.ts';
 import { generateKeys, jsonWarning, keyGuide, keyValues, needsTerminal, type Keys } from './keys.ts';
 import { type GuideBlock, type Screen, showSecrets, type Value } from './secrets.ts';
 import { StepFailed, Steps } from './steps.ts';
@@ -233,11 +233,13 @@ async function scaffold(dir: string, keys: Keyboard, out: Output, clean: (error:
   const s = style(out);
   const names = { workers: 'Cloudflare Workers', node: 'Node' } as const;
   const empty = existsSync(join(dir, '.git')) ? 'This directory holds only .git' : 'This directory is empty';
+  // Those this release deploys (`UNRELEASED`).
+  const kinds = KINDS.filter((kind) => UNRELEASED[kind] === undefined);
   const choice = await select(keys, out, s, `${empty}. Make a deployment of coffre here?`, [
-    ...KINDS.map((kind) => names[kind]),
+    ...kinds.map((kind) => names[kind]),
     'No, only the database',
   ]);
-  const kind = KINDS[choice];
+  const kind = kinds[choice];
   if (kind === undefined) return 'empty';
   const steps = new Steps(out, [`Write a ${names[kind]} deployment`, 'Install its packages'], () => null, clean);
   try {

@@ -243,6 +243,106 @@ export type Api = {
       version: string;
     };
   };
+  "GET /members/:member/bindings": {
+    input: undefined;
+    output: {
+      bindings: {
+        id: string;
+        profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
+        issuer: string;
+        jwksUri: string;
+        keys: null | {
+          kid: string | null;
+          alg: "ES256" | "RS256";
+          thumbprint: string;
+        }[];
+        claims: {
+          [key: string]: string | string[];
+        };
+        scope: null | {
+          [key: string]: string;
+        };
+        policy: null | {
+          sources?: string[];
+          audience?: string;
+          keyAudience?: true;
+          sessionHours?: number;
+          replicas?: number;
+          sessionDays?: number;
+          overlapMinutes?: number;
+          mintedBy?: string;
+          approve?: true;
+          onContention?: "alert";
+          unsignedUploads?: true;
+          reads?: {
+            [key: string]: "*" | string[];
+          };
+        };
+        label: string | null;
+        createdAt: string;
+        createdBy: string;
+        lastUsedAt: string | null;
+      }[];
+    };
+  };
+  "POST /members/:member/bindings": {
+    input: {
+      profile: string;
+      claims: {
+        [key: string]: unknown;
+      };
+      issuer?: string | null;
+      scope?: {
+        [key: string]: string;
+      };
+      label?: string | null;
+      replaces?: string[];
+      jwks?: {
+        [key: string]: unknown;
+        keys: {
+          [key: string]: unknown;
+        }[];
+      };
+      policy?: {
+        [key: string]: unknown;
+      };
+    };
+    output: {
+      binding: {
+        id: string;
+        scope: {
+          [key: string]: string;
+        };
+      };
+      replaced: string[];
+    };
+  };
+  "POST /members/:member/bindings/keys": {
+    input: {
+      issuer: string;
+      jwks: {
+        [key: string]: unknown;
+        keys: {
+          [key: string]: unknown;
+        }[];
+      };
+    };
+    output: {
+      bindings: {
+        id: string;
+        scope: {
+          [key: string]: string;
+        };
+      }[];
+      replaced: string[];
+    };
+  };
+  "DELETE /members/:member/bindings/:id": {
+    input: undefined;
+    output: {
+      unbound: true;
+    };
+  };
   "GET /members/:member/tokens": {
     input: undefined;
     output: {
@@ -537,10 +637,10 @@ export type Api = {
     output: {
       revoked: {
         grants: number;
-        sessions: number | null;
-        tokens: number | null;
-        identities: number | null;
-        apps: number | null;
+        sessions: number;
+        tokens: number;
+        identities: number;
+        apps: number;
       };
       report: null | {
         principalType: "service" | "user";
@@ -716,106 +816,6 @@ export type Api = {
         kept: number;
         aging: number;
       }[];
-    };
-  };
-  "GET /members/:member/bindings": {
-    input: undefined;
-    output: {
-      bindings: {
-        id: string;
-        profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
-        issuer: string;
-        jwksUri: string;
-        keys: null | {
-          kid: string | null;
-          alg: "ES256" | "RS256";
-          thumbprint: string;
-        }[];
-        claims: {
-          [key: string]: string | string[];
-        };
-        scope: null | {
-          [key: string]: string;
-        };
-        policy: null | {
-          sources?: string[];
-          audience?: string;
-          keyAudience?: true;
-          sessionHours?: number;
-          replicas?: number;
-          sessionDays?: number;
-          overlapMinutes?: number;
-          mintedBy?: string;
-          approve?: true;
-          onContention?: "alert";
-          unsignedUploads?: true;
-          reads?: {
-            [key: string]: "*" | string[];
-          };
-        };
-        label: string | null;
-        createdAt: string;
-        createdBy: string;
-        lastUsedAt: string | null;
-      }[];
-    };
-  };
-  "POST /members/:member/bindings": {
-    input: {
-      profile: string;
-      claims: {
-        [key: string]: unknown;
-      };
-      issuer?: string | null;
-      scope?: {
-        [key: string]: string;
-      };
-      label?: string | null;
-      replaces?: string[];
-      jwks?: {
-        [key: string]: unknown;
-        keys: {
-          [key: string]: unknown;
-        }[];
-      };
-      policy?: {
-        [key: string]: unknown;
-      };
-    };
-    output: {
-      binding: {
-        id: string;
-        scope: {
-          [key: string]: string;
-        };
-      };
-      replaced: string[];
-    };
-  };
-  "POST /members/:member/bindings/keys": {
-    input: {
-      issuer: string;
-      jwks: {
-        [key: string]: unknown;
-        keys: {
-          [key: string]: unknown;
-        }[];
-      };
-    };
-    output: {
-      bindings: {
-        id: string;
-        scope: {
-          [key: string]: string;
-        };
-      }[];
-      replaced: string[];
-    };
-  };
-  "DELETE /members/:member/bindings/:id": {
-    input: undefined;
-    output: {
-      unbound: true;
     };
   };
   "GET /freezes": {

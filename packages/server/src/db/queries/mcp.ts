@@ -37,8 +37,34 @@ export const REGISTERED = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
  * connection's own row (no `ancestors`) with no code waiting (`challenge`).
  * By `credentials_live_idx`, the person's credentials not revoked.
  */
-const redeemed = (principal: string, at: Date) =>
-  sql`c.principal = ${principal} AND c.revoked_at IS NULL AND c.expires_at > ${at} AND c.kind = 'mcp' AND c.ancestors IS NULL AND c.challenge IS NULL`;
+const redeemed = (principal: string, at: Date) => sql`c.principal = ${principal} AND c.revoked_at IS NULL AND c.expires_at > ${at} AND ${CONNECTION}`;
+
+/** A credential `c` that is a connection its client redeemed: not one of its access tokens, nor one whose code waits. */
+export const CONNECTION = sql`c.kind = 'mcp' AND c.ancestors IS NULL AND c.challenge IS NULL`;
+
+/** A connection's row as Connected apps reads it (`APP_JSON`). */
+export type AppRow = { id: string; label: string | null; client: string; createdAt: Date | string; lastUsedAt: Date | string | null; lastUsedIp: string | null; expiresAt: Date | string };
+
+/** A connection `c`'s columns as `appOf` reads them, as JSON. */
+export const APP_JSON = sql`json_build_object('id', c.id, 'label', c.label, 'client', c.client, 'createdAt', c.created_at, 'lastUsedAt', c.last_used_at, 'lastUsedIp', c.last_used_ip, 'expiresAt', c.expires_at)`;
+
+/** A connection as Connected apps lists it; none for one whose client does not read as one. */
+export function appOf(row: AppRow): ConnectedApp[] {
+  const client = clientOf(row.client);
+  if (client === undefined) return [];
+  const iso = (value: Date | string) => new Date(value).toISOString();
+  return [{
+    id: row.id,
+    name: row.label ?? 'Unnamed app',
+    host: client.host,
+    registration: client.registration,
+    scopes: client.scopes,
+    createdAt: iso(row.createdAt),
+    lastUsedAt: row.lastUsedAt === null ? null : iso(row.lastUsedAt),
+    lastUsedIp: row.lastUsedIp,
+    expiresAt: iso(row.expiresAt),
+  }];
+}
 
 /** The client a connection's row keeps, JSON (`storedClient` in the vault's ops/mcp.ts); undefined for one that does not read as such. */
 export function clientOf(stored: string): { host: string | null; registration: 'cimd' | 'dcr'; scopes: McpScope[] } | undefined {
@@ -93,23 +119,8 @@ export async function consentRead(db: Queryable, principal: string, clientId: st
 
 /** A person's connected apps, newest first: the connections their clients redeemed, which stand. One statement, of 20 rows at most (`MAX_CONNECTIONS`). */
 export async function connectedApps(db: Queryable, principal: string, at: Date): Promise<ConnectedApp[]> {
-  const rows = await rowsOf<{ id: string; label: string | null; client: string; createdAt: Date | string; lastUsedAt: Date | string | null; lastUsedIp: string | null; expiresAt: Date | string }>(db, sql`
+  const rows = await rowsOf<AppRow>(db, sql`
     SELECT c.id, c.label, c.client, c.created_at AS "createdAt", c.last_used_at AS "lastUsedAt", c.last_used_ip AS "lastUsedIp", c.expires_at AS "expiresAt"
     FROM credentials c WHERE ${redeemed(principal, at)} ORDER BY c.created_at DESC, c.id`);
-  const iso = (value: Date | string) => new Date(value).toISOString();
-  return rows.flatMap((row) => {
-    const client = clientOf(row.client);
-    if (client === undefined) return [];
-    return [{
-      id: row.id,
-      name: row.label ?? 'Unnamed app',
-      host: client.host,
-      registration: client.registration,
-      scopes: client.scopes,
-      createdAt: iso(row.createdAt),
-      lastUsedAt: row.lastUsedAt === null ? null : iso(row.lastUsedAt),
-      lastUsedIp: row.lastUsedIp,
-      expiresAt: iso(row.expiresAt),
-    }];
-  });
+  return rows.flatMap(appOf);
 }

@@ -2,6 +2,8 @@ import type { Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
 
+import { grantRow, liveGrants, type RawGrant, type ServiceGrantRow } from './bindings.ts';
+import { APP_JSON, appOf, CONNECTION, type AppRow, type ConnectedApp } from './mcp.ts';
 import type { PlaceRow } from './places.ts';
 import { ENVIRONMENT, environmentOf, PROJECT, projectOf, SECRET, secretOf, type EnvironmentRow, type ProjectRow, type SecretRow } from './secrets.ts';
 import { SCOPE_ID, type TokenRow } from './tokens.ts';
@@ -29,6 +31,13 @@ export type MemberRow = {
   grants: GrantRow[];
   /** A removed member's keys to rotate, counted when the read asked (`removed`); null for anyone active. */
   toRotate: number | null;
+  /**
+   * When the read asked (`accounts`), an active service account's live
+   * grants, every one wherever it is, and the instance's setting: what
+   * `managesService` weighs. Null otherwise.
+   */
+  account: ServiceGrantRow[] | null;
+  setting: string | null;
 };
 
 /** A live grant, at its place, with its role as the instance defines it: no definition, a role it no longer has. */
@@ -57,6 +66,8 @@ type Raw = {
   status_changed_at: Date | string;
   status_changed_by: string;
   to_rotate: number | string | null;
+  account: RawGrant[] | null;
+  setting: string | null;
   grants: {
     project_id: string; project: string; role: string; expires_at: string | null; role_name: string | null; permissions: string[] | null; guarded: string[] | null;
     environment_id: string | null; environment: string | null; archived_at: string | null; protected: boolean | null; owner: string | null;
@@ -86,10 +97,13 @@ const iso = (value: Date | string): string => new Date(value).toISOString();
  *              project role, or holding the instance role
  *   most       at most one member past this many, and one grant past this
  *              many of each, to see there are more: the caller refuses past it
+ *   accounts   each active service account's grants and the instance's
+ *              setting, to weigh who manages it (`account`), and, listed
+ *              `held`, those the `actor` admitted that hold none there
  */
 export async function members(
   db: Queryable,
-  query: { member?: string; within: readonly string[] | null; project?: string; listed: 'all' | 'held'; roles?: boolean; removed: boolean; scopes: boolean; reaching?: { instance: boolean; role: string }; most?: number; now: Date },
+  query: { member?: string; within: readonly string[] | null; project?: string; listed: 'all' | 'held'; roles?: boolean; removed: boolean; scopes: boolean; reaching?: { instance: boolean; role: string }; most?: number; accounts?: { actor: string }; now: Date },
 ): Promise<MemberRow[]> {
   const now = sql`${query.now.toISOString()}::timestamptz`;
   const reaching = query.reaching === undefined ? sql`true` : query.reaching.instance ? sql`m.role = ${query.reaching.role}`
@@ -101,13 +115,17 @@ export async function members(
   const onProject = query.project === undefined ? sql`true` : sql`gp.id = ${query.project}::uuid`;
   const member = query.member === undefined ? sql`true` : sql`m.id = ${query.member}`;
   const status = query.removed ? sql`true` : sql`m.status = 'active'`;
-  const listed = query.listed === 'all' ? sql`true` : query.roles === true ? sql`(held.grants IS NOT NULL OR m.role <> 'member')` : sql`held.grants IS NOT NULL`;
+  const admitted = query.accounts === undefined ? sql`` : sql` OR (m.id LIKE 'token:%' AND m.status_changed_by = ${query.accounts.actor})`;
+  const listed = query.listed === 'all' ? sql`true` : query.roles === true ? sql`(held.grants IS NOT NULL OR m.role <> 'member'${admitted})` : sql`(held.grants IS NOT NULL${admitted})`;
+  const account = query.accounts === undefined ? sql`NULL` : sql`CASE WHEN m.id LIKE 'token:%' AND m.status = 'active' THEN ${liveGrants(query.now)} END`;
+  const setting = query.accounts === undefined ? sql`NULL` : sql`(SELECT service_accounts FROM policy WHERE only_row)`;
   const rows = await rowsOf<Raw>(
     db,
     sql`
       SELECT m.id, m.status, m.role, m.scope, m.status_changed_at, m.status_changed_by,
         cardinality(ir.permissions) > 0 AS role_holds, ir.name AS role_name, ir.permissions AS role_permissions, ir.protected AS role_protected, scoped.slugs AS scope_slugs, held.grants,
-        ${query.removed ? sql`CASE WHEN m.status = 'removed' THEN coalesce(rotating.keys, 0) END` : sql`NULL`} AS to_rotate
+        ${query.removed ? sql`CASE WHEN m.status = 'removed' THEN coalesce(rotating.keys, 0) END` : sql`NULL`} AS to_rotate,
+        ${account} AS account, ${setting} AS setting
       FROM principals m
       LEFT JOIN roles ir ON ir.instance AND ir.id = m.role
       LEFT JOIN LATERAL (
@@ -151,6 +169,8 @@ export async function members(
     statusChangedAt: iso(row.status_changed_at),
     statusChangedBy: row.status_changed_by,
     toRotate: row.to_rotate === null ? null : Number(row.to_rotate),
+    account: row.account === null ? null : row.account.map(grantRow),
+    setting: row.setting,
     grants: (row.grants ?? []).map((grant) => ({
       project: { id: grant.project_id, slug: grant.project },
       environment: grant.environment_id === null ? null : {
@@ -265,7 +285,7 @@ export function seenBy(who: SQL): SQL {
 export type SeenKey = { project: string; environment: string; key: string; version: number; wrote: boolean; rotate: boolean; at: string | null };
 
 /** One member's report, as its one statement reads it. */
-export type ReportRow = Omit<MemberRow, 'grants' | 'roleHolds' | 'roleDefinition' | 'toRotate'> & {
+export type ReportRow = Omit<MemberRow, 'grants' | 'roleHolds' | 'roleDefinition' | 'toRotate' | 'account' | 'setting'> & {
   /** What still lets them in, at their generation: live grants, sign-in accounts, and credentials by kind. */
   live: { grants: number; sessions: number; tokens: number; identities: number; apps: number };
   keys: SeenKey[];
@@ -275,6 +295,8 @@ export type ReportRow = Omit<MemberRow, 'grants' | 'roleHolds' | 'roleDefinition
   issued: IssuedRow[];
   /** A person's own live tokens, personal tokens and handles, newest first: what `live.tokens` counts. None for a service account. */
   tokens: TokenRow[];
+  /** A person's connected apps, newest first, as Connected apps lists them (`connectedApps`): what `live.apps` counts. */
+  apps: ConnectedApp[];
   /** The slug of each project and environment the two lists' scopes name, by id, those still there. */
   slugs: Record<string, string>;
   /** The references they made that still stand, oldest first: each its holder's and source's rows, and both their places'. */
@@ -298,14 +320,15 @@ type ListedCredential = { id: string; kind: string; principal: string; label: st
 /**
  * What one member holds and has seen: their row, what still lets them in,
  * the live keys they read or wrote (`seenBy`), their personal configs, the
- * service tokens they issued, a person's own tokens, and the references
- * they made that still stand. One statement, driven from their own rows;
- * null for no such member. The tokens they issued are found by account:
- * `credentials_issued_by_idx` leads with the account, so one probe for each
- * service account still there, however many credentials the instance
- * keeps. Each of the three lists stops at `LISTED`, and says how many there
- * are in all: what it counts it reads, to the last row, but builds no more
- * than `LISTED` of.
+ * service tokens they issued, a person's own tokens and connected apps, and
+ * the references they made that still stand. One statement, driven from
+ * their own rows; null for no such member. The tokens they issued are found
+ * by account: `credentials_issued_by_idx` leads with the account, so one
+ * probe for each service account still there, however many credentials the
+ * instance keeps. Each of the three lists of tokens and references stops at
+ * `LISTED`, and says how many there are in all: what it counts it reads, to
+ * the last row, but builds no more than `LISTED` of. The connected apps are
+ * Connected apps' list, 20 at most (`MAX_CONNECTIONS`).
  *
  * A reference stands while its row points at its source (`source_set_by`
  * says who pointed it): one broken, or written over, points nowhere and
@@ -326,6 +349,7 @@ export async function reportOf(db: Queryable, principal: string, now: Date): Pro
     personal: { project: string; of: string; slug: string }[] | null;
     issued: ListedCredential[] | null;
     own: ListedCredential[] | null;
+    connected: AppRow[] | null;
     slugs: Record<string, string> | null;
     made: Record<string, unknown>[] | null;
     issued_total: number | string | null; own_total: number | string | null; made_total: number | string | null;
@@ -347,11 +371,14 @@ export async function reportOf(db: Queryable, principal: string, now: Date): Pro
           JOIN projects pp ON pp.id = pe.project_id
           JOIN environments parent ON parent.id = pe.parent_id
           WHERE pe.owner = m.id AND strpos(pe.slug, '~') = 0 AND strpos(pp.slug, '~') = 0) AS personal,
-        issued.list AS issued, issued.total AS issued_total, mine.list AS own, mine.total AS own_total, named.slugs, made.list AS made, made.total AS made_total
+        issued.list AS issued, issued.total AS issued_total, mine.list AS own, mine.total AS own_total, named.slugs, made.list AS made, made.total AS made_total,
+        -- A person's connected apps, as Connected apps lists them: 20 at most (MAX_CONNECTIONS).
+        (SELECT json_agg(${APP_JSON} ORDER BY c.created_at DESC, c.id) FROM credentials c
+          WHERE m.id LIKE 'user:%' AND c.principal = m.id AND c.generation = m.generation AND c.revoked_at IS NULL AND c.expires_at > ${at}::timestamptz AND ${CONNECTION}) AS connected
       FROM principals m
       LEFT JOIN LATERAL (
         SELECT count(*) FILTER (WHERE c.kind IN ('browser', 'cli')) AS sessions,
-          count(*) FILTER (WHERE c.kind = 'mcp') AS apps,
+          count(*) FILTER (WHERE ${CONNECTION}) AS apps,
           count(*) FILTER (WHERE c.kind NOT IN ('browser', 'cli', 'mcp')) AS tokens
         FROM credentials c
         WHERE c.principal = m.id AND c.generation = m.generation AND c.revoked_at IS NULL AND c.expires_at > ${at}::timestamptz
@@ -449,6 +476,7 @@ export async function reportOf(db: Queryable, principal: string, now: Date): Pro
       lastUsedAt: token.last_used_at === null ? null : iso(token.last_used_at),
       lastUsedIp: token.last_used_ip,
     })),
+    apps: (row.connected ?? []).flatMap(appOf),
     slugs: row.slugs ?? {},
     made: (row.made ?? []).map((item) => ({
       holder: secretOf(item.holder as Record<string, unknown>),

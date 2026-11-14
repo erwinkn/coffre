@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { KINDS } from '../src/init.ts';
+import { init, KINDS, UNRELEASED } from '../src/init.ts';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const main = join(root, 'packages/cli/src/main.ts');
@@ -35,12 +35,14 @@ function coffre(args: string[], cwd: string, home: string): string {
 }
 
 for (const kind of KINDS) {
-  test(`coffre init --${kind} writes examples/${kind}, file for file`, (t) => {
+  // A kind this release does not deploy keeps its template, written by `init` itself, which the command does not call.
+  const command = UNRELEASED[kind] === undefined;
+  test(`coffre init --${kind} writes examples/${kind}, file for file${command ? '' : ' (its template, for its release)'}`, (t) => {
     const scratch = mkdtempSync(join(tmpdir(), 'coffre-init-'));
     t.after(() => rmSync(scratch, { recursive: true, force: true }));
     // Named as the example is, so package.json's name matches too.
     const project = join(scratch, `coffre-${kind}`);
-    const output = coffre(['init', `--${kind}`, project], scratch, scratch);
+    const output = command ? coffre(['init', `--${kind}`, project], scratch, scratch) : `${init(kind, project, version).join('\n')}\n\n`;
 
     const expected = exampleFiles(kind);
     assert.ok(expected.includes('package.json') && expected.includes('.gitignore'));
@@ -64,7 +66,7 @@ for (const kind of KINDS) {
 test('coffre init names the project after its directory and pins coffre at its own version', (t) => {
   const scratch = mkdtempSync(join(tmpdir(), 'coffre-init-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
-  coffre(['init', '--node', 'Acme Secrets'], scratch, scratch);
+  coffre(['init', '--workers', 'Acme Secrets'], scratch, scratch);
   const pkg = JSON.parse(readFileSync(join(scratch, 'Acme Secrets', 'package.json'), 'utf8')) as {
     name: string;
     dependencies: Record<string, string>;
@@ -78,6 +80,16 @@ test('coffre init names the project after its directory and pins coffre at its o
   for (const [name, wanted] of Object.entries(peerDependencies)) {
     assert.equal(pkg.dependencies[name] ?? pkg.devDependencies[name], wanted, name);
   }
+});
+
+test('coffre init --node refuses, naming the release it comes back in, and writes nothing (D198)', (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'coffre-init-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  assert.throws(() => coffre(['init', '--node', 'acme'], scratch, scratch), (error: Error & { stderr: string }) => {
+    assert.match(error.stderr, /Workers only: the Node deployment returns in 0\.16\.1\. Keep a Node deployment on coffre 0\.14/);
+    return true;
+  });
+  assert.equal(existsSync(join(scratch, 'acme')), false);
 });
 
 test('coffre init refuses a directory that is not empty, and needs one kind', (t) => {

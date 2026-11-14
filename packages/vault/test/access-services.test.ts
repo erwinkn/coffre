@@ -205,11 +205,11 @@ test('a person removes a service account they manage, and no other member', asyn
     assert.deepEqual(await remove('mk-cli', empty), { refused: 'no_access' }, 'one that holds nothing is its maker\'s');
     assert.deepEqual(await remove('dv-pat', ci), { refused: 'no_access' }, 'nor on a token');
   });
-  assert.deepEqual(await remove('dv-cli', ci), { answer: { revoked: 1 } });
+  assert.deepEqual(await remove('dv-cli', ci), { answer: { revoked: 1, sessions: 0, tokens: 0, apps: 0, identities: 0 } });
   assert.deepEqual(await row(ci), { id: ci, status: 'removed', role: 'member', generation: 1, status_changed_by: dv });
   assert.deepEqual(await held(ci), []);
   assert.deepEqual([(await written()).action, (await written()).actor], ['member.remove', dv]);
-  assert.deepEqual(await remove('dv-cli', empty), { answer: { revoked: 0 } });
+  assert.deepEqual(await remove('dv-cli', empty), { answer: { revoked: 0, sessions: 0, tokens: 0, apps: 0, identities: 0 } });
   // Its remover brings it back.
   assert.deepEqual(await put('dv-cli', ci), { answer: { role: 'member', scope: null, created: true } });
 });

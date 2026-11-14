@@ -81,7 +81,7 @@ export const GRANT_PLACES = sql`LEFT JOIN environments e ON e.id = g.environment
 export const liveFor = (now: Date) => sql`g.principal = m.id AND g.generation = m.generation AND (g.expires_at IS NULL OR g.expires_at > ${now})`;
 
 /** The live grants of the principal row aliased `m`, as JSON. */
-const liveGrants = (now: Date) => sql`(SELECT coalesce(json_agg(${GRANT_JSON}), '[]') FROM grants g ${GRANT_PLACES} WHERE ${liveFor(now)})`;
+export const liveGrants = (now: Date) => sql`(SELECT coalesce(json_agg(${GRANT_JSON}), '[]') FROM grants g ${GRANT_PLACES} WHERE ${liveFor(now)})`;
 
 /** A grant `GRANT_JSON` built, as the app weighs it. */
 export const grantRow = (grant: RawGrant): ServiceGrantRow => ({
