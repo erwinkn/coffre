@@ -37,11 +37,11 @@ import { sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, refusedTo, type Asking } from '../caller.ts';
 import { amended, part, put, WRITE_MS, type Operation, type Parts, type Refusal, type Seen, type Unsealed, type Write } from '../change.ts';
-import type { Fresh, Row } from '../rows.ts';
+import type { Fresh, Row, Wire } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
 import { HASH, presented, text, traced } from './input.ts';
-import { definitionsOf, manages, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
+import { definitionsOf, manages, MAX_PARENTS, onSession, projectsOf, runs, sensitiveIn, serviceOf, serviceParts, settingOf, withheldOf } from './services.ts';
 
 /** A provider's id, as the table's own check has it (`identities_provider_check`). */
 const PROVIDER = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -375,8 +375,6 @@ function accountUnlink(input: Presented & AccountUnlink, vault: Deciding): Opera
 
 /** A service's token lasts 366 days at most, as 0.14.7's (`MAX_SERVICE_TOKEN_DAYS`). */
 const SERVICE_MINUTES = 366 * 24 * 60;
-/** Where a fork inherits from, three deep, as a use reads it (use.ts). */
-const MAX_PARENTS = 3;
 /** A place's slug as one is made (`SLUG` in places.ts): a tombstone's `~` names none. */
 export const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
 /** An environment a handle stands in for, by path: `market/dev`, or `market/dev@me` for its person's personal config of it. */
@@ -537,6 +535,8 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
   const NO_ACCESS: Refusal = { refused: 'no_access' };
   return {
     read,
+    // A service's: the places of its projects that hold a sensitive value, which its answer names where it reads none.
+    ...(member === null ? {} : { beside: { sensitive: sensitiveIn(sql`(${named} UNION ${projectsOf(member)})`) } }),
     denied: refusedTo('token.create', shown, vault.workloads, {
       objects: (seen: Read) => [
         ...seen.account.map((row) => `principal:${row.id}`),
@@ -546,7 +546,7 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
         }),
       ],
     }),
-    decide(seen: Read, at: number, unsealed: Unsealed<typeof read>) {
+    decide(seen: Read, at: number, unsealed: Unsealed<typeof read>, _: undefined, beside?: Readonly<Record<string, readonly Wire[]>>) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       if (caller.workload !== null) return { refused: 'workload_cannot_issue' };
@@ -664,7 +664,10 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
           objects: [...new Set([`principal:${caller.principal}`, `credential:${caller.credential.id}`, `credential:${id}`, `principal:${principal}`, ...scope.map((grant) => (grant.environmentId === null ? `project:${grant.projectId}` : `environment:${grant.environmentId}`))])],
           detail: { credential: id, kind, principal, expiresAt: expiresAt.toISOString(), scope, ...(places === null ? {} : { places }) },
         },
-        answer: { principal, credential: id, expiresAt: expiresAt.toISOString(), scope: Object.fromEntries(issued.map(({ grant, path }) => [path, grant.role]).sort(([a], [b]) => (a! < b! ? -1 : 1))) },
+        answer: {
+          principal, credential: id, expiresAt: expiresAt.toISOString(), scope: Object.fromEntries(issued.map(({ grant, path }) => [path, grant.role]).sort(([a], [b]) => (a! < b! ? -1 : 1))),
+          ...(member === null ? {} : { withheld: withheldOf(issued, beside?.sensitive) }),
+        },
       };
     },
   };

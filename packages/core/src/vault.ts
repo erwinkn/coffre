@@ -220,9 +220,10 @@ export type Called = {
    * is the effective one, which a session's hard end and the rows above it
    * may bring sooner. An MCP connection's access token (kind `mcp`)
    * says which connection it is under and the scopes it holds, from its
-   * row; no other credential has either.
+   * row; no other credential has either. `label` is the one it was made
+   * with: a personal token's, which `GET /me` names it by.
    */
-  credential: { id: string; kind: string; expiresAt: string; connection?: string; scopes?: McpScope[] };
+  credential: { id: string; kind: string; expiresAt: string; label: string | null; connection?: string; scopes?: McpScope[] };
   holds: Holdings & { policy: Policy };
   /**
    * For a call that asked (`head`): the log's head as the vault last signed

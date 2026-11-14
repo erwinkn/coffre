@@ -11,8 +11,12 @@ export type SigninAnswers = {
   /** The identity the account is bound by. */
   'account.link': { identity: string };
   'account.unlink': { identity: string };
-  /** The token made, and what it reaches, each place by its path and the role there. */
-  'token.create': Issued & { scope: Record<string, string> };
+  /**
+   * The token made, and what it reaches, each place by its path and the
+   * role there; a service's, the places of those whose sensitive values it
+   * will not read (`withheld`, R32), as `token.bind` answers them.
+   */
+  'token.create': Issued & { scope: Record<string, string>; withheld?: string[] };
   /** The device login, and when its codes stop being good, ISO 8601. */
   'device.start': { deviceLogin: string; expiresAt: string };
   /** The device login decided. */

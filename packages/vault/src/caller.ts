@@ -471,7 +471,7 @@ export async function caller(vault: Pick<Running, 'db' | 'keys' | 'now'> & { mem
   await touch(vault, asking.mcp?.connection ?? asking.credential, shown.ip, at);
   // Unless a newer read of the same is there already: a slow call does not put its older rows back over it.
   if (memory.seconds > 0 && !((memory.callers.get(key)?.at ?? -Infinity) > found.at)) keep(memory.callers, key, found, at - memory.seconds * 1000);
-  const { id, kind, expiresAt } = asking.credential;
+  const { id, kind, expiresAt, label } = asking.credential;
   const mcp = asking.mcp === null ? {} : { connection: asking.mcp.connection.id, scopes: asking.mcp.scopes };
-  return { principal: asking.principal, credential: { id, kind, expiresAt: expiresAt.toISOString(), ...mcp }, holds: asking.holds, ...(head === undefined ? {} : { head }) };
+  return { principal: asking.principal, credential: { id, kind, expiresAt: expiresAt.toISOString(), label, ...mcp }, holds: asking.holds, ...(head === undefined ? {} : { head }) };
 }

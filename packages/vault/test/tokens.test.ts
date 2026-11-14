@@ -281,7 +281,7 @@ test("a service's token, asked nothing: every grant it holds, sealed explicitly,
   const done = await vault.change(serviceToken('root-cli', ci, null, 366 * 24 * 60));
   assert.ok(!('refused' in done), JSON.stringify(done));
   const { credential: id, expiresAt, ...answer } = done.answer;
-  assert.deepEqual(answer, { principal: ci, scope: { 'market/dev': 'developer', 'market/prod': 'viewer' } });
+  assert.deepEqual(answer, { principal: ci, scope: { 'market/dev': 'developer', 'market/prod': 'viewer' }, withheld: [] });
   assert.equal(expiresAt, new Date(world.now() + 366 * 86_400_000).toISOString());
   const { who, row, scope } = await minted();
   assert.equal(who, `${ci} service`);

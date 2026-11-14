@@ -727,7 +727,7 @@ test("each of 0.14.7's routes not served yet answers 501, not 404, and asks the 
 test('the projects a page reads are those its caller reaches: every one for whoever runs the instance or holds a role across it', () => {
   const holds = (more: Partial<Called['holds']>): Called => ({
     principal: ada,
-    credential: { id: 'c', kind: 'cli', expiresAt: '' },
+    credential: { id: 'c', kind: 'cli', expiresAt: '', label: null },
     holds: { role: 'member', scope: { projects: 'all', environments: 'all' }, grants: [], credentialScope: null, service: false, kind: 'person', policy: DEFAULT_POLICY, ...more },
   });
   assert.deepEqual(projectsReached(holds({})), []);

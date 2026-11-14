@@ -45,12 +45,12 @@ import { sql } from 'drizzle-orm';
 
 import { callerParts, refusedTo } from '../caller.ts';
 import { amended, part, put, type Operation, type Parts, type Refusal, type Seen, type Unsealed, type Write } from '../change.ts';
-import type { Row } from '../rows.ts';
+import type { Row, Wire } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
 import { asking } from './asking.ts';
 import type { Operations } from './index.ts';
 import { long, presented, text } from './input.ts';
-import { definitionsOf, manages, projectsOf, serviceOf, serviceParts, settingOf } from './services.ts';
+import { definitionsOf, manages, projectsOf, sensitiveIn, serviceOf, serviceParts, settingOf, withheldOf } from './services.ts';
 import { by, labelled, scopeAsked, sealedScope, SLUG, type Wanted } from './signin.ts';
 
 /** The longest issuer or keys' address the contract carries. */
@@ -221,6 +221,8 @@ function tokenBind(input: Presented & TokenBind, vault: Deciding): Operation<Par
 
   return {
     read,
+    // The places of its projects that hold a sensitive value, which the answer names where a binding reads none.
+    beside: { sensitive: sensitiveIn(sql`(${named} UNION ${projectsOf(member)})`) },
     denied: refusedTo('token.bind', shown, vault.workloads, { objects: (seen: Read) => seen.account.map((row) => `principal:${row.id}`) }),
     async check() {
       if (!uploads) return null;
@@ -231,7 +233,7 @@ function tokenBind(input: Presented & TokenBind, vault: Deciding): Operation<Par
         throw error;
       }
     },
-    decide(seen: Read, at: number, unsealed: Unsealed<typeof read>, keys: UploadedKeys | 'invalid' | null) {
+    decide(seen: Read, at: number, unsealed: Unsealed<typeof read>, keys: UploadedKeys | 'invalid' | null, beside?: Readonly<Record<string, readonly Wire[]>>) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       // A row written behind the vault is not a row that is absent, wherever it is: a grant less, a binding less, a key's nature.
@@ -300,8 +302,14 @@ function tokenBind(input: Presented & TokenBind, vault: Deciding): Operation<Par
       /** Whether the caller gives each grant, as it will be kept, and the service holds all of it (`issuesCredential`). */
       const gives = (scope: readonly { grant: ScopeGrant; place: Place }[]) =>
         issuesCredential(issuer, setting, caller.principal, account, scope.map(({ grant, place }) => ({ role: grant.role, place, kept: scopeDefinition(grant) })));
-      /** A grant's place by path, as the answer names it. */
-      const byPath = (scope: readonly ScopeGrant[]) => Object.fromEntries(scope.map((grant) => [found(grant)?.path ?? grant.environmentId ?? grant.projectId, grant.role]).sort(([a], [b]) => (a! < b! ? -1 : 1)));
+      /** Each grant's place by path, as the answer names it. */
+      const paths = (scope: readonly ScopeGrant[]) => scope.map((grant) => ({ grant, path: found(grant)?.path ?? grant.environmentId ?? grant.projectId ?? '' }));
+      /** A binding as the answer has it: what it reaches, by path and role, and where it reads no sensitive value (`withheld`). */
+      const shownAs = (id: string, scope: readonly ScopeGrant[]) => ({
+        id,
+        scope: Object.fromEntries(paths(scope).map(({ grant, path }) => [path, grant.role]).sort(([a], [b]) => (a! < b! ? -1 : 1))),
+        withheld: withheldOf(paths(scope), beside?.sensitive),
+      });
       const now = new Date(at);
       const revoked = (old: Row<typeof bindings>) => amended(bindings, old, { revokedAt: now, revokedBy: caller.principal });
       const objects = (scope: readonly ScopeGrant[]) => scope.map((grant) => (grant.environmentId === null ? `project:${grant.projectId}` : `environment:${grant.environmentId}`));
@@ -346,7 +354,7 @@ function tokenBind(input: Presented & TokenBind, vault: Deciding): Operation<Par
             objects: [...new Set([`principal:${caller.principal}`, `credential:${caller.credential.id}`, `principal:${member}`, ...made.flatMap((binding) => [`binding:${binding.id}`, `binding:${binding.replaces}`]), ...made.flatMap((binding) => objects(binding.scope))])],
             detail: { principal: member, reason: 'keys_replaced', issuer: rekeyed.issuer, jwksUri, keys: uploaded.keys, bindings: made.map(({ id, scope, replaces }) => ({ binding: id, scope, replaces: [replaces] })) },
           },
-          answer: { bindings: made.map(({ id, scope }) => ({ id, scope: byPath(scope) })), replaced: made.map((binding) => binding.replaces) },
+          answer: { bindings: made.map(({ id, scope }) => shownAs(id, scope)), replaced: made.map((binding) => binding.replaces) },
         };
       }
 
@@ -441,7 +449,7 @@ function tokenBind(input: Presented & TokenBind, vault: Deciding): Operation<Par
             claims: binding.claims, scope: sealed, ...(rules === null ? {} : { policy: rules }), replaces: replaces.map(({ row: other, why }) => ({ binding: other.id, why })),
           },
         },
-        answer: { bindings: [{ id, scope: byPath(sealed) }], replaced: replaces.map(({ row: other }) => other.id) },
+        answer: { bindings: [shownAs(id, sealed)], replaced: replaces.map(({ row: other }) => other.id) },
       };
     },
   };

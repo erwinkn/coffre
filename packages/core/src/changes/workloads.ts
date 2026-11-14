@@ -150,8 +150,13 @@ export type NewBinding = {
  */
 export type TokenBind = { op: 'token.bind'; member: string } & ({ binding: NewBinding } | { keys: { issuer: string; jwks: unknown } });
 
-/** The bindings made, each with what it reaches by path and role, and the bindings revoked, by id. */
-export type Bound = { bindings: { id: string; scope: Record<string, string> }[]; replaced: string[] };
+/**
+ * The bindings made, each with what it reaches by path and role and the
+ * places of those whose sensitive values it will not read (`withheld`:
+ * each holds one of a project no Owner of which binds it, R32), and the
+ * bindings revoked, by id.
+ */
+export type Bound = { bindings: { id: string; scope: Record<string, string>; withheld: string[] }[]; replaced: string[] };
 
 /**
  * Remove a binding: whoever manages its service. Its row is revoked, and
