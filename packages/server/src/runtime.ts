@@ -1,3 +1,4 @@
+import { deriveKey } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
@@ -17,20 +18,26 @@ export type CoffreRuntime = {
   rotateAfterDays: ResolvedConfig['rotateAfterDays'];
   /** What is known of the database's schema, for as long as the configuration lives: the isolate's, or the process's. */
   schema: { migrated: boolean };
+  /**
+   * The key a sign-in's pending state is sealed under, in its cookie while
+   * the browser is at the provider: derived from the app key, 0.14's to the
+   * byte, so a sign-in started before an upgrade finishes after it.
+   */
+  signinKey: Buffer;
 };
 
 /**
  * What a configuration knows of its database, for as long as it lives.
  * Settled values, never a pending read (AGENTS.md, "What an isolate keeps").
  */
-const known = new WeakMap<ResolvedConfig, CoffreRuntime['schema']>();
+const known = new WeakMap<ResolvedConfig, Pick<CoffreRuntime, 'schema' | 'signinKey'>>();
 
 /**
  * The app around a database: once per invocation on Workers, whose
  * database clients belong to one request; once per process on Node.
  */
 export function createRuntime(config: ResolvedConfig, db: Database, vault: Vault): CoffreRuntime {
-  let schema = known.get(config);
-  if (schema === undefined) known.set(config, (schema = { migrated: false }));
-  return { db, vault, auth: config.auth, publicUrl: config.publicUrl, rotateAfterDays: config.rotateAfterDays, schema };
+  let kept = known.get(config);
+  if (kept === undefined) known.set(config, (kept = { schema: { migrated: false }, signinKey: deriveKey(config.auditChainKey, 'signin-state/v1') }));
+  return { db, vault, auth: config.auth, publicUrl: config.publicUrl, rotateAfterDays: config.rotateAfterDays, ...kept };
 }

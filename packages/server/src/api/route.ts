@@ -1,5 +1,5 @@
 import { environmentPath, folderName, secretKey, slug } from '@coffre/core/schemas';
-import type { z } from 'zod';
+import { z } from 'zod';
 
 import type { ApiContext } from './context.ts';
 
@@ -43,4 +43,6 @@ export const PARAMS: Record<string, z.ZodType<string>> = {
   environment: environmentPath,
   key: secretKey,
   folder: folderName,
+  // A row's id: an identity's, a credential's.
+  id: z.uuid(),
 };

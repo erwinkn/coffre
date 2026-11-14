@@ -4,18 +4,21 @@ import { isUnreachable } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
 import { ApiError } from './api/errors.ts';
-import { fetchApi, pageClient } from './fetch-api.ts';
+import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
+import { describeSignin, finishSignin, logout, pollDevice, PROVIDER_PATH, signOut, startDevice, startSignin } from './signin.ts';
 
 type Handler = (request: Request, runtime: CoffreRuntime, sourceIp: string | null) => Promise<Response>;
 
 /**
  * Exact paths outside the API's route table, and the one method each
- * takes. Sign-in's and MCP's paths are added here as they are served.
+ * takes. MCP's paths are added here as they are served. `browserForm`: a
+ * form coffre's own pages post, with the browser's cookies, which must
+ * come from one of them.
  */
-const PATHS: Record<string, { method: 'GET' | 'POST'; handler: Handler }> = {
+const PATHS: Record<string, { method: 'GET' | 'POST'; handler: Handler; browserForm?: true }> = {
   '/livez': { method: 'GET', handler: async () => jsonResponse({ ok: true }) },
   '/readyz': {
     method: 'GET',
@@ -24,10 +27,16 @@ const PATHS: Record<string, { method: 'GET' | 'POST'; handler: Handler }> = {
       return jsonResponse(readiness, readiness.ok ? 200 : 503);
     },
   },
+  // Sign-in (signin.ts): what the sign-in page reads first, the device login's two calls, and signing out.
+  '/api/auth': { method: 'GET', handler: describeSignin },
+  '/api/auth/device': { method: 'POST', handler: startDevice },
+  '/api/auth/device/token': { method: 'POST', handler: pollDevice },
+  '/api/auth/logout': { method: 'POST', handler: logout },
+  '/auth/signout': { method: 'POST', handler: signOut, browserForm: true },
 };
 
 /**
- * coffre's own paths: health and the API. Null for any other, a page's,
+ * coffre's own paths: health, sign-in and the API. Null for any other, a page's,
  * which the deployment's Start app renders.
  */
 export async function coffreRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | null> {
@@ -37,9 +46,17 @@ export async function coffreRoute(request: Request, runtime: CoffreRuntime, sour
     // HEAD is GET without the body, which the platform drops: what a monitor asks /livez and /readyz.
     const method = request.method === 'HEAD' && exact.method === 'GET' ? 'GET' : request.method;
     if (method !== exact.method) return methodNotAllowed([exact.method]);
+    if (exact.browserForm && !isSameOrigin(request, runtime.publicUrl)) return errorResponse(new ApiError('cross_origin', 'this must be sent from coffre itself'));
     return exact.handler(request, runtime, sourceIp);
   }
   if (pathname === '/api' || pathname.startsWith('/api/')) return fetchApi(request, runtime, { sourceIp });
+  // A provider's round trip: leaving for it, and back.
+  const provider = PROVIDER_PATH.exec(pathname);
+  if (provider !== null) {
+    if (request.method !== 'GET') return methodNotAllowed(['GET']);
+    const [, step, id] = provider as unknown as [string, 'signin' | 'callback', string];
+    return step === 'signin' ? startSignin(request, runtime, id) : finishSignin(request, runtime, sourceIp, id);
+  }
   return null;
 }
 
