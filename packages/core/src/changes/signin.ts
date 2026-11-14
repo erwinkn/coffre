@@ -2,7 +2,7 @@
  * The changes of sign-in and of credentials (`packages/vault/src/ops/signin.ts`,
  * docs/design/0.16.md, "Signing in").
  */
-export type SigninChanges = Signin | CredentialEnd | AccountLink | AccountUnlink | TokenCreate;
+export type SigninChanges = Signin | CredentialEnd | AccountLink | AccountUnlink | TokenCreate | DeviceStart | DeviceDecide | DeviceRedeem;
 
 export type SigninAnswers = {
   signin: Issued;
@@ -13,6 +13,12 @@ export type SigninAnswers = {
   'account.unlink': { identity: string };
   /** The token made, and what it reaches, each place by its path and the role there. */
   'token.create': Issued & { scope: Record<string, string> };
+  /** The device login, and when its codes stop being good, ISO 8601. */
+  'device.start': { deviceLogin: string; expiresAt: string };
+  /** The device login decided. */
+  'device.decide': { deviceLogin: string };
+  /** The CLI's session. */
+  'device.redeem': Issued;
 };
 
 /**
@@ -20,7 +26,7 @@ export type SigninAnswers = {
  * their request came from (`Trace`). Each rests on what the app verified,
  * or on a secret of its own (a device code).
  */
-export type Unasked = 'signin';
+export type Unasked = 'signin' | 'device.start' | 'device.redeem';
 
 /**
  * An account at a sign-in provider, as the app verified it with the
@@ -144,3 +150,42 @@ export type TokenCreate = { op: 'token.create'; credential: NewCredential; hint:
   | { kind: 'handle'; paths: string[] }
   | { kind: 'service'; member: string; scope: Record<string, string> | null }
 );
+
+/**
+ * A CLI asks to be signed in from a browser (RFC 8628, `coffre login`).
+ * The app draws both codes: the device code, which only the CLI holds and
+ * the vault has by its SHA-256 (`code`, lowercase hex), and the user code
+ * a person types in their browser (`USER_CODE` in @coffre/core/access).
+ * `label` is what the CLI calls itself, as the person approving it sees
+ * it. It waits 10 minutes for a decision (`DEVICE_TTL_SECONDS`).
+ *
+ * Refused `taken` when a row holds either code already, expired or not:
+ * the app draws again. Before the vault has adopted the database,
+ * `adopting`; with an instance's row that is not the vault's, `tampered`.
+ * How many wait at once is the app's to cap, before it asks.
+ */
+export type DeviceStart = { op: 'device.start'; code: string; userCode: string; label: string | null };
+
+/**
+ * A person, on a session of theirs, approves or denies a device login by
+ * the user code it shows (`device.approve`, `device.deny`): approved, the
+ * CLI that holds its device code collects a session of theirs. One that is
+ * not there, decided, or past its 10 minutes is refused `unknown_code`;
+ * a token, a service account's or a person's, `no_access`.
+ */
+export type DeviceDecide = { op: 'device.decide'; userCode: string; approve: boolean };
+
+/**
+ * The CLI collects its session, by its device code's SHA-256 (`code`): once
+ * a person approved its device login, within its 10 minutes, and once. The
+ * session is the approver's, of the generation they approved it in, for
+ * `minutes` (365 days at most), labelled as the CLI called itself.
+ *
+ * The CLI polls until then. Refused, writing nothing (RFC 8628's errors):
+ * `pending` while nobody has decided; `denied` once someone denied it, or
+ * when its approver is no longer an active member of the generation they
+ * approved it in; `expired` for one that is past its 10 minutes, collected
+ * already, or not there. `adopting` and `tampered` as for a sign-in, and
+ * `tampered` for a device login or its approver written behind the vault.
+ */
+export type DeviceRedeem = { op: 'device.redeem'; code: string; session: { token: string; minutes: number } };
