@@ -214,6 +214,20 @@ test('a personal config is a person\'s, of an environment they read or use, one 
   assert.equal((await environmentRow(hers.id))!.protected, false);
 });
 
+test('a personal config is made by one who only uses the environment, and again once the last was deleted', async () => {
+  // Gus may use prod's values but not read them: a person all the same.
+  const gus = user('gus');
+  await write(world, ...rows('roles', role(false, 'runner', ['secret.use'])), ...rows('principals', principal(gus)), ...rows('grants', grant(gus, 'runner', { project: market })), ...rows('credentials', credential('gus-cli', gus)));
+  const made = answered(await vault.change(mine('gus-cli', 'prod')));
+  assert.deepEqual(await environmentRow(made.id), { slug: made.slug, parent_id: prod.id, owner: gus, protected: false, project_id: market.id });
+  assert.deepEqual(await vault.change(mine('gus-cli', 'prod')), { refused: 'exists' });
+  // Deleted, it leaves a tombstone slug, which holds no place: he makes another.
+  await amend(world, 'environments', sql`id = ${made.id}`, { slug: `${made.slug}~1` });
+  const again = answered(await vault.change(mine('gus-cli', 'prod')));
+  assert.notEqual(again.id, made.id);
+  assert.equal((await environmentRow(again.id))!.owner, gus);
+});
+
 test('two makings of one place decided on the same rows: the second finds the first, and makes nothing', async () => {
   const deciding = { workloads: world.workloads };
   const race = async (inputs: (Presented & (ProjectCreate | EnvironmentCreate))[]) => {
