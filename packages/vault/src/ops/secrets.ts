@@ -56,7 +56,9 @@ function valid(item: KeyWrite): boolean {
  * kept only where a write says so. A key the environment does not hold
  * yet is what it inherits, as a use finds it (use.ts): the nearest parent's
  * key by that name, unless a fork on the way dismissed it; a key inherited
- * from nowhere is a secret. A reference's is its source's, whose row the
+ * from nowhere is a secret. An archived key the environment brings back
+ * with a value read what it inherits until then: it is as sensitive as either
+ * its own or that. A reference's is its source's, whose row the
  * reference cannot be without. A row the vault does not see, a source or a
  * parent, refuses the write, `unreadable`, rather than guess.
  */
@@ -163,10 +165,11 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         const line: Record<string, unknown> = { key, secret: secret.id };
         if (value !== undefined) {
           // What the key's value is now: its own, or what it inherits, and either one's source's: a source is never deleted while referred to.
-          const current = asked !== undefined ? null : was === null ? passedDown(key) : kept;
-          const source = current == null || current.sourceId === null ? current : sources.get(current.sourceId);
-          if (source === undefined) return { refused: 'unreadable' };
-          const nature = asked ?? (source?.nature === 'sensitive' ? 'sensitive' : 'secret');
+          // An archived key read what it inherits, and is brought back as its own: it is as sensitive as either.
+          const current = asked !== undefined ? [] : was === null ? [passedDown(key)] : was.archivedAt === null ? [kept] : [kept, passedDown(key)];
+          const natures = current.map((row) => (row == null || row.sourceId === null ? row : sources.get(row.sourceId)));
+          if (natures.includes(undefined)) return { refused: 'unreadable' };
+          const nature = asked ?? (natures.some((row) => row?.nature === 'sensitive') ? 'sensitive' : 'secret');
           const version = kept.versions + 1;
           // Typed, not generated: no recipe for Regenerate, and in no pair.
           secret = { ...secret, versions: version, currentVersion: version, updatedAt: now, sourceId: null, nature, recipe: null, pairId: null, pairHalf: null };

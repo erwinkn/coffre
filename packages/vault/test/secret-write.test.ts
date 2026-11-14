@@ -247,11 +247,16 @@ test('a value written with no nature over a key the environment inherits is as s
   const fork = environment(market, 'fork', { parentId: prod.id });
   const twig = environment(market, 'twig', { parentId: fork.id });
   const signing = value(world, secret(elsewhere, 'SIGNING'), 'sig', { sensitive: true });
-  await write(world, ...rows('environments', fork, twig),
+  // Bringing a key back takes `secret.archive` too: hers in the twig.
+  await write(world, ...rows('environments', fork, twig), ...rows('roles', role(false, 'keeper', ['secret.read', 'secret.write', 'secret.archive'])), ...rows('grants', grant(ada, 'keeper', { environment: twig })),
     ...rows('secrets', value(world, secret(prod, 'TOKEN'), 't', { sensitive: true }), value(world, secret(prod, 'FLAG'), 'on', { plain: true }), signing, secret(prod, 'SIGNING', { sourceId: signing.id }),
       // A fork's own key is the nearest; one it dismissed, and one archived, are not read in it.
       value(world, secret(prod, 'NEAREST'), 'n', { sensitive: true }), value(world, secret(fork, 'NEAREST'), 'f'), value(world, secret(prod, 'SKIPPED'), 's', { sensitive: true }),
-      value(world, secret(prod, 'SHELVED', { archivedAt: new Date(Date.UTC(2026, 10, 1)) }), 'a', { sensitive: true }), value(world, secret(prod, 'LATER'), 'l', { sensitive: true })),
+      value(world, secret(prod, 'SHELVED', { archivedAt: new Date(Date.UTC(2026, 10, 1)) }), 'a', { sensitive: true }), value(world, secret(prod, 'LATER'), 'l', { sensitive: true }),
+      // A key the fork archived reads its parent's until it is brought back, and is as sensitive as either then.
+      value(world, secret(prod, 'RETURNED'), 'p', { sensitive: true }), value(world, secret(twig, 'RETURNED', { archivedAt: new Date(Date.UTC(2026, 10, 1)) }), 'own'),
+      value(world, secret(prod, 'OVERLAID'), 'p'), value(world, secret(twig, 'OVERLAID', { archivedAt: new Date(Date.UTC(2026, 10, 1)) }), 'own', { sensitive: true }),
+      value(world, secret(prod, 'PLAINLY'), 'p'), value(world, secret(twig, 'PLAINLY', { archivedAt: new Date(Date.UTC(2026, 10, 1)) }), 'own', { plain: true })),
     ...rows('dismissedKeys', dismissed(fork, 'SKIPPED')));
   const inTwig = (keys: string[]): Presented & SecretWrite => ({ ...shown('ada-cli'), op: 'secret.write', project: 'market', environment: 'twig', keys: keys.map((key) => ({ key, value: `bare ${key}` })) });
   assert.deepEqual(await vault.use({ ...reveal('ada-cli', ['TOKEN', 'SIGNING', 'NEAREST', 'SKIPPED']), environment: 'twig' }).then((answer) => 'refused' in answer ? answer : answer.values.map((item) => ('refused' in item ? item.refused : item.value.toString()))),
@@ -260,9 +265,13 @@ test('a value written with no nature over a key the environment inherits is as s
     TOKEN: { version: 1, nature: 'sensitive' }, SIGNING: { version: 1, nature: 'sensitive' }, FLAG: { version: 1, nature: 'secret' },
     NEAREST: { version: 1, nature: 'secret' }, SKIPPED: { version: 1, nature: 'secret' }, SHELVED: { version: 1, nature: 'secret' }, NEW: { version: 1, nature: 'secret' },
   } } });
+  assert.deepEqual(await vault.use({ ...reveal('ada-cli', ['RETURNED']), environment: 'twig' }).then((answer) => 'refused' in answer ? answer : answer.values.map((item) => ('refused' in item ? item.refused : item.value.toString()))), ['sensitive']);
+  assert.deepEqual(await vault.change({ ...inTwig([]), keys: ['RETURNED', 'OVERLAID', 'PLAINLY'].map((key) => ({ key, value: `bare ${key}`, archived: false })) }), { answer: { keys: {
+    RETURNED: { version: 2, nature: 'sensitive' }, OVERLAID: { version: 2, nature: 'sensitive' }, PLAINLY: { version: 2, nature: 'secret' },
+  } } });
   world.tick(2000);
   // Written over, a sensitive value is still handed to no person.
-  assert.deepEqual(await vault.use({ ...reveal('ada-cli', ['TOKEN', 'SIGNING']), environment: 'twig' }).then((answer) => 'refused' in answer ? answer : answer.values.map((item) => ('refused' in item ? item.refused : item.value.toString()))), ['sensitive', 'sensitive']);
+  assert.deepEqual(await vault.use({ ...reveal('ada-cli', ['TOKEN', 'SIGNING', 'RETURNED']), environment: 'twig' }).then((answer) => 'refused' in answer ? answer : answer.values.map((item) => ('refused' in item ? item.refused : item.value.toString()))), ['sensitive', 'sensitive', 'sensitive']);
 
   // A parent's key edited behind the vault does not say what it was: the value is not written without a nature.
   await world.owner.execute(sql`UPDATE secrets SET folder = 'moved' WHERE environment_id = ${prod.id} AND key = 'LATER'`);
