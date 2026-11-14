@@ -55,7 +55,10 @@ export type AuditEntryView = {
   version: number | null;
   /** For a read or a write of several secrets at one place, logged as one entry: each key, with the version released or stored. `key` and `version` are then null. */
   secrets: { key: string | null; version: number | null }[] | null;
-  /** 0.14.7's: no 0.16 entry has one. */
+  /**
+   * The operation it was written for, which the change's or the read's answer names (`operationId`): its request,
+   * so the entries one request wrote share it, as 0.14.7's of one operation did, and the page shows them as one line.
+   */
   operationId: string | null;
   /** 0.14.7's: no 0.16 entry has one. */
   relatedSeq: number | null;
@@ -472,6 +475,7 @@ function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logPro
   const key = released?.length === 1 ? released[0]!.key : released === null ? ((secretIds.length === 1 ? names.secrets.get(secretIds[0]!) : undefined) ?? (typeof detail.key === 'string' ? detail.key : null)) : null;
   const version = released?.length === 1 ? released[0]!.version : released === null && typeof detail.version === 'number' ? detail.version : null;
   const credential = typeof body.credential === 'string' ? names.credentials.get(body.credential) : undefined;
+  const request = typeof body.request === 'string' ? body.request : null;
   return {
     seq: row.seq,
     author: 'vault',
@@ -487,9 +491,9 @@ function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logPro
     key,
     version,
     secrets: released !== null && released.length !== 1 ? released : null,
-    operationId: null,
+    operationId: request,
     relatedSeq: null,
-    requestId: typeof body.request === 'string' ? body.request : null,
+    requestId: request,
     run: body.action === 'token.exchange' ? { exchangeSeq: row.seq, claims: runClaims(detail.run) } : runOf(body, firsts, stands),
     token: credential?.kind === 'personal' ? { id: body.credential as string, label: credential.label ?? '' } : null,
     metadata: detail,

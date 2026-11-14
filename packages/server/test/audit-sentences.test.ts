@@ -10,7 +10,7 @@ import { after, beforeEach, test } from 'node:test';
 
 import { canonicalClaims, github, signin } from '@coffre/core/identity';
 import { LOG_ACTIONS, type KeyWrite } from '@coffre/core/vault';
-import { describe, plain, runLabel, type AuditEntry } from '@coffre/ui/audit-sentences';
+import { describe, lines, plain, runLabel, type AuditEntry } from '@coffre/ui/audit-sentences';
 
 import {
   adoptFresh,
@@ -319,6 +319,11 @@ test('every action the vault writes reads as a sentence, with no fallback, and s
     'workload.renew: renewed its workload session',
     'upkeep.expire: removed what had lapsed',
   ]);
+  // An Approve that shows a value is its reveal and its approval in one request: the page's line says both.
+  const approved = lines([...entries].reverse()).find((batch) => batch.some((entry) => entry.action === 'mcp.approve'))!;
+  assert.deepEqual(approved.map((entry) => entry.action), ['mcp.approve', 'secret.read']);
+  assert.equal(plain(describe(approved).parts), 'revealed market/dev/RENAMED; approved show_secret_value');
+  assert.equal(describe(approved).refused, false);
   // Every action the vault writes, but the adoption, the first entry of a database the vault adopted (below).
   assert.deepEqual([...new Set(entries.map((entry) => entry.action))].sort(), LOG_ACTIONS.filter((action) => action !== 'vault.adopt').sort());
 });
@@ -531,6 +536,15 @@ test('a refused change says what kind of change was refused, where and why, and 
   const done = (await logged()).find((entry) => entry.action === 'secret.write' && entry.decision !== 'deny')!;
   const denied = entries.find((entry) => entry.action === 'secret.write')!;
   assert.equal(plain(describe([denied, done]).parts), `${plain(describe([done]).parts)}, 1 refused: no access`);
+  // A value shown whose approval was then refused (expired, or decided in another tab) says the refusal after the reveal; the line was allowed.
+  await ok('cy-cli', 'POST', '/reveals', { path: 'market/dev/A' });
+  await sign();
+  const read = (await logged()).find((entry) => entry.action === 'secret.read')!;
+  const late = entries.find((entry) => entry.action === 'mcp.approve')!;
+  assert.deepEqual(describe([late, read]), { parts: [...describe([read]).parts, '; ', ...describe([late]).parts], refused: false });
+  assert.equal(plain(describe([late, read]).parts), `${plain(describe([read]).parts)}; tried to approve a change asked through MCP: no access`);
+  // Refused through and through, it is a refused line.
+  assert.equal(describe([late, entries.find((entry) => entry.action === 'mcp.deny')!]).refused, true);
   // Every action a caller who stands can be refused: the others are never refused one, or logged.
   // A refused use is not logged (D236); every membership refused is logged as an addition; nobody who stands is refused their own sign-out.
   const never = ['secret.read', 'member.restore', 'member.role', 'sign_in', 'sign_out', 'device.start', 'token.exchange', 'oauth.register', 'mcp.token', 'mcp.ask', 'mcp.disconnect', 'upkeep.expire', 'vault.adopt'];

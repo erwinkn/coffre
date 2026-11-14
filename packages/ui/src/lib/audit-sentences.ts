@@ -722,7 +722,7 @@ export function reasonInWords(reason: string | null): string {
 
 // --- lines ----------------------------------------------------------------------
 
-/** In a batch of mixed actions, the one the line is named for: a write, not its reads. */
+/** In a batch of mixed actions, the one its line says first: a write, then its reads, then the rest. */
 const LEAD = ['secret.write', 'secret.loosen', 'secret.read'];
 
 export function leadOf(batch: AuditEntry[]): AuditEntry {
@@ -757,10 +757,21 @@ export function perSecret<T extends AuditEntry>(entry: T): T[] {
   });
 }
 
-/** What a line says: one entry, or a batch that shares an operation. */
+/**
+ * What a line says: one entry, or a batch that shares an operation. A batch
+ * of several actions says each, the lead's first ("revealed market/prod/API_KEY;
+ * approved show_secret_value"), and is refused only if each of them was.
+ */
 export function describe(batch: AuditEntry[]): Sentence {
-  const lead = perSecret(leadOf(batch))[0]!;
-  const same = batch.filter((other) => other.action === lead.action).flatMap(perSecret);
+  const actions = [...new Set([leadOf(batch).action, ...batch.map((entry) => entry.action)])];
+  const said = actions.map((action) => describeAction(batch.filter((entry) => entry.action === action)));
+  return { parts: said.flatMap((one, i) => (i === 0 ? one.parts : ['; ', ...one.parts])), refused: said.every((one) => one.refused) };
+}
+
+/** A batch of one action in words. */
+function describeAction(batch: AuditEntry[]): Sentence {
+  const lead = perSecret(batch[0]!)[0]!;
+  const same = batch.flatMap(perSecret);
   // A batch is what was done: its refusals are counted after it, never said or counted as done.
   const allowed = same.filter((other) => other.decision !== 'deny');
   const denied = same.filter((other) => other.decision === 'deny');
