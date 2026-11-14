@@ -191,13 +191,6 @@ export const placeRoutes = {
     },
   }),
 
-  /** Delete a project for good: the vault does not erase a place yet. */
-  ...route('DELETE /projects/:project', {
-    run: async () => {
-      throw notServed('deleting a project for good');
-    },
-  }),
-
   /**
    * Make an environment, by whoever manages its project's environments; with
    * `from`, a fork of that environment, live, by one who reads it too: with
@@ -255,13 +248,6 @@ export const placeRoutes = {
         { op: 'environment.update', ...at, slug: environment },
       );
       return { environment: environmentView(await changed(ctx, edit, `${project}/${edit.op === 'environment.update' ? edit.slug : environment}`)) };
-    },
-  }),
-
-  /** Delete an environment for good: the vault does not erase a place yet. */
-  ...route('DELETE /projects/:project/:environment', {
-    run: async () => {
-      throw notServed('deleting an environment for good');
     },
   }),
 

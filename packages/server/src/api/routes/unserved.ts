@@ -23,6 +23,9 @@ export const unservedRoutes = {
   ...unserved('GET /members/:member/bindings/:id/enrollments', "a binding's enrollments"),
   ...unserved('POST /members/:member/bindings/:id/enrollments', 'enrolling a workload'),
   ...unserved('POST /members/:member/bindings/:id/enrollments/:enrollment/promote', 'promoting an enrollment'),
+  // A project or an environment deleted for good: the vault does not erase a place yet.
+  ...unserved('DELETE /projects/:project', 'deleting a project for good'),
+  ...unserved('DELETE /projects/:project/:environment', 'deleting an environment for good'),
   // A missing key dismissed, or restored.
   ...unserved('PATCH /projects/:project/:environment/dismissals', 'dismissing a missing key'),
   // A GitHub or GitLab repository looked up for a binding, and those the deployment's GitHub App is installed on.

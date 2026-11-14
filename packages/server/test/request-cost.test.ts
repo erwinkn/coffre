@@ -24,6 +24,10 @@ import { credential, emptyDatabase, environment, grant, identity, instance, prin
 import { sql } from 'drizzle-orm';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
+// The router before its table: the table's modules import it back (mcp/tools.ts), so the table loads through it.
+import '../src/api/router.ts';
+import { routes } from '../src/api/routes.ts';
+import { unservedRoutes } from '../src/api/routes/unserved.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { openApp, PUBLIC_URL, SESSION } from './app-fixture.ts';
@@ -225,9 +229,15 @@ const requests: Record<string, Entry> = {
   'GET /members, by a project manager': { request: () => api('bo-cli', 'GET', '/members'), calls: ['caller'], statements: 1 },
   'GET /members?path=': { request: () => api('bo-cli', 'GET', '/members?path=market'), calls: ['caller'], statements: 2 },
   'GET /members/:member/access': { request: () => api('cy-cli', 'GET', `/members/${ada}/access`), calls: ['caller'], statements: 1, fixed: true },
+  // Someone's report, for offboarding them: what they hold and every key they know, in one statement.
+  'GET /members/:member': { request: () => api('cy-cli', 'GET', `/members/${ada}`), calls: ['caller'], statements: 1, fixed: true },
   'GET /roles': { request: () => api('cy-cli', 'GET', '/roles'), calls: ['caller'], statements: 1 },
   // The roles, the members the role reaches, and the places they reach it in (`WEIGHED_MOST`).
   'PUT /roles/:role?dryRun=1': { request: () => api('cy-cli', 'PUT', '/roles/viewer?dryRun=1', { name: 'Viewer', description: '', permissions: [], protected: [] }), calls: ['caller'], statements: 3 },
+  // A write weighed and not made: one `weigh`, then one `use` to compare every value it would replace, and none when
+  // it replaces none.
+  'PATCH /secrets/:project/:environment?dryRun=1': { request: () => api('bo-cli', 'PATCH', '/secrets/market/dev?dryRun=1', { API_KEY: 'fake-guess', DATABASE_URL: 'postgres://fake', NEW: 'fake-new' }), calls: ['weigh', 'use'], statements: 0 },
+  'PATCH /secrets/:project/:environment?dryRun=1, new keys only': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy?dryRun=1', { NEW: 'fake-new' }), calls: ['weigh'], statements: 0 },
   'GET /settings': { request: () => api('cy-cli', 'GET', '/settings'), calls: ['caller'], statements: 1, fixed: true },
 
   // Values: one call to the vault and no statement, the token hashed, never looked up.
@@ -449,6 +459,13 @@ const held = (spent: Record<string, Cost>) =>
 test('each route runs exactly its budget: the vault calls it makes, by name, and the app statements', async () => {
   const spent = await costs();
   for (const [name, budget] of Object.entries(requests)) assert.deepEqual({ calls: spent[name]!.calls, statements: spent[name]!.statements }, { calls: budget.calls, statements: budget.statements }, name);
+});
+
+test("every route the API serves has a budget above: an entry named by the route's key, before any `?` or `,`", () => {
+  const priced = new Set(Object.keys(requests).map((name) => name.split(/[?,]/)[0]));
+  // A route not served yet is unserved.ts's own, until an area lists its own under the same key.
+  const served = Object.entries(routes).filter(([key, def]) => def !== unservedRoutes[key as keyof typeof unservedRoutes]).map(([key]) => key);
+  assert.deepEqual(served.filter((key) => !priced.has(key)), []);
 });
 
 /** Cy, who may make every change growth asks. */
