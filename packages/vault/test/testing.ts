@@ -48,5 +48,5 @@ export async function signerOf(world: TestVault): Promise<{ sign(full?: boolean)
 export async function adoptFresh(world: TestVault, owners: readonly string[]): Promise<void> {
   const signer = await Signer.open({ db: world.db, keys: world.keys, now: world.now, store: memoryStore(), keepUsesDays: null });
   // No archive of 0.14's to check, so no key of its.
-  if (!(await adopt(signer, world, { keks: world.keks, owners: [...owners], signingKeys: [] }))) throw new Error('the database has a log already');
+  if ((await adopt(signer, world, { keks: world.keks, owners: [...owners], signingKeys: [] })) === false) throw new Error('the database has a log already');
 }
