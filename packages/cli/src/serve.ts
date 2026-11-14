@@ -24,9 +24,16 @@ import { addressOf, forwarder, proofOf, PROOFS } from './workload.ts';
 /**
  * `coffre serve --url <url> --service <name> --proof <proof> [--place <project>/<env>] [--listen <address>] [--tunnel <name>=<address>]…`;
  * `url`, the session flag's, if given before the command; `fetching`, the
- * fetch for the instance at an origin, timed under `--verbose`.
+ * fetch for the instance at an origin, timed under `--verbose`;
+ * `refuseKnown`, what stops it before the proof is read, behind Cloudflare
+ * Access as a session saved here knows.
  */
-export async function serve(args: string[], sessionUrl: string | undefined, fetching: (instance: string) => typeof fetch): Promise<void> {
+export async function serve(
+  args: string[],
+  sessionUrl: string | undefined,
+  fetching: (instance: string) => typeof fetch,
+  refuseKnown: (origin: string) => void,
+): Promise<void> {
   const { values } = parse(
     args,
     { url: { type: 'string' }, service: { type: 'string' }, proof: { type: 'string' }, place: { type: 'string' }, listen: { type: 'string' }, tunnel: { type: 'string', multiple: true } },
@@ -44,6 +51,8 @@ export async function serve(args: string[], sessionUrl: string | undefined, fetc
     if ('path' in where) throw new UsageError(`--tunnel ${spec}: a tunnel listens on a host and port`);
     return { name, where };
   });
+  // Behind Cloudflare Access, as a 0.14 session saved here for it says, the proof is not read (`browsersOnly`).
+  refuseKnown(origin);
   const proof = await proofOf(values.proof, process.env);
   const say = (line: string) => process.stderr.write(`${line}\n`);
 

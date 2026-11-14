@@ -7,11 +7,10 @@
  * add a transitive dependency tree for argument parsing.
  */
 import { parseArgs } from 'node:util';
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
-import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { init, KINDS, UNRELEASED, type Kind } from './init.ts';
 import { keys } from './keys.ts';
@@ -19,7 +18,7 @@ import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks, runsCode } from './github-env.ts';
 import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
 import { exchange, ExchangeFailed, idToken, keyBound, proofOf } from './workload.ts';
-import { commandLine, readSession } from './flags.ts';
+import { commandLine, readSession, talksToInstance } from './flags.ts';
 import { requestLine, stderr, timed, took } from './timings.ts';
 import { readSecret } from './secret.ts';
 import { generatedLines, generatedPatch, recipeFlag, regeneratedPatch } from './generate.ts';
@@ -32,8 +31,8 @@ import { serve } from './serve.ts';
 import { CheckFailed, memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
 import { interval, replaceFile, watch } from './watch.ts';
-import { BACKUP_USAGE, NOT_IN_016, RESTORE_USAGE, VERIFY_BACKUP_USAGE } from './backup-help.ts';
 import { KEYS_USAGE, INSTANCE_USAGE, pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
+import { BACKUP_USAGE, NOT_IN_016, RESTORE_USAGE, VERIFY_BACKUP_USAGE, LOG_GONE } from './backup-help.ts';
 import {
   choose,
   credentialHeaders,
@@ -49,6 +48,10 @@ import {
   REPO_FILE,
   resolveTarget,
   signInError,
+  accessAnswered,
+  accessRefusal,
+  browsersOnly,
+  savedAccess,
   within,
   withPin,
   withoutPins,
@@ -220,26 +223,41 @@ function target(): Target {
   return attempt(() => resolveTarget(sessionFlags, readStore(), localHere()));
 }
 
-/** cloudflared keeps and refreshes the Access token; ask it each time. */
-async function cloudflaredToken(origin: string): Promise<string> {
-  try {
-    const { stdout } = await promisify(execFile)('cloudflared', ['access', 'token', `-app=${origin}`]);
-    const token = stdout.trim();
-    if (token === '' || token.includes(' ')) throw new Error(stdout);
-    return token;
-  } catch {
-    throw new Error(`could not get a Cloudflare Access token for ${origin}: run \`coffre login ${origin}\``);
-  }
+/**
+ * `fetch`, for every request the CLI sends, under `--verbose` each one said
+ * on stderr with its answer and its time (`timings.ts`): by its path when it
+ * is `instance`'s, by its host when it is a platform's or GitHub's. Without
+ * `instance`, for the requests only the instance is sent.
+ *
+ * It follows no redirect, so a credential goes to the URL it was sent to and
+ * nowhere else (`redirect: 'error'` still fails on one). And Cloudflare
+ * Access's answer, to whichever request got it, ends the command with what
+ * 0.16.0 does there (`accessAnswered`, `browsersOnly`): one place, so no
+ * command needs a check of its own. Not for a request the credential proxy
+ * relays (`relayed`), whose answer is another service's.
+ */
+function fetching(instance?: string): typeof fetch {
+  const sent = sessionFlags.verbose ? timed(fetch, stderr, instance) : fetch;
+  return async (input, init) => {
+    const asked = init?.redirect ?? (input instanceof Request ? input.redirect : 'follow');
+    const response = await sent(input, { ...init, redirect: 'manual' });
+    const url = new URL(input instanceof Request ? input.url : input);
+    if (!relayed(url) && (await accessAnswered(response))) fail(browsersOnly(url.origin));
+    if (asked === 'error' && response.status >= 300 && response.status < 400) throw new TypeError(`fetch failed: ${url.href} redirects, and redirect is "error"`);
+    return response;
+  };
 }
 
 /**
- * `fetch`, under `--verbose` each request said on stderr with its answer
- * and its time (`timings.ts`): by its path when it is `instance`'s, by its
- * host when it is a platform's or GitHub's. Without `instance`, for the
- * requests only the instance is sent.
+ * Whether `url` is one the credential proxy relays to another service, a
+ * credential's path under it: `/use/<project>/<env>/<name>/…`, or the stable
+ * `/use/<name>/<a>/…`, three segments or more. Not `/use`, nor the plan,
+ * `/use/<project>/<env>`, which are coffre's own. A stable URL's one-segment
+ * path, `/use/<name>/<a>`, reads as coffre's: an Access login page that
+ * service answers there ends the command as coffre's would.
  */
-function fetching(instance?: string): typeof fetch {
-  return sessionFlags.verbose ? timed(fetch, stderr, instance) : fetch;
+function relayed(url: URL): boolean {
+  return /^\/use\/[^/]+\/[^/]+\/./.test(url.pathname);
 }
 
 /** A request to the instance. */
@@ -337,10 +355,9 @@ async function workloadSecrets(): Promise<[string, string][]> {
 
 async function headersFor(to: Target): Promise<Record<string, string>> {
   if (to.credential.kind === 'workload') {
-    return credentialHeaders(to.mode, to.credential, (await workloadCredential(to.origin, to.credential)).credential);
+    return credentialHeaders(to.credential, (await workloadCredential(to.origin, to.credential)).credential);
   }
-  const access = to.credential.kind === 'cloudflared' ? await cloudflaredToken(to.origin) : undefined;
-  return credentialHeaders(to.mode, to.credential, access);
+  return credentialHeaders(to.credential);
 }
 
 /** What to do next, for a refusal a command expects: its status and message, to a line, or null. */
@@ -442,7 +459,6 @@ async function send(request: Request, to: Target, hint?: Hint, handled: readonly
 
   const relogin = `run \`coffre login ${to.origin}\``;
   if (response.status >= 300 && response.status < 400) {
-    if (to.mode === 'cloudflare') fail(`Cloudflare Access did not accept your token: ${relogin}`);
     fail(`${to.origin} redirected to ${response.headers.get('location') ?? 'elsewhere'}; is that the right address?`);
   }
   if (response.status === 401) fail(refused(to));
@@ -479,12 +495,8 @@ function refused(to: Target): string {
       return `${to.origin} does not know the credential this run's ID token bought: it lasts five minutes. Sign in again, \`coffre login ${to.origin} --service <name>\``;
     case 'token':
       return `${to.origin} does not know this bearer token: it is unknown, expired or revoked`;
-    case 'access':
-      return `${to.origin} refused the Access service token's sign-in: is its service still a member?`;
     case 'person':
-      return to.mode === 'cloudflare'
-        ? `${to.origin} refused your Cloudflare Access sign-in: run ${relogin}`
-        : signInError(`${to.origin} does not know the session saved here: it was signed out, or the instance was reset since. Sign in again: ${relogin}`, 'signin');
+      return signInError(`${to.origin} does not know the session saved here: it was signed out, or the instance was reset since. Sign in again: ${relogin}`);
   }
 }
 
@@ -534,8 +546,9 @@ function printMe(me: Me): void {
  *   where you are signed in, and the CLI receives a session token of its own.
  *   A session saved here that the instance still knows is kept: the login
  *   only pins.
- * - Cloudflare Access: the CLI hands over to `cloudflared`, which keeps the
- *   Access token from then on.
+ * - Cloudflare Access: 0.16.0 signs people in there through the browser
+ *   only, so the CLI says so (`browsersOnly`) and signs in nowhere; as it
+ *   does for 0.14's Access service token, `--access-client-id`.
  */
 async function login(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
@@ -550,17 +563,16 @@ async function login(args: string[]): Promise<void> {
     allowPositionals: true,
   });
   if (positionals.length > 1) fail(`too many arguments: ${positionals.slice(1).join(' ')}`);
-  const machine = (['token', 'access-client-id', 'service'] as const).filter((name) => values[name] !== undefined && values[name] !== false);
+  if (values['access-client-id'] !== undefined) fail(browsersOnly());
+  const machine = (['token', 'service'] as const).filter((name) => values[name] !== undefined && values[name] !== false);
   if (machine.length > 1) fail(`${machine.map((name) => `--${name}`).join(' and ')} are two ways to sign in: give one`);
   if (values['id-token'] && values.service === undefined) fail('--id-token goes with --service <name>: the ID token signs a CI run in as that service');
   if (machine.length > 0 && values['no-browser']) fail('--no-browser is for a person\'s sign-in, in a browser');
-  // Each machine sign-in implies its mode: a bearer token and an ID token are coffre's own, an Access service token Access's.
+  // A bearer token and an ID token are coffre's own sign-in's.
   if (machine.length > 0 && sessionFlags.authMode !== undefined) fail(`--auth-mode is for a person's sign-in: --${machine[0]} says which`);
-  for (const name of ['access-client-id', 'service'] as const) {
-    if (values[name]?.trim() === '') fail(`--${name} is empty: an unset variable, perhaps`);
-  }
+  if (values.service?.trim() === '') fail('--service is empty: an unset variable, perhaps');
 
-  const mode = attempt(() => parseMode(sessionFlags.authMode));
+  if (attempt(() => parseMode(sessionFlags.authMode)) === 'cloudflare') fail(browsersOnly());
   // The directory to pin, known before anything is asked of the instance.
   const directory = here('A login pins the directory it runs in: run it from one that exists');
 
@@ -572,22 +584,24 @@ async function login(args: string[]): Promise<void> {
   if (local?.by === 'file') {
     // A clone names any URL it likes: you see where you sign in, and a secret you hand over goes only where you name it.
     const file = shown(join(local.directory, REPO_FILE));
-    const handed = values.token ? '--token' : values['access-client-id'] !== undefined ? '--access-client-id <id>' : values['id-token'] ? `--service ${values.service} --id-token` : null;
+    const handed = values.token ? '--token' : values['id-token'] ? `--service ${values.service} --id-token` : null;
     if (handed !== null) fail(`${file} names ${origin}, and a secret goes only where you name it: \`coffre login ${origin} ${handed}\``);
     process.stderr.write(`Signing in to ${origin}, which ${file} names\n`);
   }
+  const store = readStore();
+  const kept = store.instances[origin];
+  // 0.14's session behind Access there: refused before a secret is read.
+  const refused = savedAccess(store, origin);
+  if (refused !== null) fail(refused);
   // A person's session there is not replaced unseen, and left valid on the server: they sign out first.
-  const kept = readStore().instances[origin];
   if (machine.length > 0 && kept !== undefined && kept.kind === undefined) {
     fail(`signed in to ${origin} as ${kept.principal?.id ?? 'a person'}: \`coffre logout ${origin}\` first, or sign the run in from a home of its own`);
   }
+  // How it signs people in, asked first, with nothing of yours: behind Access, no secret is read, and no session saved here sent.
+  if ((await askMode(origin)) === 'cloudflare') fail(browsersOnly(origin));
   if (values.token) await tokenLogin(origin);
-  else if (values['access-client-id'] !== undefined) await accessServiceLogin(origin, values['access-client-id'].trim());
   else if (values.service !== undefined) await runLogin(origin, serviceMember(values.service.trim()), values['id-token']);
-  else if (!(await keepSession(origin, kept, mode))) {
-    const asked = mode ?? (await askMode(origin));
-    await (asked === 'cloudflare' ? accessLogin(origin) : deviceLogin(origin, values['no-browser']));
-  }
+  else if (!(await keepSession(origin, kept))) await deviceLogin(origin, values['no-browser']);
   pinTo(directory, origin);
 }
 
@@ -597,8 +611,8 @@ async function login(args: string[]): Promise<void> {
  * Only the instance saying it does not know it, 401, replaces it: any other
  * failure leaves it as it is, and says so.
  */
-async function keepSession(origin: string, kept: Session | undefined, mode: AuthMode | undefined): Promise<boolean> {
-  if (kept === undefined || kept.kind !== undefined || kept.mode !== 'signin' || !kept.token || mode === 'cloudflare') return false;
+async function keepSession(origin: string, kept: Session | undefined): Promise<boolean> {
+  if (kept === undefined || kept.kind !== undefined || kept.mode !== 'signin' || !kept.token) return false;
   if (kept.expiresAt && Date.parse(kept.expiresAt) <= Date.now()) return false;
   const token = kept.token;
   let me: Me;
@@ -691,7 +705,6 @@ async function deviceLogin(origin: string, noBrowser: boolean): Promise<void> {
   const session = await pollDevice(origin, device.device_code, device.interval, device.expires_in);
   const me = await client({
     origin,
-    mode: 'signin',
     by: 'person',
     credential: { kind: 'token', token: session.access_token },
   }).me();
@@ -710,7 +723,7 @@ async function deviceLogin(origin: string, noBrowser: boolean): Promise<void> {
 }
 
 /** Ask the instance how it signs people in. */
-async function askMode(origin: string): Promise<'signin' | 'cloudflare'> {
+async function askMode(origin: string): Promise<AuthMode> {
   let response: Response;
   try {
     response = await http(`${origin}/api/auth`, { redirect: 'manual', headers: { accept: 'application/json' } });
@@ -759,10 +772,10 @@ async function pollDevice(
     }
     if (error === 'authorization_pending') continue;
     if (error === 'access_denied') fail('the sign-in was declined in the browser');
-    if (error === 'expired_token') fail(signInError('the code expired before it was approved; run `coffre login` again', 'signin'));
+    if (error === 'expired_token') fail(signInError('the code expired before it was approved; run `coffre login` again'));
     fail(`sign-in failed: ${error ?? `status ${response.status}`}`);
   }
-  fail(signInError('the code expired before it was approved; run `coffre login` again', 'signin'));
+  fail(signInError('the code expired before it was approved; run `coffre login` again'));
 }
 
 /** Best effort: on a machine without a desktop the printed link is enough. */
@@ -791,23 +804,27 @@ async function saveRun(to: Target, session: Omit<Session, 'principal' | 'obtaine
   printMe(me);
 }
 
+/**
+ * What to say instead of a command, behind Cloudflare Access: for the
+ * instance the session flags and this directory choose (`accessRefusal`),
+ * or for `origin`, when the command names its own (`savedAccess`). A
+ * credentials file or coffre.json it cannot read is the command's own to say.
+ */
+function refusalBefore(origin?: string): string | null {
+  try {
+    const store = readStore();
+    return origin === undefined ? accessRefusal(sessionFlags, store, localHere()) : savedAccess(store, origin);
+  } catch {
+    return null;
+  }
+}
+
 /** `coffre login <url> --token`: a bearer token, asked for, and kept as the session. */
 async function tokenLogin(origin: string): Promise<void> {
   const token = await readSecret({ label: 'Bearer token', hint: 'coffre_svc_… or coffre_pat_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
     fail((error as Error).message),
   );
-  await saveRun({ origin, mode: 'signin', by: 'token', credential: { kind: 'token', token } }, { mode: 'signin', kind: 'token', token, expiresAt: null });
-}
-
-/** `coffre login <url> --access-client-id <id>`: an Access service token, its secret asked for. */
-async function accessServiceLogin(origin: string, clientId: string): Promise<void> {
-  const clientSecret = await readSecret({ label: 'Access client secret', hint: `The secret of the Access service token ${clientId}. Hidden as you type.` }).catch((error: unknown) =>
-    fail((error as Error).message),
-  );
-  await saveRun(
-    { origin, mode: 'cloudflare', by: 'access', credential: { kind: 'access-service-token', clientId, clientSecret } },
-    { mode: 'cloudflare', kind: 'access', clientId, clientSecret },
-  );
+  await saveRun({ origin, by: 'token', credential: { kind: 'token', token } }, { mode: 'signin', kind: 'token', token, expiresAt: null });
 }
 
 /**
@@ -821,43 +838,14 @@ async function runLogin(origin: string, service: string, ask: boolean): Promise<
     : undefined;
   const { issued } = await signIn(origin, service, given).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   await saveRun(
-    { origin, mode: 'signin', by: 'run', credential: { kind: 'token', token: issued.token } },
+    { origin, by: 'run', credential: { kind: 'token', token: issued.token } },
     { mode: 'signin', kind: 'run', token: issued.token, expiresAt: issued.expiresAt },
   );
 }
 
-async function accessLogin(origin: string): Promise<void> {
-  process.stderr.write(`${origin} is behind Cloudflare Access; signing in with cloudflared.\n`);
-  const code = await new Promise<number | null>((resolve) => {
-    const child = spawn('cloudflared', ['access', 'login', origin], { stdio: 'inherit' });
-    child.on('error', () => resolve(null));
-    child.on('exit', (status) => resolve(status));
-  });
-  if (code === null) {
-    fail(
-      'this instance uses Cloudflare Access, which needs cloudflared: ' +
-        'https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/\n' +
-        '  In CI, sign in with an Access service token instead: coffre login <url> --access-client-id <id>, its secret pasted or piped in.',
-    );
-  }
-  if (code !== 0) fail('cloudflared could not sign you in');
-
-  const to: Target = { origin, mode: 'cloudflare', by: 'person', credential: { kind: 'cloudflared' } };
-  const me = await client(to).me();
-  writeStore(
-    withSession(readStore(), origin, {
-      mode: 'cloudflare',
-      principal: me.principal,
-      obtainedAt: new Date().toISOString(),
-    }),
-  );
-  process.stdout.write(`Signed in to ${origin} as ${me.principal.id}\n`);
-  printMe(me);
-}
-
 /**
  * End a person's session on the server, then forget it here. A CI run's
- * is only forgotten: its bearer token or Access service token is the
+ * is only forgotten: its bearer token is the
  * service's, for other runs too, and its credential ends by itself.
  */
 async function logout(args: string[]): Promise<void> {
@@ -901,11 +889,7 @@ async function logout(args: string[]): Promise<void> {
   writeStore(withoutSession(store, origin));
   process.stdout.write(`Signed out of ${origin}\n`);
   unpin();
-  if (session.kind === 'token' || session.kind === 'access') {
-    process.stdout.write(`  The ${session.kind === 'token' ? 'bearer token' : 'Access service token'} is forgotten here, and works elsewhere until it is revoked.\n`);
-  } else if (session.mode === 'cloudflare' && session.kind === undefined) {
-    process.stdout.write('  cloudflared still holds its Access token until it expires.\n');
-  }
+  if (session.kind === 'token') process.stdout.write('  The bearer token is forgotten here, and works elsewhere until it is revoked.\n');
 }
 
 async function whoami(args: string[]): Promise<void> {
@@ -921,9 +905,8 @@ async function whoami(args: string[]): Promise<void> {
   const choice = attempt(() => choose(sessionFlags, store, localHere()));
   const why = choice.by === 'default' ? ' (the default)' : choice.by === 'url' ? '' : ` (${because(choice)})`;
   const via = {
-    person: { signin: 'coffre sign-in', cloudflare: 'Cloudflare Access' }[to.mode],
+    person: 'coffre sign-in',
     token: 'a bearer token, from coffre login --token',
-    access: 'an Access service token, from coffre login --access-client-id',
     run: "the run's ID token, from coffre login --service",
     service: "the run's ID token, as --service",
   }[to.by];
@@ -1440,12 +1423,13 @@ async function run(args: string[]): Promise<void> {
   // A service, key-bound where the instance has it: the session's environments unless named, and nothing but its key in memory.
   const to = target();
   if (flags.proof !== undefined && to.credential.kind !== 'workload') fail('--proof is how a service proves itself: coffre --service <name> run --proof …');
-  const bound =
-    to.credential.kind === 'workload'
-      ? await keyBound(to.origin, to.credential.service, await proofOf(flags.proof, process.env), positionals, (line) => process.stderr.write(`${line}\n`), fetching(to.origin)).catch(
-          (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
-        )
-      : null;
+  let bound: Awaited<ReturnType<typeof keyBound>> | null = null;
+  if (to.credential.kind === 'workload') {
+    const proof = await proofOf(flags.proof, process.env);
+    bound = await keyBound(to.origin, to.credential.service, proof, positionals, (line) => process.stderr.write(`${line}\n`), fetching(to.origin)).catch(
+      (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
+    );
+  }
   const paths = bound?.places ?? environmentPaths(positionals);
   // A person's app gets placeholders, where the instance has the proxy; a service account, the values.
   const placed = bound === null ? await placeholders(paths) : null;
@@ -2005,19 +1989,10 @@ async function audit(args: string[]): Promise<void> {
 }
 
 /**
- * An Owner's acceptance that audit entries `<from>` to `<to>` are lost for
- * good: the audit watch's anchor goes on past them, and its finding, with
- * the acceptance, stays in the log.
+ * One check of the instance, named, or chosen on the terminal
+ * (`verify/index.ts`). 0.14's `verify log` is gone: the vault watches the
+ * log itself in 0.16.0 (`LOG_GONE`).
  */
-async function acceptLoss(args: string[]): Promise<void> {
-  const [from, to, ...rest] = args;
-  const entry = (value: string | undefined) => (value !== undefined && /^[0-9]{1,15}$/.test(value) ? Number(value) : null);
-  if (entry(from) === null || entry(to) === null || rest.length > 0) fail('usage: coffre audit accept-loss <from> <to>');
-  const { resumes } = await client().audit.acceptLoss({ from: entry(from)!, to: entry(to)! });
-  process.stdout.write(`entries ${from} to ${to} accepted as lost: the audit watch goes on from entry ${resumes ?? 0}\n`);
-}
-
-/** One check of the instance, named, or chosen on the terminal (`verify/index.ts`). */
 async function verify(args: string[]): Promise<void> {
   const [named, ...more] = args;
   if (named === '--help' || named === '-h') {
@@ -2027,55 +2002,19 @@ async function verify(args: string[]): Promise<void> {
   const check = named ?? (await pickCheck());
   switch (check) {
     case 'instance':
-      return verifyInstance(more, readStore(), sessionFlags, localHere());
+      return verifyInstance(more, readStore(), sessionFlags, localHere(), fetching);
     case 'keys': {
       const to = target();
       return verifyKeys(more, client(to), to.origin);
     }
     case 'log':
-      if (more.length > 0) fail('usage: coffre verify log');
-      return verifyLog();
+      return fail(LOG_GONE);
     case 'backup':
       return notIn016('verify backup');
     default:
       process.stderr.write(`coffre: no check named ${check}\n${VERIFY_USAGE}\n`);
       process.exit(2);
   }
-}
-
-/**
- * The whole audit log, verified by the app and the vault from its first
- * entry, a stretch a request, for whoever reads it whole: what the audit
- * page's check, which goes on from the newest checkpoint, takes on trust.
- */
-async function verifyLog(): Promise<void> {
-  const shown = process.stderr.isTTY;
-  const result = await client().audit.verifyWhole((stretch) => {
-    if (shown && stretch.ok && typeof stretch.next === 'string') process.stderr.write(`\rverified through entry ${stretch.through}…`);
-  });
-  if (shown) process.stderr.write('\r\x1b[K');
-
-  if (result.ok) {
-    const through = result.through === null ? 'empty' : `verified from the first entry through entry ${result.through}`;
-    const signed = result.checkpoint === null
-      ? 'no checkpoint signed yet'
-      : `last checkpoint: entry ${result.checkpoint.seq}, signed ${result.checkpoint.signedAt}`;
-    const pending = result.pending === undefined ? '' : `${result.pending} key operations still under way\n`;
-    if (result.remaining > 0) {
-      // Past the newest checkpoint a stretch goes one walk, and none goes on from there: not the whole log.
-      process.stderr.write(
-        `audit log not verified to its end: ${through}, and ${result.remaining} newer entries wait for the checkpoints to catch up, ` +
-          'a walk every five minutes; run this again after the next beats\n',
-      );
-      process.exit(3);
-    }
-    process.stdout.write(`audit log OK: ${through}, ${result.entries} entries; members and grants replayed\n${signed}\n${pending}`);
-    return;
-  }
-  const at = result.failedAtSeq === null ? '' : ` at entry ${result.failedAtSeq}`;
-  const through = result.through === null ? 'nothing verified' : `verified through entry ${result.through}`;
-  process.stderr.write(`audit log BROKEN${at}, found by the ${result.author}'s check (${through}): ${result.reason}\n`);
-  process.exit(2);
 }
 
 /** `coffre init --workers|--node [<dir>]`: a new deployment of coffre. */
@@ -2190,9 +2129,12 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   untrust: (args) => manage.untrust(connect, args),
   freeze: (args) => freeze(connect, args),
   unfreeze: (args) => unfreeze(connect, args),
-  serve: (args) => serve(args, sessionFlags.url, fetching),
+  serve: (args) =>
+    serve(args, sessionFlags.url, fetching, (origin) => {
+      const refusal = refusalBefore(origin);
+      if (refusal !== null) fail(refusal);
+    }),
   audit,
-  'audit accept-loss': acceptLoss,
   verify,
   'verify instance': (args) => verify(['instance', ...args]),
   'verify keys': (args) => verify(['keys', ...args]),
@@ -2256,6 +2198,12 @@ if ((end === -1 ? args : args.slice(0, end)).some((arg) => arg === '--help' || a
 if ('group' in found) {
   process.stderr.write(`coffre: ${command} needs a command after it\n${helpText(words)}`);
   process.exit(2);
+}
+// Behind Cloudflare Access, before the command reads a secret or sends a credential (`accessRefusal`); `serve` names its
+// instance itself, and refuses for that one.
+if (talksToInstance(command) && command !== 'serve') {
+  const refusal = refusalBefore();
+  if (refusal !== null) fail(refusal);
 }
 try {
   await COMMANDS[found.command](found.args);

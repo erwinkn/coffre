@@ -195,7 +195,7 @@ test('the CLI through cloudflared, an Access service token and a bearer token ar
     browser('/api/me', ada1, [], { headers: { authorization: 'Bearer bo-cli' } }),
   ];
   const [answers, calls] = await cost(async () => Promise.all(asked));
-  for (const response of answers) assert.deepEqual(await body(response), [401, { error: 'unauthenticated', message: BROWSERS_ONLY }]);
+  for (const response of answers) assert.deepEqual(await body(response), [401, { error: 'unauthenticated', reason: 'browsers_only', message: BROWSERS_ONLY }]);
   assert.deepEqual(calls, []);
   assert.deepEqual(await rowsOf(world.owner, sql`SELECT count(*)::int AS made FROM credentials WHERE kind = 'browser'`), [{ made: 0 }]);
 });
@@ -218,7 +218,7 @@ test("a workload's DPoP session, its proof good, is a machine's credential: refu
   ];
   for (const headers of asked) {
     const [response, calls, statements] = await cost(() => app.request('/api/me', { headers }));
-    assert.deepEqual([await body(response), calls, statements, gated, response.headers.get('dpop-nonce')], [[401, { error: 'unauthenticated', message: BROWSERS_ONLY }], [], 0, [], null]);
+    assert.deepEqual([await body(response), calls, statements, gated, response.headers.get('dpop-nonce')], [[401, { error: 'unauthenticated', reason: 'browsers_only', message: BROWSERS_ONLY }], [], 0, [], null]);
   }
   assert.deepEqual(await rowsOf(world.owner, sql`SELECT count(*)::int AS made FROM credentials WHERE kind = 'browser'`), [{ made: 0 }]);
 });

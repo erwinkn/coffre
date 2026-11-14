@@ -6,7 +6,7 @@ import { callerOf } from './api/context.ts';
 import { ApiError } from './api/errors.ts';
 import { serveApi } from './api/router.ts';
 import { bearerToken, presented, sessionCookie, sessionCookieName } from './auth.ts';
-import { BROWSERS_ONLY, machineCredential, unregisteredMe, type Admission } from './behind-access.ts';
+import { BROWSERS_ONLY, machineCredential, unadmitted, unregisteredMe, type Admission } from './behind-access.ts';
 import { errorResponse, jsonResponse } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { dpopToken, provenSession, SessionRefused, sessionStopped } from './sessions.ts';
@@ -27,7 +27,7 @@ export type ApiCredential = { token: string; ambient: boolean };
  */
 export function apiCredential(request: Request, auth: AuthConfig, access?: Admission): ApiCredential | null {
   if (auth.mode === 'cloudflare') {
-    if (machineCredential(request) !== null) throw new ApiError('unauthenticated', BROWSERS_ONLY);
+    if (machineCredential(request) !== null) throw new ApiError('unauthenticated', BROWSERS_ONLY, 'browsers_only');
     return access?.session == null ? null : { token: access.session, ambient: true };
   }
   const header = bearerToken(request);
@@ -84,7 +84,7 @@ export async function fetchApi(request: Request, runtime: CoffreRuntime, options
     } else {
       const credential = apiCredential(request, runtime.auth, access);
       if (credential === null) {
-        if (access?.unregistered == null) throw new ApiError('unauthenticated', access?.why ?? 'sign in first');
+        if (access?.unregistered == null) throw unadmitted(access);
         if (request.method === 'GET' && new URL(request.url).pathname === '/api/me') return jsonResponse(unregisteredMe(access.unregistered));
         throw new ApiError('registration_required', access.why);
       }

@@ -539,7 +539,10 @@ every deploy, and the way back in if every Owner is locked out
 ([deployment-auth.md](deployment-auth.md#the-owners-the-deployment-names)). `VAULT_KEY_ID` comes with the keys, in step 3.
 
 For Cloudflare Access instead, replace `signin(…)` with `cloudflareAccess(…)`
-([deployment-auth.md](deployment-auth.md)).
+([deployment-auth.md](deployment-auth.md)). In 0.16.0 Access signs in
+browsers only: the CLI and machines come back behind it in 0.16.x, with
+coffre's own credentials, so a deployment whose CLI or CI reaches coffre
+through Access stays on 0.14 until then.
 
 ### 2. Two Hyperdrive configs
 

@@ -98,9 +98,10 @@ curl https://coffre.example.com/api/auth
 Behind Access it answers `{"signin":null,"access":{"assertion":true}}`:
 `assertion` says whether this request carried one, so the page can tell
 "open coffre through Access" from "Access vouched, and coffre could not
-verify it". `coffre login` runs a device login when `signin` is set, and
-hands over to `cloudflared` when `access` is, or when Access turns the
-request away before it reaches coffre.
+verify it". `coffre login` runs a device login when `signin` is set. When
+`access` is, or when Access turns the request away before it reaches
+coffre, it signs in nowhere and says why ([The CLI and
+machines](#the-cli-and-machines)).
 
 ## Behind Cloudflare Access
 
@@ -161,7 +162,44 @@ will sign in with coffre's own credentials, Access checking them at the
 edge: `coffre login` through a device login approved in the browser, and
 machines with a service token or a binding of coffre's beside an Access
 service token. Until then, a deployment whose CLI or machines reach coffre
-through Access stays on 0.14.
+through Access stays on 0.14, and its machines keep 0.14's Access service
+tokens; in 0.16.x they will need coffre's tokens instead, beside them.
+
+The CLI says so, in each of the ways 0.14's signed in behind Access:
+
+```
+$ coffre login https://secrets.acme.example
+coffre: https://secrets.acme.example is behind Cloudflare Access, where coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x
+$ coffre login https://secrets.acme.example --access-client-id 1b2c….access
+coffre: Behind Cloudflare Access, coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x
+```
+
+What it holds to there is three things:
+
+1. A credential goes to the instance's own origin and nowhere else: the
+   CLI follows no redirect, Access's to its login page included.
+2. What it knows already, it refuses before it reads or sends anything:
+   `--auth-mode cloudflare` and `--access-client-id`, the second line above,
+   and a session 0.14's CLI saved behind Access, by `cloudflared` or an
+   Access service token, the first, for any command. `coffre login` asks
+   `GET /api/auth` first, with nothing of yours, so behind Access it reads no
+   secret, starts no `cloudflared` and sends no session saved here.
+3. What it learns from an answer, it says: Access's redirect to
+   `<team>.cloudflareaccess.com`, or coffre's own 401 for a credential
+   behind Access (`"reason": "browsers_only"`), ends any command with the
+   first line above, at the first request it answers: `coffre verify
+   instance`'s checks as no one included, so its session or token is not
+   sent after them, and a run's plan, `GET /use/<project>/<env>`. Not what
+   the credential proxy relays from another service, under
+   `/use/<project>/<env>/<name>/…` or `/use/<name>/<path>/…`: that service's
+   own Access login page is the app's answer.
+
+So a credential can still reach the instance's hostname once. A session
+`coffre login` saved before the instance went behind Access goes with the
+next `coffre whoami`; Access answers it with its redirect, and the CLI prints
+the first line. Cloudflare's edge serves that hostname with or without
+Access, and opens every request to it, so the token reaches no one it did
+not reach before.
 
 ### Closed-door behavior
 

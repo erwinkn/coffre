@@ -11,11 +11,11 @@ const noFetch = async (): Promise<Response> => {
 
 test('--service signs the run in as the service, by its ID token, whatever the saved session', () => {
   const target = resolveTarget({ url: ORIGIN, service: 'api-deploy' }, emptyStore());
-  assert.deepEqual(target, { origin: ORIGIN, mode: 'signin', by: 'service', credential: { kind: 'workload', service: 'token:api-deploy' } });
+  assert.deepEqual(target, { origin: ORIGIN, by: 'service', credential: { kind: 'workload', service: 'token:api-deploy' } });
   assert.deepEqual(resolveTarget({ url: ORIGIN, service: 'token:api-deploy' }, emptyStore()).credential, { kind: 'workload', service: 'token:api-deploy' });
-  assert.throws(() => resolveTarget({ url: ORIGIN, service: 'api-deploy', authMode: 'cloudflare' }, emptyStore()), /behind Cloudflare Access/);
-  assert.deepEqual(credentialHeaders('signin', target.credential, 'coffre_svc_issued'), { authorization: 'Bearer coffre_svc_issued' });
-  assert.throws(() => credentialHeaders('signin', target.credential), /no credential was exchanged/);
+  assert.throws(() => resolveTarget({ url: ORIGIN, service: 'api-deploy', authMode: 'cloudflare' }, emptyStore()), /Behind Cloudflare Access/);
+  assert.deepEqual(credentialHeaders(target.credential, 'coffre_svc_issued'), { authorization: 'Bearer coffre_svc_issued' });
+  assert.throws(() => credentialHeaders(target.credential), /no credential was exchanged/);
 });
 
 test('the ID token is the one login asked for, or a fresh one from GitHub for this instance', async () => {

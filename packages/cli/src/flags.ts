@@ -91,6 +91,15 @@ export function commandLine(argv: readonly string[]): { session: SessionArgs; co
   return { session, command, rest };
 }
 
+/**
+ * Whether a command talks to the instance a session names: those that take
+ * every session flag. `login` and `logout` name theirs, and the others talk
+ * to none.
+ */
+export function talksToInstance(command: string): boolean {
+  return TAKES[command] === undefined;
+}
+
 function placeholder(name: string): string {
   return { url: ' <url>', service: ' <name>', 'auth-mode': ' signin|cloudflare', verbose: '' }[name] ?? ' …';
 }

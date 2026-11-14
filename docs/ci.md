@@ -44,10 +44,10 @@ job signs in over it or reads with it: `export HOME="$(mktemp -d)"` before
 token there too, and revokes nothing.
 
 A bearer token works without an interactive login. The runner must be
-able to reach your instance; behind Cloudflare Access, the job signs in
-with an Access service token instead, its secret piped in the same way:
-`coffre login <url> --access-client-id <id>`
-([deployment-auth.md](deployment-auth.md)). See the
+able to reach your instance. Behind Cloudflare Access, 0.16.0 signs no CI
+run in: a job that reaches coffre through Access stays on 0.14, with its
+Access service token, until 0.16.x
+([deployment-auth.md](deployment-auth.md#the-cli-and-machines)). See the
 [deployment settings](deploy.md#1-settings).
 
 Each value read is audited before it reaches the pipeline. Revoking the

@@ -61,6 +61,10 @@ ${KEYS_HELP}
 
 Exits 1 when a check fails.`;
 
+/** What `coffre verify log`, 0.14's walk of the whole audit log, says in 0.16.0. */
+export const LOG_GONE =
+  'coffre verify log is not in 0.16.0: the vault signs the audit log, checks its end every minute and re-checks its older entries a few blocks a minute, and the audit page proves each entry it shows against what was signed, marking any past it as not proven';
+
 export const VERIFY_BACKUP_USAGE = `usage: coffre verify backup <dump> [--keys]
 
 ${UNAVAILABLE}

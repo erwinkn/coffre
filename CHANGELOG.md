@@ -67,6 +67,24 @@
   is taken as it stands. Keep the vault down and restore a backup taken
   before the loss (`docs/restore.md`, "If the signer's storage is lost").
 
+- **Behind Cloudflare Access, browsers only.** 0.16.0 signs people in
+  there through the browser, and the CLI and machines come back in 0.16.x,
+  with coffre's own credentials. The CLI no longer starts `cloudflared` or
+  takes an Access service token: `coffre login` behind Access, `coffre login
+  --access-client-id` and `--auth-mode cloudflare` say so before they read
+  or send anything, as does any command with a session 0.14's CLI saved
+  there; any other says so from Access's answer, and the CLI follows no
+  redirect with a credential (`docs/deployment-auth.md`). A deployment
+  whose CLI or CI reaches coffre through Access stays on 0.14 until 0.16.x,
+  when its machines will need coffre tokens.
+- **No `coffre verify log` or `coffre audit accept-loss`.** 0.16.0's vault
+  watches the audit log itself: its signer checks the log's end every minute
+  and re-checks older entries a few blocks a minute, and the audit page
+  proves each entry it shows against the head the signer signed, marking any
+  past it as not proven. `coffre verify log` says so; a walk of the whole
+  log, `coffre verify --full`, is designed, not built. `coffre verify
+  instance` no longer verifies the log as its last step, as the owner or the
+  token.
 - **A restored version comes back as typed.** Restoring a version a recipe
   made, or one half of a key pair, writes it as a value typed by hand:
   Regenerate no longer makes its next one by that recipe, and the pair's

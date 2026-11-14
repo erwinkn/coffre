@@ -78,7 +78,6 @@ export const SECTIONS = [
     entries: [
       { command: 'login', usage: ['login [<url>] [--no-browser]'], about: ['sign in; use <url> in this directory and below,', 'and by default'] },
       { command: 'login', usage: ['login <url> --token'], about: ["a CI run's or a script's sign-in: a bearer or personal", 'token, asked for or piped in'] },
-      { command: 'login', usage: ['login <url> --access-client-id <id>'], about: ['the same, behind Cloudflare Access: its secret asked for'] },
       {
         command: 'login',
         usage: ['login <url> --service <name> [--id-token]'],
@@ -421,11 +420,6 @@ export const SECTIONS = [
     title: 'Audit',
     entries: [
       { command: 'audit', usage: ['audit [<path>] [--limit N] [--actor <id>] [--denied] [--detail] [--json]'], about: ['a project, environment or KEY: market/prod/DATABASE_URL lists', 'who read or changed it, reads of several that listed it included'] },
-      {
-        command: 'audit accept-loss',
-        usage: ['audit accept-loss <from> <to>'],
-        about: ['as an owner of the whole instance: entries <from> to <to> are lost for', "good, a cut with no backup; the audit watch's finding stays logged"],
-      },
     ],
   },
   {
@@ -438,7 +432,7 @@ export const SECTIONS = [
         usage: ['verify keys [--vault-id <id>]'],
         about: ['the vault key or signing key you keep, checked on this machine'],
       },
-      { command: 'verify log', usage: ['verify log'], about: ['the whole audit log, as an auditor, admin or owner of all of it'] },
+      { command: 'verify log', usage: ['verify log'], about: ['not in 0.16.0: the vault checks the audit log itself, and the', 'audit page proves each entry it shows'] },
       {
         command: 'verify backup',
         usage: ['verify backup <dump> [--keys]'],

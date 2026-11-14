@@ -17,7 +17,8 @@ import { fileURLToPath } from 'node:url';
 
 import { derivedSigningKey, keyCheckOf } from '@coffre/core/kek';
 
-import { signInError } from '../src/instance.ts';
+import { LOG_GONE } from '../src/backup-help.ts';
+import { browsersOnly, signInError } from '../src/instance.ts';
 import { Failure, Skip } from '../src/verify/checks.ts';
 import { keyVerdict, type KeyMaterial } from '../src/verify/keys.ts';
 import { inTerminal, ptySkip, visible } from './pty.ts';
@@ -193,7 +194,7 @@ for (const role of ['user', 'owner'] as const) {
   test(`coffre verify instance, as a ${role}, uses the session coffre login made, and leaves it signed in`, async (t) => {
     const me = { principal: { type: 'user', id: 'root@acme.example' }, registered: true, tampered: false, instanceRole: role === 'user' ? 'member' : role, runsInstance: role !== 'user', canReadAudit: true, environments: [] };
     const instance = await fakeInstance(t, (method, path) =>
-      method === 'GET' && path === '/api/me' ? me : method === 'GET' && path === '/api/audit/verification' ? { ok: true, entries: 12, through: 11, checkpoint: null } : undefined,
+      method === 'GET' && path === '/api/me' ? me : undefined,
     );
     const { home, store } = signedInHome(t, instance.origin);
     const before = store();
@@ -205,7 +206,8 @@ for (const role of ['user', 'owner'] as const) {
       assert.doesNotMatch(run.stdout, /setup|clean-up/);
     } else {
       assert.match(run.stdout, /✓ owner +root@acme\.example, an owner, with this CLI's session/);
-      assert.match(run.stdout, /✓ owner verification +the whole chain verifies, as you: 12 entries, through entry 11/);
+      // 0.16.0 walks no whole log, as the owner or the token.
+      assert.doesNotMatch(run.stdout, /verification/);
       assert.match(run.stdout, /✓ clean-up +nothing issued; your session stays/);
     }
     const signed = instance.seen.filter(({ headers }) => headers.authorization !== undefined);
@@ -228,13 +230,13 @@ test('coffre verify instance without a session says to sign in first, and checks
   const elsewhere = await coffre(['verify', 'instance', 'https://coffre.acme.example'], home);
   assert.equal(elsewhere.code, 1);
   assert.equal(elsewhere.stderr, `coffre: ${signInError('not signed in: run `coffre login https://coffre.acme.example` first')}\n`);
-  // Named a sign-in instance by --auth-mode, it is not hedged about Access.
   const named = await coffre(['--auth-mode', 'signin', 'verify', 'instance', 'https://coffre.acme.example'], home);
-  assert.equal(named.stderr, `coffre: ${signInError('not signed in: run `coffre login https://coffre.acme.example` first', 'signin')}\n`);
+  assert.equal(named.stderr, `coffre: ${signInError('not signed in: run `coffre login https://coffre.acme.example` first')}\n`);
+  // Behind Cloudflare Access, 0.16.0 takes no CLI's credential: said in a sentence, nothing checked.
   const access = await coffre(['--auth-mode', 'cloudflare', 'verify', 'instance', 'https://coffre.acme.example'], home);
-  assert.equal(access.stderr, 'coffre: not signed in: run `coffre login https://coffre.acme.example` first\n', 'Access signs in with cloudflared: no code to explain');
+  assert.equal(access.stderr, `coffre: ${browsersOnly('https://coffre.acme.example')}\n`);
   const noUrl = await coffre(['--auth-mode', 'signin', 'verify', 'instance'], home);
-  assert.equal(noUrl.stderr, `coffre: ${signInError('not signed in anywhere yet: run `coffre login <url>` first', 'signin')}\n`);
+  assert.equal(noUrl.stderr, `coffre: ${signInError('not signed in anywhere yet: run `coffre login <url>` first')}\n`);
   assert.equal(nowhere.stdout + elsewhere.stdout + named.stdout + access.stdout + noUrl.stdout, '');
 });
 
@@ -244,26 +246,34 @@ test('coffre verify alone, without a terminal, lists the checks and exits 2', as
   const run = await coffre(['verify'], home);
   assert.equal(run.code, 2);
   assert.equal(run.stdout, '');
-  assert.match(run.stderr, /^usage: coffre verify instance \| keys \| log \| backup <dump>\n\n {2}instance {2}.+\n {2}keys {6}.+\n {2}log {7}.+\n {2}backup {4}.+\n/);
+  assert.match(run.stderr, /^usage: coffre verify instance \| keys \| backup <dump>\n\n {2}instance {2}.+\n {2}keys {6}.+\n {2}backup {4}.+\n/);
+});
+
+test("coffre verify log, 0.14's walk of the whole log, says in a line what watches the log in 0.16.0, and asks nothing", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'coffre-verify-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const run = await coffre(['verify', 'log'], home);
+  assert.equal(run.code, 1);
+  assert.equal(run.stdout, '');
+  assert.equal(run.stderr, `coffre: ${LOG_GONE}\n`);
+  assert.match(LOG_GONE, /^coffre verify log is not in 0\.16\.0: the vault signs the audit log/);
 });
 
 test('coffre verify alone, on a terminal, asks which check, and runs the one chosen', { skip: ptySkip }, async (t) => {
-  const instance = await fakeInstance(t, (method, path) =>
-    method === 'GET' && path === '/api/audit/verification' ? { ok: true, entries: 12, through: 11, checkpoint: null } : undefined,
-  );
+  // An instance that lets no one read the keys' material: the keys' check, chosen, says so and asks for no key.
+  const instance = await fakeInstance(t, () => undefined);
   const { home } = signedInHome(t, instance.origin);
   const { output, code } = await inTerminal(['verify'], { ...cleanEnv(), HOME: home }, async (terminal) => {
     await terminal.waitFor('Which check?');
-    await terminal.waitFor('log');
-    terminal.send('\x1b[B');
+    await terminal.waitFor('keys');
     terminal.send('\x1b[B');
     terminal.send('\r');
-    await terminal.waitFor('audit log OK');
+    await terminal.waitFor('not found');
   });
-  assert.equal(code, 0);
+  assert.equal(code, 1);
   const shown = visible(output);
-  assert.match(shown, /✓ Which check\? {2}log {7}the whole audit log, as you, an owner/);
-  assert.match(shown, /audit log OK: verified from the first entry through entry 11, 12 entries/);
+  assert.match(shown, /✓ Which check\? {2}keys {6}the vault key or signing key you keep, against the instance/);
+  assert.doesNotMatch(shown, /\blog\b/, 'the whole log is no check to choose');
 });
 
 test('coffre verify keys, on a terminal, asks for the key without showing it', { skip: ptySkip }, async (t) => {
