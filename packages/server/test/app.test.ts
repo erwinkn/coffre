@@ -1,0 +1,296 @@
+// The app on the 0.16 contract (docs/design/0.16.md, "The server"): a
+// request's credential hashed and handed to the vault, which decides. In
+// process, with the real vault; app-workers.test.ts holds the same through
+// the Workers themselves.
+import assert from 'node:assert/strict';
+import { createHash, randomUUID } from 'node:crypto';
+import { after, beforeEach, test } from 'node:test';
+
+import { CoffreError } from '@coffre/client';
+import { rowsOf } from '@coffre/db/dialect';
+import { credential, emptyDatabase, environment, grant, identity, principal, project, role, rows, secret, user, value, write } from '@coffre/vault/testing';
+import { sql } from 'drizzle-orm';
+
+import { can, placeOf } from '../src/api/caller.ts';
+import { openApp, SESSION } from './app-fixture.ts';
+
+const app = await openApp();
+const { world } = app;
+after(() => app.close());
+
+const [ada, bo, cy] = [user('ada'), user('bo'), user('cy')];
+const HANDLE = `coffre_use_${'a'.repeat(43)}`;
+const BROWSER = `coffre_web_${'b'.repeat(43)}`;
+const PERSONAL = `coffre_pat_${'c'.repeat(43)}`;
+
+/**
+ * market: prod, Ada's personal config of it, and staging, protected.
+ * billing: prod. Ada views market, Bo develops it, Cy owns the instance.
+ * A viewer holds nothing in a protected environment.
+ */
+beforeEach(async () => {
+  await emptyDatabase(world.owner);
+  for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
+  const [market, billing] = [project('market'), project('billing')];
+  const prod = environment(market, 'prod');
+  const adas = environment(market, 'prod-ada', { parentId: prod.id, owner: ada });
+  const staging = environment(market, 'staging', { protected: true });
+  const [billed, deleted] = [environment(billing, 'prod'), environment(billing, 'old~deleted-2026-11-01')];
+  const own = await value(world, secret(adas, 'OWN'), 'hers alone');
+  const url = await value(world, secret(prod, 'DATABASE_URL'), 'postgres://märkt');
+  const stripe = await value(world, secret(prod, 'STRIPE_KEY'), 'sk_live', { sensitive: true });
+  const flag = await value(world, secret(prod, 'FLAG'), 'on', { plain: true });
+  const used = { lastUsedAt: new Date() };
+  // A browser's session is an account's, always.
+  const github = identity(bo);
+  await write(
+    world,
+    ...rows('projects', market, billing),
+    ...rows('environments', prod, adas, staging, billed, deleted),
+    ...rows('secrets', url, stripe, flag, own, secret(prod, 'EMPTY')),
+    ...rows('roles', role(false, 'viewer', ['secret.read'], []), role(false, 'developer', ['secret.read', 'secret.write']), role(true, 'owner', ['secret.read', 'secret.write', 'audit.read']), role(true, 'member', [])),
+    ...rows('principals', principal(ada), principal(bo), principal(cy, { role: 'owner' })),
+    ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market })),
+    ...rows('identities', github),
+    ...rows('credentials', credential('ada-cli', ada, used), credential('bo-cli', bo, used), credential('cy-cli', cy, used), credential(HANDLE, ada, { ...used, kind: 'handle' }), credential(BROWSER, bo, { ...used, kind: 'browser', identityId: github.id }), credential(PERSONAL, bo, { ...used, kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) })),
+  );
+  // The database's migrations are known from the first request on: none of a test's counts is that question.
+  await app.request('/livez');
+  await app.request('/api/me', { headers: { authorization: 'Bearer nobody' } });
+  app.calls.length = 0;
+});
+
+type Body = { error?: string; reason?: string; message?: string } & Record<string, unknown>;
+const json = (body: unknown) => ({ method: 'POST', body: JSON.stringify(body) });
+const as = (label: string, init: RequestInit = {}) => ({ ...init, headers: { authorization: `Bearer ${label}`, ...(init.headers as Record<string, string> | undefined) } });
+const answered = async (response: Promise<Response>): Promise<[number, Body]> => {
+  const got = await response;
+  return [got.status, (await got.json()) as Body];
+};
+const reveal = (label: string, path: string, keys?: string[]) => answered(app.request('/api/reveals', as(label, json(keys === undefined ? { path } : { path, keys }))));
+const pending = async () => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM log_pending`))[0]!.n;
+/** What one request cost: the vault's calls it made, and the app's statements. */
+async function cost<T>(run: () => Promise<T>): Promise<[T, string[], number]> {
+  const [calls, statements] = [app.calls.length, app.statements];
+  const result = await run();
+  return [result, app.calls.slice(calls), app.statements - statements];
+}
+
+test('a reveal is one call to the vault and no statement of the app: the token hashed, never looked up', async () => {
+  const [[status, body], calls, statements] = await cost(() => reveal('ada-cli', 'market/prod/DATABASE_URL'));
+  assert.deepEqual([status, calls, statements], [200, ['use'], 0], JSON.stringify(body));
+  assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', values: { DATABASE_URL: 'postgres://märkt' }, sensitive: [], useOnly: [], version: null });
+  assert.match(String(body.operationId), /^[0-9a-f-]{36}$/);
+  // The vault's entry names the request by the id the app answered with.
+  const [entry] = await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id DESC LIMIT 1`);
+  assert.ok(entry!.body.includes(String(body.operationId)) && entry!.body.includes('192.0.2.7') && entry!.body.includes('"purpose":"reveal"'), entry!.body);
+  // An environment's read says so in the log: what `coffre run` and an export make.
+  await reveal('ada-cli', 'market/prod', ['FLAG']);
+  const [ran] = await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id DESC LIMIT 1`);
+  assert.ok(ran!.body.includes('"purpose":"run"'), ran!.body);
+});
+
+test('every answer carries coffre\'s security headers, a refusal\'s too', async () => {
+  for (const response of [await app.request('/api/reveals', as('ada-cli', json({ path: 'market/prod/FLAG' }))), await app.request('/api/reveals', json({ path: 'market/prod/FLAG' }))]) {
+    assert.ok(response.headers.has('content-security-policy'), 'a policy');
+    assert.deepEqual(['cache-control', 'x-content-type-options', 'x-frame-options', 'strict-transport-security'].map((name) => response.headers.get(name)), ['no-store', 'nosniff', 'DENY', 'max-age=31536000; includeSubDomains']);
+  }
+});
+
+test('an environment read answers what its caller is given and names what it left out; its version moves with what a read opens', async () => {
+  const [status, whole] = await reveal('ada-cli', 'market/prod');
+  assert.equal(status, 200, JSON.stringify(whole));
+  // A person is handed no sensitive value: named, not opened. A key with no value is not there.
+  assert.deepEqual([whole.values, whole.sensitive, whole.useOnly], [{ DATABASE_URL: 'postgres://märkt', FLAG: 'on' }, ['STRIPE_KEY'], []]);
+  assert.match(String(whole.version), /^[A-Za-z0-9_-]{43}$/);
+  // Of some keys only: one the environment does not hold is left out, not refused.
+  const [, some] = await reveal('ada-cli', 'market/prod', ['FLAG', 'NOPE', 'STRIPE_KEY']);
+  assert.deepEqual([some.values, some.sensitive], [{ FLAG: 'on' }, ['STRIPE_KEY']]);
+  assert.notEqual(some.version, whole.version);
+  assert.equal((await reveal('ada-cli', 'market/prod'))[1].version, whole.version, 'the same read, the same version');
+  await app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ FLAG: { value: 'off', sensitivity: 'plain' } }) }));
+  world.memory.reads.clear();
+  assert.notEqual((await reveal('ada-cli', 'market/prod'))[1].version, whole.version);
+  // Her personal config of prod: its own key, and prod's.
+  assert.deepEqual((await reveal('ada-cli', 'market/prod@me'))[1].values, { DATABASE_URL: 'postgres://märkt', FLAG: 'off', OWN: 'hers alone' });
+  assert.deepEqual((await reveal('bo-cli', 'market/prod@me'))[1].values, { DATABASE_URL: 'postgres://märkt', FLAG: 'off' }, 'who has none reads the environment itself');
+});
+
+test('a refusal is the vault\'s word with a status: nothing says whether a place exists, and nothing was written', async () => {
+  const before = await pending();
+  const refused = async (label: string, path: string) => {
+    const [status, body] = await reveal(label, path);
+    return [status, body.error, body.reason];
+  };
+  assert.deepEqual(await refused('ada-cli', 'market/prod/STRIPE_KEY'), [403, 'forbidden', 'sensitive']);
+  assert.deepEqual(await refused('ada-cli', 'market/prod/NOPE'), [404, 'not_found', 'unknown_key']);
+  assert.deepEqual(await refused('ada-cli', 'market/prod/EMPTY'), [404, 'not_found', 'no_value']);
+  assert.deepEqual(await refused('nobody', 'market/prod/FLAG'), [401, 'unauthenticated', 'unauthenticated']);
+  // A project she holds nothing in, an environment that is not there, a project that is not: one answer.
+  const [held, ...others] = await Promise.all(['billing/prod', 'market/nope', 'nope/prod'].map((path) => reveal('ada-cli', path)));
+  assert.deepEqual([held![0], held![1].error, held![1].reason], [403, 'vault_refused', 'no_access']);
+  for (const [status, body] of others) assert.deepEqual([status, body.error, body.reason, String(body.message).split(': ')[1]], [403, 'vault_refused', 'no_access', String(held![1].message).split(': ')[1]]);
+  assert.equal(await pending(), before);
+});
+
+test('what only the app sees of a request, it holds before the vault is asked: no credential, a handle, a change from another site', async () => {
+  const body = json({ path: 'market/prod/FLAG' });
+  const cookie = (token: string, more: Record<string, string> = {}) => ({ ...body, headers: { cookie: `${SESSION}=${token}`, ...more } });
+  const tried = async (init: RequestInit) => {
+    const [[status, answer], calls] = await cost(() => answered(app.request('/api/reveals', init)));
+    return [status, answer.error, answer.reason, calls];
+  };
+  assert.deepEqual(await tried(body), [401, 'unauthenticated', undefined, []]);
+  // A handle is the proxy's: the vault would open values for it.
+  assert.deepEqual(await tried(as(HANDLE, body)), [403, 'forbidden', 'handle', []]);
+  // A cookie rides along with any site's request: a change with one comes from coffre's own pages, or not at all.
+  assert.deepEqual(await tried(cookie(BROWSER)), [403, 'cross_origin', undefined, []]);
+  assert.deepEqual(await tried(cookie(BROWSER, { 'sec-fetch-site': 'cross-site' })), [403, 'cross_origin', undefined, []]);
+  assert.deepEqual(await tried(cookie(BROWSER, { 'sec-fetch-site': 'same-origin' })), [200, undefined, undefined, ['use']]);
+  assert.deepEqual(await tried(cookie(BROWSER, { origin: 'https://secrets.acme.example' })), [200, undefined, undefined, ['use']]);
+  // A header is only there when its caller put it there.
+  assert.deepEqual(await tried(as('bo-cli', body)), [200, undefined, undefined, ['use']]);
+  // A personal token is a bearer's: planted in the cookie, it is no session.
+  assert.deepEqual(await tried(cookie(PERSONAL, { 'sec-fetch-site': 'same-origin' })), [401, 'unauthenticated', undefined, []]);
+  assert.deepEqual(await tried(as(PERSONAL, body)), [200, undefined, undefined, ['use']]);
+});
+
+test('a write is one change of the vault and no statement of the app; what it refuses, and what is not served yet', async () => {
+  const patch = (label: string, path: string, values: unknown) => answered(app.request(`/api/secrets/${path}`, as(label, { method: 'PATCH', body: JSON.stringify(values) })));
+  const [[status, body], calls, statements] = await cost(() => patch('bo-cli', 'market/prod', { API_KEY: 'k1', FLAG: { value: 'off', sensitivity: 'plain' }, STRIPE_KEY: { value: 'sk_2', sensitivity: 'sensitive' } }));
+  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  assert.deepEqual(body.keys, { API_KEY: { version: 1, sensitivity: 'secret' }, FLAG: { version: 2, sensitivity: 'plain' }, STRIPE_KEY: { version: 2, sensitivity: 'sensitive' } });
+  world.memory.reads.clear();
+  assert.deepEqual((await reveal('bo-cli', 'market/prod'))[1].values, { API_KEY: 'k1', DATABASE_URL: 'postgres://märkt', FLAG: 'off' });
+
+  // A viewer writes nothing, and is told no more than for a place that is not there.
+  for (const path of ['market/prod', 'nope/prod']) {
+    const [refused, said] = await patch('ada-cli', path, { API_KEY: 'k2' });
+    assert.deepEqual([refused, said.error, said.reason], [403, 'vault_refused', 'no_access']);
+  }
+  // What the vault would call a fault, the app refuses first, and what is not served yet it says: the vault is not asked.
+  app.calls.length = 0;
+  const shapes: [string, unknown, number][] = [
+    ['market/prod', { API_KEY: 'a\0b' }, 400], ['market/prod', { API_KEY: '\ud800' }, 400], ['market/prod', { API_KEY: 'x'.repeat(64 * 1024 + 1) }, 400], ['market/prod', { 'not a key': 'x' }, 400], ['market/prod', {}, 400],
+    ['market/prod', { API_KEY: null }, 400], ['market/prod', { API_KEY: { ref: 'market/prod/FLAG' } }, 400], ['market/prod', { API_KEY: { sensitivity: 'sensitive' } }, 400],
+    ['market/prod?dryRun=1', { API_KEY: 'x' }, 400], ['market/prod@me', { API_KEY: 'x' }, 501], ['Market/prod', { API_KEY: 'x' }, 400],
+  ];
+  for (const [path, values, expected] of shapes) assert.equal((await patch('bo-cli', path, values))[0], expected, `${path} ${JSON.stringify(values).slice(0, 40)}`);
+  assert.deepEqual(app.calls, []);
+});
+
+test('a path is a route or it is not: its method, its segments and its body are held before any handler runs', async () => {
+  const tried = async (path: string, init: RequestInit = {}) => {
+    const response = await app.request(path, as('ada-cli', init));
+    return [response.status, ((await response.json()) as Body).error, response.headers.get('allow')];
+  };
+  assert.deepEqual(await tried('/api/nope'), [404, 'not_found', null]);
+  assert.deepEqual(await tried('/api/reveals'), [405, 'method_not_allowed', 'POST']);
+  assert.deepEqual(await tried('/api/me', { method: 'POST' }), [405, 'method_not_allowed', 'GET']);
+  assert.deepEqual(await tried('/api/%E0%A4%A'), [400, 'bad_request', null]);
+  assert.deepEqual(await tried('/api/reveals', { method: 'POST', body: '{' }), [400, 'bad_request', null]);
+  assert.deepEqual(await tried('/api/reveals', json({ path: 'market/prod', keys: [], extra: 1 })), [400, 'bad_request', null]);
+  assert.deepEqual(await tried('/api/reveals', json({ path: 'market' })), [400, 'bad_request', null]);
+  assert.deepEqual(await tried('/api/reveals', json({ path: 'market/prod', keys: Array.from({ length: 1001 }, (_, i) => `K${i}`) })), [400, 'bad_request', null]);
+  assert.deepEqual(await tried('/api/secrets/market/prod', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(Array.from({ length: 2001 }, (_, i) => [`K${i}`, 'x']))) }), [400, 'bad_request', null]);
+  assert.deepEqual(await tried('/api/secrets/market/prod', { method: 'PATCH', body: JSON.stringify({ A: 'x'.repeat(1024 * 1024) }) }), [400, 'bad_request', null]);
+  assert.deepEqual(app.calls, []);
+  // Outside the API: health, and nothing else of coffre's yet.
+  assert.deepEqual(await tried('/livez'), [200, undefined, null]);
+  assert.deepEqual(await answered(app.request('/readyz')), [200, { ok: true }]);
+  assert.deepEqual(await tried('/livez', { method: 'POST' }), [405, 'method_not_allowed', 'GET']);
+  assert.deepEqual(await tried('/auth/signin/github'), [404, 'not_found', null]);
+});
+
+test('who is asking, and where they hold something: one call to the vault, one statement, scoped by its answer', async () => {
+  const me = (label: string) => answered(app.request('/api/me', as(label)));
+  const [[status, mine], calls, statements] = await cost(() => me('ada-cli'));
+  assert.deepEqual([status, calls, statements], [200, ['caller'], 1], JSON.stringify(mine));
+  assert.deepEqual(
+    { principal: mine.principal, registered: mine.registered, instanceRole: mine.instanceRole, runsInstance: mine.runsInstance, canReadAudit: mine.canReadAudit, scope: mine.scope, credentialExpiresAt: mine.credentialExpiresAt },
+    { principal: { type: 'user', id: 'ada@acme.example' }, registered: true, instanceRole: 'member', runsInstance: false, canReadAudit: false, scope: { projects: 'all', environments: 'all' }, credentialExpiresAt: '2027-01-01T00:00:00.000Z' },
+  );
+  // prod, which she views; her own config of it, as `prod@me`, whose values are hers; not staging, protected, nor billing.
+  assert.deepEqual(mine.environments, [
+    { project: 'market', environment: 'prod', permissions: ['secret.read'] },
+    { project: 'market', environment: 'prod@me', permissions: ['secret.read', 'secret.use', 'secret.write', 'secret.archive'] },
+  ]);
+  // The fields other areas answer say none, until they are served.
+  assert.deepEqual([mine.setsUpServices, mine.serviceSetup, mine.features, mine.personalToken], [false, null, { mcp: null, workloads: false }, null]);
+
+  // Bo's role holds its permissions in a protected environment too. Nobody else's personal config is a place of his.
+  const [, bos] = await me('bo-cli');
+  assert.deepEqual((bos.environments as { environment: string }[]).map((at) => at.environment), ['prod', 'staging']);
+  // Whoever runs the instance reads every project, in one statement still.
+  const [[, owner], , all] = await cost(() => me('cy-cli'));
+  assert.equal(all, 1);
+  assert.deepEqual([owner.runsInstance, owner.canReadAudit, owner.setsUpServices], [true, true, true]);
+  // Not Ada's personal config, which is hers alone, nor what a deletion left behind.
+  assert.deepEqual((owner.environments as { project: string; environment: string }[]).map((at) => `${at.project}/${at.environment}`), ['billing/prod', 'market/prod', 'market/staging']);
+  assert.deepEqual(await me('nobody'), [401, { error: 'unauthenticated', message: 'that credential is unknown, expired or revoked', reason: 'unauthenticated' }]);
+});
+
+test('an archived place is not listed, and a protected environment the vault\'s answer lacks is protected still, by its row', async () => {
+  const listed = async () => ((await answered(app.request('/api/me', as('ada-cli'))))[1].environments as { environment: string }[]).map((at) => at.environment);
+  // staging's row edited behind the vault: it is no row of the vault's, and its answer protects nothing there.
+  await world.owner.execute(sql`UPDATE environments SET mac = decode(repeat('00', 36), 'hex') WHERE slug = 'staging'`);
+  world.memory.callers.clear();
+  assert.deepEqual(await listed(), ['prod', 'prod@me']);
+  // prod archived: neither it nor her config of it is a place any more.
+  await world.owner.execute(sql`UPDATE environments SET archived_at = now() WHERE slug = 'prod' AND project_id = (SELECT id FROM projects WHERE slug = 'market')`);
+  assert.deepEqual(await listed(), []);
+  const owners = async () => ((await answered(app.request('/api/me', as('cy-cli'))))[1].environments as { project: string; environment: string }[]).map((at) => `${at.project}/${at.environment}`);
+  assert.deepEqual(await owners(), ['billing/prod', 'market/staging']);
+  await world.owner.execute(sql`UPDATE projects SET archived_at = now() WHERE slug = 'billing'`);
+  assert.deepEqual(await owners(), ['market/staging']);
+});
+
+test("a personal config's values are its owner's alone, whatever anyone else holds; what else is asked of it is asked of its parent", async () => {
+  const called = async (label: string) => {
+    const who = await app.vault.caller({ token: createHash('sha256').update(label).digest('hex'), proof: null, request: null, ip: null });
+    assert.ok(!('refused' in who));
+    return who;
+  };
+  const [{ id: project }] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM projects WHERE slug = 'market'`);
+  const [prod] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM environments WHERE slug = 'prod' AND project_id = ${project}`);
+  const config = (owner: string) => placeOf({ id: project! }, { id: randomUUID(), slug: 'prod-x', protected: false, owner, parentId: prod!.id, parentSlug: 'prod' });
+  const [hers, owners] = [await called('ada-cli'), await called('cy-cli')];
+  assert.deepEqual([can(hers, 'secret.read', config(ada)), can(hers, 'secret.write', config(ada)), can(hers, 'audit.read', config(ada))], [true, true, false]);
+  // An Owner of the instance reads prod, and its log; never Ada's values.
+  assert.deepEqual([can(owners, 'secret.read', config(ada)), can(owners, 'secret.write', config(ada)), can(owners, 'audit.read', config(ada))], [false, false, true]);
+  // A config of an environment its owner does not read, staging, protected, is no more theirs.
+  const [staging] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM environments WHERE slug = 'staging'`);
+  assert.equal(can(hers, 'secret.read', placeOf({ id: project! }, { id: randomUUID(), slug: 'staging-x', protected: true, owner: ada, parentId: staging!.id, parentSlug: 'staging' })), false);
+});
+
+test("a page's render asks the vault who its visitor is once, for all its calls, and changes nothing", async () => {
+  const session = { headers: { cookie: `${SESSION}=${BROWSER}; theme=dark` } };
+  const [response, calls, statements] = await cost(() => app.render(session, async ({ client, cspNonce }) => {
+    const [first, second] = await Promise.all([client.me(), client.me()]);
+    // A change during a render has no origin to show: refused as from any other site.
+    const change = await client.secrets.set('market/prod', { API_KEY: 'x' }).then(() => 'written', (error: unknown) => (error instanceof CoffreError ? error.code : String(error)));
+    return { same: JSON.stringify(first) === JSON.stringify(second), who: first.principal.id, change, nonce: cspNonce.length > 0 };
+  }));
+  assert.deepEqual(await response.json(), { same: true, who: 'bo@acme.example', change: 'cross_origin', nonce: true });
+  assert.deepEqual([calls, statements], [['caller'], 2]);
+  // Nobody signed in: each call is answered so, and the vault is not asked.
+  const anonymous = await cost(() => app.render({}, ({ client }) => client.me().then(() => 'answered', (error: unknown) => (error instanceof CoffreError ? error.code : String(error)))));
+  assert.deepEqual([await anonymous[0].json(), anonymous[1]], ['unauthenticated', []]);
+});
+
+test('below its migrations the app serves nothing but its health, and asks the vault nothing', async () => {
+  // A database with no ledger: never migrated.
+  const below = await openApp({ database: 'postgres' });
+  try {
+    const api = await below.request('/api/me', as('ada-cli'));
+    assert.deepEqual([api.status, ((await api.json()) as Body).error, api.headers.get('retry-after')], [503, 'migrating', '30']);
+    const page = await below.request('/projects', { headers: { accept: 'text/html' } });
+    assert.deepEqual([page.status, page.headers.get('content-type')], [503, 'text/html; charset=utf-8']);
+    assert.match(await page.text(), /coffre migrate/);
+    assert.equal((await below.request('/livez')).status, 200);
+    assert.deepEqual(await answered(below.request('/readyz')), [503, { ok: false }]);
+    assert.deepEqual(below.calls, []);
+  } finally {
+    await below.close();
+  }
+});

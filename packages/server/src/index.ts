@@ -25,4 +25,3 @@ export {
 } from '@coffre/core/identity';
 export type { Vault } from '@coffre/core/vault';
 export type { CoffreConfig } from './config.ts';
-export type { CoffrePlugin, PluginContext } from './plugins.ts';

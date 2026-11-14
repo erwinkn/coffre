@@ -32,6 +32,9 @@
       "types": "./dist/node.d.ts",
       "default": "./dist/node.js"
     },
+    "./testing": {
+      "coffre:source": "./test/testing.ts"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

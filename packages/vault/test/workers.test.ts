@@ -6,7 +6,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { connect, createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { after } from 'node:test';
@@ -21,7 +20,7 @@ import { resolveVaultConfig } from '../src/config.ts';
 import { checked } from '../src/rows.ts';
 import { headText } from '../src/signer.ts';
 import { prepareVault } from '../src/vault.ts';
-import { emptyDatabase, openTestVault, VAULT_URL } from './database.ts';
+import { emptyDatabase, openTestVault, slowPostgres, VAULT_URL } from './database.ts';
 import { credential, environment, grant, principal, project, role, rows, secret, user, value, write } from './world.ts';
 
 const VAULT_KEY = randomBytes(32).toString('base64');
@@ -42,42 +41,6 @@ async function instance(): Promise<void> {
   const secrets = await Promise.all(KEYS.map((key) => value(world, secret(prod, key), `value of ${key}`)));
   await write(world, ...rows('projects', market), ...rows('environments', prod), ...rows('secrets', ...secrets), ...rows('roles', role(false, 'viewer', ['secret.read']), role(false, 'developer', ['secret.read', 'secret.write'])),
     ...rows('principals', principal(ada), principal(bo)), ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market })), ...rows('credentials', credential('ada-cli', ada), credential('bo-cli', bo)));
-}
-
-/**
- * Postgres as Hyperdrive serves it from far away: each chunk either way
- * delayed by `ms`. Locally a query answers in well under a millisecond,
- * which hides calls waiting on each other's I/O. `opened` counts the
- * connections made to it.
- */
-async function slowPostgres(ms: number): Promise<{ url: string; readonly opened: number; close(): Promise<void> }> {
-  const target = new URL(VAULT_URL);
-  let opened = 0;
-  const server: Server = createServer((client) => {
-    opened += 1;
-    const upstream = connect(Number(target.port), target.hostname);
-    const relay = (from: NodeJS.ReadableStream, to: NodeJS.WritableStream) =>
-      from.on('data', (chunk) => setTimeout(() => to.write(chunk), ms));
-    relay(client, upstream);
-    relay(upstream, client);
-    const end = () => {
-      client.destroy();
-      upstream.destroy();
-    };
-    client.on('close', end).on('error', end);
-    upstream.on('close', end).on('error', end);
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const address = server.address() as { port: number };
-  const url = new URL(VAULT_URL);
-  url.port = String(address.port);
-  return {
-    url: url.href,
-    get opened() {
-      return opened;
-    },
-    close: () => new Promise((resolve) => server.close(() => resolve())),
-  };
 }
 
 type Answer = { status: number; body: Used & { refused?: string; error?: string } };
