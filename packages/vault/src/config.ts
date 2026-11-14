@@ -25,6 +25,8 @@ export const MAX_BULK_WINDOW_MINUTES = 24 * 60;
 export const DEFAULT_MEMORY_SECONDS = 2;
 /** The longest it remembers them: up to a thousand reads, each with the values it opened, sit in an isolate for as long. */
 export const MAX_MEMORY_SECONDS = 600;
+/** The longest a proxied use is answered while the database cannot be reached (`outageSeconds`), and the values opened for one sit in an isolate: an hour, 0.14's longest `cacheSeconds`. */
+export const MAX_OUTAGE_SECONDS = 3600;
 
 /** The vault as it runs: keys decoded, emails checked. */
 export type ResolvedVaultConfig = {
@@ -43,6 +45,7 @@ export type ResolvedVaultConfig = {
   signingKeys: readonly Uint8Array[];
   bulkLimit: BulkLimit;
   memorySeconds: number;
+  outageSeconds: number;
   workloads: Workloads;
   /** How long the signer keeps a use, in days; null keeps every one. */
   keepUsesDays: number | null;
@@ -92,6 +95,18 @@ export type VaultConfig = {
    * vault's short memory").
    */
   memorySeconds?: number;
+  /**
+   * How long a proxied use is still answered while the database cannot be
+   * reached, in seconds, from the rows the vault last answered it from:
+   * never unless set, an hour at most. Only then: while the database
+   * answers, `memorySeconds` alone says how long a revocation waits. In an
+   * outage, a revocation made since those rows were read, or through an
+   * instance that still reaches the database, is not seen for as long.
+   * The values opened for a proxied use stay in memory that long too
+   * (docs/design/0.16.md, "Through an outage of the database"). 0.14's
+   * `cacheSeconds`, for outages alone.
+   */
+  outageSeconds?: number;
   /**
    * For a deployment with workloads, what the app's `workloads` says of
    * them, which the vault decides on: `noReads`, no binding lists values
@@ -202,6 +217,7 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
     signingKeys: signingKeys(config.signingKey, keks),
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
     memorySeconds: checkMemory(config.memorySeconds ?? DEFAULT_MEMORY_SECONDS),
+    outageSeconds: checkOutage(config.outageSeconds ?? 0),
     workloads: config.workloads === undefined ? null : { noReads: config.workloads.noReads === true, useOnly: config.workloads.useOnly === true },
     keepUsesDays: checkKeepUsesDays(config.log?.keepUsesDays),
   };
@@ -247,6 +263,11 @@ function checkBulkLimit({ count, windowMinutes }: { count: number; windowMinutes
 
 function checkMemory(seconds: number): number {
   if (!(seconds >= 0 && seconds <= MAX_MEMORY_SECONDS)) throw new Error(`memorySeconds is 0 to ${MAX_MEMORY_SECONDS} seconds`);
+  return seconds;
+}
+
+function checkOutage(seconds: number): number {
+  if (!(seconds >= 0 && seconds <= MAX_OUTAGE_SECONDS)) throw new Error(`outageSeconds is 0 to ${MAX_OUTAGE_SECONDS} seconds`);
   return seconds;
 }
 
