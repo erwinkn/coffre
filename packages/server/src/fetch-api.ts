@@ -171,12 +171,23 @@ export function pageCredential(page: Request, auth: AuthConfig): Record<string, 
  * admitted with, as its own route would.
  */
 export function pageClient(page: Request, runtime: CoffreRuntime, sourceIp: string | null, access?: Admission): CoffreClient {
-  const credential = pageCredential(page, runtime.auth);
+  return inProcess(new URL(page.url).origin, pageCredential(page, runtime.auth), runtime, { sourceIp, page, access });
+}
+
+/**
+ * The API in process as whoever `token` is, a token a plugin read from its
+ * request (`PluginContext.api`): sent as a bearer token, never a cookie, so
+ * it is held to what the CLI's is. Behind Access, refused as any bearer
+ * token is (`apiCredential`). The vault is asked who it is once, by the
+ * first call that needs to know, and the answer is every call's.
+ */
+export function tokenClient(token: string, runtime: CoffreRuntime, sourceIp: string | null): CoffreClient {
+  return inProcess(runtime.publicUrl, { authorization: `Bearer ${token}` }, runtime, { sourceIp });
+}
+
+/** A client whose calls go straight to `fetchApi` with `headers`, asking the vault about their caller once for all of them. */
+function inProcess(url: string, headers: Record<string, string>, runtime: CoffreRuntime, options: { sourceIp: string | null; page?: Request; access?: Admission }): CoffreClient {
   let asked: Promise<Called> | undefined;
   const caller: AskCaller = (shown) => (asked ??= callerOf(runtime.vault, shown));
-  return createClient({
-    url: new URL(page.url).origin,
-    headers: () => credential,
-    transport: (request) => fetchApi(request, runtime, { sourceIp, caller, page, access }),
-  });
+  return createClient({ url, headers: () => headers, transport: (request) => fetchApi(request, runtime, { ...options, caller }) });
 }

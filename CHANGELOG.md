@@ -29,6 +29,16 @@
   can still take away their role and grants. The deployment's configured
   Owner is refused 409 `configured_owner` where 0.14.7 said 403
   `not_allowed`.
+- **The Vault KV adapter is back** (`vaultKv()`, `docs/vault.md`): External
+  Secrets Operator, `vault kv get` and the rest read through `/v1` as on
+  0.14, a read the API's reveal as the token's holder (one vault `use`),
+  and ESO's Kubernetes login a workload exchange. Two answers change. An
+  environment that is not there is 403, as one the token cannot read,
+  where 0.14 said 404: the vault says neither which, and ESO keeps its
+  target rather than delete it. Behind Cloudflare Access, which 0.16.0
+  serves to browsers alone, every token is refused before anything is
+  read. A plugin's context gives `api(token)`, `exchange` and `signOut`
+  again, each coffre's own route in process.
 - **Postgres only.** coffre no longer runs on SQLite. `@coffre/db` drops its
   SQLite schema, migrations and driver (`@libsql/client`), and a `file:`
   URL is refused wherever a database URL is taken (`createCoffre`,

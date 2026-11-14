@@ -11,11 +11,10 @@
   // files they import are gone (the v0.14.7 tag has them, and 0.14's tests). Each goes from this list when its area
   // is moved or rewritten; one named here that no longer exists fails the suite.
   "exclude": [
-    // Workloads' sign-in and renewal, the AWS proof and vault-kv (W422).
+    // Workloads' sign-in and renewal, and the AWS proof (W422).
     "src/auth-routes.ts",
     "src/api/workloads.ts",
     "src/db/workloads.ts",
-    "src/plugins/vault-kv.ts",
     "src/workload-sessions.ts",
     "src/workloads/aws.ts",
 
