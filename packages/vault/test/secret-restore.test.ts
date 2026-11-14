@@ -152,9 +152,12 @@ test('a key with no value of its own goes by its newest version\'s label, which 
 });
 
 test('a version restored counts as the most a value weighs against a write\'s 1 MiB, checked before anything is read', async () => {
-  // 5 restores fit, 192 KiB each: the keys are not there, which the vault finds only once it reads.
+  // 5 restores fit, 192 KiB each: five values that weigh the most, 64 Ki characters of 3 bytes each, come back.
+  const heavy = '€'.repeat(65_536);
+  for (let at = 0; at < 5; at += 1) assert.ok(!('refused' in (await vault.change(writing('ada-cli', [{ key: `K${at}`, value: heavy }])))));
   const keys = (count: number) => Array.from({ length: count }, (_, at) => ({ key: `K${at}`, restore: 1 }));
-  assert.deepEqual(await vault.change(writing('ada-cli', keys(5))), { refused: 'unknown_key' });
+  assert.ok(!('refused' in (await vault.change(writing('ada-cli', keys(5))))));
+  assert.deepEqual(await given(keys(5).map(({ key }) => key)), keys(5).map(() => [2, heavy]));
   await assert.rejects(vault.change(writing('ada-cli', keys(6))), TypeError);
   // One restore and 832 KiB typed is 1 MiB; one byte more is past it.
   const full = Array.from({ length: 13 }, (_, at) => ({ key: `V${at}`, value: 'x'.repeat(65_536) }));
@@ -227,4 +230,16 @@ test('a version row changed after the read makes the write start over; a key ser
   const down = openLocalVault(world.db, { ...world, keks: { ...world.keks, unwrap: () => Promise.reject(new KekUnavailableError('the key service is down')) } as never }, { wake: world.wake, now: world.now });
   await assert.rejects(down.change(restoring('ada-cli', 'DATABASE_URL', 1)), /key service is down/);
   assert.deepEqual(await counts(), before);
+
+  // The same for the newest version a key made a reference goes by: changed after the read, the write starts over; the key service down, it fails.
+  await typed('ACCOUNT', 'acct_2', 'sensitive');
+  assert.ok(!('refused' in (await vault.change(writing('ada-cli', [{ key: 'ACCOUNT', ref: { project: 'billing', environment: 'prod', key: 'SOURCE' } }])))));
+  const vouching = await prepare(world, OPERATIONS['secret.write'](restoring('ada-cli', 'ACCOUNT', 1), deciding));
+  assert.ok(!('refused' in vouching));
+  await world.owner.execute(sql`UPDATE secret_versions SET created_by = 'someone' WHERE secret_id = ${ids.ACCOUNT!} AND version = 2`);
+  const referenced = await counts();
+  assert.equal(await commit(world, vouching), false);
+  assert.deepEqual(await counts(), referenced);
+  await assert.rejects(down.change(restoring('ada-cli', 'ACCOUNT', 1)), /key service is down/);
+  assert.deepEqual(await counts(), referenced);
 });
