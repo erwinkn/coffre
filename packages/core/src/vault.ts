@@ -159,7 +159,8 @@ export type Called = {
  * tree's size and root, hex (the changes kept for good, and the uses that
  * age out, of which `agingFrom` is the first still there). `signedAt` is
  * ISO 8601. It says the vault signed this log, not that none is newer: the
- * signer holds the log to its own copy every minute.
+ * signer holds the log's end to its own copy every minute, and walks the
+ * rest within a day.
  */
 export type SignedHead = { size: number; keptSize: number; keptRoot: string; agingSize: number; agingRoot: string; agingFrom: number; signedAt: string };
 
