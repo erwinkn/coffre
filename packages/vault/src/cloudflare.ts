@@ -77,8 +77,9 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     const { SIGNER } = this.env as { SIGNER?: SignerNamespace };
     if (SIGNER === undefined) throw new Error('the vault Worker binds its signer: a durable_objects binding SIGNER to CoffreSigner, which it exports (docs/design/0.16.md, "The signer")');
     if (!entry.adopted) {
-      entry.adopted = await this.#adopted(SIGNER);
-      if (!entry.adopted) return ADOPTING;
+      // A call that hears no in time leaves alone the yes another heard meanwhile.
+      if (!(await this.#adopted(SIGNER))) return ADOPTING;
+      entry.adopted = true;
     }
     const pool = new HyperdrivePool(database.hyperdrive.connectionString);
     // The reply does not wait for the signer, and the call lives on until it has heard. One that fails costs the entry

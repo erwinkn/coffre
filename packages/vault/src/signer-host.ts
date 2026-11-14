@@ -68,9 +68,13 @@ export type Hosting = {
 /**
  * What the host says of itself (`status`): when the last check completed,
  * what stands, whether the database is adopted, and, while it is not, why
- * the last try failed and when, if it did.
+ * the last try failed and when, if it did; and, if this signer's storage
+ * was empty before a database that was not, when it took it as it stood.
  */
-export type SignerStatus = { checked: number; standing: Alerted[]; adopted: boolean; adoption: { at: number; error: string } | null };
+export type SignerStatus = { checked: number; standing: Alerted[]; adopted: boolean; adoption: { at: number; error: string } | null; took: Took | null };
+
+/** That a signer whose storage was empty took a database that was not as it stood: a fresh install never does; an upgrade from 0.14 does once. */
+export type Took = { at: number; said: string };
 
 /** How long after the vault told of an entry the signer runs: the entries of that second are one run's. */
 export const TICK_MS = 1000;
@@ -124,6 +128,8 @@ export const storeOf = (storage: Storage): Store => ({
 const STOPPED = 'stopped said';
 /** When the adoption under way started, on disk while it runs: one found there at the next call never returned, cut off by a reset of the object. */
 const ADOPTING = 'adopting since';
+/** `Took`, kept for good. One over a log begun is also the host's yes, since its signer may sign nothing for a while. */
+const TOOK = 'took';
 
 export class SignerHost {
   readonly #on: Hosting;
@@ -169,7 +175,15 @@ export class SignerHost {
 
   /** Whether the database is adopted, as far as the host knows: its signer has signed the first entry, or it found so. */
   #knows(signer: Signer): boolean {
-    return (this.#adopted ||= signer.adopted);
+    return (this.#adopted ||= signer.adopted || (this.#on.storage.kv.get(TOOK) as (Took & { begun: boolean }) | undefined)?.begun === true);
+  }
+
+  /** That a signer whose storage was empty took the database as it stood, on disk and in the log, once. */
+  async #took(at: number, what: string, begun: boolean): Promise<void> {
+    const said = `the signer's storage was empty: it took the database as it stands, ${what} (docs/design/0.16.md, "Losing the signer's storage")`;
+    console.error(`coffre: ${said}`);
+    this.#on.storage.kv.put(TOOK, { at, said, begun });
+    await this.#on.storage.sync();
   }
 
   /**
@@ -202,11 +216,13 @@ export class SignerHost {
         // On disk before the first statement, so that an attempt cut off anywhere, its first run included, is said by the next.
         this.#on.storage.kv.put(ADOPTING, now);
         await this.#on.storage.sync();
-        const begun = !(await adopt(signer, { db: this.#on.db, keys: this.#on.keys, now: this.#on.now }, this.#on.adopting));
+        const blank = signer.blank;
+        const found = await adopt(signer, { db: this.#on.db, keys: this.#on.keys, now: this.#on.now }, this.#on.adopting);
+        if (found !== false && found > 0) await this.#took(now, `adopting ${found} rows it found there`, false);
         await signer.run(false);
-        // A signer whose storage is new, before a log begun: its head says. One that signed, or was told, waits for its own.
-        if (!this.#knows(signer) && begun && signer.blank) this.#adopted = await adopted(this.#on.db);
-        if (!this.#adopted) throw new Error("the database's log is begun, and its signer has signed none of it: it adopts nothing begun, and waits for an entry it may sign");
+        // A signer whose storage was empty, before a log begun: its head says, under the vault's MAC. One that signed, or was told, waits for its own.
+        if (!this.#knows(signer) && found === false && blank && signer.blank && (await adopted(this.#on.db, this.#on.keys))) await this.#took(now, 'a log begun that it did not sign', true);
+        if (!this.#knows(signer)) throw new Error("the database's log is begun, and its signer has signed none of it: it adopts nothing begun, and waits for an entry it may sign");
         this.#failed = null;
       } catch (error) {
         this.#failed = { at: this.#on.now(), error: error instanceof Error ? error.message : String(error) };
@@ -248,7 +264,8 @@ export class SignerHost {
     const now = this.#on.now();
     await this.#by(now + CHECK_MS);
     const known = this.#knows(signer);
-    return { checked: signer.checked, standing: [...signer.standing, ...this.#stopped(signer, now)], adopted: known, adoption: known ? null : this.#failed };
+    const took = this.#on.storage.kv.get(TOOK) as Took | undefined;
+    return { checked: signer.checked, standing: [...signer.standing, ...this.#stopped(signer, now)], adopted: known, adoption: known ? null : this.#failed, took: took === undefined ? null : { at: took.at, said: took.said } };
   }
 
   /** Not before the adoption: no check runs until then. */
@@ -271,8 +288,10 @@ export class SignerHost {
     let next = now + TICK_MS;
     let signer: Signer | null = null;
     try {
-      signer = await this.#open();
-      next = (await this.#run(signer, now)) ? now : this.#due(signer, now);
+      const opened = (signer = await this.#open());
+      // Before the adoption, alone: an adoption that came in the middle would find its signer running, and fail.
+      const run = () => this.#run(opened, now);
+      next = (await (this.#knows(opened) ? run() : this.#on.alone(run))) ? now : this.#due(opened, now);
     } catch (error) {
       console.error('coffre: a run of the signer failed, and the next tries again', error);
     }

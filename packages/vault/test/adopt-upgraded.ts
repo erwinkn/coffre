@@ -62,10 +62,10 @@ async function vaultOn(database: string): Promise<TestVault> {
 /** Adopted, and its first entry signed: a signer, run once, that found nothing. */
 async function adoptedOn(vault: TestVault): Promise<Signer> {
   const signer = await Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store: memoryStore(), keepUsesDays: 90 });
-  assert.equal(await adopt(signer, vault, { keks, owners: ['root@acme.example'], signingKeys: [SEED] }), true);
+  assert.notEqual(await adopt(signer, vault, { keks, owners: ['root@acme.example'], signingKeys: [SEED] }), false);
   for (const table of MIRRORED) assert.deepEqual(await rowsOf(vault.owner, sql`SELECT count(*)::int AS n FROM ${table} WHERE octet_length(mac) = 0`), [{ n: 0 }], shapeOf(table).name);
   assert.deepEqual(await runOf(signer, vault), []);
-  assert.equal(await adopted(vault.db), true);
+  assert.equal(await adopted(vault.db, vault.keys), true);
   return signer;
 }
 async function runOf(signer: Signer, vault: TestVault, full = false) {
@@ -128,7 +128,7 @@ test('in workerd, the vault Worker adopts a database upgraded from 0.14 at its f
     assert.deepEqual([status.adopted, status.adoption, status.standing], [true, null, []]);
     for (const table of MIRRORED) assert.deepEqual(await rowsOf(vault.owner, sql`SELECT count(*)::int AS n FROM ${table} WHERE octet_length(mac) = 0`), [{ n: 0 }], shapeOf(table).name);
     assert.deepEqual(await rowsOf(vault.owner, sql`SELECT body::jsonb ->> 'action' AS action FROM log ORDER BY seq`), [{ action: 'vault.adopt' }]);
-    assert.equal(await adopted(vault.db), true);
+    assert.equal(await adopted(vault.db, vault.keys), true);
     // Ada's CLI session, as 0.14 issued it: the value reads.
     const read = await worker.reveal(`sha256:${Buffer.alloc(32, 51).toString('hex')}`, 'market/prod', ['DATABASE_URL', 'STRIPE_KEY']);
     assert.deepEqual([read.status, read.body.values.map((each) => ('value' in each ? [each.key, each.value] : [each.key, each.refused]))], [200, [['DATABASE_URL', 'sensitive'], ['STRIPE_KEY', 'pk_live']]]);

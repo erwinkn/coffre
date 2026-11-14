@@ -133,7 +133,7 @@ test('a fresh database is adopted at the first call, a sign-in, which is answere
   await emptyDatabase(world.owner);
   const vault = await freshVault(VAULT_URL);
   try {
-    assert.deepEqual(await vault.status(), { checked: (await vault.status()).checked, standing: [], adopted: false, adoption: null, asked: 0 });
+    assert.deepEqual(await vault.status(), { checked: (await vault.status()).checked, standing: [], adopted: false, adoption: null, took: null, asked: 0 });
     const root = { provider: 'github', issuer: 'github', subject: '1', emails: ['root@acme.example'] };
     const first = await vault.signin(root, 'root-web');
     assert.deepEqual([first.status, first.body.answer?.principal], [200, user('root')], JSON.stringify(first.body));

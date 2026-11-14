@@ -131,7 +131,7 @@ test('an entry is signed a second after the vault tells of it, and the check com
   assert.equal(storage.alarm, opened + CHECK_MS);
   vault.tick(CHECK_MS);
   assert.equal(await fire(), 1);
-  assert.deepEqual(await host.status(), { checked: vault.now(), standing: [], adopted: true, adoption: null });
+  assert.deepEqual(await host.status(), { checked: vault.now(), standing: [], adopted: true, adoption: null, took: null });
   // And a minute after that one, with nothing told: the alarm is always set.
   assert.equal(storage.alarm, vault.now() + CHECK_MS);
   vault.tick(CHECK_MS);
@@ -159,7 +159,7 @@ test('an entry is signed a second after the vault tells of it, and the check com
 
 test('before the adoption, a signer asked how it stands checks nothing and says nothing, however long; adopted, it checks', async () => {
   assert.equal(storage.alarm, null);
-  assert.deepEqual(await host.status(), { checked: vault.now(), standing: [], adopted: false, adoption: null });
+  assert.deepEqual(await host.status(), { checked: vault.now(), standing: [], adopted: false, adoption: null, took: null });
   assert.equal(storage.alarm, vault.now() + CHECK_MS);
   // A row as the migration from 0.14 leaves it, with no MAC: a check would find it, and every other.
   await vault.owner.insert(principals).values({ ...principal(ada, { role: 'owner' }), mac: Buffer.alloc(0) });
@@ -167,7 +167,7 @@ test('before the adoption, a signer asked how it stands checks nothing and says 
     vault.tick(CHECK_MS);
     assert.equal(await fire(), 1);
   }
-  assert.deepEqual([alerts, await host.status()], [[], { checked: vault.now() - 10 * CHECK_MS, standing: [], adopted: false, adoption: null }]);
+  assert.deepEqual([alerts, await host.status()], [[], { checked: vault.now() - 10 * CHECK_MS, standing: [], adopted: false, adoption: null, took: null }]);
   assert.equal(storage.alarm, vault.now() + CHECK_MS);
   // Adopted, the row is the vault's; one written behind it after is found by the next check.
   assert.equal(await host.adopt(), true);
@@ -637,8 +637,8 @@ test('the first call adopts an empty database for the signer, which has signed i
   assert.equal(await host.adopt(), true);
   // The Owners the configuration names, the log's first entry signed, and the head that says so.
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT id, role FROM principals`), [{ id: user('root'), role: 'owner' }]);
-  assert.deepEqual([await actions('log'), await actions('log_pending'), await adopted(vault.db)], [['vault.adopt'], [], true]);
-  assert.deepEqual(await host.status(), { checked: vault.now(), standing: [], adopted: true, adoption: null });
+  assert.deepEqual([await actions('log'), await actions('log_pending'), await adopted(vault.db, vault.keys)], [['vault.adopt'], [], true]);
+  assert.deepEqual(await host.status(), { checked: vault.now(), standing: [], adopted: true, adoption: null, took: null });
   assert.ok('answer' in (await signin('root@acme.example')));
   // Nothing more is read: the database could be gone.
   down.database = true;
@@ -710,7 +710,7 @@ test('a log emptied under a signer that has signed is not adopted again: the pla
 test('a log emptied under a signer told of the adoption, before it signed: refused, loudly, at every try', async (t) => {
   const logged = t.mock.method(console, 'error', () => {});
   // The adoption commits and tells the signer, and the object stops before it signs.
-  assert.equal(await adopt(await Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store: storeOf(storage), keepUsesDays: 90 }), vault, adopting), true);
+  assert.notEqual(await adopt(await Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store: storeOf(storage), keepUsesDays: 90 }), vault, adopting), false);
   // The writer deletes the entry, and what the adoption wrote, and plants an Owner.
   await vault.owner.execute(sql`TRUNCATE log_pending, policy, roles, principals CASCADE`);
   await vault.owner.insert(principals).values({ ...principal(user('mallory'), { role: 'owner' }), mac: Buffer.alloc(0) });
@@ -732,9 +732,9 @@ test('a log emptied under a signer told of the adoption, before it signed: refus
 });
 
 test('an object that stopped between the adoption\'s commit and its first signature has it signed by the next call, with no finding', async () => {
-  assert.equal(await adopt(await Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store: storeOf(storage), keepUsesDays: 90 }), vault, adopting), true);
+  assert.notEqual(await adopt(await Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store: storeOf(storage), keepUsesDays: 90 }), vault, adopting), false);
   // Between the two, its first entry waits: the vault Worker serves nothing until the signer says it is signed.
-  assert.equal(await adopted(vault.db), false);
+  assert.equal(await adopted(vault.db, vault.keys), false);
   host = start();
   assert.equal(await host.adopt(), true);
   assert.deepEqual([await actions('log'), await actions('log_pending')], [['vault.adopt'], []]);
@@ -747,7 +747,7 @@ test('an object that stopped between the adoption\'s commit and its first signat
 test('or by its alarm, though its word of the entry was lost; and an adoption whose signature fails answers no until the alarm signs it', async (t) => {
   t.mock.method(console, 'error', () => {});
   // Told no signer: its storage is blank, and the entry waits.
-  assert.equal(await adopt(await Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store: memoryStore(), keepUsesDays: 90 }), vault, adopting), true);
+  assert.notEqual(await adopt(await Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store: memoryStore(), keepUsesDays: 90 }), vault, adopting), false);
   storage.alarm = vault.now();
   await fire();
   assert.deepEqual([await actions('log'), (await host.status()).adopted], [['vault.adopt'], true]);
@@ -769,4 +769,54 @@ test('or by its alarm, though its word of the entry was lost; and an adoption wh
   assert.deepEqual([await actions('log'), await host.adopt()], [['vault.adopt'], true]);
   await minute();
   assert.deepEqual(alerts, []);
+});
+
+test("a head the database's writer planted is no word of the vault's: a signer whose storage is empty does not take it for adopted", async (t) => {
+  const logged = t.mock.method(console, 'error', () => {});
+  await vault.owner.execute(sql`INSERT INTO log_head (only_row, size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac) VALUES (true, 1, 1, decode(repeat('00', 32), 'hex'), 0, decode(repeat('00', 32), 'hex'), 0, now(), decode(repeat('00', 36), 'hex'))`);
+  assert.equal(await host.adopt(), false);
+  const { adopted: yes, adoption, took } = await host.status();
+  assert.deepEqual([yes, took, await adopted(vault.db, vault.keys)], [false, null, false]);
+  assert.match(adoption!.error, /the database's log is begun, and its signer has signed none of it/);
+  assert.match(String(logged.mock.calls[0]!.arguments[0]), /did not adopt its database/);
+  assert.deepEqual(await signin('root@acme.example'), { refused: 'adopting' });
+});
+
+test("a signer whose storage was lost takes the database as it stands, and says so: once, in the log and in `status`, kept across a restart", async (t) => {
+  assert.equal(await host.adopt(), true);
+  await member(ada, 'member');
+  await minute();
+  // A new storage, before the same database: the object's class renamed, say.
+  storage = objectStorage();
+  host = start();
+  const logged = t.mock.method(console, 'error', () => {});
+  assert.equal(await host.adopt(), true);
+  const said = /^the signer's storage was empty: it took the database as it stands, a log begun that it did not sign \(docs\/design\/0\.16\.md, "Losing the signer's storage"\)$/;
+  assert.deepEqual(logged.mock.calls.map(({ arguments: [text] }) => String(text).replace(/^coffre: /, '')).filter((text) => said.test(text)).length, 1);
+  const { took } = await host.status();
+  assert.equal(took!.at, vault.now());
+  assert.match(took!.said, said);
+  // Its yes is on disk: a host that starts again over the storage answers it, and says nothing more.
+  vault.tick(CHECK_MS);
+  host = start();
+  assert.equal(await host.adopt(), true);
+  assert.deepEqual([(await host.status()).took, logged.mock.callCount()], [took, 1]);
+  assert.ok('answer' in (await signin('root@acme.example')));
+});
+
+test("a log emptied, the policy and roles with it, before a signer whose storage was lost: adopted again with the Owner planted, and said", async (t) => {
+  assert.equal(await host.adopt(), true);
+  await member(ada, 'member');
+  await minute();
+  // The limit (docs/design/0.16.md, "Losing the signer's storage"): nothing but the signer's storage says the log was begun.
+  await vault.owner.execute(sql`TRUNCATE log, log_index, log_tiles, log_head, log_pending, policy, roles`);
+  await vault.owner.insert(principals).values({ ...principal(user('mallory'), { role: 'owner' }), mac: Buffer.alloc(0) });
+  storage = objectStorage();
+  host = start();
+  const logged = t.mock.method(console, 'error', () => {});
+  assert.equal(await host.adopt(), true);
+  const { took } = await host.status();
+  assert.match(took!.said, /^the signer's storage was empty: it took the database as it stands, adopting 2 rows it found there \(/);
+  assert.equal(logged.mock.callCount(), 1);
+  assert.ok('answer' in (await signin('mallory@acme.example')));
 });

@@ -12,7 +12,7 @@ import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 export type Answer = { status: number; body: Used & { refused?: string; error?: string } };
 type Written = { status: number; body: { answer?: { keys: Record<string, { version: number; nature: string }>; outcomes: Record<string, unknown> }; refused?: string; error?: string } };
 /** `asked`: how often the vault asked it whether the database is adopted. */
-type SignerStatus = { checked: number; standing: unknown[]; adopted: boolean; adoption: { at: number; error: string } | null; asked: number };
+type SignerStatus = { checked: number; standing: unknown[]; adopted: boolean; adoption: { at: number; error: string } | null; took: { at: number; said: string } | null; asked: number };
 
 /** The vault's keys, as its configuration names them: a local KEK, and the signing key, derived from it unless given. */
 export type WorkerKeys = { id: string; key: string; signingKey?: string };

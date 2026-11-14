@@ -373,6 +373,42 @@ key under a new id is a rotation: its check value is recorded on first use,
 and values wrapped under an id the vault is no longer given fail with "no
 vault key configured for …". Keep earlier vault keys in `previousKeks`.
 
+## If the signer's storage is lost
+
+From 0.16, the vault's signer, a Durable Object (`CoffreSigner`), keeps in
+its own storage what the log said: which entries it signed, and what each
+sealed row should be. That storage is what tells it the database was
+adopted, and is not new. Lose it and a new signer takes the database as
+it stands, with anything a writer of the database planted in it, and
+nothing in the database can tell it otherwise
+([design](design/0.16.md#still-to-design), "Losing the signer's storage").
+
+What loses it:
+
+- the object's class or its namespace deleted, or renamed without
+  Wrangler's `renamed_classes` migration, which moves the storage;
+- the vault Worker deployed under another name, or to another Cloudflare
+  account: the namespace is the Worker's own.
+
+How you know: the vault's log and the signer's `status` (`took`) say
+`the signer's storage was empty: it took the database as it stands`, with
+the time. A fresh install never says it, and an upgrade from 0.14 says it
+once, at its adoption. At any other time, the storage was lost.
+
+What to do:
+
+1. Stop traffic, as before any restore ([Before you restore](#before-you-restore)),
+   and keep it stopped: the vault serves the database it took. When you
+   know the loss is coming (a move to another account), stop it before.
+2. Restore the last backup taken before the loss, as above, or compare the database with it, members, grants, roles and policy
+   first, and put back by hand what differs. 0.16.0 has no command that
+   verifies the database against the log for you.
+3. Bring the vault up. Its first call takes the restored database, and
+   says so again; that is the line you expect.
+
+Changes made after the backup are lost with a restore. Compare instead
+when you must keep them.
+
 ## The local drill
 
 `scripts/restore-drill.sh` runs the plain-Postgres restore end to end on
