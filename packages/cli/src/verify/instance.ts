@@ -110,7 +110,8 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
     }
     out.write(`${s.bold(`Checking ${origin}`)}, as no one and with the bearer token \`coffre login --token\` saved\n`);
     out.write(s.dim("  The token's reads add a few entries to the instance's audit log, for good.\n\n"));
-    await anonymousChecks(report, origin);
+    // Behind Access, as the checks found, the token is not sent.
+    if (await anonymousChecks(report, origin)) stop(1, `coffre: ${browsersOnly(origin)}`);
     await tokenChecks(report, origin, { token, canary });
     return finish(out, report);
   }
@@ -133,7 +134,8 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
       `  It keeps ${PROBE.project}/${PROBE.environment} and ${shownMember(PROBE.service)} for the next run, and its reads stay in the audit log, for good.\n\n`,
     ),
   );
-  await anonymousChecks(report, origin);
+  // Behind Access, as the checks found, the session is not sent.
+  if (await anonymousChecks(report, origin)) stop(1, `coffre: ${browsersOnly(origin)}`);
   await ownerChecks(report, origin, api);
   finish(out, report);
 }

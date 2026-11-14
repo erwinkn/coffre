@@ -125,8 +125,4 @@ test('a secret is never an argument: set refuses a value, login refuses two ways
   const mode = coffre(['--auth-mode', 'cloudflare', 'login', 'http://127.0.0.1:9', '--token'], {}, 'coffre_svc_x\n');
   assert.equal(mode.status, 1);
   assert.equal(mode.stderr, "coffre: --auth-mode is for a person's sign-in: --token says which\n");
-  // Nothing on stdin and no terminal: said, before anything is sent.
-  const none = coffre(['login', 'http://127.0.0.1:9', '--token']);
-  assert.equal(none.status, 1);
-  assert.equal(none.stderr, 'coffre: no bearer token: none came on stdin, and there is no terminal to ask on\n');
 });

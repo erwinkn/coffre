@@ -272,7 +272,7 @@ test('coffre verify alone, on a terminal, asks which check, and runs the one cho
   });
   assert.equal(code, 1);
   const shown = visible(output);
-  assert.match(shown, /✓ Which check\? {2}keys {6}the vault key and app key you keep/);
+  assert.match(shown, /✓ Which check\? {2}keys {6}the vault key or signing key you keep, against the instance/);
   assert.doesNotMatch(shown, /\blog\b/, 'the whole log is no check to choose');
 });
 

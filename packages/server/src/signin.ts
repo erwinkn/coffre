@@ -18,7 +18,7 @@ import { z } from 'zod';
 
 import { ApiError, noteTampered, notFound, refusal } from './api/errors.ts';
 import { readCookie, sessionCookie, sessionCookieName, presented } from './auth.ts';
-import type { Admission } from './behind-access.ts';
+import { unadmitted, type Admission } from './behind-access.ts';
 import { waitingDeviceLogins } from './db/queries/signin.ts';
 import { apiCredential, isSameOrigin } from './fetch-api.ts';
 import { errorResponse, jsonResponse, readJson } from './http.ts';
@@ -349,7 +349,7 @@ export const signOut: Path = async (request, runtime, sourceIp, _track, access) 
 export const logout: Path = async (request, runtime, sourceIp, _track, access) => {
   try {
     const credential = apiCredential(request, runtime.auth, access);
-    if (credential === null) throw new ApiError('unauthenticated', access?.why ?? 'sign in first');
+    if (credential === null) throw unadmitted(access);
     if (credential.ambient && !isSameOrigin(request, runtime.publicUrl)) throw new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself');
     // Behind Access, both cookies cleared, in place of any the check set (`ended`).
     access?.ended();

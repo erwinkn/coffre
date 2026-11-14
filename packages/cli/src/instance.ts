@@ -45,12 +45,36 @@ export function signInError(message: string): string {
 
 /**
  * What the CLI says of an instance behind Cloudflare Access, `origin` when it
- * knows which, before it sends anything there: 0.16.0 takes Access's sign-in
- * from browsers alone, and answers a CLI's or a machine's credential 401.
+ * knows which: 0.16.0 takes Access's sign-in from browsers alone, and answers
+ * a CLI's or a machine's credential 401. Said before anything is read or sent
+ * when the CLI knows (`accessRefusal`), and from the answer when it learns
+ * (`accessAnswered`).
  */
 export function browsersOnly(origin?: string): string {
   const where = origin === undefined ? 'Behind Cloudflare Access,' : `${origin} is behind Cloudflare Access, where`;
   return `${where} coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x`;
+}
+
+/**
+ * Whether `response` is Cloudflare Access turning the CLI away: Access's
+ * redirect to its team's login page, `https://<team>.cloudflareaccess.com/…`,
+ * or coffre's own 401 behind it for a CLI's or a machine's credential
+ * (`browsers_only`). The CLI says so (`browsersOnly`) whatever it sent.
+ * The body is read from a clone: the response stays the caller's.
+ */
+export async function accessAnswered(response: Response): Promise<boolean> {
+  if (response.status >= 300 && response.status < 400) {
+    let host: string;
+    try {
+      host = new URL(response.headers.get('location') ?? '', 'http://relative.invalid').hostname;
+    } catch {
+      return false;
+    }
+    return host === 'cloudflareaccess.com' || host.endsWith('.cloudflareaccess.com');
+  }
+  if (response.status !== 401 || !isJsonContentType(response.headers.get('content-type'))) return false;
+  const body = (await response.clone().json().catch(() => null)) as { reason?: unknown } | null;
+  return body?.reason === 'browsers_only';
 }
 
 /** A session 0.14's CLI saved behind Cloudflare Access: a person's by cloudflared, or an Access service token's. */

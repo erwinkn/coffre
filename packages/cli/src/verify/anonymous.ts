@@ -5,6 +5,7 @@
 import { Unreachable, type AuthInfo } from '@coffre/client';
 import { everyRoute } from '@coffre/client/routes';
 
+import { accessAnswered } from '../instance.ts';
 import { expect, type Checks } from './checks.ts';
 
 /** The page anyone may open. Every other page sends no one to /login. */
@@ -26,8 +27,8 @@ export const CLOSED_PAGES = [
 export const NOWHERE = { project: 'conformance-nowhere', environment: 'none' };
 export const NOBODY = 'token:conformance-nobody';
 
-/** The checks anyone can run: no sign-in, nothing written. */
-export async function anonymousChecks(report: Checks, origin: string): Promise<void> {
+/** The checks anyone can run: no sign-in, nothing written. Whether they found the instance behind Cloudflare Access, which 0.16.0's CLI goes no further behind. */
+export async function anonymousChecks(report: Checks, origin: string): Promise<boolean> {
   // One this machine cannot reach: health says why, and the rest would only say it again.
   let instance: string | undefined = origin;
   await report.check('health', {}, () =>
@@ -39,8 +40,9 @@ export async function anonymousChecks(report: Checks, origin: string): Promise<v
   await report.check('headers', { instance }, () => headers(origin));
   await report.check('anonymous api', { instance }, () => anonymousApi(origin));
   await report.check('forged cross-site', { instance }, () => forgedCrossSite(origin));
-  await report.check('sign-in info', { instance }, () => signinInfo(origin));
+  const access = await report.check('sign-in info', { instance }, () => signinInfo(origin));
   await report.check('anonymous answers', { instance }, () => anonymousAnswers(origin));
+  return access === true;
 }
 
 // --- as no one ----------------------------------------------------------------
@@ -138,16 +140,17 @@ async function forgedCrossSite(origin: string): Promise<string> {
   return `${changes.length + 1} changes, sign-out included, from another site with a session cookie: 403`;
 }
 
-/** `GET /api/auth` names how to sign in, and nothing more. */
-async function signinInfo(origin: string): Promise<string> {
-  const response = await fetch(`${origin}/api/auth`);
+/** `GET /api/auth` names how to sign in, and nothing more; or Cloudflare Access answers first. Its value: whether Access is in front. */
+async function signinInfo(origin: string): Promise<string | { detail: string; value: boolean }> {
+  const response = await fetch(`${origin}/api/auth`, { redirect: 'manual' });
+  if (await accessAnswered(response)) return { detail: 'Cloudflare Access answers first, sending no one on to coffre', value: true };
   expect(response.ok, `/api/auth answered ${response.status}`);
   const info = (await response.json()) as AuthInfo;
   expect(sameKeys(info, ['access', 'signin']), '/api/auth says more than how to sign in', info);
   expect((info.signin === null) !== (info.access === null), '/api/auth names neither or both ways in', info);
   if (info.access !== null) {
     expect(sameKeys(info.access, ['assertion']) && info.access.assertion === false, '/api/auth says more of Access than whether it vouched', info);
-    return 'Cloudflare Access, and nothing more';
+    return { detail: 'Cloudflare Access, and nothing more', value: true };
   }
   const signin = info.signin!;
   expect(sameKeys(signin, ['note', 'providers', 'title']), '/api/auth says more of its sign-in than a page needs', signin);

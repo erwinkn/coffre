@@ -165,8 +165,7 @@ service token. Until then, a deployment whose CLI or machines reach coffre
 through Access stays on 0.14, and its machines keep 0.14's Access service
 tokens; in 0.16.x they will need coffre's tokens instead, beside them.
 
-The CLI says so before it sends a credential, in each of the ways 0.14's
-signed in behind Access:
+The CLI says so, in each of the ways 0.14's signed in behind Access:
 
 ```
 $ coffre login https://secrets.acme.example
@@ -175,11 +174,27 @@ $ coffre login https://secrets.acme.example --access-client-id 1b2c….access
 coffre: Behind Cloudflare Access, coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x
 ```
 
-The first asks only `GET /api/auth`, and starts no `cloudflared`; the
-second asks nothing, its secret included. `--auth-mode cloudflare` says the
-same as the second, and a session 0.14's CLI saved behind Access, by
-`cloudflared` or an Access service token, the same as the first, for any
-command.
+What it holds to there is three things:
+
+1. A credential goes to the instance's own origin and nowhere else: the
+   CLI follows no redirect, Access's to its login page included.
+2. What it knows already, it refuses before it reads or sends anything:
+   `--auth-mode cloudflare` and `--access-client-id`, the second line above,
+   and a session 0.14's CLI saved behind Access, by `cloudflared` or an
+   Access service token, the first, for any command. `coffre login` asks
+   `GET /api/auth` first, with nothing of yours, so behind Access it reads no
+   secret, starts no `cloudflared` and sends no session saved here.
+3. What it learns from an answer, it says: Access's redirect to
+   `<team>.cloudflareaccess.com`, or coffre's own 401 for a credential
+   behind Access (`"reason": "browsers_only"`), ends any command with the
+   first line above.
+
+So a credential can still reach the instance's hostname once. A session
+`coffre login` saved before the instance went behind Access goes with the
+next `coffre whoami`; Access answers it with its redirect, and the CLI prints
+the first line. Cloudflare's edge serves that hostname with or without
+Access, and opens every request to it, so the token reaches no one it did
+not reach before.
 
 ### Closed-door behavior
 

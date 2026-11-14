@@ -93,6 +93,10 @@ function admission(session: string | null, why: string, cookies: string[] = [], 
   return result;
 }
 
+/** What a request behind Access with no session it may use is told: `browsers_only`, which the CLI reads, when it came as a machine. */
+export const unadmitted = (access: Admission | undefined): ApiError =>
+  new ApiError('unauthenticated', access?.why ?? 'sign in first', access?.why === BROWSERS_ONLY ? 'browsers_only' : undefined);
+
 /** A machine's credential, in `Authorization`: a bearer token, or a workload's session with its proof (DPoP). A browser sends neither. */
 export const machineCredential = (request: Request): string | null => bearerToken(request) ?? dpopToken(request);
 

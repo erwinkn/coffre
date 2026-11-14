@@ -48,6 +48,7 @@ import {
   REPO_FILE,
   resolveTarget,
   signInError,
+  accessAnswered,
   accessRefusal,
   browsersOnly,
   savedAccess,
@@ -223,13 +224,28 @@ function target(): Target {
 }
 
 /**
- * `fetch`, under `--verbose` each request said on stderr with its answer
- * and its time (`timings.ts`): by its path when it is `instance`'s, by its
- * host when it is a platform's or GitHub's. Without `instance`, for the
- * requests only the instance is sent.
+ * `fetch`, for every request the CLI sends, under `--verbose` each one said
+ * on stderr with its answer and its time (`timings.ts`): by its path when it
+ * is `instance`'s, by its host when it is a platform's or GitHub's. Without
+ * `instance`, for the requests only the instance is sent.
+ *
+ * It follows no redirect, so a credential goes to the URL it was sent to and
+ * nowhere else (`redirect: 'error'` still fails on one). And Cloudflare
+ * Access's answer, to whichever request got it, ends the command with what
+ * 0.16.0 does there (`accessAnswered`, `browsersOnly`): one place, so no
+ * command needs a check of its own. Not under `/use/`, where the credential
+ * proxy relays another service's answers.
  */
 function fetching(instance?: string): typeof fetch {
-  return sessionFlags.verbose ? timed(fetch, stderr, instance) : fetch;
+  const sent = sessionFlags.verbose ? timed(fetch, stderr, instance) : fetch;
+  return async (input, init) => {
+    const asked = init?.redirect ?? (input instanceof Request ? input.redirect : 'follow');
+    const response = await sent(input, { ...init, redirect: 'manual' });
+    const url = new URL(input instanceof Request ? input.url : input);
+    if (!url.pathname.startsWith('/use/') && (await accessAnswered(response))) fail(browsersOnly(url.origin));
+    if (asked === 'error' && response.status >= 300 && response.status < 400) throw new TypeError(`fetch failed: ${url.href} redirects, and redirect is "error"`);
+    return response;
+  };
 }
 
 /** A request to the instance. */
@@ -303,7 +319,6 @@ function momentary(status: number, body: { error?: unknown; reason?: unknown } |
 async function signIn(origin: string, service: string, given?: string): Promise<{ issued: { token: string; expiresAt: string }; idTokens: string[] }> {
   // Each ID token it asked for, to hide from the log: one whose exchange failed may still be good until it expires.
   const idTokens: string[] = [];
-  await noMachineBehindAccess(origin);
   for (let attempt = 0; ; attempt++) {
     const token = await idToken(given, process.env, origin, fetching(origin));
     idTokens.push(token);
@@ -570,13 +585,11 @@ async function login(args: string[]): Promise<void> {
   if (machine.length > 0 && kept !== undefined && kept.kind === undefined) {
     fail(`signed in to ${origin} as ${kept.principal?.id ?? 'a person'}: \`coffre logout ${origin}\` first, or sign the run in from a home of its own`);
   }
+  // How it signs people in, asked first, with nothing of yours: behind Access, no secret is read, and no session saved here sent.
+  if ((await askMode(origin)) === 'cloudflare') fail(browsersOnly(origin));
   if (values.token) await tokenLogin(origin);
   else if (values.service !== undefined) await runLogin(origin, serviceMember(values.service.trim()), values['id-token']);
-  else {
-    // Asked first: a session saved before the instance went behind Access is not sent there.
-    if ((await askMode(origin)) === 'cloudflare') fail(browsersOnly(origin));
-    if (!(await keepSession(origin, kept))) await deviceLogin(origin, values['no-browser']);
-  }
+  else if (!(await keepSession(origin, kept))) await deviceLogin(origin, values['no-browser']);
   pinTo(directory, origin);
 }
 
@@ -794,21 +807,11 @@ function refusalBefore(origin?: string): string | null {
   }
 }
 
-/**
- * Before a machine's secret goes to `origin` (a bearer token, a run's ID
- * token, a workload's proof): one unauthenticated `GET /api/auth`. Behind
- * Access, 0.16.0 signs in no machine, so it stops here, the secret unsent.
- */
-async function noMachineBehindAccess(origin: string): Promise<void> {
-  if ((await askMode(origin)) === 'cloudflare') fail(browsersOnly(origin));
-}
-
 /** `coffre login <url> --token`: a bearer token, asked for, and kept as the session. */
 async function tokenLogin(origin: string): Promise<void> {
   const token = await readSecret({ label: 'Bearer token', hint: 'coffre_svc_… or coffre_pat_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
     fail((error as Error).message),
   );
-  await noMachineBehindAccess(origin);
   await saveRun({ origin, by: 'token', credential: { kind: 'token', token } }, { mode: 'signin', kind: 'token', token, expiresAt: null });
 }
 
@@ -1411,8 +1414,6 @@ async function run(args: string[]): Promise<void> {
   let bound: Awaited<ReturnType<typeof keyBound>> | null = null;
   if (to.credential.kind === 'workload') {
     const proof = await proofOf(flags.proof, process.env);
-    // Behind Access, its proof is not sent.
-    await noMachineBehindAccess(to.origin);
     bound = await keyBound(to.origin, to.credential.service, proof, positionals, (line) => process.stderr.write(`${line}\n`), fetching(to.origin)).catch(
       (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
     );
@@ -2117,12 +2118,9 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   freeze: (args) => freeze(connect, args),
   unfreeze: (args) => unfreeze(connect, args),
   serve: (args) =>
-    serve(args, sessionFlags.url, fetching, {
-      beforeReading: (origin) => {
-        const refusal = refusalBefore(origin);
-        if (refusal !== null) fail(refusal);
-      },
-      beforeSending: noMachineBehindAccess,
+    serve(args, sessionFlags.url, fetching, (origin) => {
+      const refusal = refusalBefore(origin);
+      if (refusal !== null) fail(refusal);
     }),
   audit,
   verify,

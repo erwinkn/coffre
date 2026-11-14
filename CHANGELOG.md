@@ -71,8 +71,10 @@
   there through the browser, and the CLI and machines come back in 0.16.x,
   with coffre's own credentials. The CLI no longer starts `cloudflared` or
   takes an Access service token: `coffre login` behind Access, `coffre login
-  --access-client-id` and `--auth-mode cloudflare` say so and send nothing,
-  as does any command with a session 0.14's CLI saved there. A deployment
+  --access-client-id` and `--auth-mode cloudflare` say so before they read
+  or send anything, as does any command with a session 0.14's CLI saved
+  there; any other says so from Access's answer, and the CLI follows no
+  redirect with a credential (`docs/deployment-auth.md`). A deployment
   whose CLI or CI reaches coffre through Access stays on 0.14 until 0.16.x,
   when its machines will need coffre tokens.
 - **No `coffre verify log` or `coffre audit accept-loss`.** 0.16.0's vault
