@@ -18,13 +18,15 @@ import { amend, binding, credential, environment, grant, instance, principal, pr
 const vault = await openTestVault();
 after(() => vault.close());
 
-/** The statements the vault's own connection ran. */
+/** The round trips the vault's own connection made: a statement, or a transaction sent as one. */
 let statements = 0;
-const execute = vault.db.execute.bind(vault.db);
-vault.db.execute = ((query: never) => {
-  statements += 1;
-  return execute(query);
-}) as typeof vault.db.execute;
+for (const name of ['execute', 'transaction'] as const) {
+  const run = (vault.db[name] as (...args: unknown[]) => unknown).bind(vault.db);
+  (vault.db as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
+    statements += 1;
+    return run(...args);
+  };
+}
 
 const [ada, bo, cy, dee, api] = [user('ada'), user('bo'), user('cy'), user('dee'), 'token:api'];
 const far = new Date(Date.UTC(2027, 0, 1));
