@@ -2,23 +2,48 @@ import { z } from 'zod';
 
 import type { Called } from '@coffre/core/vault';
 
-import { waitingDeviceLogin, type DeviceLoginRow } from '../../db/queries/signin.ts';
+import { linkedIdentities, liveSessions, waitingDeviceLogin, type DeviceLoginRow, type IdentityRow, type SessionRow } from '../../db/queries/signin.ts';
 import { normalizeUserCode } from '../../signin.ts';
 import { changed } from '../change.ts';
-import { refusal } from '../errors.ts';
+import type { ApiContext } from '../context.ts';
+import { forbidden, refusal } from '../errors.ts';
 import { route } from '../route.ts';
+import { signsIn } from './tokens.ts';
 
 /** A person, signed in as themselves on a session of theirs: whom `device.decide` takes, and so whom its page shows a device login. */
 const onOwnSession = (who: Called) => who.principal.startsWith('user:') && who.holds.credentialScope == null;
 
+/** Only a person, on a session of theirs, lists their sessions and accounts: a personal token reached neither in 0.14.7, nor a workload. */
+async function ownSession(ctx: ApiContext): Promise<Called> {
+  signsIn(ctx);
+  const who = await ctx.caller();
+  if (!onOwnSession(who)) throw forbidden('only a person, signed in as themselves, lists their sessions and accounts');
+  return who;
+}
+
 /**
  * A person's own sign-in through the API (docs/design/0.16.md, "Signing in
- * from the server"): unlinking one of their accounts, and the page
- * `coffre login` opens, which shows a device login and decides it. The
- * browser's round trip and the device login's own calls are paths outside
- * the API, in `signin.ts`.
+ * from the server"): their sessions and accounts listed, unlinking one of
+ * their accounts, and the page `coffre login` opens, which shows a device
+ * login and decides it. The browser's round trip and the device login's
+ * own calls are paths outside the API, in `signin.ts`.
  */
 export const signinRoutes = {
+  /** The caller's live sessions, browsers' and CLIs', the one last used first; `current` is this request's. One `caller` and one statement. */
+  ...route('GET /sessions', {
+    run: async (ctx): Promise<{ sessions: SessionRow[] }> => {
+      const who = await ownSession(ctx);
+      const sessions = await liveSessions(ctx.db, who.principal, new Date());
+      return { sessions: sessions.map((session) => ({ ...session, current: session.id === who.credential.id })) };
+    },
+  }),
+  /** The caller's linked accounts, the oldest first. One `caller` and one statement. */
+  ...route('GET /identities', {
+    run: async (ctx): Promise<{ identities: IdentityRow[] }> => {
+      const who = await ownSession(ctx);
+      return { identities: await linkedIdentities(ctx.db, who.principal) };
+    },
+  }),
   /** One of the caller's accounts revoked, and the sessions it opened with it: one `change`, no statement. */
   ...route('DELETE /identities/:id', {
     run: async (ctx, { params }): Promise<{ unlinked: true }> => {

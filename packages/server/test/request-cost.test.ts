@@ -292,6 +292,9 @@ const requests: Record<string, Entry> = {
     request: () => app.request(`/auth/callback/acme?${new URLSearchParams({ state: leaving.state, code: 'c' })}`, { headers: { cookie: `${PENDING}=${leaving.pending}; ${SESSION}=${browser}` } }),
     calls: ['change'], statements: 0,
   },
+  // The browser's person lists their own sessions and accounts: `caller` and one statement each, the rows theirs alone.
+  'GET /sessions': { request: () => app.request('/api/sessions', { headers: { cookie: `${SESSION}=${browser}` } }), calls: ['caller'], statements: 1, fixed: true },
+  'GET /identities': { request: () => app.request('/api/identities', { headers: { cookie: `${SESSION}=${browser}` } }), calls: ['caller'], statements: 1, fixed: true },
   'POST /auth/signout': { request: () => app.request('/auth/signout', { method: 'POST', headers: { cookie: `${SESSION}=${browser}`, 'sec-fetch-site': 'same-origin' } }), calls: ['change'], statements: 0 },
   // The accounts the round's sign-in bound and linked, found as the test's owner, which no request's count sees.
   'DELETE /identities/:id': { request: () => unlink(`acme-eve-${round}`), calls: ['change'], statements: 0 },

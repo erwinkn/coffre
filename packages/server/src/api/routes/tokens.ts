@@ -72,7 +72,7 @@ const tokenInput = z.object({
 });
 
 /** Sessions and tokens are coffre's own sign-in: behind Cloudflare Access there are none, as 0.14.7 answered. */
-function signsIn(ctx: ApiContext): void {
+export function signsIn(ctx: ApiContext): void {
   if (ctx.auth.mode !== 'signin') throw notFound('this instance has no sign-in of its own');
 }
 
