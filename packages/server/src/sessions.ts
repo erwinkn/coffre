@@ -166,3 +166,10 @@ export async function gated(
     throw refused(new ApiError('unavailable', 'coffre cannot check this proof right now'));
   }
 }
+
+/** An answer to a workload, with the nonce its next proof signs: a response of its own, since another's headers may be immutable. */
+export function withNonce(response: Response, nonce: string): Response {
+  const headers = new Headers(response.headers);
+  headers.set('dpop-nonce', nonce);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
