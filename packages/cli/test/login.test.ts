@@ -159,7 +159,8 @@ test('a CI run the instance cannot sign in yet asks again, with a fresh ID token
   const kept = await cli(home, ['login', unsure.origin, '--service', 'deploy', '--id-token'], 'id.token.ok\n');
   assert.equal(kept.status, 0, kept.stderr);
   assert.match(kept.stdout, new RegExp(`^Signed in to ${unsure.origin} as deploy\\n`));
-  assert.deepEqual(unsure.seen.map(({ url }) => url), ['/api/auth/oidc', '/api/me', '/api/me']);
+  // How the instance signs in, asked first, with no credential: behind Access, the ID token would go nowhere.
+  assert.deepEqual(unsure.seen.map(({ url }) => url), ['/api/auth', '/api/auth/oidc', '/api/me', '/api/me']);
 
   // Three times unable, it fails as it did; a 503 an operator must fix, at once. Login asks again the same way.
   for (const [unavailable, exchanges] of [[[null, 'busy', null], 3], [['wrong_kek'], 1]] as const) {
@@ -453,6 +454,15 @@ test('behind Cloudflare Access, the CLI says in a sentence that 0.16.0 signs peo
     assert.ok(!run.stdout.includes('secret') && !run.stderr.includes('secret'), 'no secret asked for');
   }
   assert.deepEqual(seen, ['GET /api/auth'], 'nothing sent');
+  // A machine's login, a bearer token's or a run's ID token: Access is asked about before the secret is sent, and it is not.
+  for (const args of [['--token'], ['--service', 'deploy', '--id-token']]) {
+    seen.length = 0;
+    const run = await cli(home, ['login', origin, ...args], 'coffre_svc_ci\n');
+    assert.equal(run.status, 1, args.join(' '));
+    assert.equal(run.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`, args.join(' '));
+    assert.deepEqual(seen, ['GET /api/auth'], `${args.join(' ')}: only how to sign in asked`);
+  }
+  seen.length = 0;
   assert.ok(!existsSync(join(home, '.coffre', 'credentials.json')), 'nothing saved');
   // 0.14's sessions there, a person's by cloudflared and an Access service token's: refused before any request.
   for (const session of [{ mode: 'cloudflare' }, { mode: 'cloudflare', kind: 'access', clientId: 'id.access', clientSecret: 'shh' }]) {
@@ -461,8 +471,17 @@ test('behind Cloudflare Access, the CLI says in a sentence that 0.16.0 signs peo
     const whoami = await cli(home, ['whoami'], '');
     assert.equal(whoami.status, 1);
     assert.equal(whoami.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`);
+    // Before a command reads its secret: set says so, not that no value came on stdin.
+    const set = await cli(home, ['set', 'market/prod/KEY'], '');
+    assert.equal(set.status, 1);
+    assert.equal(set.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`);
+    // A CI run's ID token, from GitHub's runner here, is neither asked for nor sent there.
+    const runner = { ACTIONS_ID_TOKEN_REQUEST_URL: `${origin}/runner?x=1`, ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'runner-bearer' };
+    const service = await cli(home, ['--service', 'deploy', 'whoami'], '', undefined, false, runner);
+    assert.equal(service.status, 1);
+    assert.equal(service.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`);
   }
-  assert.deepEqual(seen, ['GET /api/auth'], 'nothing sent');
+  assert.deepEqual(seen, [], 'nothing sent');
 });
 
 test('login refuses an --auth-mode it does not know before asking the instance anything', async (t) => {

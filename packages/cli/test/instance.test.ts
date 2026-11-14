@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   choose,
+  accessRefusal,
   browsersOnly,
   credentialHeaders,
   emptyPins,
@@ -130,6 +131,14 @@ test('a CI run signs in with `coffre login`, and its session is used as a person
   // Its kind alone says Access's, whatever mode a hand-edited file gives it: never sent as a bearer token.
   const relabelled = parseStore(JSON.stringify({ version: 2, current: THEIRS, instances: { [THEIRS]: { mode: 'signin', kind: 'access', token: 'shh', obtainedAt: '2026-09-26T00:00:00Z' } } }));
   assert.throws(() => resolveTarget({}, relabelled, null, NOW), { message: browsersOnly(THEIRS) });
+  // Nor does a run's ID token go there, by --service.
+  assert.throws(() => resolveTarget({ service: 'deploy' }, access, null, NOW), { message: browsersOnly(THEIRS) });
+  // What a command that talks to an instance says first, before it reads a secret.
+  assert.equal(accessRefusal({}, access, null), browsersOnly(THEIRS));
+  assert.equal(accessRefusal({ service: 'deploy' }, access, null), browsersOnly(THEIRS));
+  assert.equal(accessRefusal({ authMode: 'cloudflare' }, emptyStore(), null), browsersOnly());
+  assert.equal(accessRefusal({}, token, null), null);
+  assert.equal(accessRefusal({}, emptyStore(), null), null, 'signed in nowhere: the command says so itself');
   // A run's credential lasts five minutes, and says how to get another.
   const run = withSession(emptyStore(), OURS, {
     mode: 'signin',

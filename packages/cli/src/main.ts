@@ -18,7 +18,7 @@ import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks, runsCode } from './github-env.ts';
 import { bindingFrom, describeBindings, describeEvents, describeKeys, describePlan, keySetFrom, reaches, scopeFrom, serviceMember, TRUST_OPTIONS, TRUST_USAGE } from './trust.ts';
 import { exchange, ExchangeFailed, idToken, keyBound, proofOf } from './workload.ts';
-import { commandLine, readSession } from './flags.ts';
+import { commandLine, readSession, talksToInstance } from './flags.ts';
 import { requestLine, stderr, timed, took } from './timings.ts';
 import { readSecret } from './secret.ts';
 import { generatedLines, generatedPatch, recipeFlag, regeneratedPatch } from './generate.ts';
@@ -48,6 +48,7 @@ import {
   REPO_FILE,
   resolveTarget,
   signInError,
+  accessRefusal,
   browsersOnly,
   within,
   withPin,
@@ -772,10 +773,16 @@ async function saveRun(to: Target, session: Omit<Session, 'principal' | 'obtaine
 }
 
 /** `coffre login <url> --token`: a bearer token, asked for, and kept as the session. */
+/** A machine's sign-in, its secret read but not yet sent anywhere: behind Access, 0.16.0 signs in none, so it stops here. */
+async function noMachineBehindAccess(origin: string): Promise<void> {
+  if ((await askMode(origin)) === 'cloudflare') fail(browsersOnly(origin));
+}
+
 async function tokenLogin(origin: string): Promise<void> {
   const token = await readSecret({ label: 'Bearer token', hint: 'coffre_svc_… or coffre_pat_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
     fail((error as Error).message),
   );
+  await noMachineBehindAccess(origin);
   await saveRun({ origin, by: 'token', credential: { kind: 'token', token } }, { mode: 'signin', kind: 'token', token, expiresAt: null });
 }
 
@@ -788,6 +795,7 @@ async function runLogin(origin: string, service: string, ask: boolean): Promise<
   const given = ask
     ? await readSecret({ label: 'ID token', hint: `The run's ID token, for the audience ${origin}. Hidden as you type.` }).catch((error: unknown) => fail((error as Error).message))
     : undefined;
+  await noMachineBehindAccess(origin);
   const { issued } = await signIn(origin, service, given).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   await saveRun(
     { origin, by: 'run', credential: { kind: 'token', token: issued.token } },
@@ -2145,6 +2153,18 @@ if ((end === -1 ? args : args.slice(0, end)).some((arg) => arg === '--help' || a
 if ('group' in found) {
   process.stderr.write(`coffre: ${command} needs a command after it\n${helpText(words)}`);
   process.exit(2);
+}
+// Behind Cloudflare Access, before the command reads a secret or sends a credential (`accessRefusal`).
+if (talksToInstance(command)) {
+  const refusal = (() => {
+    try {
+      return accessRefusal(sessionFlags, readStore(), localHere());
+    } catch {
+      // A credentials file or coffre.json it cannot read: the command's own to say.
+      return null;
+    }
+  })();
+  if (refusal !== null) fail(refusal);
 }
 try {
   await COMMANDS[found.command](found.args);

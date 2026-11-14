@@ -53,6 +53,29 @@ export function browsersOnly(origin?: string): string {
   return `${where} coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x`;
 }
 
+/** A session 0.14's CLI saved behind Cloudflare Access: a person's by cloudflared, or an Access service token's. */
+function behindAccess(session: Session | undefined): boolean {
+  return session !== undefined && (session.mode === 'cloudflare' || session.kind === 'access');
+}
+
+/**
+ * What a command that talks to an instance says before it does anything,
+ * reads a secret included, when that instance is behind Cloudflare Access:
+ * `--auth-mode cloudflare` says so, or its saved session is 0.14's there
+ * (`browsersOnly`). Null otherwise, and when no instance is named yet,
+ * which the command says itself.
+ */
+export function accessRefusal(flags: SessionFlags, store: Store, local: Local | null): string | null {
+  if (flags.authMode === 'cloudflare') return browsersOnly();
+  let origin: string;
+  try {
+    origin = choose(flags, store, local).origin;
+  } catch {
+    return null;
+  }
+  return behindAccess(store.instances[origin]) ? browsersOnly(origin) : null;
+}
+
 /**
  * Who vouches for you there: coffre's own sign-in, or Cloudflare Access in
  * front of it. A session saved as `cloudflare` is 0.14's, which 0.16.0 refuses.
@@ -381,6 +404,9 @@ export function resolveTarget(flags: SessionFlags, store: Store, local: Local | 
   if (parseMode(flags.authMode) === 'cloudflare') throw new Error(browsersOnly());
   const choice = choose(flags, store, local);
   const { origin } = choice;
+  const stored = store.instances[origin];
+  // 0.14's session behind Access, a person's by cloudflared or an Access service token's: nothing goes there, a run's ID token included.
+  if (stored?.mode === 'cloudflare' || stored?.kind === 'access') throw new Error(browsersOnly(origin));
 
   if (flags.service !== undefined) {
     // `deploy`, `service:deploy` or `token:deploy`: the API's token:deploy.
@@ -389,15 +415,12 @@ export function resolveTarget(flags: SessionFlags, store: Store, local: Local | 
     return { origin, by: 'service', credential: { kind: 'workload', service } };
   }
 
-  const stored = store.instances[origin];
   const relogin = `run \`coffre login ${origin}\``;
   if (stored === undefined) {
     // A clone's first command: where the instance came from, so that a URL the repository chose is not taken for one you did.
     const named = choice.by === 'file' ? ` (named by ${join(choice.directory, REPO_FILE)})` : '';
     throw new Error(signInError(`not signed in: ${relogin}${named}`));
   }
-  // 0.14's session behind Access, a person's by cloudflared or an Access service token's.
-  if (stored.mode === 'cloudflare' || stored.kind === 'access') throw new Error(browsersOnly(origin));
   const by = stored.kind ?? 'person';
   if (!stored.token) {
     const message = `not signed in: ${relogin}`;
