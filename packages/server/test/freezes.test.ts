@@ -102,6 +102,8 @@ test('what the vault would take as a fault is told before any call; an upstream 
   for (const bad of [
     { target: 'Token:ci', reason: 'x' }, { target: 'binding:not-a-uuid', reason: 'x' }, { target: 'everything', reason: 'x' }, { target: ci, reason: '  ' }, { target: ci },
     { target: ci, reason: 'x'.repeat(401) }, { target: ci, reason: 'x', extra: 1 },
+    // What Postgres keeps no part of: a NUL, half of a surrogate pair.
+    { target: ci, reason: 'leaked\u0000' }, { target: ci, reason: 'leaked \ud800' }, { target: 'instance', reason: '\udc00' },
   ]) assert.deepEqual(refused(await call('cy-cli', 'POST', '/freezes', bad)), [400, 'bad_request', undefined], JSON.stringify(bad));
   assert.deepEqual(refused(await call('cy-cli', 'DELETE', '/freezes/nothing')), [400, 'bad_request', undefined]);
   assert.deepEqual(refused(await call('cy-cli', 'POST', '/freezes', { target: 'credential:00000000-0000-4000-8000-000000000000/stripe', reason: 'x' })), [501, 'not_implemented', undefined]);

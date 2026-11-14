@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { changed } from '../change.ts';
 import { ApiError, badRequest } from '../errors.ts';
 import { route } from '../route.ts';
+import { wellFormed } from './members.ts';
 
 /**
  * Freezes (docs/design/workload-access.md, section 8.2): every workload's
@@ -34,7 +35,7 @@ export const freezeRoutes = {
    *   → { "target": "token:api-prod", "frozenAt": "2026-11-14T09:12:03.000Z" }
    */
   ...route('POST /freezes', {
-    input: z.object({ target: z.string().max(400), reason: z.string().trim().min(1).max(400) }).strict(),
+    input: z.object({ target: z.string().max(400), reason: z.string().trim().min(1).max(400).refine((reason) => !reason.includes('\0') && wellFormed(reason), 'a reason is well-formed text, with no NUL') }).strict(),
     run: async (ctx, { input }) => {
       const target = targetOf(input.target);
       return changed(ctx, { op: 'workload.freeze', target, reason: input.reason }, target);

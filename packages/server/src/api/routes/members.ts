@@ -32,7 +32,7 @@ function memberOf(raw: string): string {
 }
 
 /** Whether text holds no half of a surrogate pair, which Postgres refuses: `encodeURIComponent` throws on one. */
-function wellFormed(text: string): boolean {
+export function wellFormed(text: string): boolean {
   try {
     encodeURIComponent(text);
     return true;
