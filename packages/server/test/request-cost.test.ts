@@ -49,10 +49,14 @@ const acme: SigninProvider = {
 
 const KUBE = 'https://kubernetes.acme.example';
 const POD = { sub: 'system:serviceaccount:ci:runner' };
-/** What a cluster publishes: its discovery document, which a binding's making asks, and no keys, which a binding here carries. */
+/** The key the cluster publishes, the same every round, which an exchange fetches for a binding that carries none. */
+const published = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+const jwksOf = (pair: typeof published) => ({ keys: [{ ...pair.publicKey.export({ format: 'jwk' }), kid: 'pod', alg: 'ES256', use: 'sig' }] });
+/** What a cluster publishes: its discovery document, which a binding's making asks, and its keys. */
 const transport: WorkloadTransport = {
   async json(url) {
     if (url.href === `${KUBE}/.well-known/openid-configuration`) return { issuer: KUBE, jwks_uri: `${KUBE}/openid/v1/jwks` };
+    if (url.href === `${KUBE}/openid/v1/jwks`) return jwksOf(published);
     throw FetchRefused.answered(url, 404);
   },
 };
@@ -139,14 +143,14 @@ let personal = '';
 let serviceToken = '';
 let handle = '';
 let bound = '';
-/** The cluster's key, a new one each round, which its binding's re-keying carries. */
+/** The key a binding's re-keying carries, a new one each round. */
 let cluster = generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
-/** A pod's ID token from the cluster, for ci, signed by the round's key. */
-function podToken(): string {
+/** A pod's ID token from the cluster, for ci, signed by `key`. */
+function podToken(key = cluster): string {
   const now = Math.floor(Date.now() / 1000);
   const input = `${b64({ alg: 'ES256', kid: 'pod', typ: 'JWT' })}.${b64({ iss: KUBE, ...POD, aud: PUBLIC_URL, iat: now - 10, exp: now + 290, jti: randomUUID() })}`;
-  return `${input}.${sign('sha256', Buffer.from(input), { key: cluster.privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`;
+  return `${input}.${sign('sha256', Buffer.from(input), { key: key.privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`;
 }
 
 /** A route's budget: the vault's calls, by name, and the app's statements, a transaction one. */
@@ -313,17 +317,22 @@ const requests: Record<string, Entry> = {
   'POST /handles': { request: () => take<{ id: string }>(api('ada-cli', 'POST', '/handles', { label: 'run', paths: ['market/dev'] }), (body) => (handle = body.id)), calls: ['change'], statements: 0 },
   'DELETE /handles/:id': { request: () => api('ada-cli', 'DELETE', `/handles/${handle}`), calls: ['change'], statements: 0 },
   // A service account's trust bindings. Making one is weighed as the change first, `caller` and one statement, before its
-  // issuer is asked where its keys are; its re-keying carries the round's key, under which a CI run's exchange is verified:
-  // one statement, which bindings to verify under, and one change.
+  // issuer is asked where its keys are. A CI run's exchange is one statement, which bindings to verify under, and one
+  // change: under the keys its issuer publishes, fetched, then under those the binding's re-keying carries.
   'POST /members/:member/bindings': {
     request: () => take<{ binding: { id: string } }>(api('bo-cli', 'POST', `/members/${ci}/bindings`, { profile: 'custom', issuer: KUBE, claims: POD, scope: { 'market/dev': 'viewer' } }), (body) => (bound = body.binding.id)),
     calls: ['caller', 'change'], statements: 1,
   },
   'GET /members/:member/bindings': { request: () => api('bo-cli', 'GET', `/members/${ci}/bindings`), calls: ['caller'], statements: 1 },
+  'GET /members/:member/bindings, by the service itself': { request: () => api('ci-token', 'GET', `/members/${ci}/bindings`), calls: ['caller'], statements: 1 },
+  'POST /api/auth/oidc, its keys fetched': {
+    request: () => app.request('/api/auth/oidc', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: ci, token: podToken(published) }) }),
+    calls: ['change'], statements: 1, fixed: true,
+  },
   'POST /members/:member/bindings/keys': {
     request: () => {
       cluster = generateKeyPairSync('ec', { namedCurve: 'P-256' });
-      const jwks = { keys: [{ ...cluster.publicKey.export({ format: 'jwk' }), kid: 'pod', alg: 'ES256', use: 'sig' }] };
+      const jwks = jwksOf(cluster);
       return take<{ bindings: { id: string }[] }>(api('bo-cli', 'POST', `/members/${ci}/bindings/keys`, { issuer: KUBE, jwks }), (body) => (bound = body.bindings[0]!.id));
     },
     calls: ['change'], statements: 0,
