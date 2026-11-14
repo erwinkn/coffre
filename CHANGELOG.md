@@ -55,6 +55,13 @@
   typecheck until the line goes. `auditChainKey` stays, as the key the
   sign-in state and Access sessions are sealed under.
 
+- **A proxied use's entry says where the value went again.** As in 0.14.7,
+  it names the host and whether the request left through the deployment's
+  egress, and one key sent through two credentials or to two hosts within
+  the minute is two entries. `UseInput.upstream` is `{ credential, host?,
+  egress?: true }`, no longer the credential's name alone. A presigned
+  URL's method, path and expiry are no longer logged: an entry stands for a
+  minute of the credential's uses, and says only what holds for all of them.
 - **The vault is told of workloads too.** It decides each CI run's
   sign-in now, on its own configuration: a deployment that trusts
   workloads adds `workloads: {}` to `vault(env => …)` in
