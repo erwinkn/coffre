@@ -10,20 +10,17 @@
  * its own handling of Cloudflare Access redirects. A request that never
  * reaches the instance throws `Unreachable`, which says why.
  */
-import type { Api, AuthInfo, BindingPlan, BindingView, DeletionResult, DryRunOutcome, DryRunResult, InheritResult, KeysPlan, RoleImpact, SetResult, TokenPlan } from './api.ts';
+import type { Api, AuthInfo, DeletionResult, DryRunOutcome, DryRunResult, RoleImpact, SetResult } from './api.ts';
 import { Unreachable } from './reach.ts';
 
 export type {
   AccessValue,
   Api,
-  ApprovalView,
   AuditEntryView,
   AuthInfo,
   AuthorizationView,
-  BindingPlan,
   BindingView,
   ConnectedApp,
-  Decision,
   Deletion,
   DeletionResult,
   DismissedKey,
@@ -33,7 +30,6 @@ export type {
   IdentityRow,
   ImpactLine,
   InheritResult,
-  KeysPlan,
   ListedReference,
   Me,
   Member,
@@ -51,9 +47,7 @@ export type {
   SecretVersion,
   SessionRow,
   SetResult,
-  TokenPlan,
   TokenRow,
-  WorkloadIds,
 } from './api.ts';
 
 export { ageInDays, olderThan } from './age.ts';
@@ -264,10 +258,10 @@ export function createClient(options: ClientOptions) {
         call('PATCH /secrets/:project/:environment/:key', place(path), patch),
       /**
        * In a fork, a key back to its parent's value (`true`), its own kept,
-       * or its own served again (`false`); `from` holds the parent's.
+       * or its own served again (`false`); the answer says which, `inherit`.
        */
       inherit: (path: string, inherit: boolean) =>
-        call('PATCH /secrets/:project/:environment/:key', place(path), { inherit }) as Promise<InheritResult>,
+        call('PATCH /secrets/:project/:environment/:key', place(path), { inherit }),
     },
 
     /**
@@ -300,10 +294,10 @@ export function createClient(options: ClientOptions) {
      */
     tokens: {
       list: (member: string) => call('GET /members/:member/tokens', { member }),
-      /** What the token would reach, as the server would issue it now; issues nothing. */
+      /** What the token would reach, as the server would issue it now; issues nothing. Not served in 0.16 yet: a 501. */
       preview: (member: string, input: RouteInput<'POST /members/:member/tokens'>) => {
         const [method, route] = address('POST /members/:member/tokens', { member });
-        return send(method, `${route}?dryRun=1`, input) as Promise<TokenPlan>;
+        return send(method, `${route}?dryRun=1`, input) as Promise<Exclude<RouteOutput<'POST /members/:member/tokens'>, { token: string }>>;
       },
       /** The value is in the answer, and only there. */
       issue: (member: string, input: RouteInput<'POST /members/:member/tokens'>) =>
@@ -325,21 +319,21 @@ export function createClient(options: ClientOptions) {
     /** Trust bindings: which CI runs may sign in as a service, by their platform's ID token. */
     bindings: {
       list: (member: string) => call('GET /members/:member/bindings', { member }),
-      /** The binding as it would be saved, the keys its issuer names, and what it replaces; writes nothing. */
+      /** The binding as it would be saved, the keys its issuer names, and what it replaces; writes nothing. Not served in 0.16 yet: a 501. */
       preview: (member: string, input: RouteInput<'POST /members/:member/bindings'>) => {
         const [method, route] = address('POST /members/:member/bindings', { member });
-        return send(method, `${route}?dryRun=1`, input) as Promise<BindingPlan>;
+        return send(method, `${route}?dryRun=1`, input) as Promise<Exclude<RouteOutput<'POST /members/:member/bindings'>, { binding: unknown }>>;
       },
       create: (member: string, input: RouteInput<'POST /members/:member/bindings'>) =>
-        call('POST /members/:member/bindings', { member }, input) as Promise<{ binding: BindingView; replaced: string[] }>,
-      /** The service's bindings on an issuer that new keys would replace, and the keys as checked; writes nothing. */
+        call('POST /members/:member/bindings', { member }, input),
+      /** The service's bindings on an issuer that new keys would replace, and the keys as checked; writes nothing. Not served in 0.16 yet: a 501. */
       previewKeys: (member: string, input: RouteInput<'POST /members/:member/bindings/keys'>) => {
         const [method, route] = address('POST /members/:member/bindings/keys', { member });
-        return send(method, `${route}?dryRun=1`, input) as Promise<KeysPlan>;
+        return send(method, `${route}?dryRun=1`, input) as Promise<Exclude<RouteOutput<'POST /members/:member/bindings/keys'>, { bindings: unknown }>>;
       },
       /** New keys, uploaded, for every binding of the service on the issuer: each replaced by one the same but for them. */
       replaceKeys: (member: string, input: RouteInput<'POST /members/:member/bindings/keys'>) =>
-        call('POST /members/:member/bindings/keys', { member }, input) as Promise<{ bindings: BindingView[]; replaced: string[] }>,
+        call('POST /members/:member/bindings/keys', { member }, input),
       remove: (member: string, id: string) => call('DELETE /members/:member/bindings/:id', { member, id }),
       /** A GitHub repository's or GitLab project's IDs, which bindings name: a public one's, or one the deployment's GitHub App is installed on. */
       lookup: (input: RouteInput<'GET /workloads/lookup'>) => call('GET /workloads/lookup', {}, input),
@@ -458,33 +452,8 @@ export function createClient(options: ClientOptions) {
 
     audit: {
       list: (query: RouteInput<'GET /audit'> = {}) => call('GET /audit', {}, query),
-      /**
-       * Whether the log holds, from the newest checkpoint; or, with `from`, a
-       * stretch of the walk from the first entry: `start`, then each `next`
-       * until it is null (`verifyWhole`).
-       */
-      verify: (query: RouteInput<'GET /audit/verification'> = {}) => call('GET /audit/verification', {}, query),
-      /**
-       * The walk from the first entry to the head, a stretch a request, each
-       * as long as the server walks in one: the first stretch that fails, or
-       * the last. `onStretch` sees each verdict as it comes.
-       */
-      verifyWhole: async (onStretch: (verdict: RouteOutput<'GET /audit/verification'>) => void = () => {}) => {
-        for (let from = 'start'; ;) {
-          const verdict: RouteOutput<'GET /audit/verification'> = await call('GET /audit/verification', {}, { from });
-          onStretch(verdict);
-          if (!verdict.ok || verdict.next === undefined || verdict.next === null) return verdict;
-          from = verdict.next;
-        }
-      },
       /** What an escrowed key is checked against: public material, for admins and owners of the whole instance. */
       keys: () => call('GET /audit/keys', {}),
-      /**
-       * Accept that entries `from` to `to` are lost for good, as an Owner of
-       * the whole instance: the audit watch's finding, inside the range, stays
-       * in the log, and its anchor goes on past them.
-       */
-      acceptLoss: (range: RouteInput<'POST /audit/loss'>) => call('POST /audit/loss', {}, range),
     },
   };
 }

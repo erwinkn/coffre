@@ -9,15 +9,15 @@ import { useAction } from '../lib/use-action';
 import { secretKeyProblem } from '../lib/validation';
 import { ArrowRight } from './icons';
 import { Card } from './page';
-import { ConfirmDialog, ErrorLine, Modal, Notice, Timestamp } from './ui';
+import { ConfirmDialog, ErrorLine, Modal, Notice } from './ui';
 
 /**
  * References: a secret read live through another (docs/design/environments.md).
  * The vault makes and checks each one; these only show them.
  */
 
-/** Why a reference does not read, in a few words; null while it does. */
-export function referenceProblem(state: ReferenceView['state']): string | null {
+/** Why a reference does not read, in a few words; null while it does. A member's report also names one whose holder has a value of its own again, `replaced`. */
+export function referenceProblem(state: ReferenceView['state'] | 'replaced'): string | null {
   switch (state) {
     case 'live':
       return null;
@@ -84,8 +84,7 @@ export function LentReferences({ references, onBreak }: { references: ListedRefe
       {references.map((reference) => (
         <li key={reference.id}>
           <span>
-            Read through <SecretPath path={reference.holder} open={false} />, made by {reference.createdBy.replace(/^user:/, '')}{' '}
-            <Timestamp iso={reference.createdAt} display="relative" />
+            Read through <SecretPath path={reference.holder} open={false} />
             {reference.readers !== null && (
               <span className="cell-muted">
                 {' '}
@@ -223,12 +222,7 @@ export function ReferencesInto({ project }: { project: string }) {
               <tr key={reference.id}>
                 <td className="mono" data-label="Secret">{reference.source}</td>
                 <td data-label="Read through">
-                  <span className="cell-stack">
-                    <span className="mono">{reference.holder}</span>
-                    <small className="cell-muted">
-                      Made by {reference.createdBy.replace(/^user:/, '')} <Timestamp iso={reference.createdAt} display="relative" />
-                    </small>
-                  </span>
+                  <span className="mono">{reference.holder}</span>
                 </td>
                 <td data-label="Readers">
                   {reference.readers === null

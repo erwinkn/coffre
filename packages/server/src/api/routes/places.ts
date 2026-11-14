@@ -59,6 +59,9 @@ const lists = (who: Called, place: ReturnType<typeof placeOf>) => can(who, 'secr
 
 type Environment = PlaceRow['environments'][number];
 
+/** A project made, as 0.14 answered it: `created` always, since one that is there is refused, and never archived. */
+type ProjectMade = { project: { slug: string; name: string; archivedAt: string | null }; created: boolean };
+
 /**
  * An environment made, as 0.14 answered it: `created` always, since one
  * that is there is refused. `forked` says what a fork made: whether it
@@ -184,7 +187,7 @@ export const placeRoutes = {
    */
   ...route('PUT /projects/:project', {
     input: z.object({ name: displayName.optional() }),
-    run: async (ctx, { params }) => {
+    run: async (ctx, { params }): Promise<ProjectMade> => {
       await changed(ctx, { op: 'project.create', project: params.project }, params.project);
       return { project: { slug: params.project, name: params.project, archivedAt: null }, created: true };
     },

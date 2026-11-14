@@ -5,6 +5,7 @@ import { environmentPath, folderName, personalOf, rowId, secretKey, slug } from 
 import type { KeyWrite, SecretWrite } from '@coffre/core/vault';
 import { z } from 'zod';
 
+import type { Nature } from '../../db/queries/secrets.ts';
 import { changed } from '../change.ts';
 import type { ApiContext } from '../context.ts';
 import { badRequest, refusal } from '../errors.ts';
@@ -110,6 +111,12 @@ const canonical = ({ recipe, pair }: Generation): Generation => ({ recipe: forma
 /** What a merge patch would do to a key: the answer to `?dryRun=1`, as 0.14's. */
 export type DryRunOutcome = 'added' | 'changed' | 'unchanged' | 'archived';
 export type DryRunResult = { dryRun: true; keys: Record<string, DryRunOutcome> };
+
+/** A merge patch written, as 0.14 answered it: each key's version and sensitivity as written, a reference's source, or archived. */
+export type SetResult = {
+  operationId: string | null;
+  keys: Record<string, { version: number; sensitivity: Nature } | { archived: true } | { reference: string }>;
+};
 
 /** Whether two values are the same, in a time that says nothing of where they differ. */
 const same = (a: string, b: string) => timingSafeEqual(createHash('sha256').update(a).digest(), createHash('sha256').update(b).digest());
@@ -242,7 +249,7 @@ export const secretRoutes = {
       .refine((patch) => Object.keys(patch).length > 0, 'name at least one key'),
     // `?dryRun=1` weighs the write and makes none. Any other query is refused, not ignored: a mistyped flag must not write.
     query: z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict(),
-    run: async (ctx, { params, input, query }) => {
+    run: async (ctx, { params, input, query }): Promise<SetResult | DryRunResult> => {
       const { environment, mine } = environmentOf(params.environment);
       if (mine && Object.values(input).some((written) => typeof written === 'object' && written !== null && 'ref' in written)) {
         throw badRequest(`${params.project}/${params.environment} is your personal config, which holds values only: make the reference in ${params.project}/${environment}`);

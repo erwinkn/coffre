@@ -13,6 +13,7 @@ import type { ApiError } from '../src/api/errors.ts';
 // The router before its table: the table's modules import it back (mcp/tools.ts), so the table loads through it.
 import '../src/api/router.ts';
 import { routes } from '../src/api/routes.ts';
+import { IDENTITIES_LISTED, SESSIONS_LISTED } from '../src/db/queries/signin.ts';
 import { openApp } from './app-fixture.ts';
 
 const app = await openApp();
@@ -94,6 +95,7 @@ test("a person's live sessions, the one last used first, the request's own marke
   const sessions = body.sessions as Record<string, unknown>[];
   // The request's own was used just now; those never used go by when they were made.
   assert.deepEqual(sessions.map((session) => session.id), [ids.cli2, ids.browser, ids.cli]);
+  assert.equal(body.more, false);
   assert.deepEqual(sessions[1], {
     id: ids.browser, kind: 'browser', label: 'bo-browser', hint: 'coffre_brw_…b001', provider: 'github',
     createdAt: day(5).toISOString(), expiresAt: '2027-01-01T00:00:00.000Z', lastUsedAt: day(9).toISOString(), lastUsedIp: '192.0.2.7', current: false,
@@ -112,9 +114,33 @@ test("a person's linked accounts, the oldest first: one `caller` and one stateme
     { id: ids.github, provider: 'github', email: 'bo@acme.example', createdAt: day(2).toISOString(), lastSignInAt: day(9).toISOString() },
     { id: ids.acme, provider: 'acme', email: null, createdAt: day(3).toISOString(), lastSignInAt: null },
   ]);
+  assert.equal(body.more, false);
   // Cy's own, and nothing of Bo's.
   const [, hers] = await call('cy-cli', '/identities');
   assert.deepEqual((hers.identities as { id: string }[]).map((account) => account.id), [ids.cys]);
+});
+
+test('a person who signs in from a script lists their 200 sessions last used, and 50 oldest accounts, and is told there are more: still one statement', async () => {
+  // Bo's three live sessions were used on days 7 to 9, and his two accounts made on days 2 and 3: these come after both.
+  const scripts = Array.from({ length: SESSIONS_LISTED }, (_, n) => credential(`bo-script-${n}`, bo, { generation: 1, createdAt: new Date(Date.UTC(2026, 9, 1, 0, n)) }));
+  await write(
+    world,
+    ...rows('identities', ...Array.from({ length: IDENTITIES_LISTED }, (_, n) => identity(bo, { generation: 1, provider: 'acme', createdAt: new Date(Date.UTC(2026, 10, 4, 0, n)) }))),
+    ...rows('credentials', ...scripts),
+  );
+  // The statement reads one row past the cap, never all of them.
+  const read = app.sent.rows;
+  const [[, sessions], , sessionStatements] = await cost(() => call('bo-cli', '/sessions'));
+  const listed = sessions.sessions as { id: string; current: boolean }[];
+  assert.deepEqual([listed.length, sessions.more, sessionStatements, app.sent.rows - read], [SESSIONS_LISTED, true, 1, SESSIONS_LISTED + 1]);
+  // The request's own, used just now, then the two used last, then the scripts' newest first: the three made first are past the cap.
+  assert.deepEqual(listed.map((session) => session.id), [ids.cli, ids.browser, ids.cli2, ...scripts.slice(3).reverse().map((row) => row.id)]);
+  assert.ok(listed[0]!.current);
+  const readBefore = app.sent.rows;
+  const [[, accounts], , accountStatements] = await cost(() => call('bo-cli', '/identities'));
+  const linked = accounts.identities as { id: string }[];
+  assert.deepEqual([linked.length, accounts.more, accountStatements, app.sent.rows - readBefore], [IDENTITIES_LISTED, true, 1, IDENTITIES_LISTED + 1]);
+  assert.deepEqual(linked.slice(0, 2).map((account) => account.id), [ids.github, ids.acme]);
 });
 
 test('an unlinked account, and the sessions it opened, are gone from both lists', async () => {

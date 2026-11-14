@@ -43,7 +43,7 @@ export function getCalls({ places, secrets, members, services }: Subjects): GetC
     'GET /members/:member/tokens': services.map((member) => ({ params: { member } })),
     'GET /members/:member/bindings': services.map((member) => ({ params: { member } })),
     'GET /members/:member/bindings/:id/enrollments': services.map((member) => ({ params: { member, id: '00000000-0000-4000-8000-000000000000' } })),
-    'GET /workloads/lookup': [{ params: {}, input: { github: 'acme/api' } }],
+    'GET /workloads/lookup': [{ params: {} }],
     'GET /workloads/repositories': [{ params: {} }],
     'GET /freezes': [{ params: {} }],
     'GET /roles': [{ params: {} }],
@@ -55,7 +55,6 @@ export function getCalls({ places, secrets, members, services }: Subjects): GetC
     'GET /approvals/:id': [{ params: { id: '00000000-0000-4000-8000-000000000000' } }],
     'GET /apps': [{ params: {} }],
     'GET /audit': [{ params: {}, input: { limit: 500 } }, { params: {}, input: { limit: 500, detail: '1' } }],
-    'GET /audit/verification': [{ params: {} }],
     'GET /audit/keys': [{ params: {} }],
   };
 }
@@ -139,9 +138,7 @@ const EVERY_ROUTE: { [K in RouteKey]: true } = {
   'GET /apps': true,
   'DELETE /apps/:id': true,
   'GET /audit': true,
-  'GET /audit/verification': true,
   'GET /audit/keys': true,
-  'POST /audit/loss': true,
 };
 
 /**
