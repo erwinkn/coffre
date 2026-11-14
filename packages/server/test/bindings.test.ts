@@ -195,7 +195,7 @@ test('a binding is checked before anything is asked: its profile\'s rules, its k
 test("a preview (`?dryRun=1`) is the binding weighed and not made, as it would be made: whoever may bind, then its issuer asked, then one weigh; nothing written", async () => {
   const [[status, body], calls, statements] = await bind('ada-cli', { label: 'pods', scope: { 'market/dev': 'developer' } }, '?dryRun=1');
   assert.equal(status, 200, JSON.stringify(body));
-  assert.deepEqual(body, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, keys: null, claims: POD, scope: { 'market/dev': 'developer' }, policy: null, replaces: [] });
+  assert.deepEqual(body, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, keys: null, claims: POD, scope: { 'market/dev': 'developer' }, policy: null, withheld: [], replaces: [] });
   assert.deepEqual([calls, statements, fetched], [['caller', 'weigh'], 1, [`${KUBE}/.well-known/openid-configuration`]]);
   assert.deepEqual(((await list('ada-cli'))[0][1] as { bindings: unknown[] }).bindings, [], 'nothing made');
   assert.deepEqual(await pending(), [], 'nothing logged');

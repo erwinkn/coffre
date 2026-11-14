@@ -348,7 +348,7 @@ export type Api = {
           [key: string]: "*" | string[];
         };
       };
-      withheld?: string[];
+      withheld: string[];
       replaces: {
         id: string;
         why: "asked" | "keys_moved";
@@ -418,6 +418,7 @@ export type Api = {
       scope: {
         [key: string]: string;
       };
+      withheld?: string[];
     } | {
       scope: {
         [key: string]: string;
@@ -444,6 +445,7 @@ export type Api = {
       scope: {
         [key: string]: string;
       };
+      withheld?: string[];
     };
   };
   "DELETE /handles/:id": {
@@ -1778,7 +1780,7 @@ export type BindingPlan = {
       [key: string]: "*" | string[];
     };
   };
-  withheld?: string[];
+  withheld: string[];
   replaces: {
     id: string;
     why: "asked" | "keys_moved";
