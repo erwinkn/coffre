@@ -72,6 +72,11 @@
   egress?: true }`, no longer the credential's name alone. A presigned
   URL's method, path and expiry are no longer logged: an entry stands for a
   minute of the credential's uses, and says only what holds for all of them.
+- **Re-keying's preview is served again.** `POST
+  /members/:member/bindings/keys?dryRun=1` (`coffre trust … --replace-keys`
+  without `--apply`) answers 0.14.7's `KeysPlan`: the keys as checked, the
+  bindings on the issuer they would replace, and the places whose sensitive
+  values the new bindings would withhold. It was 501.
 - **The vault is told of workloads too.** It decides each CI run's
   sign-in now, on its own configuration: a deployment that trusts
   workloads adds `workloads: {}` to `vault(env => …)` in

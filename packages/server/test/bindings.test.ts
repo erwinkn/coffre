@@ -204,9 +204,6 @@ test("a preview (`?dryRun=1`) is the binding weighed and not made, as it would b
   fetched.length = 0;
   const [answer, refusedCalls, refusedStatements] = await bind('bo-cli', {}, '?dryRun=1');
   assert.deepEqual([refused(answer), refusedCalls, refusedStatements, fetched], [[403, 'vault_refused', 'no_access'], ['caller'], 1, []]);
-  // The keys' preview is not served yet.
-  const [keysAnswer] = await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: KUBE, jwks: { keys: [] } }));
-  assert.equal(keysAnswer[0], 501);
 });
 
 test("a preview says what the binding replaces: those asked, and those on its issuer under keys other than discovery found, not those under the same", async () => {
@@ -286,6 +283,29 @@ test("an issuer's bindings re-keyed: each replaced by one the same but for its k
   // The same keys again, and an issuer with no binding.
   assert.deepEqual(refused((await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys`, { issuer: KUBE, jwks })))[0]), [409, 'conflict', 'same_keys']);
   assert.deepEqual(refused((await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys`, { issuer: 'https://other.acme.example', jwks })))[0]), [404, 'not_found', 'unknown_binding']);
+});
+
+test("re-keying's preview (`?dryRun=1`) is the same change weighed, one call: the keys as checked, the bindings it replaces, and what it withholds; nothing made", async () => {
+  const [[, first]] = await bind('ada-cli', { scope: { 'market/dev': 'developer' } });
+  const was = (first as { binding: { id: string } }).binding.id;
+  const { publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const jwks = { keys: [{ ...publicKey.export({ format: 'jwk' }), kid: 'k2', alg: 'ES256', use: 'sig' }] };
+  const logged = (await pending()).length;
+  const [[status, body], calls, statements] = await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: KUBE, jwks }));
+  assert.equal(status, 200, JSON.stringify(body));
+  // Where the keys it carries are: their digest, as the bindings made would name them.
+  const { jwksUri, ...rest } = body as { jwksUri: string };
+  assert.match(jwksUri, /^sha256:[0-9a-f]{64}$/);
+  assert.deepEqual(rest, { issuer: KUBE, keys: [{ kid: 'k2', alg: 'ES256', thumbprint: (rest as { keys: { thumbprint: string }[] }).keys[0]!.thumbprint }], replaces: [was], withheld: [] });
+  assert.deepEqual([calls, statements], [['weigh'], 0]);
+  assert.deepEqual([(await pending()).length, ((await list('ada-cli'))[0][1] as { bindings: { id: string }[] }).bindings.map((row) => row.id)], [logged, [was]], 'nothing made, nothing logged');
+  // Refused as re-keying is: by whoever does not manage the service, on an issuer with no binding, with keys they carry already.
+  assert.deepEqual(refused((await cost(() => call('bo-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: KUBE, jwks })))[0]), [403, 'vault_refused', 'no_access']);
+  assert.deepEqual(refused((await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: 'https://other.acme.example', jwks })))[0]), [404, 'not_found', 'unknown_binding']);
+  // Made, the bindings name the keys where the preview said.
+  await call('ada-cli', 'POST', `/members/${ci}/bindings/keys`, { issuer: KUBE, jwks });
+  assert.deepEqual(((await list('ada-cli'))[0][1] as { bindings: { jwksUri: string }[] }).bindings.map((row) => row.jwksUri), [jwksUri]);
+  assert.deepEqual(refused((await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: KUBE, jwks })))[0]), [409, 'conflict', 'same_keys']);
 });
 
 test('removing a binding is one change; one not live is not found, and whoever does not manage the service is refused', async () => {
