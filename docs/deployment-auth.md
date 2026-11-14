@@ -172,7 +172,7 @@ signed in behind Access:
 $ coffre login https://secrets.acme.example
 coffre: https://secrets.acme.example is behind Cloudflare Access, where coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x
 $ coffre login https://secrets.acme.example --access-client-id 1b2c….access
-coffre: Behind Cloudflare Access coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x
+coffre: Behind Cloudflare Access, coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x
 ```
 
 The first asks only `GET /api/auth`, and starts no `cloudflared`; the

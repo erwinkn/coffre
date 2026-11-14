@@ -49,7 +49,7 @@ export function signInError(message: string): string {
  * from browsers alone, and answers a CLI's or a machine's credential 401.
  */
 export function browsersOnly(origin?: string): string {
-  const where = origin === undefined ? 'Behind Cloudflare Access' : `${origin} is behind Cloudflare Access, where`;
+  const where = origin === undefined ? 'Behind Cloudflare Access,' : `${origin} is behind Cloudflare Access, where`;
   return `${where} coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x`;
 }
 

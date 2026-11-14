@@ -118,7 +118,7 @@ test("--url picks another saved instance; 0.14's session behind Cloudflare Acces
     message: `${THEIRS} is behind Cloudflare Access, where coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x`,
   });
   assert.equal(browsersOnly(THEIRS), `${THEIRS} is behind Cloudflare Access, where coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x`);
-  assert.equal(browsersOnly(), 'Behind Cloudflare Access coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x');
+  assert.equal(browsersOnly(), 'Behind Cloudflare Access, coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x');
 });
 
 test('a CI run signs in with `coffre login`, and its session is used as a person’s is', () => {
@@ -127,6 +127,9 @@ test('a CI run signs in with `coffre login`, and its session is used as a person
   // 0.14's Access service token, saved: read, so that it is refused as Access's, never sent.
   const access = parseStore(JSON.stringify({ version: 2, current: THEIRS, instances: { [THEIRS]: { mode: 'cloudflare', kind: 'access', clientId: 'id.access', clientSecret: 'shh', obtainedAt: '2026-09-26T00:00:00Z' } } }));
   assert.throws(() => resolveTarget({}, access, null, NOW), { message: browsersOnly(THEIRS) });
+  // Its kind alone says Access's, whatever mode a hand-edited file gives it: never sent as a bearer token.
+  const relabelled = parseStore(JSON.stringify({ version: 2, current: THEIRS, instances: { [THEIRS]: { mode: 'signin', kind: 'access', token: 'shh', obtainedAt: '2026-09-26T00:00:00Z' } } }));
+  assert.throws(() => resolveTarget({}, relabelled, null, NOW), { message: browsersOnly(THEIRS) });
   // A run's credential lasts five minutes, and says how to get another.
   const run = withSession(emptyStore(), OURS, {
     mode: 'signin',

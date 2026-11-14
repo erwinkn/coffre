@@ -449,7 +449,7 @@ test('behind Cloudflare Access, the CLI says in a sentence that 0.16.0 signs peo
   for (const args of [['--auth-mode', 'cloudflare', 'login', origin], ['login', origin, '--access-client-id', 'id.access']]) {
     const run = await cli(home, args, 'shh\n');
     assert.equal(run.status, 1, args.join(' '));
-    assert.equal(run.stderr, `coffre: Behind Cloudflare Access ${sentence}\n`, args.join(' '));
+    assert.equal(run.stderr, `coffre: Behind Cloudflare Access, ${sentence}\n`, args.join(' '));
     assert.ok(!run.stdout.includes('secret') && !run.stderr.includes('secret'), 'no secret asked for');
   }
   assert.deepEqual(seen, ['GET /api/auth'], 'nothing sent');
