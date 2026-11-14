@@ -273,8 +273,63 @@ test("a person's grants set in one change and no statement, each place by path, 
   assert.deepEqual(refused(await call('cy-cli', 'PATCH', `/access/${ci}`, { market: 'viewer' })), [501, 'not_implemented', undefined]);
 });
 
+test('a member put is one change and no statement: admitted, brought back or given a role, as their row calls for', async () => {
+  const put = (label: string, member: string, body: unknown) => cost(() => call(label, 'PUT', `/members/${member}`, body));
+  const everywhere = { projects: 'all', environments: 'all' };
+  const nobody = 'user:new@acme.example';
+
+  // No row: admitted, as member when no role is asked.
+  const [[status, body], calls, statements] = await put('cy-cli', 'user:New@Acme.example', {});
+  assert.deepEqual([status, body, calls, statements], [200, { member: nobody, instanceRole: 'member', scope: everywhere, created: true }, ['change'], 0]);
+  // Active, a role and a scope set, by slug; asked again, nothing moves.
+  const admin = { role: 'admin', scope: { projects: { only: ['market', 'billing', 'market'] } } };
+  const scoped = { projects: { only: ['billing', 'market'] }, environments: 'all' };
+  assert.deepEqual((await put('cy-cli', nobody, admin)).slice(0, 3), [[200, { member: nobody, instanceRole: 'admin', scope: scoped, created: false }], ['change'], 0]);
+  assert.deepEqual((await put('cy-cli', nobody, admin))[0][1], { member: nobody, instanceRole: 'admin', scope: scoped, created: false });
+  // No role keeps theirs: its scope names projects by id, which one statement words.
+  assert.deepEqual((await put('cy-cli', nobody, {})).slice(0, 3), [[200, { member: nobody, instanceRole: 'admin', scope: scoped, created: false }], ['change'], 1]);
+  assert.deepEqual((await put('cy-cli', dee, {})).slice(0, 3), [[200, { member: dee, instanceRole: 'developer', scope: everywhere, created: false }], ['change'], 0]);
+  // A role with no scope is everywhere; one with an environments' filter alone names no project.
+  assert.deepEqual((await put('cy-cli', ada, { role: 'auditor' }))[0][1], { member: ada, instanceRole: 'auditor', scope: everywhere, created: false });
+  assert.deepEqual((await put('cy-cli', ada, { role: 'developer', scope: { environments: { except: ['prod'] } } }))[0][1], { member: ada, instanceRole: 'developer', scope: { projects: 'all', environments: { except: ['prod'] } }, created: false });
+  assert.deepEqual((await put('cy-cli', ada, {}))[0].slice(0, 2), [200, { member: ada, instanceRole: 'developer', scope: { projects: 'all', environments: { except: ['prod'] } }, created: false }]);
+  // Removed: brought back, as asked, with none of the grants they held before.
+  assert.deepEqual((await call('cy-cli', 'DELETE', `/members/${ed}`))[0], 200);
+  assert.deepEqual((await put('cy-cli', ed, { role: 'developer' }))[0], [200, { member: ed, instanceRole: 'developer', scope: everywhere, created: true }]);
+  assert.deepEqual((await call('cy-cli', 'GET', `/members/${ed}/access`))[1].grants, []);
+  assert.deepEqual((await put('cy-cli', rex, {}))[0], [200, { member: rex, instanceRole: 'member', scope: everywhere, created: true }]);
+  // A service account is put as a member, and holds no instance role.
+  assert.deepEqual((await put('cy-cli', ci, {}))[0][1], { member: ci, instanceRole: 'member', scope: everywhere, created: false });
+  assert.deepEqual((await put('cy-cli', 'token:deploy', {}))[0][1], { member: 'token:deploy', instanceRole: 'member', scope: everywhere, created: true });
+  const [[serviceStatus, serviceBody]] = await put('cy-cli', ci, { role: 'admin' });
+  assert.deepEqual([serviceStatus, serviceBody.reason, serviceBody.message], [409, 'invalid', `${ci}: a service account holds project grants only, never an instance role`]);
+
+  // The vault refuses: whoever does not run the instance, an Admin scoped to market included; an Admin who makes an Owner, or changes their own role; a
+  // project that is not there; the last Owner; a token, whatever its scope.
+  assert.deepEqual(refused((await put('bo-cli', 'user:other@acme.example', {}))[0]), NO_ACCESS);
+  assert.deepEqual(refused((await put('al-cli', gus, { role: 'developer', scope: { projects: { only: ['market'] } } }))[0]), NO_ACCESS);
+  assert.deepEqual((await put('cy-cli', dee, { role: 'admin' }))[0][0], 200);
+  assert.deepEqual(refused((await put('dee-cli', gus, { role: 'owner' }))[0]), NO_ACCESS);
+  assert.deepEqual(refused((await put('dee-cli', dee, { role: 'developer' }))[0]), NO_ACCESS);
+  assert.deepEqual((await put('dee-cli', gus, { role: 'developer', scope: { projects: { only: ['market'] } } }))[0][1], { member: gus, instanceRole: 'developer', scope: { projects: { only: ['market'] }, environments: 'all' }, created: false });
+  assert.deepEqual(refused((await put('cy-cli', gus, { role: 'admin', scope: { projects: { only: ['nope'] } } }))[0]), NO_ACCESS);
+  assert.deepEqual(refused((await put('cy-cli', cy, { role: 'admin' }))[0]), [409, 'conflict', 'last_owner']);
+  assert.deepEqual(refused((await put('cy-token', ed, { role: 'admin' }))[0]), NO_ACCESS);
+
+  // What the app tells before any call; a service account made with its grants waits on who manages one (D239).
+  const before = app.calls.length;
+  const bads: [string, unknown][] = [
+    [gus, { scope: { projects: 'all' } }], [gus, { role: 'member', scope: { projects: 'all' } }], [gus, { role: 'boss' }], [gus, { role: 'admin', scope: { projects: { only: ['Market'] } } }],
+    [gus, { role: 'admin', extra: 1 }], [gus, { access: { market: 'viewer' } }], [ci, { access: { market: 'viewer' }, role: 'member' }], [ci, { access: {} }],
+  ];
+  for (const [member, bad] of bads) assert.deepEqual(refused(await call('cy-cli', 'PUT', `/members/${member}`, bad)), [400, 'bad_request', undefined], JSON.stringify(bad));
+  assert.deepEqual(refused(await call('cy-cli', 'PUT', '/members/user:a%20b', {})), [400, 'bad_request', undefined]);
+  assert.equal(app.calls.length, before);
+  assert.deepEqual(refused(await call('cy-cli', 'PUT', `/members/${ci}`, { access: { market: 'viewer' } })), [501, 'not_implemented', undefined]);
+});
+
 test('what is not served yet answers 501', async () => {
-  for (const [method, path] of [['GET', `/members/${ada}`], ['PUT', `/members/${gus}`], ['GET', '/roles'], ['PUT', '/settings'], ['GET', `/members/${ci}/tokens`], ['POST', `/members/${ci}/bindings`]] as const) {
+  for (const [method, path] of [['GET', `/members/${ada}`], ['GET', '/roles'], ['PUT', '/settings'], ['GET', `/members/${ci}/tokens`], ['POST', `/members/${ci}/bindings`]] as const) {
     assert.deepEqual(refused(await call('cy-cli', method, path, method === 'GET' ? undefined : {})), [501, 'not_implemented', undefined], `${method} ${path}`);
   }
 });

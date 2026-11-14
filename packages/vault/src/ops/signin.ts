@@ -5,6 +5,7 @@ import {
   assignableToEnvironment,
   definitionOf,
   delegable,
+  DEVICE_TTL_SECONDS,
   heldColumns,
   holds as holdsAt,
   isScope,
@@ -20,6 +21,7 @@ import {
   ROLES,
   runsInstance,
   scopeDefinition,
+  USER_CODE,
   type Holdings,
   type Permission,
   type Place,
@@ -29,16 +31,17 @@ import {
   type ScopeGrant,
   type ServiceAccount,
 } from '@coffre/core/access';
-import type { Account, AccountLink, AccountUnlink, Answers, Asked, CredentialEnd, Presented, SigninChanges, TokenCreate } from '@coffre/core/vault';
-import { credentials, environments, grants, identities, policy, principals, projects, roles } from '@coffre/db/schema';
+import type { Account, AccountLink, AccountUnlink, Answers, Asked, CredentialEnd, DeviceDecide, Presented, SigninChanges, TokenCreate } from '@coffre/core/vault';
+import { credentials, deviceLogins, environments, grants, identities, policy, principals, projects, roles } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, refusedTo, type Asking } from '../caller.ts';
-import { amended, part, put, type Operation, type Parts, type Refusal, type Seen, type Unsealed, type Write } from '../change.ts';
+import { amended, part, put, WRITE_MS, type Operation, type Parts, type Refusal, type Seen, type Unsealed, type Write } from '../change.ts';
 import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
 import { HASH, presented, text, traced } from './input.ts';
+import { definitionsOf, held, manages, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
 
 /** A provider's id, as the table's own check has it (`identities_provider_check`). */
 const PROVIDER = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -200,121 +203,8 @@ function asking(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, vault:
   return caller;
 }
 
-/**
- * On a session: a credential with a scope holds nothing of the instance's
- * own, and what it did here (end another credential, link or unlink an
- * account, make a token) would outlive it or reach past it. Only a person
- * has a session: a service account's credentials always have a scope.
- */
-const onSession = (caller: Asking) => caller.holds.credentialScope == null;
-
-/** What the caller holds, but for an instance role whose row was not read: a role with no row is no role. */
-const held = ({ holds }: Asking) => (Object.hasOwn(holds.policy.instanceRoles, holds.role) ? holds : { ...holds, role: 'member' as const });
-
-/** Whether the caller runs the instance (`runsInstance`). */
-const runs = (caller: Asking) => runsInstance(held(caller));
-
 /** The entry's fields a change a caller asks gives the same way. */
-const by = (caller: Asking, shown: Shown) => ({ actor: caller.principal, credential: caller.credential.id, request: shown.request, ip: shown.ip });
-
-/** `member` if it names a service account, else null. */
-const serviceNamed = (member: string | null) => (member?.startsWith('token:') === true ? member : null);
-
-/** The projects a service account's grants are on, as SQL for `callerParts`: what the caller holds there says whether they manage it. */
-function projectsOf(member: string | null) {
-  const service = serviceNamed(member);
-  return service === null ? NO_PROJECT : sql`(SELECT coalesce(g.project_id, e.project_id) FROM grants g LEFT JOIN environments e ON e.id = g.environment_id WHERE g.principal = ${service})`;
-}
-
-/**
- * What says who manages a service account (`managesService`): its row, its
- * grants, the places they are on and the roles they name, and the
- * instance's setting of where people set service accounts up. Nothing for
- * a member that is none.
- */
-function serviceParts(member: string | null) {
-  const service = serviceNamed(member);
-  const of = (where: (id: string) => ReturnType<typeof sql>) => (service === null ? sql`false` : where(service));
-  return {
-    account: part(principals, of((id) => sql`${principals.id} = ${id}`)),
-    held: part(grants, of((id) => sql`${grants.principal} = ${id}`)),
-    heldIn: part(projects, of((id) => sql`${projects.id} IN (SELECT g.project_id FROM grants g WHERE g.principal = ${id})`)),
-    heldAt: part(environments, of((id) => sql`${environments.id} IN (SELECT g.environment_id FROM grants g WHERE g.principal = ${id})`)),
-    // The roles its grants name: what the caller must hold of each is the role's row, and a role with no row is no role.
-    heldAs: part(roles, of((id) => sql`NOT ${roles.instance} AND ${roles.id} IN (SELECT g.role FROM grants g WHERE g.principal = ${id})`)),
-    // Every environment of the projects it holds something in, whatever its row says: the caller's read takes those that say they are protected, and one whose flag was edited behind the vault would leave it unseen.
-    beside: part(environments, service === null ? sql`false` : sql`${environments.projectId} IN ${projectsOf(service)}`),
-    setting: part(policy, service === null ? sql`false` : sql`${policy.onlyRow}`),
-  };
-}
-
-type ServiceSeen = Seen<ReturnType<typeof serviceParts>>;
-
-/**
- * A service account as `managesService` weighs it, from the rows read: its
- * live grants, each on a place that is there (one on a deleted place
- * reaches nothing, and is left out, as 0.14 left it out), and who admitted
- * it last, as 0.14 said it (`status_changed_by`). Null for one that is not
- * an active service account, or with a grant on a place the read did not
- * find: a row missing makes it no one's to manage but whoever runs the
- * instance.
- */
-function serviceOf(seen: ServiceSeen, member: string, at: number): ServiceAccount | null {
-  const row = seen.account.find((other) => other.id === member);
-  if (row === undefined || row.status !== 'active') return null;
-  const held: { role: string; place: Place }[] = [];
-  for (const grant of seen.held) {
-    if (grant.generation !== row.generation || (grant.expiresAt !== null && grant.expiresAt.getTime() <= at)) continue;
-    if (grant.environmentId !== null) {
-      const there = seen.heldAt.find((environment) => environment.id === grant.environmentId);
-      if (there === undefined) return null;
-      if (!there.slug.includes('~')) held.push({ role: grant.role, place: { projectId: there.projectId, environmentId: there.id, environmentSlug: there.slug } });
-    } else {
-      const there = seen.heldIn.find((project) => project.id === grant.projectId);
-      if (there === undefined) return null;
-      if (!there.slug.includes('~')) held.push({ role: grant.role, place: { projectId: there.id } });
-    }
-  }
-  return { grants: held, admittedBy: row.statusChangedBy };
-}
-
-/** The instance's setting of where people set service accounts up, from its row: none without the row, or with one that does not read as a scope. */
-function settingOf(seen: ServiceSeen): Scope | null {
-  const [row] = seen.setting;
-  if (row === undefined) return null;
-  try {
-    const setting: unknown = JSON.parse(row.serviceAccounts);
-    return isScope(setting) ? setting : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Whether the caller, on a session, manages the service account `member`:
- * whoever runs the instance; else a person who holds everything it holds,
- * where the instance's setting lets people set service accounts up, or who
- * admitted it while it holds nothing (`managesService`). `tampered` when
- * that would rest on a row written behind the vault: a grant of the
- * service's is one less it holds, and an environment of its projects may
- * be protected, where the caller holds less. Either would let them manage
- * it more easily. A row deleted for the decision is not found this way (see
- * `credentialEnd`).
- */
-function manages(caller: Asking, seen: ServiceSeen, unsealed: Unsealed<ReturnType<typeof serviceParts> & ReturnType<typeof callerParts>>, member: string, at: number): boolean | 'tampered' {
-  if (runs(caller)) return true;
-  // A credential with a scope manages no service, as 0.14.7 gave a non-person no setting (`serviceSettingFor`): a
-  // service's token that holds `grant.manage` would make another's tokens, or a new one of its own past its revocation.
-  if (!onSession(caller)) return false;
-  if (unsealed.held + unsealed.places + unsealed.beside > 0) return 'tampered';
-  const account = serviceOf(seen, member, at);
-  const setting = settingOf(seen);
-  if (account === null || setting === null) return false;
-  // What its grants' roles hold, from their rows, beside the caller's own.
-  const holds = held(caller);
-  const named = Object.fromEntries(seen.heldAs.filter((row) => !row.instance).map((row): [string, RoleDefinition] => [row.id, { name: row.name, description: row.description, permissions: row.permissions as Permission[], protected: row.protected as Permission[] }]));
-  return managesService({ ...holds, policy: { ...holds.policy, roles: { ...named, ...holds.policy.roles } } }, setting, caller.principal, account);
-}
+export const by = (caller: Asking, shown: Shown) => ({ actor: caller.principal, credential: caller.credential.id, request: shown.request, ip: shown.ip });
 
 /**
  * End a credential (`CredentialEnd`): one row written, revoked. What it
@@ -488,14 +378,14 @@ const SERVICE_MINUTES = 366 * 24 * 60;
 /** Where a fork inherits from, three deep, as a use reads it (use.ts). */
 const MAX_PARENTS = 3;
 /** A place's slug as one is made (`SLUG` in places.ts): a tombstone's `~` names none. */
-const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
+export const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
 /** An environment a handle stands in for, by path: `market/dev`, or `market/dev@me` for its person's personal config of it. */
 const HANDLE_PATH = /^([a-z0-9][a-z0-9-]{0,62})\/([a-z0-9][a-z0-9-]{0,62})(@me)?$/;
 /** Each kind's prefix, which its hint starts with (`tokenHint` in @coffre/core/identity). */
 const PREFIX = { personal: 'coffre_pat_', handle: 'coffre_use_', service: 'coffre_svc_' } as const;
 
 /** A label as 0.14.7 took one, printed in lists and terminals: trimmed, 1 to 120 characters, no control character. */
-const labelled = (value: unknown): value is string => text(value) && value.length <= 120 && value !== '' && value === value.trim() && !/\p{Cc}/u.test(value);
+export const labelled = (value: unknown): value is string => text(value) && value.length <= 120 && value !== '' && value === value.trim() && !/\p{Cc}/u.test(value);
 
 /** What a handle reads and uses, and no more: it writes nothing (0.14.7's `HANDLE_HOLDS`). */
 const HANDLE_HOLDS: RoleDefinition = { name: 'Handle', description: 'Read and use, as its person does.', permissions: ['secret.read', 'secret.use'], protected: ['secret.read', 'secret.use'] };
@@ -508,10 +398,10 @@ const HANDLE_HOLDS: RoleDefinition = { name: 'Handle', description: 'Read and us
 const HANDLE_ROLES: Policy['roles'] = { viewer: HANDLE_HOLDS, contributor: HANDLE_HOLDS };
 
 /** A place asked, by slug, with the role asked there. */
-type Wanted = { project: string; environment: string | null; role: string };
+export type Wanted = { project: string; environment: string | null; role: string };
 
 /** A scope as the app names it, `{ "market/dev": "viewer" }`, copied: 1 to 1,000 places, each a project or one of its environments by slug, and a role's id. */
-function scopeAsked(value: unknown): Wanted[] | undefined {
+export function scopeAsked(value: unknown): Wanted[] | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const entries = Object.entries(value as Record<string, unknown>);
   if (entries.length === 0 || entries.length > MAX_SCOPE_PLACES) return undefined;
@@ -533,7 +423,7 @@ function pathsAsked(value: unknown): { project: string; environment: string; per
 }
 
 /** A grant of a scope, and the place it is on as the caller names it. */
-type Issued = { grant: ScopeGrant; path: string };
+export type Issued = { grant: ScopeGrant; path: string };
 
 /**
  * A scope as the credential's row seals it, which a use reads
@@ -541,7 +431,7 @@ type Issued = { grant: ScopeGrant; path: string };
  * it holds, and, a service's, whether it reads the sensitive values there.
  * 0.14.7's `storedScope`.
  */
-function sealedScope(issued: readonly Issued[]): ScopeGrant[] {
+export function sealedScope(issued: readonly Issued[]): ScopeGrant[] {
   const key = (grant: ScopeGrant) => `${grant.projectId}/${grant.environmentId ?? ''}`;
   return issued
     .map(({ grant }) => grant)
@@ -551,10 +441,6 @@ function sealedScope(issued: readonly Issued[]): ScopeGrant[] {
       return { projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role, permissions: { normal: [...permissions], protected: [...guarded] }, ...(grant.sensitive === undefined ? {} : { sensitive: grant.sensitive }) };
     });
 }
-
-/** The roles of a project's grants a read found, by id: a role with no row is no role. */
-const definitionsOf = (rows: readonly Row<typeof roles>[]) =>
-  Object.fromEntries(rows.filter((row) => !row.instance).map((row): [string, RoleDefinition] => [row.id, { name: row.name, description: row.description, permissions: row.permissions as Permission[], protected: row.protected as Permission[] }]));
 
 /**
  * Make a token (`TokenCreate`): one row written, the credential, its scope
@@ -779,5 +665,199 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
   };
 }
 
+/** The longest a CLI's session lasts, whatever the app asks: the most a deployment's `cliSessionDays` says. */
+const CLI_MINUTES = 365 * 24 * 60;
+
+/**
+ * The instance's one row, which the vault's adoption of the database
+ * writes. A change nobody asks reads it, as a sign-in does: on a database
+ * not adopted yet it would begin the log, and the adoption would never run.
+ */
+const instancePart = () => part(policy, sql`${policy.onlyRow}`);
+
+/** `adopting` before the adoption, `tampered` for an instance's row that is not the vault's; else nothing. */
+const adopted = (rows: readonly unknown[], unsealed: number): Refusal | undefined => (rows.length === 0 ? { refused: unsealed > 0 ? 'tampered' : 'adopting' } : undefined);
+
+/**
+ * A CLI asks to be signed in from a browser (`DeviceStart`): one row
+ * written, the device login, with both codes the app drew. Nobody asks it,
+ * and nothing it reads decides access: a row that holds either code, there
+ * or written behind the vault, is refused alike, since the table's unique
+ * keys would refuse the write too; a row deleted for the decision lets the
+ * one write through. How many wait at once is the app's to count, before
+ * it asks (docs/design/0.16.md, "A cap on strangers is the app's").
+ */
+function deviceStart(input: Asked<'device.start'>): Operation<Parts, Answers['device.start']> {
+  const from = traced(input);
+  const { code, userCode, label } = input;
+  if (!text(code) || !HASH.test(code) || !text(userCode) || !USER_CODE.test(userCode) || !(label === null || labelled(label))) {
+    throw new TypeError("a device login starts with its device code's SHA-256, a user code of eight letters, BCDF-GHJK, and the CLI's label or none");
+  }
+  // Drawn here: a decision draws nothing.
+  const id = randomUUID();
+  const read = {
+    // Either code held: one row at most by each unique key.
+    taken: part(deviceLogins, sql`${deviceLogins.deviceCodeHash} = decode(${code}, 'hex') OR ${deviceLogins.userCode} = ${userCode}`),
+    instance: instancePart(),
+  };
+  return {
+    read,
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+      const before = adopted(seen.instance, unsealed.instance);
+      if (before !== undefined) return before;
+      if (seen.taken.length > 0 || unsealed.taken > 0) return { refused: 'taken' };
+      const now = new Date(at);
+      const expiresAt = new Date(at + DEVICE_TTL_SECONDS * 1000);
+      return {
+        writes: [put(deviceLogins, {
+          id, deviceCodeHash: Buffer.from(code, 'hex'), userCode, clientLabel: label, clientIp: from.ip, createdAt: now, expiresAt,
+          decidedAt: null, decision: null, generation: 0, principal: null, consumedAt: null,
+        })],
+        entry: {
+          // Asked by nobody yet: whoever approves it is named by the next.
+          kept: false,
+          action: 'device.start', actor: null, credential: null, request: from.request, ip: from.ip,
+          objects: [`device_login:${id}`],
+          detail: { deviceLogin: id, userCode, label, expiresAt: expiresAt.toISOString() },
+        },
+        answer: { deviceLogin: id, expiresAt: expiresAt.toISOString() },
+      };
+    },
+  };
+}
+
+/**
+ * A person, on a session of theirs, approves or denies a device login by
+ * its user code (`DeviceDecide`): its row written, decided. Only one that
+ * waits for a decision, before its 10 minutes are up: of two people
+ * deciding at once, the second finds it decided. A row written behind the
+ * vault is refused, `tampered`: what the person approves is what its row
+ * says, and its device code is whoever wrote it.
+ */
+function deviceDecide(input: Presented & DeviceDecide, vault: Deciding): Operation<Parts, Answers['device.decide']> {
+  const shown = presented(input);
+  const { userCode, approve } = input;
+  if (!text(userCode) || !USER_CODE.test(userCode) || typeof approve !== 'boolean') throw new TypeError('a device login is approved or denied by its user code, BCDF-GHJK');
+  const action = approve ? 'device.approve' : 'device.deny';
+  const read = {
+    ...callerParts(shown.token, NO_PROJECT),
+    login: part(deviceLogins, sql`${deviceLogins.userCode} = ${userCode}`),
+  };
+  return {
+    read,
+    denied: refusedTo(action, shown, vault.workloads, { objects: (seen: Seen<typeof read>) => seen.login.map((row) => `device_login:${row.id}`) }),
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+      const caller = asking(seen, shown, vault, at);
+      if ('refused' in caller) return caller;
+      // A person, as themselves, on a session: a token approving one would make a session with all its person holds (0.14.7).
+      if (!onSession(caller)) return { refused: 'no_access' };
+      if (unsealed.login > 0) return { refused: 'tampered' };
+      // Decided only with a write's time left before it expires (`WRITE_MS`): a write that starts by `until` may wait on a lock that long.
+      const row = seen.login.find((other) => other.decidedAt === null && heldUntil(other) > at);
+      if (row === undefined) return { refused: 'unknown_code' };
+      const now = new Date(at);
+      return {
+        writes: [amended(deviceLogins, row, approve
+          ? { decidedAt: now, decision: 'approved', principal: caller.principal, generation: caller.credential.generation }
+          : { decidedAt: now, decision: 'denied' })],
+        // Decided while it waits: a write that would start too late to land within its 10 minutes is decided again, and refused.
+        until: heldUntil(row),
+        entry: {
+          ...by(caller, shown),
+          // Part of a session's coming, which ages out (D231).
+          kept: false,
+          action,
+          objects: [`principal:${caller.principal}`, `credential:${caller.credential.id}`, `device_login:${row.id}`],
+          detail: { deviceLogin: row.id, label: row.clientLabel, clientIp: row.clientIp },
+        },
+        answer: { deviceLogin: row.id },
+      };
+    },
+  };
+}
+
+/**
+ * The last instant a change of a device login may start its write and still
+ * land before the login expires: its expiry, less the time a write is given
+ * (`WRITE_MS`, change.ts), which a row lock may take whole.
+ */
+function heldUntil(login: { expiresAt: Date }): number {
+  return login.expiresAt.getTime() - WRITE_MS;
+}
+
+/**
+ * The CLI collects its session (`DeviceRedeem`): the device login written
+ * consumed, and a CLI session of its approver's, in one statement. Nobody
+ * asks it but whoever holds the device code. Of two collecting at once,
+ * the second finds it consumed.
+ *
+ * Its decision rests on two rows, the device login and its approver's:
+ * either written behind the vault refuses it, `tampered`, since a row that
+ * says someone approved it would become their session. One deleted for
+ * the decision is not there, and only refuses.
+ */
+function deviceRedeem(input: Asked<'device.redeem'>): Operation<Parts, Answers['device.redeem']> {
+  const from = traced(input);
+  const { code, session } = input;
+  if (!text(code) || !HASH.test(code) || !text(session?.token) || !HASH.test(session.token) || !Number.isInteger(session.minutes) || session.minutes < 1 || session.minutes > CLI_MINUTES) {
+    throw new TypeError("a device login is collected by its device code's SHA-256, for a session by its token's SHA-256, of 365 days at most");
+  }
+  // Drawn here: a decision draws nothing.
+  const id = randomUUID();
+  const of = sql`d.device_code_hash = decode(${code}, 'hex')`;
+  const read = {
+    login: part(deviceLogins, sql`${deviceLogins.deviceCodeHash} = decode(${code}, 'hex')`),
+    approver: part(principals, sql`${principals.id} IN (SELECT d.principal FROM device_logins d WHERE ${of})`),
+    instance: instancePart(),
+  };
+  return {
+    read,
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+      const before = adopted(seen.instance, unsealed.instance);
+      if (before !== undefined) return before;
+      if (unsealed.login + unsealed.approver > 0) return { refused: 'tampered' };
+      const [row] = seen.login;
+      // Approved or not, one past its 10 minutes is good for nothing: one the CLI never collected stays no key to a session.
+      // As for a decision, a write's time before it expires is already past it.
+      if (row === undefined || row.consumedAt !== null || heldUntil(row) <= at) return { refused: 'expired' };
+      if (row.decision === null) return { refused: 'pending' };
+      // Approved before its approver was last removed: they were let back in with nothing from before.
+      const who = seen.approver.find((other) => other.id === row.principal);
+      if (row.decision !== 'approved' || who === undefined || who.status !== 'active' || who.generation !== row.generation) return { refused: 'denied' };
+      const now = new Date(at);
+      const expiresAt = new Date(at + session.minutes * 60_000);
+      return {
+        writes: [
+          amended(deviceLogins, row, { consumedAt: now }),
+          put(credentials, {
+            id, kind: 'cli', tokenHash: Buffer.from(session.token, 'hex'), tokenHint: null, previousTokenHash: null, generation: who.generation, principal: who.id, identityId: null,
+            scope: null, places: null, label: row.clientLabel, createdAt: now, createdBy: who.id, expiresAt, lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
+            jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
+          }),
+        ],
+        // Collected while its code is good, the write's own time included.
+        until: heldUntil(row),
+        entry: {
+          // A session's coming ages out with the uses (D231).
+          kept: false,
+          action: 'sign_in', actor: who.id, credential: id, request: from.request, ip: from.ip,
+          objects: [`principal:${who.id}`, `credential:${id}`, `device_login:${row.id}`],
+          detail: { kind: 'cli', deviceLogin: row.id, label: row.clientLabel, clientIp: row.clientIp },
+        },
+        answer: { principal: who.id, credential: id, expiresAt: expiresAt.toISOString() },
+      };
+    },
+  };
+}
+
 /** The changes of sign-in and of credentials (docs/design/0.16.md, "Signing in"). */
-export const signinOperations: Operations<SigninChanges> = { signin, 'credential.end': credentialEnd, 'account.link': accountLink, 'account.unlink': accountUnlink, 'token.create': tokenCreate };
+export const signinOperations: Operations<SigninChanges> = {
+  signin,
+  'credential.end': credentialEnd,
+  'account.link': accountLink,
+  'account.unlink': accountUnlink,
+  'token.create': tokenCreate,
+  'device.start': deviceStart,
+  'device.decide': deviceDecide,
+  'device.redeem': deviceRedeem,
+};

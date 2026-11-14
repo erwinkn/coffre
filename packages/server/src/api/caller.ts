@@ -42,7 +42,7 @@ const SECRET_PERMISSIONS: readonly Permission[] = ['secret.read', 'secret.use', 
  *   on an environment  its environment grant, its project's grant, or their instance role, when its scope takes it in
  *   in a personal config, its values: its owner alone, while they read or use the environment it is a config of
  */
-export function can(who: Called, permission: Permission, place: Place): boolean {
+export function can(who: Pick<Called, 'principal' | 'holds'>, permission: Permission, place: Place): boolean {
   const { holds } = who;
   const held: Holdings & { policy: Policy } =
     place.protected === undefined || place.protected.length === 0 ? holds : { ...holds, policy: { ...holds.policy, protected: [...holds.policy.protected, ...place.protected] } };
