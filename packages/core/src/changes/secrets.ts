@@ -2,7 +2,7 @@
 export type SecretsChanges = SecretWrite | SecretRefile | ReferenceBreak;
 
 export type SecretsAnswers = {
-  /** Each key given a value: the version it is at now, and the nature it was written as. A key made a reference is given none. */
+  /** Each key given a value, written or restored: the version it is at now, and the nature it was written as. A key made a reference is given none. */
   'secret.write': { keys: Record<string, { version: number; nature: Nature }> };
   /** Where the reference read, as its source's rows say: null when the vault does not see them. */
   'reference.break': { source: SecretPath | null };
@@ -25,6 +25,14 @@ export type Nature = 'secret' | 'sensitive' | 'plain';
  *   and both for an archived key brought back: sensitive stays sensitive, and anything else is written a secret, a
  *   plain one's and one inherited from nowhere included. A reference's is
  *   its source's.
+ * - `restore`: the key's next version, the value of that version of its
+ *   own, opened and sealed again by the vault, which never hands it out.
+ *   The value comes back as it was kept, plain, a secret or sensitive, and
+ *   sensitive while the key is, as a write with no nature says (above), or
+ *   while the key's newest value was. Its first date is its source's (the
+ *   member report's). Made by a recipe or in a pair, it comes back as typed:
+ *   Regenerate makes a new value, and it pairs with nothing. Whoever restores
+ *   reads the key there (`secret.read`): the value serves again.
  * - `ref`: the key made a reference to that key, which whoever reads this
  *   environment then reads through it, value and nature, as it changes. Its
  *   own value, if any, is history. The source is a key of a live project and
@@ -41,16 +49,17 @@ export type Nature = 'secret' | 'sensitive' | 'plain';
  * holds.
  */
 export type KeyWrite = { key: string; archived?: boolean; folder?: string | null } & (
-  | { value: string; nature?: Nature; ref?: undefined }
-  | { ref: SecretPath; value?: undefined; nature?: undefined }
-  | { value?: undefined; nature?: undefined; ref?: undefined }
+  | { value: string; nature?: Nature; ref?: undefined; restore?: undefined }
+  | { restore: number; value?: undefined; nature?: undefined; ref?: undefined }
+  | { ref: SecretPath; value?: undefined; nature?: undefined; restore?: undefined }
+  | { value?: undefined; nature?: undefined; ref?: undefined; restore?: undefined }
 );
 
 /**
  * Write keys in one environment, all of them or none. 1 to 2,000 keys,
  * each once and named as a key is (`[A-Za-z_][A-Za-z0-9_]{0,127}`); a value
  * is well-formed text with no NUL, 64 Ki characters at most, and the values
- * of one write 1 MiB of UTF-8 in all; a reference's source named by slugs and its key's name; a folder 1 to 64 UTF-16 units, with no slash or control character
+ * of one write 1 MiB of UTF-8 in all, each version restored counted as the most a value weighs, 192 KiB (so 5 at most), since its size is known only once the vault reads it; a version restored a positive integer; a reference's source named by slugs and its key's name; a folder 1 to 64 UTF-16 units, with no slash or control character
  * and nothing `trim` removes at either end (`folderName`). Past any of these
  * the call is a fault, not a refusal: the app checks them first.
  */

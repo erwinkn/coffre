@@ -320,6 +320,34 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
   assert.deepEqual(app.calls, []);
 });
 
+test('a version restored is one change: the key\'s next version is the old value, as it was kept', async () => {
+  const call = (label: string, path: string, body: unknown) => cost(() => answered(app.request(`/api/secrets/${path}/restore`, as(label, json(body)))));
+  assert.equal((await answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ DATABASE_URL: 'postgres://new' }) }))))[0], 200);
+  const [[status, body], calls, statements] = await call('bo-cli', 'market/prod/DATABASE_URL', { version: 1 });
+  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', key: 'DATABASE_URL', version: 3, sensitivity: 'secret' });
+  world.memory.reads.clear();
+  assert.deepEqual((await reveal('ada-cli', 'market/prod/DATABASE_URL'))[1].values, { DATABASE_URL: 'postgres://märkt' });
+  // A sensitive value comes back sensitive, and says so.
+  assert.deepEqual((await call('bo-cli', 'market/prod/STRIPE_KEY', { version: 1 }))[0][1].sensitivity, 'sensitive');
+  const refused: [string, string, number, number, string][] = [
+    // A viewer writes nothing; a version the key never had, a key not there, and an archived key.
+    ['ada-cli', 'DATABASE_URL', 1, 403, 'no_access'], ['bo-cli', 'DATABASE_URL', 9, 404, 'unknown_version'], ['bo-cli', 'NOPE', 1, 404, 'unknown_key'], ['bo-cli', 'OLD', 1, 409, 'archived'],
+  ];
+  for (const [label, key, version, code, reason] of refused) {
+    const [[got, said]] = await call(label, `market/prod/${key}`, { version });
+    assert.deepEqual([got, said.reason], [code, reason], `${label} ${key} ${version}`);
+  }
+  // What the app refuses by its shape, and what is not served yet: the vault is not asked.
+  app.calls.length = 0;
+  const shapes: [string, unknown, number][] = [
+    ['market/prod@me/DATABASE_URL', { version: 1 }, 501], ['market/prod/DATABASE_URL', {}, 400], ['market/prod/DATABASE_URL', { version: 0 }, 400], ['market/prod/DATABASE_URL', { version: 1.5 }, 400],
+    ['market/prod/DATABASE_URL', { version: '1' }, 400], ['market/prod/DATABASE_URL', { version: 2 ** 31 }, 400], ['market/prod/DATABASE_URL', { version: 1, sensitivity: 'plain' }, 400],
+  ];
+  for (const [path, input, code] of shapes) assert.equal((await call('bo-cli', path, input))[0][0], code, `${path} ${JSON.stringify(input)}`);
+  assert.deepEqual(app.calls, []);
+});
+
 test('a path is a route or it is not: its method, its segments and its body are held before any handler runs', async () => {
   const tried = async (path: string, init: RequestInit = {}) => {
     const response = await app.request(path, as('ada-cli', init));

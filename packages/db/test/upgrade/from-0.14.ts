@@ -84,15 +84,25 @@ const KEK = new LocalKekProvider(Buffer.alloc(32, 7), 'k');
 const SIGNING = deriveLogKey('vault', Buffer.alloc(32, 8));
 const bytes = (value: Buffer) => `'\\x${value.toString('hex')}'`;
 /** A version as 0.14 wrote it, envelope format 1: secrets 101 and 102 are in market/prod, the rest in billing/prod. */
-async function version(n: number, secret: number, number: number, more: { erased?: boolean; plaintext?: string; sensitive?: boolean; recipe?: string; pair?: [id: number, half: string] } = {}): Promise<string> {
+/** Each version's encryption, by its number here: a restore copies its source's. */
+const encrypted = new Map<number, { sealed: ReturnType<typeof encrypt>; dek: Buffer }>();
+/**
+ * A version as 0.14 wrote it, on `T0` and `at` days after, unless it
+ * `restores` another: then as 0.14's restore wrote it, the same ciphertext,
+ * IV and tag, and its data key wrapped again.
+ */
+async function version(n: number, secret: number, number: number, more: { erased?: boolean; plaintext?: string; sensitive?: boolean; recipe?: string; pair?: [id: number, half: string]; at?: number; restores?: number } = {}): Promise<string> {
   const [project, environment] = secret <= 102 ? [1, 11] : [2, 21];
   const ids = { projectId: id(project), environmentId: id(environment), secretId: id(secret) };
-  const dek = freshDek();
-  const sealed = encrypt(Buffer.from(more.plaintext ?? `value ${n}`), ids, dek);
+  const source = more.restores === undefined ? undefined : encrypted.get(more.restores)!;
+  const dek = source?.dek ?? freshDek();
+  const sealed = source?.sealed ?? encrypt(Buffer.from(more.plaintext ?? `value ${n}`), ids, dek);
+  encrypted.set(n, { sealed, dek });
   const wrapped = await KEK.wrap(dek, { ...ids, ...(more.sensitive ? { sensitive: true } : {}) });
   const [ciphertext, key] = more.erased ? [Buffer.alloc(0), Buffer.alloc(0)] : [sealed.ciphertext, wrapped.bytes];
-  return `(${u(n)}, ${u(secret)}, ${number}, 1, ${bytes(ciphertext)}, ${bytes(sealed.iv)}, ${bytes(sealed.authTag)}, ${bytes(key)}, 'local', 'k', '1', '${ADA}', ${text(more.plaintext)}, ${more.sensitive ?? false}, ${text(more.recipe)}, ${more.pair === undefined ? 'NULL, NULL' : `${u(more.pair[0])}, '${more.pair[1]}'`})`;
+  return `(${u(n)}, ${u(secret)}, ${number}, 1, ${bytes(ciphertext)}, ${bytes(sealed.iv)}, ${bytes(sealed.authTag)}, ${bytes(key)}, 'local', 'k', '1', ${stamp(T0 + (more.at ?? 0) * day)}, '${ADA}', ${text(more.plaintext)}, ${more.sensitive ?? false}, ${text(more.recipe)}, ${more.pair === undefined ? 'NULL, NULL' : `${u(more.pair[0])}, '${more.pair[1]}'`})`;
 }
+const stamp = (ms: number) => `to_timestamp(${ms} / 1000.0)`;
 /** An entry 0.14's vault wrote, under its MAC: what the adoption reads of the archive. */
 function vouched(seq: number, action: string, metadata: object): string {
   const fields = { seq: BigInt(seq), author: 'vault' as const, keyId: SIGNING.keyId, occurredAt: T0 + seq * 1000, actor: ADA, action, decision: 'allow', code: null, subjectPrincipal: null, projectId: null, environmentId: null, secretId: null, secretVersionId: null, operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: JSON.stringify(metadata) };
@@ -107,7 +117,7 @@ const API = 'token:api';
 const CI = 'token:ci';
 // Removed twice and brought back: generation 2, which the grant carried over takes.
 const CY = 'user:cy@acme.example';
-// Projects 1 and 2; environments 11 (market/prod), 12 (market/dev), 21 (billing/prod); secrets 101 and 102 in market/prod, 103 to 109 in billing/prod.
+// Projects 1 and 2; environments 11 (market/prod), 12 (market/dev), 21 (billing/prod); secrets 101 and 102 in market/prod, 103 to 110 in billing/prod.
 const SEED = `
   INSERT INTO vault_members (principal, status, owner, role, scope, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES
     ('${ADA}', 'active', true, NULL, NULL, 0, ${T0}, 'system:setup', ${T0}, 'system:setup', 1, ${h(9)}),
@@ -121,8 +131,9 @@ const SEED = `
     (${u(101)}, ${u(1)}, ${u(11)}, 'DATABASE_URL', 1), (${u(102)}, ${u(1)}, ${u(11)}, 'STRIPE_KEY', 2),
     (${u(103)}, ${u(2)}, ${u(21)}, 'DATABASE_URL', 0), (${u(104)}, ${u(2)}, ${u(21)}, 'OLD_REFERENCE', 0), (${u(105)}, ${u(2)}, ${u(21)}, 'FORGED_REFERENCE', 0),
     (${u(106)}, ${u(2)}, ${u(21)}, 'VALUE_THEN_ENDED_REFERENCE', 2), (${u(107)}, ${u(2)}, ${u(21)}, 'VALUE_THEN_REFERENCE', 1),
-    (${u(108)}, ${u(2)}, ${u(21)}, 'ENDED_OVER_UNENDED', 0), (${u(109)}, ${u(2)}, ${u(21)}, 'REFERENCE_THEN_VALUE', 1);
-  INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, plaintext, sensitive, recipe, pair_id, pair_half) VALUES
+    (${u(108)}, ${u(2)}, ${u(21)}, 'ENDED_OVER_UNENDED', 0), (${u(109)}, ${u(2)}, ${u(21)}, 'REFERENCE_THEN_VALUE', 1),
+    (${u(110)}, ${u(2)}, ${u(21)}, 'RESTORED', 4);
+  INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_at, created_by, plaintext, sensitive, recipe, pair_id, pair_half) VALUES
     ${(
       await Promise.all([
         version(1011, 101, 1, { sensitive: true }),
@@ -135,11 +146,17 @@ const SEED = `
         version(1071, 107, 1),
         // A key pair's private half, made by a recipe.
         version(1091, 109, 1, { recipe: 'ecdsa:p-256', pair: [1099, 'private'] }),
+        // Written on days 1 and 2; version 3 restores version 1 on day 3, and version 4 restores version 3 on day 4.
+        version(1101, 110, 1, { at: 1 }),
+        version(1102, 110, 2, { at: 2 }),
+        version(1103, 110, 3, { at: 3, restores: 1101 }),
+        version(1104, 110, 4, { at: 4, restores: 1103 }),
       ])
     ).join(',\n    ')};
   UPDATE secrets SET current_version_id = ${u(1011)} WHERE id = ${u(101)};
   UPDATE secrets SET current_version_id = ${u(1022)} WHERE id = ${u(102)};
   UPDATE secrets SET current_version_id = ${u(1091)} WHERE id = ${u(109)};
+  UPDATE secrets SET current_version_id = ${u(1104)} WHERE id = ${u(110)};
   INSERT INTO dismissed_keys (environment_id, key, dismissed_by) VALUES (${u(12)}, 'STRIPE_KEY', '${ADA}');
   INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, expires_at, granted_at, granted_by) VALUES
     ('${ADA}', ${u(1)}, NULL, NULL, 'maintainer', NULL, ${T0 + 7}, 'system:setup'),
@@ -319,24 +336,33 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
       { key: 'FORGED_REFERENCE', source_id: null, versions: 0, current_version: null },
       { key: 'OLD_REFERENCE', source_id: null, versions: 0, current_version: null },
       { key: 'REFERENCE_THEN_VALUE', source_id: null, versions: 1, current_version: 1 },
+      { key: 'RESTORED', source_id: null, versions: 4, current_version: 4 },
       // Version 2 was replaced by the reference, and the reference ended: no value, and the next version is 3.
       { key: 'VALUE_THEN_ENDED_REFERENCE', source_id: null, versions: 2, current_version: null },
       { key: 'VALUE_THEN_REFERENCE', source_id: id(101), versions: 1, current_version: null },
     ]);
-    assert.equal(await count('secret_versions'), 7);
+    assert.equal(await count('secret_versions'), 11);
     assert.deepEqual(await rows(`SELECT s.key, v.id FROM secrets s JOIN secret_versions v ON v.secret_id = s.id AND v.version = s.current_version ORDER BY s.key, s.id`), [
       { key: 'DATABASE_URL', id: id(1011) },
       { key: 'REFERENCE_THEN_VALUE', id: id(1091) },
+      { key: 'RESTORED', id: id(1104) },
       { key: 'STRIPE_KEY', id: id(1022) },
     ]);
     // How a current value is kept and was made is on its secret's row, as 0.14's version said it, for the adoption to vouch for.
     assert.deepEqual(await rows(`SELECT key, nature, recipe, pair_id, pair_half FROM secrets WHERE nature IS NOT NULL OR recipe IS NOT NULL ORDER BY key`), [
       { key: 'DATABASE_URL', nature: 'sensitive', recipe: null, pair_id: null, pair_half: null },
       { key: 'REFERENCE_THEN_VALUE', nature: 'secret', recipe: 'ecdsa:p-256', pair_id: id(1099), pair_half: 'private' },
+      { key: 'RESTORED', nature: 'secret', recipe: null, pair_id: null, pair_half: null },
       { key: 'STRIPE_KEY', nature: 'plain', recipe: null, pair_id: null, pair_half: null },
     ]);
     // An erased version stays erased: the adoption has nothing of it to encrypt again.
     assert.deepEqual(await rows(`SELECT octet_length(ciphertext) AS ciphertext, octet_length(wrapped_dek) AS wrapped FROM secret_versions WHERE id = ${u(1061)}`), [{ ciphertext: 0, wrapped: 0 }]);
+    // When each value was first written to its key: a restore's is its source's, a restore of a restore's the first,
+    // as 0.14 told them, by their IV and tag; and every other version's its own date.
+    const first = await rows(`SELECT id, first_written_at, created_at FROM secret_versions ORDER BY id`);
+    const of = (n: number) => first.find((row) => row.id === id(n))!;
+    assert.deepEqual([1101, 1102, 1103, 1104].map((n) => ms(of(n).first_written_at)), [T0 + day, T0 + 2 * day, T0 + day, T0 + day]);
+    assert.deepEqual(first.filter((row) => ![1101, 1102, 1103, 1104].some((n) => row.id === id(n))).filter((row) => ms(row.first_written_at) !== ms(row.created_at)), []);
   });
 
   await t.test('freezes: each is a field of the row it stops', async () => {

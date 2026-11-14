@@ -233,6 +233,13 @@ export const secretVersions = pgTable(
     kekVersion: text('kek_version').notNull(),
     createdAt: at('created_at').notNull(),
     createdBy: text('created_by').notNull(),
+    // When its value was first written to its key: the version's own date, or
+    // for a restore its source's, so a restore of a restore keeps the first.
+    // What the member report holds each person's last sight of the key to: Bo
+    // saw it on day 11, version 4 restores version 1, written on day 1, so
+    // Bo knows the value. A copy for the pages, under no MAC, as `plaintext`:
+    // no decision reads it.
+    firstWrittenAt: at('first_written_at').notNull(),
     // The value itself, for a plain one: a key marked not secret, an account's
     // id, which whoever lists the environment sees. Null for a secret. A copy
     // for the pages, under no MAC: a use opens the ciphertext, never this.

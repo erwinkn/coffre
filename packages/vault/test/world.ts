@@ -113,7 +113,7 @@ export async function amend<K extends keyof typeof TABLES>(vault: TestVault, tab
 export function value(_vault: TestVault, of: Fresh<typeof secrets>, text: string, more: { sensitive?: boolean; plain?: boolean } = {}): Fresh<typeof secrets> {
   const version = of.versions + 1;
   values.push({
-    value: { version: { id: randomUUID(), secretId: of.id, version, createdAt: at, createdBy: root, plaintext: more.plain === true ? text : null, sensitive: more.sensitive === true }, text: Buffer.from(text) },
+    value: { version: { id: randomUUID(), secretId: of.id, version, createdAt: at, firstWrittenAt: at, createdBy: root, plaintext: more.plain === true ? text : null, sensitive: more.sensitive === true }, text: Buffer.from(text) },
     environment: of.environmentId,
   });
   return { ...of, versions: version, currentVersion: version, nature: more.sensitive === true ? 'sensitive' : more.plain === true ? 'plain' : 'secret', recipe: null, pairId: null, pairHalf: null };
@@ -129,7 +129,7 @@ export async function rewrite(vault: TestVault, of: { id: string }, text: string
       const { mac: _, ...kept } = was!;
       const version = kept.versions + 1;
       written = { ...kept, versions: version, currentVersion: version, nature: 'secret', recipe: null, pairId: null, pairHalf: null };
-      const row = { id: randomUUID(), secretId: kept.id, version, createdAt: at, createdBy: root, plaintext: null, sensitive: false };
+      const row = { id: randomUUID(), secretId: kept.id, version, createdAt: at, firstWrittenAt: at, createdBy: root, plaintext: null, sensitive: false };
       return { writes: [put(secrets, written, was!)], values: [{ version: row, text: Buffer.from(text) }], entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null };
     },
   });
