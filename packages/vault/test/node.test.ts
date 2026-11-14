@@ -83,6 +83,10 @@ test("the vault's database not answering crosses the socket as the outage it is,
       // A peek crosses as a use does, its outage and its bug told apart the same way.
       const peeked = () => vault.peek(NOBODY).then(() => assert.fail('answered'), (error: unknown) => isUnavailable(error));
       assert.deepEqual([await peeked(), await peeked()], [true, false]);
+      // And so does a change weighed: every call of the contract has its path on the socket.
+      answers.push(failureOf(lock), bugged());
+      const weighed = () => vault.weigh({ ...NOBODY, op: 'secret.write', keys: [] } as never).then(() => assert.fail('answered'), (error: unknown) => isUnavailable(error));
+      assert.deepEqual([await weighed(), await weighed()], [true, false]);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

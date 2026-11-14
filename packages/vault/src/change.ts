@@ -347,8 +347,12 @@ export async function readParts<P extends Parts, B extends string = never>(
 /** What a row is read again by: its MAC, or a version's, which has none, a hash of all of it. */
 const tokenOf = (table: Readable) => ('mac' in table ? sql`encode(${table}.mac, 'hex')` : sql`md5(to_jsonb(${table})::text)`);
 
-/** A change's read and its decision. */
-export async function prepare<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>): Promise<Prepared<A> | (Refusal & { said?: Denied | null })> {
+/**
+ * A change's read and its decision, and what it writes held to what it
+ * read: all of a change that asks nothing of a key service, and writes
+ * nothing.
+ */
+async function decided<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>) {
   const parts = Object.entries(operation.read);
   const { seen, unsealed, named: read, versions: copied, tokens, readAt } = await readParts(vault, operation.read);
   const checked = (operation.check === undefined ? undefined : await operation.check(seen, unsealed)) as C;
@@ -385,8 +389,7 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
     if (row === null) group.deletes.push(toWire(table, was!, shape.key));
     else (was === null ? group.inserts : group.updates).push({ ...toWire(table, row), mac: `\\x${mac!.toString('hex')}` });
   }
-  // What it read and left, by the MAC it carried: the same twice.
-  const { once, used, until } = plan;
+  const { used, until } = plan;
   // The time a decision goes by is a row's, an expiry it read: a decision that read no row has none to hold until.
   if (until !== undefined && !(Number.isFinite(until) && until > at && Number.isFinite(readAt))) throw new Error('a change holds until a time after its decision, by a row it read');
   if (used !== undefined) {
@@ -394,10 +397,20 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
     // Postgres writes a row once in a statement: which of two writes it kept would be anyone's guess.
     if (rows.some((other) => other.row === nameOf(bindings, used))) throw new Error(`a change that writes ${nameOf(bindings, used)} does not move its last use on too`);
   }
+  // What it read and left, by the MAC it carried: the same twice.
   for (const [row, name] of read) {
     const mac = (row as { mac: Buffer }).mac.toString('hex');
     if (!rows.some((other) => other.row === name)) rows.push({ row: name, was: mac, now: mac });
   }
+  return { plan, at, readAt, parts, tokens, read, copied, key, rows, written, refuse };
+}
+
+/** A change's read, its decision and its write, ready to send: its values sealed, and the versions it restores or vouches for opened. */
+export async function prepare<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>): Promise<Prepared<A> | (Refusal & { said?: Denied | null })> {
+  const found = await decided(vault, operation);
+  if ('refused' in found) return found;
+  const { plan, at, readAt, parts, tokens, read, copied, key, rows, written, refuse } = found;
+  const { once, used, until } = plan;
   const versions: Wire[] = [];
   /** A row of `table` as this change leaves it, by its key: the one it writes, or else the one it read. None for a row it drops. */
   const rowOf = <T extends Sealed>(table: T, key: object): Fresh<T> | undefined => {
@@ -576,16 +589,19 @@ export async function change<P extends Parts, A, C = undefined>(vault: Running, 
 
 /**
  * What a change would answer, made now: its read, its check and its
- * decision, its rows sealed and its values opened, all of a change but the
- * write, which is never sent. So nothing is written, no proof spent and no
- * binding used, and a proof spent before is the one refusal it cannot tell.
- * Its answer is as of its read: the change made after it reads and decides
- * again. A refusal is a change's, logged as one (D236), so that weighing is
- * no way to ask what one may do and leave no entry.
+ * decision, with what it writes held to what it read, and then nothing is
+ * sealed or sent. So nothing is written, no proof spent and no binding
+ * used, and no key service is asked anything: a call to one is paired with
+ * an entry (docs/keys.md), and a weighing writes none. Two refusals are
+ * the write's alone, which a weighing cannot tell: a proof spent before
+ * (`replayed`), and a version to restore that does not open
+ * (`unreadable`). Its answer is as of its read: the change made after it
+ * reads and decides again. A refusal is a change's, logged as one (D236),
+ * so that weighing is no way to ask what one may do and leave no entry.
  */
 export async function weigh<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>): Promise<{ answer: A } | Refusal> {
-  const prepared = await prepare(vault, operation);
-  return 'refused' in prepared ? refused(vault, prepared) : { answer: prepared.answer };
+  const found = await decided(vault, operation);
+  return 'refused' in found ? refused(vault, found) : { answer: found.plan.answer };
 }
 
 /** A refusal, once its entry is logged, if it has one. */

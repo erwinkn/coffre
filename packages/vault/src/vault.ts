@@ -1,4 +1,4 @@
-import { PURPOSES, type Answers, type Asked, type Change, type UseInput, type Vault } from '@coffre/core/vault';
+import { PURPOSES, type Answers, type Asked, type Change, type Unasked, type UseInput, type Vault, type WorkloadsUnasked } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
 import type { ResolvedVaultConfig } from './config.ts';
@@ -46,6 +46,9 @@ function asked(input: UseInput): Ask {
   return { ...presented(input), project, environment, mine, keys: keys as string[] | null, purpose, upstream };
 }
 
+/** The changes nobody asks, by name: each rests on a proof, which a weighing would try and not spend. */
+const UNASKED: Record<Unasked | WorkloadsUnasked, true> = { signin: true, 'device.start': true, 'device.redeem': true, 'token.exchange': true, 'workload.signin': true };
+
 /**
  * What every operation is given of the vault's configuration, past its
  * input: what it takes of workloads, and the people it names Owners
@@ -86,6 +89,7 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
       return change(serving, operation(input));
     },
     async weigh(input) {
+      if (Object.hasOwn(UNASKED, input.op)) throw new TypeError('a change nobody asks is not weighed');
       return weigh(serving, operation(input));
     },
   };
