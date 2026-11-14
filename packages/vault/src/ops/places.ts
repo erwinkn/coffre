@@ -117,10 +117,14 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
       ? sql` OR (${environments.parentId} = (SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${named}) AND ${environments.owner} = ${principal} AND strpos(${environments.slug}, '~') = 0)`
       : sql``}`),
   };
-  /** The project named and the environment it inherits from, as far as they are there: undefined for one that is not, null for no parent asked. */
+  /** The project named, the environment it inherits from and the one already under its slug, as far as they are there: undefined for one that is not, null for no parent asked. */
   const placed = (seen: Seen<typeof read>) => {
     const place = seen.project.find((row) => row.slug === projectSlug && live(row));
-    return { place, parent: place === undefined || parentSlug === null ? null : seen.chain.find((row) => row.projectId === place.id && row.slug === parentSlug && live(row) && row.owner === null) };
+    return {
+      place,
+      parent: place === undefined || parentSlug === null ? null : seen.chain.find((row) => row.projectId === place.id && row.slug === parentSlug && live(row) && row.owner === null),
+      there: place === undefined ? undefined : seen.taken.find((row) => row.projectId === place.id && row.slug === slug && live(row)),
+    };
   };
   return {
     read,
@@ -128,8 +132,8 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
     denied: refusedTo('environment.create', shown, vault.workloads, {
       where: { project: projectSlug, environment: named, ...(mine || parentSlug === null ? {} : { parent: parentSlug }) },
       objects: (seen: Seen<typeof read>) => {
-        const { place, parent } = placed(seen);
-        return [...(place === undefined ? [] : [`project:${place.id}`]), ...(parent == null ? [] : [`environment:${parent.id}`])];
+        const { place, parent, there } = placed(seen);
+        return [...(place === undefined ? [] : [`project:${place.id}`]), ...(there === undefined ? [] : [`environment:${there.id}`]), ...(parent == null ? [] : [`environment:${parent.id}`])];
       },
     }),
     decide(seen: Seen<typeof read>, at: number) {
@@ -310,7 +314,8 @@ function readers(inside: SQL, outside: SQL) {
  * and cannot clear, its source, environment or project not read, stops it
  * all the same: a row not read is never taken to say a reference reads
  * nothing. A reference held where nothing reads, archived or in a personal
- * config, stops nothing; nor one whose source reads nothing already.
+ * config, stops nothing; nor one whose source reads nothing already: a
+ * reference itself, or a key with no value yet (0.14's `source_empty`).
  */
 function stopped(seen: Seen<ReturnType<typeof readers>>, inside: (row: Row<typeof secrets>) => boolean): Row<typeof secrets>[] {
   const reads = (environmentId: string) => {
@@ -322,7 +327,7 @@ function stopped(seen: Seen<ReturnType<typeof readers>>, inside: (row: Row<typeo
     const whose = seen.endProject.find((row) => row.id === holder.projectId);
     if (whose !== undefined && !live(whose)) return false;
     const source = seen.source.find((row) => row.id === holder.sourceId);
-    return source === undefined || (inside(source) && source.archivedAt === null && source.sourceId === null && reads(source.environmentId));
+    return source === undefined || (inside(source) && source.archivedAt === null && source.sourceId === null && source.currentVersion !== null && reads(source.environmentId));
   });
 }
 
@@ -411,7 +416,8 @@ function environmentArchive(input: Op<EnvironmentEdit, 'environment.archive'>, v
     decide({ caller, place, environment, seen, at, entry }) {
       if (!managesEnvironments(caller, place)) return NO_ACCESS;
       if (environment.archivedAt !== null) return { writes: [], entry: entry({ slug: environment.slug }), answer: { id: environment.id } };
-      if (stopped(seen, (row) => row.environmentId === environment.id).length > 0) return { refused: 'referenced' };
+      // In an archived project, nothing is read from it already.
+      if (place.archivedAt === null && stopped(seen, (row) => row.environmentId === environment.id).length > 0) return { refused: 'referenced' };
       const children = seen.child.filter((row) => row.parentId === environment.id && row.projectId === place.id && live(row));
       if (children.some((row) => row.owner === null)) return { refused: 'inherited' };
       const archivedAt = new Date(at);

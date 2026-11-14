@@ -212,6 +212,25 @@ test('a reference that reads nothing now stops no archive: one held in a persona
   const link = secret(prod, 'LINK', { sourceId: other.id });
   await write(world, ...rows('secrets', other, link, secret(there, 'CHAIN', { sourceId: link.id })));
   await answered(edit('ada-cli', 'environment.archive', 'market/prod'));
+  await answered(edit('ada-cli', 'environment.restore', 'market/prod'));
+  // Billing's prod reads prod's EMPTY, a key with no value yet: it reads nothing, as 0.14's `source_empty`.
+  const empty = secret(prod, 'EMPTY');
+  await write(world, ...rows('secrets', empty, secret(there, 'EMPTY', { sourceId: empty.id })));
+  assert.deepEqual(await given(reveal('ada-cli', 'billing/prod', { keys: ['EMPTY'] })), ['unreadable']);
+  await answered(edit('ada-cli', 'environment.archive', 'market/prod'));
+  await answered(edit('ada-cli', 'environment.restore', 'market/prod'));
+  await answered(edit('cy-cli', 'project.archive', 'market'));
+});
+
+test('an environment of an archived project is archived whatever references it: one into an archived project reads nothing', async () => {
+  // Billing archived, then market, which nothing reads then; billing restored, its reference into market reads nothing.
+  await amend(world, 'projects', sql`id = ${billing.id}`, { archivedAt: ARCHIVED });
+  await answered(edit('cy-cli', 'project.archive', 'market'));
+  await amend(world, 'projects', sql`id = ${billing.id}`, { archivedAt: null });
+  assert.notDeepEqual(await given(reveal('ada-cli', 'billing/prod')), ['postgres://prod']);
+  await answered(edit('ada-cli', 'environment.archive', 'market/staging'));
+  await answered(edit('ada-cli', 'environment.archive', 'market/prod'));
+  assert.equal((await environmentRow(prod.id))!.archived, true);
 });
 
 test('a project filed in a folder by whoever manages it, and taken out of it', async () => {

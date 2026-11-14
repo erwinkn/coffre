@@ -169,6 +169,15 @@ test('an environment is made by whoever manages the project\'s environments, in 
     ['environment.create', ada, { project: 'nowhere', ...dev }, []],
     ['environment.create', dee, { project: 'shelved', ...dev }, []],
   ]);
+  // A minute on, Ada is logged again, with the environment there under that slug, so that its page finds it; one archived is not, as a project's.
+  world.tick(60_000);
+  assert.deepEqual(await refused('ada-cli', 'prod'), { refused: 'exists' });
+  world.tick(60_000);
+  assert.deepEqual(await refused('ada-cli', 'old'), { refused: 'exists' });
+  assert.deepEqual((await denied()).slice(5), [
+    ['environment.create', ada, { project: 'market', environment: 'prod', refused: 'exists' }, [`project:${market.id}`, `environment:${prod.id}`]],
+    ['environment.create', ada, { project: 'market', environment: 'old', refused: 'exists' }, [`project:${market.id}`]],
+  ]);
 
   const made = answered(await vault.change(adding('ada-cli', 'dev', { protected: true })));
   assert.deepEqual(await environmentRow(made.id), { slug: 'dev', parent_id: null, owner: null, protected: true, project_id: market.id });
