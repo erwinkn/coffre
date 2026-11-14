@@ -1,3 +1,4 @@
+import type { Peeked } from '@coffre/core/vault';
 import { allows, readsSensitive, useOnly, withinCredential, type Place } from '@coffre/core/access';
 import { open } from '@coffre/core/envelope';
 import { KekUnavailableError } from '@coffre/core/kek';
@@ -333,10 +334,36 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
   }
 
   await touch(vault, caller.credential, ask.ip, at);
-  // Unless a newer read of the same is there already: a slow use does not put its older rows back over it.
-  if (memory.seconds > 0 && !((memory.reads.get(shapeOfAsk(ask))?.at ?? -Infinity) > found.at)) keep(memory.reads, shapeOfAsk(ask), found, at - memory.seconds * 1000);
+  remember(memory, ask, found, at);
   const { workload } = caller;
   return { principal: caller.principal, credential: caller.credential.id, values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
+}
+
+/** A read's rows kept for the memory's length, unless a newer read of the same is there already: a slow use does not put its older rows back over it. */
+function remember(memory: Memory, ask: Ask, found: Read, at: number): void {
+  if (memory.seconds > 0 && !((memory.reads.get(shapeOfAsk(ask))?.at ?? -Infinity) > found.at)) keep(memory.reads, shapeOfAsk(ask), found, at - memory.seconds * 1000);
+}
+
+/**
+ * What a use would be given, as of now, without it: each key's secret and
+ * version, or why it is refused, as `answer` would say (docs/design/0.16.md,
+ * "Pages"). It opens nothing and writes nothing: no log entry, no exposure,
+ * no credential's last use. Its rows are remembered as a use's are, so a
+ * reveal just after reads nothing again. A value whose row says it is
+ * there but does not open is the one thing it cannot tell: the use refuses
+ * it `unreadable`.
+ */
+export async function peek(vault: Serving, ask: Ask): Promise<Peeked | Refusal> {
+  const found = recall(vault, ask) ?? (await read(vault, ask));
+  const at = vault.now();
+  const decided = decide(found.seen, ask, vault.workloads, at);
+  if ('refused' in decided) {
+    vault.memory.reads.delete(shapeOfAsk(ask));
+    return decided;
+  }
+  remember(vault.memory, ask, found, at);
+  const items = decided.items.map((item) => ('refused' in item ? item : { key: item.key, secret: item.held.id, version: item.version.version }));
+  return { principal: decided.caller.principal, credential: decided.caller.credential.id, items };
 }
 
 /** A use: from memory while it is fresh, else one read. */

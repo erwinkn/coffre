@@ -6,7 +6,7 @@ import { sql } from 'drizzle-orm';
 
 import { entryOf, type Entry } from '../src/entry.ts';
 import { Busy } from '../src/change.ts';
-import { memoryOf, recall, read, answer, use, type Ask, type Value } from '../src/use.ts';
+import { memoryOf, peek, recall, read, answer, use, type Ask, type Value } from '../src/use.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
 import { amend, ask, binding, credential, dismissed, environment, grant, identity, instance, principal, project, rewrite, role, rows, secret, session, user, value, write } from './world.ts';
 
@@ -516,4 +516,45 @@ test('a handle reaches what its scope does; an upstream credential frozen in an 
   assert.deepEqual(await got(ask('ada', 'market/staging', ['DATABASE_URL'], { purpose: 'use', upstream: 'stripe' })), { DATABASE_URL: 'postgres://staging' });
   // Nobody is told a credential is frozen in a place they hold nothing in.
   assert.equal(await got(ask('dee', 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: 'stripe' })), 'no_access');
+});
+
+test('a peek is what a use would give, key by key, and writes nothing: no entry, no exposure, no last use; one read, none within the memory', async () => {
+  let statements = 0;
+  const db = new Proxy(vault.db, {
+    get(target, name, receiver) {
+      const member = Reflect.get(target, name, receiver) as unknown;
+      if (name !== 'execute' || typeof member !== 'function') return member;
+      return (...args: unknown[]) => ((statements += 1), (member as (...args: unknown[]) => unknown).apply(target, args));
+    },
+  });
+  const counted = { ...vault, db };
+  const run = { purpose: 'run' };
+  // A whole environment, a fork, a personal config, the sensitive one on an Owner's token, a place Bo holds nothing in, and keys named.
+  const asks = [ask('ada', 'market/prod', null, run), ask('ada', 'market/staging', null, run), ask('ada', 'market/staging', null, { ...run, mine: true }), ask('ci-sensitive', 'market/prod', null, run), ask('bo', 'market/prod', null, run), ask('ada', 'market/prod', ['DATABASE_URL', 'STRIPE_KEY', 'LINK', 'NOPE'])];
+  const peeked = [];
+  for (const asked of asks) {
+    statements = 0;
+    const first = await peek(counted, asked);
+    const cold = statements;
+    const again = await peek(counted, asked);
+    // Remembered as a use's rows are, and forgotten on a refusal: a reveal within the memory reads nothing again.
+    assert.deepEqual([cold, statements - cold, again, recall(vault, asked) !== undefined], [1, 'refused' in first ? 1 : 0, first, !('refused' in first)], JSON.stringify(asked.keys));
+    peeked.push(first);
+  }
+  await untouched();
+  assert.deepEqual(await rowsOf(vault.owner, sql`SELECT label FROM credentials WHERE last_used_at IS NOT NULL`), []);
+
+  // What a use of the same gives, the same key by key: the secret that holds the value, its version, or the same refusal.
+  for (const [i, asked] of asks.entries()) {
+    const used = await use(vault, asked);
+    const seen = 'refused' in used ? used : { principal: used.principal, credential: used.credential, items: used.values.map((item) => ('refused' in item ? item : { key: item.key, secret: item.secret, version: item.version })) };
+    assert.deepEqual(peeked[i], seen, JSON.stringify(asked.keys));
+  }
+  assert.equal((peeked[3] as { items: { key: string }[] }).items.some((item) => item.key === 'STRIPE_KEY' && !('refused' in item)), true);
+  // Refused as of now from what it remembers, it forgets it, as a use does: a credential that expires within the memory.
+  await write(vault, ...rows('credentials', credential('brief', ada, { expiresAt: new Date(vault.now() + 1000) })));
+  const brief = ask('brief', 'market/prod', null, run);
+  assert.ok('items' in (await peek(vault, brief)) && recall(vault, brief) !== undefined);
+  vault.tick(1000);
+  assert.deepEqual([await peek(vault, brief), recall(vault, brief)], [{ refused: 'unauthenticated' }, undefined]);
 });

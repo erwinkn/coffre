@@ -6,6 +6,7 @@ import type { AccessAnswers, AccessChanges } from './changes/access.ts';
 import type { PlacesAnswers, PlacesChanges } from './changes/places.ts';
 import type { SecretsAnswers, SecretsChanges } from './changes/secrets.ts';
 import type { SigninAnswers, SigninChanges, Unasked } from './changes/signin.ts';
+import type { WorkloadAnswers, WorkloadChanges, WorkloadsUnasked } from './changes/workloads.ts';
 import type { BindingPolicy, Constraints } from './identity/index.ts';
 
 export type { CallerKind } from './access.ts';
@@ -36,6 +37,12 @@ export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames
 export interface Vault {
   /** Open values for whoever presented a token: a reveal, `coffre run`, an export, a proxied request, a signature. */
   use(input: UseInput): Promise<Used | Refused>;
+  /**
+   * What `use` would give, as of now, without opening or writing anything:
+   * each key's secret and version, or why it is refused. What a watch
+   * compares before it reads (`GET …/version`).
+   */
+  peek(input: UseInput): Promise<Peeked | Refused>;
   /**
    * Who a request's credential is and all it holds, for the app to scope a
    * page's queries with. Nothing is opened or changed on the answer: a use
@@ -78,7 +85,7 @@ export type Presented = Trace & {
  * request showed, or for one nobody asks (`Unasked`), where it came from
  * alone.
  */
-export type Asked<O extends Change['op']> = O extends Change['op'] ? (O extends Unasked ? Trace : Presented) & Extract<Change, { op: O }> : never;
+export type Asked<O extends Change['op']> = O extends Change['op'] ? (O extends Unasked | WorkloadsUnasked ? Trace : Presented) & Extract<Change, { op: O }> : never;
 
 export type UseInput = Presented & {
   /** The place, by its slugs. */
@@ -116,6 +123,14 @@ export type Used = {
   workload: { binding: string; profile: string; policy: BindingPolicy; constraints: Constraints | null } | null;
 };
 
+/** What a use would give: each key's secret and version, or why it is refused; nothing opened. */
+export type Peeked = {
+  principal: string;
+  /** The credential's id. */
+  credential: string;
+  items: ({ key: string; secret: string; version: number } | { key: string; refused: string })[];
+};
+
 /**
  * Who a request is: its principal, `user:<email>` or `token:<name>`, the
  * credential it came in on, and what it holds, as `allows` in
@@ -140,13 +155,14 @@ export type Refused = { refused: string };
  * Each area's are in a file of its own (`changes/`), with what each
  * answers once it is made.
  */
-export type Change = SecretsChanges | PlacesChanges | AccessChanges | SigninChanges;
-export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers & SigninAnswers;
+export type Change = SecretsChanges | PlacesChanges | AccessChanges | SigninChanges | WorkloadChanges;
+export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers & SigninAnswers & WorkloadAnswers;
 
 export type * from './changes/access.ts';
 export type * from './changes/places.ts';
 export type * from './changes/secrets.ts';
 export type * from './changes/signin.ts';
+export type * from './changes/workloads.ts';
 
 // 0.14's contract, from here on: each type goes with the last of the server's code that names it.
 

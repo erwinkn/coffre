@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { environmentPath, personalOf, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
+import { changed } from '../change.ts';
 import { ApiError, badRequest, refusal } from '../errors.ts';
 import { parsePath } from '../paths.ts';
 import { route } from '../route.ts';
@@ -16,7 +17,7 @@ const VALUE_LENGTH = 64 * 1024;
 const secretValue = z.string().max(VALUE_LENGTH).refine((value) => !value.includes('\0') && Buffer.from(value).toString() === value, 'a value is well-formed text, with no NUL');
 
 /** An environment as a path names it: its slug, and whether it is the caller's personal config of it (`dev@me`). */
-function environmentOf(named: string): { environment: string; mine: boolean } {
+export function environmentOf(named: string): { environment: string; mine: boolean } {
   const of = personalOf(named);
   return of === null ? { environment: named, mine: false } : { environment: of, mine: true };
 }
@@ -35,6 +36,17 @@ export function versionOf(read: readonly { key: string; secret: string; version:
 
 /** What a whole environment's read leaves out and names, and what it leaves out as not there: any other refusal of a key refuses the read. */
 const LEFT_OUT = new Set(['sensitive', 'use_only', 'unknown_key', 'no_value']);
+
+/**
+ * The key that refuses a whole environment's read, or none: past a key's
+ * name, a fork says nothing of what its reader cannot read, so a parent
+ * the caller does not read is told first. The reveal's rule, and the
+ * version's (`GET …/version`).
+ */
+export function stopOf(items: readonly ({ key: string } | { key: string; refused: string })[]): { key: string; refused: string } | undefined {
+  const stops = items.filter((item): item is { key: string; refused: string } => 'refused' in item && !LEFT_OUT.has(item.refused));
+  return stops.find((item) => item.refused === 'parent_unreadable') ?? stops[0];
+}
 
 /**
  * `market/prod` or `market/prod/KEY`, each part as a path's segment is
@@ -87,10 +99,9 @@ export const secretRoutes = {
       const values: Record<string, string> = Object.create(null);
       const read: { key: string; secret: string; version: number }[] = [];
       const left: Record<string, string[]> = { sensitive: [], use_only: [] };
-      const stops = answer.values.filter((item) => 'refused' in item && (one !== undefined || !LEFT_OUT.has(item.refused))) as { key: string; refused: string }[];
-      // Before any other refusal, as 0.14: past a key's name, a fork says nothing of what its reader cannot read.
-      const stop = stops.find((item) => item.refused === 'parent_unreadable') ?? stops[0];
-      if (stop !== undefined) throw refusal(stop.refused, `${named}/${stop.key}`);
+      // One key is refused whole with why; a whole environment, as `stopOf` says.
+      const stop = one === undefined ? stopOf(answer.values) : answer.values.find((item) => 'refused' in item);
+      if (stop !== undefined && 'refused' in stop) throw refusal(stop.refused, `${named}/${stop.key}`);
       for (const item of answer.values) {
         if ('refused' in item) left[item.refused]?.push(item.key);
         else {
@@ -126,11 +137,10 @@ export const secretRoutes = {
       const keys = Object.entries(input).map(([key, written]) => (typeof written === 'string' ? { key, value: written }
         : 'ref' in written ? { key, ref: { project: written.ref.project, environment: written.ref.environment, key: written.ref.key! } }
           : { key, value: written.value, nature: written.sensitivity }));
-      const answer = await ctx.vault.change({ ...ctx.shown, op: 'secret.write', project: params.project, environment, keys });
-      if ('refused' in answer) throw refusal(answer.refused, `${params.project}/${params.environment}`);
+      const answer = await changed(ctx, { op: 'secret.write', project: params.project, environment, keys }, `${params.project}/${params.environment}`);
       const references = keys.flatMap((item) => (item.ref === undefined ? [] : [[item.key, { reference: `${item.ref.project}/${item.ref.environment}/${item.ref.key}` }] as const]));
       // As entries: a key named __proto__ is a key like any other.
-      return { operationId: ctx.shown.request, keys: Object.fromEntries([...Object.entries(answer.answer.keys).map(([key, { version, nature }]) => [key, { version, sensitivity: nature }] as const), ...references]) };
+      return { operationId: ctx.shown.request, keys: Object.fromEntries([...Object.entries(answer.keys).map(([key, { version, nature }]) => [key, { version, sensitivity: nature }] as const), ...references]) };
     },
   }),
 
@@ -147,9 +157,7 @@ export const secretRoutes = {
       const holder = `${params.project}/${params.environment}/${params.key}`;
       // A personal config holds values only.
       if (environmentOf(params.environment).mine) throw refusal('no_reference', holder);
-      const answer = await ctx.vault.change({ ...ctx.shown, op: 'reference.break', project: params.project, environment: params.environment, key: params.key });
-      if ('refused' in answer) throw refusal(answer.refused, holder);
-      const { source } = answer.answer;
+      const { source } = await changed(ctx, { op: 'reference.break', project: params.project, environment: params.environment, key: params.key }, holder);
       return { operationId: ctx.shown.request, reference: { holder, source: source === null ? '(gone)' : `${source.project}/${source.environment}/${source.key}`, state: 'broken' as const } };
     },
   }),
