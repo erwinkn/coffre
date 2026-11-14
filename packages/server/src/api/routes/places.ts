@@ -1,11 +1,11 @@
-import type { Called, EnvironmentEdit, EnvironmentEdited, Forked, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
+import type { Called, EnvironmentEdit, EnvironmentEdited, Forked, PlaceDelete, PlaceDeleted, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
 import { ownsProject, runsInstance, type Permission } from '@coffre/core/access';
 import { displayName, environmentSlug, folderName, personalOf, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { keyCounts, personalConfigs, places, type PlaceRow } from '../../db/queries/places.ts';
 import { can, permissionsAt, placeOf, projectsReached } from '../caller.ts';
-import { changed } from '../change.ts';
+import { changed, weighed } from '../change.ts';
 import { ApiError, badRequest, refusal } from '../errors.ts';
 import { route } from '../route.ts';
 
@@ -28,10 +28,31 @@ function oneChange<T>(asked: (T | null)[], noChange: T): T {
   return changes[0] ?? noChange;
 }
 
-const projectView = (left: ProjectEdited) => ({ slug: left.slug, name: left.slug, archivedAt: left.archivedAt, folder: left.folder });
-const environmentView = (left: EnvironmentEdited) => ({ slug: left.slug, name: left.slug, archivedAt: left.archivedAt, protected: left.protected });
+/** An environment as an edit answers it. */
+export type EnvironmentView = {
+  slug: string;
+  /** @deprecated A place goes by its slug since 0.6.2; kept for older CLIs, which print it. */
+  name: string;
+  archivedAt: string | null;
+  protected: boolean;
+};
 
-const notServed = (what: string) => new ApiError('not_implemented', `${what} is not served yet`);
+const projectView = (left: ProjectEdited) => ({ slug: left.slug, name: left.slug, archivedAt: left.archivedAt, folder: left.folder });
+const environmentView = (left: EnvironmentEdited): EnvironmentView => ({ slug: left.slug, name: left.slug, archivedAt: left.archivedAt, protected: left.protected });
+
+/** What deleting a project or an environment takes, or took (`PlaceDeleted` in @coffre/core). */
+export type Deletion = PlaceDeleted;
+/** A deletion, made or only weighed (`?dryRun=1`). */
+export type DeletionResult = { dryRun: boolean; deletion: Deletion };
+
+/** `?dryRun=1` weighs a deletion and makes none. Any other query is refused, not ignored: a mistyped flag must not delete. */
+const dryRunFlag = z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict();
+
+/** A deletion, one change of the vault's, or weighed and none made. */
+async function deletion(ctx: Parameters<typeof changed>[0], change: PlaceDelete, dryRun: boolean, what: string): Promise<DeletionResult> {
+  return { dryRun, deletion: dryRun ? await weighed(ctx, change, what) : await changed(ctx, change, what) };
+}
+
 
 /** Whether the caller reads or uses values at a place: a role that writes or archives there also reads or uses, so this is who lists its keys. */
 const lists = (who: Called, place: ReturnType<typeof placeOf>) => can(who, 'secret.read', place) || can(who, 'secret.use', place);
@@ -192,6 +213,20 @@ export const placeRoutes = {
   }),
 
   /**
+   * Delete an archived project for good, by an Admin or Owner of the whole
+   * instance (`PlaceDelete` in @coffre/core): every value in it erased,
+   * every grant on it revoked, every reference into it or out of it ended,
+   * and its slug free, in one change. Its rows stay under a tombstone's
+   * slug, names only, for the log. `?dryRun=1` says what it would take,
+   * and changes nothing.
+   */
+  ...route('DELETE /projects/:project', {
+    query: dryRunFlag,
+    run: (ctx, { params, query }): Promise<DeletionResult> =>
+      deletion(ctx, { op: 'project.delete', project: params.project }, query.dryRun !== undefined, params.project),
+  }),
+
+  /**
    * Make an environment, by whoever manages its project's environments; with
    * `from`, a fork of that environment, live, by one who reads it too: with
    * `inherit`, one that inherits from it; otherwise one that holds, made in
@@ -248,6 +283,22 @@ export const placeRoutes = {
         { op: 'environment.update', ...at, slug: environment },
       );
       return { environment: environmentView(await changed(ctx, edit, `${project}/${edit.op === 'environment.update' ? edit.slug : environment}`)) };
+    },
+  }),
+
+  /**
+   * Delete an archived environment for good, with its personal configs, as
+   * a project is: refused while a fork inherits from it. A personal config,
+   * by its owner or whoever manages the project's environments, archived
+   * or not: `dev@me` for the caller's own, or the config's slug, which the
+   * list of personal configs shows. `?dryRun=1` says what it would take.
+   */
+  ...route('DELETE /projects/:project/:environment', {
+    query: dryRunFlag,
+    run: (ctx, { params, query }): Promise<DeletionResult> => {
+      const of = personalOf(params.environment);
+      const change: PlaceDelete = { op: 'environment.delete', project: params.project, environment: of ?? params.environment, mine: of !== null };
+      return deletion(ctx, change, query.dryRun !== undefined, `${params.project}/${params.environment}`);
     },
   }),
 

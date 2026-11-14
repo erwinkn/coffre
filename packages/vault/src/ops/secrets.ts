@@ -12,12 +12,11 @@ import type { Fresh, Row } from '../rows.ts';
 import { natureOf } from '../value.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
-import { KEY, presented, text } from './input.ts';
+import { KEY, MOST_KEYS, presented, text } from './input.ts';
 import { chainOf } from './places.ts';
 
-/** The app's own bounds (its routes'): a value's length in characters, the keys of one write, and a request's body, which every value of a write came in. */
+/** The app's own bounds (its routes'): a value's length in characters, and a request's body, which every value of a write came in; and the keys of one write (`MOST_KEYS`). */
 const VALUE_LENGTH = 64 * 1024;
-const MOST_KEYS = 2000;
 const WRITE_BYTES = 1024 * 1024;
 /** The most a value weighs in UTF-8, 3 bytes a UTF-16 unit: what a version restored counts for, which is read only after the count. */
 const VALUE_BYTES = 3 * VALUE_LENGTH;

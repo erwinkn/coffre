@@ -113,7 +113,11 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   no_folder: ['not_found', 'no key is filed in that folder there'],
   // A fork's key reset to what it inherits, or that undone (routes/secrets.ts).
   not_inherited: ['conflict', 'no environment it inherits from passes that key down: archive it, or bring it back, instead'],
-  inherited: ['conflict', 'a fork inherits from it: archive the fork first'],
+  inherited: ['conflict', 'a fork inherits from it: archive that fork first, or delete it first to delete this one for good'],
+  // A place deleted for good (routes/places.ts), as 0.14.7 answered it.
+  not_archived: ['conflict', 'it is not archived: archive it first, then delete it'],
+  too_many_keys: ['conflict', 'a fork copies 2,000 values at most: make it hold references to them (`references`), or inherit them (`inherit`), instead'],
+  too_large: ['conflict', 'it holds more versions than one deletion erases: delete its environments one at a time first'],
   parent_archived: ['conflict', 'it inherits from an environment that is archived or deleted: restore that first'],
   too_deep: ['conflict', 'that environment already inherits from three: fork one higher up'],
   workload_cannot_issue: ['forbidden', "a workload's session issues no credential and changes no one's access"],

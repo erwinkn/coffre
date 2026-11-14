@@ -563,6 +563,9 @@ test('a decision that writes around its read is a fault, not a change', async ()
   await assert.rejects(change(vault, writing(put(principals, member(bo)), put(principals, member(bo)))), /twice/);
   const read = { found: part(principals, sql`true`) };
   await assert.rejects(change(vault, { read, decide: ({ found: [it] }: Seen<typeof read>) => ({ writes: [put(principals, member(bo), it!)], entry: said('test'), answer: null }) }), /moves its key/);
+  // A place's values are erased only as the decision read it: one it never read may have moved since, or never be the one meant.
+  const elsewhere = { id: randomUUID(), slug: 'gone', name: 'Gone', createdAt: at, archivedAt: at, folder: null } as Row<typeof projects>;
+  await assert.rejects(change(vault, { read: nothing, decide: () => ({ writes: [], erase: { projects: [elsewhere] }, entry: said('test'), answer: null }) }), /erases the values of a place its decision read/);
   // Postgres would store each as another value, a row the vault never sealed: a UUID in small letters, a number as a text.
   const grant = { id: randomUUID(), principal: ada, projectId: randomUUID(), environmentId: null, role: 'viewer', expiresAt: null, grantedAt: at, grantedBy: ada };
   await assert.rejects(change(vault, writing(put(grants, { ...grant, id: grant.id.toUpperCase() }))), /grants\.id: .* is not a uuid as Postgres stores one/);

@@ -1,21 +1,22 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
-import { allows, makesProjects, ownsProject, useOnly } from '@coffre/core/access';
+import { allows, makesProjects, ownsProject, runsInstance, useOnly } from '@coffre/core/access';
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
 import { PROJECT_PAGES } from '@coffre/core/pages';
-import type { Answers, EnvironmentCopy, EnvironmentCreate, EnvironmentEdit, EnvironmentEdited, FolderRefile, Forked, PlacesChanges, Presented, ProjectCreate, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
-import { dismissedKeys, environments, projects, secrets, secretVersions } from '@coffre/db/schema';
+import { tombstoneOf } from '@coffre/core/schemas';
+import type { Answers, EnvironmentCopy, EnvironmentCreate, EnvironmentEdit, EnvironmentEdited, FolderRefile, Forked, PlaceDelete, PlaceDeleted, PlacesChanges, Presented, ProjectCreate, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
+import { dismissedKeys, environments, grants, principals, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { callerParts, live, refusedTo, type Asking } from '../caller.ts';
-import { part, put, type Operation, type Part, type Parts, type Plan, type Refusal, type Seen, type Unsealed, type Value, type Write } from '../change.ts';
+import { amended, drop, part, put, type Operation, type Part, type Parts, type Plan, type Refusal, type Seen, type Unsealed, type Value, type Write } from '../change.ts';
 import type { Said } from '../entry.ts';
 import type { Fresh, Row, Sealed } from '../rows.ts';
 import { natureOf } from '../value.ts';
 import type { Deciding } from '../vault.ts';
 import { asking, NOWHERE } from './asking.ts';
 import type { Operations } from './index.ts';
-import { presented, text } from './input.ts';
+import { MOST_KEYS, presented, text } from './input.ts';
 
 /** A place's slug as one is made: a tombstone's `~` is the vault's alone (`PLACE_SLUG` in @coffre/db/schema). */
 const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -316,6 +317,8 @@ function copied(
     if (where.projectId !== place.id) objects.add(`project:${where.projectId}`);
     if (held !== asked) objects.add(`environment:${where.id}`);
   }
+  // Each value copied is opened and sealed again in this one change: past what a write seals, a fork refers or inherits instead.
+  if (values.length > MOST_KEYS) return { refused: 'too_many_keys' };
   return { writes, values, lines, objects: [...objects], forked };
 }
 
@@ -712,6 +715,207 @@ function freezing(on: boolean) {
   };
 }
 
+/**
+ * The most versions holding a value that one deletion erases. Its write is
+ * one statement, which the change lock and `WRITE_MS` bound; emptying a
+ * version is a row rewritten in place, and this many take well under a
+ * second of it (docs/design/0.16.md, "Deleting a place"). Past it, nothing
+ * is erased: a project's environments are deleted one at a time first.
+ */
+export const MOST_ERASED = 20_000;
+
+/** A personal config as its deletion names it: `dev@ada@acme.example`, its environment's slug and its owner's email or id. */
+const configName = (parent: string, owner: string) => `${parent}@${owner.replace(/^user:/, '')}`;
+
+/**
+ * A place deleted for good (`PlaceDelete`), as 0.14.7's `deletePlace`
+ * did it, in one change where 0.14 took a vault call per member, another
+ * for the references and a transaction: nothing between them to finish
+ * when asked again, nor to re-check. What it reads: the project, its
+ * environments, the grants on them and their members' other grants, the
+ * references into them and out of them with where each end is, and,
+ * beside, how many keys and versions are there. What it writes: the
+ * place's row under its tombstone's slug (and its personal configs'),
+ * each grant dropped, each reference's holder amended to none, and every
+ * version emptied (`Plan.erase`).
+ */
+function placeDelete(input: Presented & PlaceDelete, vault: Deciding): Operation<Parts, PlaceDeleted> {
+  const shown = presented(input);
+  const { op: action, project: projectSlug } = input;
+  const named = input.op === 'environment.delete' ? input.environment : null;
+  const mine = input.op === 'environment.delete' && input.mine;
+  if (!text(projectSlug) || (input.op === 'environment.delete' && (!text(named) || typeof input.mine !== 'boolean'))) {
+    throw new TypeError("a deletion names a project by its slug, or an environment in one by its slug, or the caller's personal config of one");
+  }
+  const project = projectOf(projectSlug);
+  const principal = sql`(SELECT c.principal FROM credentials c WHERE c.token_hash = decode(${shown.token.toString('hex')}, 'hex'))`;
+  /** The environment named, as SQL: for `mine`, the caller's standing config of it. */
+  const environment = named === null
+    ? null
+    : mine
+      ? sql`(SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.owner = ${principal} AND strpos(e.slug, '~') = 0
+          AND e.parent_id = (SELECT p.id FROM environments p WHERE p.project_id = ${project} AND p.slug = ${named}))`
+      : sql`(SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${named})`;
+  /** Where the deletion takes keys, as SQL on a secret `s`: the project's, or the environment's and its standing personal configs'. */
+  const within = environment === null
+    ? sql`s.project_id = ${project}`
+    : sql`s.environment_id IN (SELECT e.id FROM environments e WHERE e.id = ${environment} OR (e.parent_id = ${environment} AND e.owner IS NOT NULL AND strpos(e.slug, '~') = 0))`;
+  /** Where a grant on it is, as SQL on a grant `g`. */
+  const granted = environment === null
+    ? sql`(g.project_id = ${project} OR g.environment_id IN (SELECT e.id FROM environments e WHERE e.project_id = ${project}))`
+    : sql`g.environment_id = ${environment}`;
+  const holders = sql`SELECT s.id FROM secrets s WHERE s.source_id IS NOT NULL AND (${within} OR s.source_id IN (SELECT s.id FROM secrets s WHERE ${within}))`;
+  const ends = sql`SELECT h.id FROM secrets h WHERE h.id IN (${holders}) UNION SELECT h.source_id FROM secrets h WHERE h.id IN (${holders})`;
+  const read = {
+    ...callerParts(shown.token, project),
+    // The project, and its tombstones, whose slugs a new one is not.
+    project: part(projects, sql`${projects.slug} = ${projectSlug} OR strpos(${projects.slug}, ${`${projectSlug}~deleted-`}) = 1`),
+    // Every environment of it: those it takes, a fork that keeps one, and the tombstones a new one's slug is not.
+    places: part(environments, sql`${environments.projectId} = ${project}`),
+    // Each member with a grant on it, and every grant they hold: those it revokes, and whether any is left.
+    grantee: part(principals, sql`${principals.id} IN (SELECT g.principal FROM grants g WHERE ${granted})`),
+    held: part(grants, sql`${grants.principal} IN (SELECT g.principal FROM grants g WHERE ${granted})`),
+    // Each reference held in it, or reading a value in it, and its source, with the environments and projects at both ends.
+    end: part(secrets, sql`${secrets.id} IN (${ends})`),
+    endPlace: part(environments, sql`${environments.id} IN (SELECT s.environment_id FROM secrets s WHERE s.id IN (${ends}))`),
+    endProject: part(projects, sql`${projects.id} IN (SELECT s.project_id FROM secrets s WHERE s.id IN (${ends}))`),
+  };
+  // What no decision of access goes by: how many keys are there, and how many of their versions hold a value.
+  const beside = {
+    counted: sql`SELECT jsonb_build_object(
+      'keys', (SELECT count(*) FROM secrets s WHERE ${within}),
+      'versions', (SELECT count(*) FROM secret_versions v JOIN secrets s ON s.id = v.secret_id WHERE ${within}
+        AND (octet_length(v.ciphertext) > 0 OR octet_length(v.wrapped_dek) > 0 OR v.plaintext IS NOT NULL))) AS row`,
+  };
+  /** The place named, as far as it is there: the project, and the environment or personal config. */
+  const placed = (seen: Seen<typeof read>) => {
+    const place = seen.project.find((row) => row.slug === projectSlug && standing(row));
+    if (place === undefined || named === null) return { place, there: undefined };
+    const ofProject = (row: Row<typeof environments>) => row.projectId === place.id && standing(row);
+    if (!mine) return { place, there: seen.places.find((row) => ofProject(row) && row.slug === named) };
+    const parent = seen.places.find((row) => ofProject(row) && row.slug === named && row.owner === null);
+    // The caller's own: their principal's row, which the caller's parts read.
+    const caller = seen.principal[0]?.id;
+    return { place, there: parent && seen.places.find((row) => ofProject(row) && row.parentId === parent.id && row.owner !== null && row.owner === caller) };
+  };
+  return {
+    read,
+    beside,
+    denied: refusedTo(action, shown, vault.workloads, {
+      where: { project: projectSlug, ...(named === null ? {} : { environment: named }) },
+      objects: (seen: Seen<typeof read>) => {
+        const { place, there } = placed(seen);
+        return [...(place === undefined ? [] : [`project:${place.id}`]), ...(there === undefined ? [] : [`environment:${there.id}`])];
+      },
+    }),
+    decide(seen: Seen<typeof read>, at: number, _unsealed, _checked, rode) {
+      const caller = asking(seen, shown, vault, at);
+      if ('refused' in caller) return caller;
+      const { place, there } = placed(seen);
+      if (place === undefined || (named !== null && there === undefined)) return NO_ACCESS;
+      const ofPlace = (row: Row<typeof environments>) => row.projectId === place.id;
+      const parentOf = there?.owner == null ? undefined : seen.places.find((row) => ofPlace(row) && row.id === there.parentId);
+      const personal = there !== undefined && there.owner !== null;
+      if (personal) {
+        // A personal config: its owner's, or whoever manages the project's environments, archived or not (0.14's `deletePersonal`).
+        if (there.owner !== caller.principal && !allows(caller.holds, 'environment.manage', { projectId: place.id })) return NO_ACCESS;
+      } else {
+        // A role with no row is no role, as for making a project.
+        if (!runsInstance(caller.holds) || !Object.hasOwn(caller.holds.policy.instanceRoles, caller.holds.role)) return NO_ACCESS;
+        if ((there ?? place).archivedAt === null) return { refused: 'not_archived' };
+        // A fork, archived or not, keeps its parent: a personal config does not, and goes with it.
+        if (there !== undefined && seen.places.some((row) => ofPlace(row) && row.parentId === there.id && row.owner === null && standing(row))) return { refused: 'inherited' };
+      }
+      const counted = (rode?.counted?.[0] ?? {}) as { keys?: number; versions?: number };
+      const keys = Number(counted.keys ?? 0);
+      const versions = Number(counted.versions ?? 0);
+      if (versions > MOST_ERASED) return { refused: 'too_large' };
+
+      const day = new Date(at);
+      /** The first tombstone of `slug` that day that none of `taken` holds. */
+      const tombstone = (slug: string, taken: readonly { slug: string }[]) => {
+        let n = 1;
+        while (taken.some((row) => row.slug === tombstoneOf(slug, day, n))) n += 1;
+        return tombstoneOf(slug, day, n);
+      };
+      const configs = there === undefined || personal ? [] : seen.places.filter((row) => ofPlace(row) && row.parentId === there.id && row.owner !== null && standing(row));
+      const taken = seen.places.filter(ofPlace);
+      const gone = there === undefined ? [] : [there, ...configs];
+      const marks = gone.map((row) => ({ row, slug: tombstone(row.slug, taken) }));
+      const mark = there === undefined ? tombstone(place.slug, seen.project) : marks[0]!.slug;
+      const inside = (environmentId: string, projectId: string) => (there === undefined ? projectId === place.id : gone.some((row) => row.id === environmentId));
+
+      // The grants on it, lapsed ones too; and who holds nothing elsewhere then, with no instance role to keep them in.
+      const doomed = seen.held.filter((grant) => (there === undefined
+        ? grant.projectId === place.id || seen.places.some((row) => ofPlace(row) && row.id === grant.environmentId)
+        : grant.environmentId === there.id));
+      const environmentSlug = (id: string | null) => seen.places.find((row) => row.id === id)?.slug ?? id;
+      const stranded = seen.grantee
+        .filter((member) => doomed.some((grant) => grant.principal === member.id) && member.role === 'member')
+        .filter((member) => seen.held.every((grant) => grant.principal !== member.id || doomed.includes(grant) || (grant.expiresAt !== null && grant.expiresAt.getTime() <= at)))
+        .map((member) => member.id)
+        .sort();
+
+      // The references into it and out of it: each holder reads nothing since, as a reference holds no value of its own.
+      const pathOf = (secret: Row<typeof secrets> | undefined) => {
+        const where = secret && seen.endPlace.find((row) => row.id === secret.environmentId && row.projectId === secret.projectId);
+        const whose = where && seen.endProject.find((row) => row.id === where.projectId);
+        return whose === undefined ? '(gone)' : `${whose.slug}/${where!.owner === null ? where!.slug : configName(seen.endPlace.find((row) => row.id === where!.parentId)?.slug ?? '?', where!.owner)}/${secret!.key}`;
+      };
+      const ended = seen.end.filter((holder) => holder.sourceId !== null && (inside(holder.environmentId, holder.projectId)
+        || seen.end.some((source) => source.id === holder.sourceId && inside(source.environmentId, source.projectId))));
+
+      const path = there === undefined ? place.slug : `${place.slug}/${personal ? configName(parentOf?.slug ?? '?', there.owner!) : there.slug}`;
+      const answer: PlaceDeleted = {
+        path,
+        tombstone: mark,
+        environments: there === undefined
+          // Every standing one, personal configs too, as 0.14.7 listed them: their values go with it.
+          ? seen.places.filter((row) => ofPlace(row) && standing(row))
+            .map((row) => (row.owner === null ? row.slug : configName(seen.places.find((parent) => parent.id === row.parentId)?.slug ?? '?', row.owner))).sort()
+          : personal ? [there.slug] : [there.slug, ...configs.map((row) => configName(there.slug, row.owner!))],
+        keys,
+        versions,
+        grants: doomed.map((grant) => ({ member: grant.principal, place: grant.environmentId === null ? place.slug : `${place.slug}/${environmentSlug(grant.environmentId)}`, role: grant.role }))
+          .sort((a, b) => a.member.localeCompare(b.member) || a.place.localeCompare(b.place)),
+        references: ended.map((holder) => ({ holder: pathOf(holder), source: pathOf(seen.end.find((row) => row.id === holder.sourceId)) }))
+          .sort((a, b) => a.holder.localeCompare(b.holder) || a.source.localeCompare(b.source)),
+        stranded,
+      };
+      return {
+        writes: [
+          ...(there === undefined ? [amended(projects, place, { slug: mark })] : marks.map(({ row, slug }) => amended(environments, row, { slug }))),
+          ...doomed.map((grant) => drop(grants, grant)),
+          ...ended.map((holder) => amended(secrets, holder, { sourceId: null, updatedAt: new Date(at) })),
+        ],
+        erase: there === undefined ? { projects: [place] } : { environments: gone },
+        entry: {
+          ...by(caller, shown),
+          action,
+          objects: [...new Set([
+            `project:${place.id}`,
+            ...gone.map((row) => `environment:${row.id}`),
+            ...doomed.map((grant) => `principal:${grant.principal}`),
+            ...ended.flatMap((holder) => [`secret:${holder.id}`, `secret:${holder.sourceId}`]),
+            `principal:${caller.principal}`,
+            `credential:${caller.credential.id}`,
+          ])],
+          detail: {
+            path,
+            tombstone: mark,
+            keys,
+            versions,
+            grants: doomed.length,
+            references: ended.length,
+            ...(personal ? { personal: true } : configs.length === 0 ? {} : { personal: configs.map((row) => row.slug) }),
+          },
+        },
+        answer,
+      };
+    },
+  };
+}
+
 /** The changes of projects and environments (docs/design/0.16.md, "A change"). */
 export const placeOperations: Operations<PlacesChanges> = {
   'project.create': projectCreate,
@@ -728,4 +932,6 @@ export const placeOperations: Operations<PlacesChanges> = {
   'environment.unprotect': protection(false),
   'upstream.freeze': freezing(true),
   'upstream.thaw': freezing(false),
+  'project.delete': placeDelete,
+  'environment.delete': placeDelete,
 };

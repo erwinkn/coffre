@@ -1,5 +1,5 @@
 /** The changes of projects and environments (`packages/vault/src/ops/places.ts`). */
-export type PlacesChanges = ProjectCreate | EnvironmentCreate | ProjectEdit | EnvironmentEdit | FolderRefile;
+export type PlacesChanges = ProjectCreate | EnvironmentCreate | ProjectEdit | EnvironmentEdit | FolderRefile | PlaceDelete;
 
 /**
  * An edit answers the place as it leaves it, `archivedAt` in ISO 8601;
@@ -19,6 +19,8 @@ export type PlacesAnswers = {
   'environment.create': { id: string; slug: string; protected: boolean; forked?: Forked };
   /** The projects it filed, by slug. */
   'folder.refile': { moved: string[] };
+  'project.delete': PlaceDeleted;
+  'environment.delete': PlaceDeleted;
 } & { [K in ProjectEdit['op']]: ProjectEdited } & { [K in EnvironmentEdit['op']]: EnvironmentEdited };
 
 /**
@@ -150,3 +152,56 @@ export type EnvironmentEdit = { project: string; environment: string } & (
  * file is no folder of theirs: refused as one with no project.
  */
 export type FolderRefile = { op: 'folder.refile'; folder: string; to: string | null };
+
+/**
+ * A place deleted for good, as 0.14.7 deleted one (`deletePlace`), in one
+ * change: every version under it erased, its ciphertext and wrapped data
+ * key emptied, and a plain one's copy cleared; every grant on it revoked;
+ * every reference into it or out of it ended, its holder reading nothing
+ * since (a reference holds no value of its own); and its slug made a
+ * tombstone, `market~deleted-2026-10-05` (`tombstoneOf`), which frees the
+ * slug and is never mistaken for what takes it next. Its rows stay, names
+ * and dates only, because the log names them. A copy made of one of its
+ * values elsewhere, a fork's, is a value of its own and stays. Weighed
+ * (`weigh`), it says what it would take, and changes nothing.
+ *
+ * - `project.delete`: an archived project, with every environment and
+ *   personal config in it.
+ * - `environment.delete`: an archived environment itself, whatever its
+ *   project is, with its personal configs; refused, `inherited`, while a
+ *   fork inherits from it, archived or not: deleted, it would leave the
+ *   fork naming a tombstone.
+ *
+ * Both by an Admin or Owner of the whole instance, on no credential's
+ * scope (`runsInstance`); a place there but live is `not_archived`. A
+ * personal config is deleted by its owner, or by whoever manages its
+ * project's environments (`environment.manage`), archived or not:
+ * `environment` names it by its own slug, which only a list for deletion
+ * shows, or, with `mine`, the environment it is the caller's config of.
+ * A place that holds more versions with a value than one change erases
+ * (`MOST_ERASED` in the vault) is refused, `too_large`, and nothing is
+ * erased: its environments are deleted one at a time first.
+ */
+export type PlaceDelete =
+  | { op: 'project.delete'; project: string }
+  | { op: 'environment.delete'; project: string; environment: string; mine: boolean };
+
+/** What deleting a place takes, or took. */
+export type PlaceDeleted = {
+  /** `market`, `market/prod`, or a personal config's `market/dev@ada@acme.example`. */
+  path: string;
+  /** The slug its tombstone keeps: `market~deleted-2026-10-05`. */
+  tombstone: string;
+  /** The environments it takes, personal configs too, these by their environment and owner (`dev@ada@acme.example`): a project's every one, or the one with its configs. */
+  environments: string[];
+  /** The keys named there, which the tombstone keeps, never their values. */
+  keys: number;
+  /** The versions whose values it erases. */
+  versions: number;
+  /** The grants on it, lapsed ones too, which it revokes. */
+  grants: { member: string; place: string; role: string }[];
+  /** The references into it and out of it, which it ends: each holder, and the source it read (`(gone)` for one not found). */
+  references: { holder: string; source: string }[];
+  /** Members who hold nothing anywhere afterwards, with no instance role: a service among them may be offboarded. */
+  stranded: string[];
+};

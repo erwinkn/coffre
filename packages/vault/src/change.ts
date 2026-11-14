@@ -3,7 +3,7 @@ import { KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
 import { gaveUpCode } from '@coffre/db/dialect';
 import { later, laterRows } from '@coffre/db/later';
-import { bindings, environments, secrets, secretVersions } from '@coffre/db/schema';
+import { bindings, environments, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
@@ -165,7 +165,21 @@ export type Denied = Omit<Said, 'kept' | 'actor'> & { actor: string };
  * the engine opens each as its row labels it, as a copy's, before anything
  * is written, and one that does not open refuses the change, `unreadable`.
  */
-export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; vouched?: readonly Row<typeof secretVersions>[]; once?: Buffer; used?: Row<typeof bindings>; until?: number; entry: Said; answer: A };
+export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; vouched?: readonly Row<typeof secretVersions>[]; erase?: Erase; once?: Buffer; used?: Row<typeof bindings>; until?: number; entry: Said; answer: A };
+
+/**
+ * The places whose every version a change erases, a deletion's: each
+ * version of each secret in those projects, or in those environments,
+ * that still holds a value has its ciphertext and wrapped data key
+ * emptied and a plain one's copy cleared, in the change's own statement,
+ * however many there are. Its row stays, as the log names it. Each place
+ * is a row the decision read, so a place that changed since starts the
+ * change over; and what it erases is the operation's to count beside its
+ * read (`Operation.beside`), which is asked again with the rows, so a
+ * version written meanwhile, in a personal config deleted live, starts it
+ * over too. How many it erases is the operation's to bound.
+ */
+export type Erase = { projects?: readonly Row<typeof projects>[]; environments?: readonly Row<typeof environments>[] };
 
 export type Operation<P extends Parts, A, C = undefined> = {
   read: P;
@@ -177,8 +191,17 @@ export type Operation<P extends Parts, A, C = undefined> = {
    * change starts over. It reads nothing and writes nothing.
    */
   check?(seen: Seen<P>, unsealed: Unsealed<P>): Promise<C>;
-  /** From the rows read, the time and what `check` found, and nothing else. `unsealed` counts, by part, the rows found that are not the vault's. */
-  decide(seen: Seen<P>, at: number, unsealed: Unsealed<P>, checked: C): Plan<A> | Refusal;
+  /**
+   * What rides beside the read, no part, by name: each a query of one
+   * jsonb column, `row`, read with the parts under no MAC (`readParts`),
+   * and read again with them under the change lock: an answer that differs
+   * then starts the change over, as a row that moved does. For what no row
+   * says and no decision of access goes by: how many versions a deletion
+   * would erase, which a write beside it may add to.
+   */
+  beside?: Readonly<Record<string, SQL>>;
+  /** From the rows read, the time and what `check` found, and nothing else. `unsealed` counts, by part, the rows found that are not the vault's; `beside`, what rode beside them. */
+  decide(seen: Seen<P>, at: number, unsealed: Unsealed<P>, checked: C, beside?: Readonly<Record<string, readonly Wire[]>>): Plan<A> | Refusal;
   /**
    * What the log says of a refusal, from the same rows: who was refused
    * what, and why. Null for a caller who does not stand, who is told one
@@ -295,7 +318,8 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
  * milliseconds (none when it found no row, of a part or beside one): a
  * number, which no session's settings read another way. `beside` rides in
  * the same statement and is no part: each a query of one jsonb column,
- * `row`, given back as read, with no token, since no write reads it again.
+ * `row`, given back as read, and its token a hash of it, by which a change
+ * reads it again.
  * No MAC is checked on it here, so whoever asks for one holds it to its
  * own (the log's head, sealed as the signer seals it: caller.ts).
  */
@@ -310,8 +334,8 @@ export async function readParts<P extends Parts, B extends string = never>(
   if (asides.some(([name]) => Object.hasOwn(read, name))) throw new Error('what rides beside a read has a name no part has');
   const arms = [
     ...parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row, ${tokenOf(table)} AS token FROM ${table} WHERE ${where}`),
-    // What rides beside is read once and never again: it has no token.
-    ...asides.map(([name, query]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, aside.row, NULL::text AS token FROM (${query}) aside`),
+    // What rides beside is read again by a hash of what it said, as a version is.
+    ...asides.map(([name, query]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, aside.row, ${besideToken} AS token FROM (${query}) aside`),
   ];
   // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts). Bounded as a
   // change's write is: a lock someone holds on a table it reads makes the call busy, and never holds it, nor the signer's upkeep.
@@ -330,6 +354,7 @@ export async function readParts<P extends Parts, B extends string = never>(
   for (const { part: name, row: wire, token } of found) {
     if (Object.hasOwn(aside, name)) {
       aside[name as B].push(wire);
+      tokens.push(`${name}:${token}`);
       continue;
     }
     const { table } = read[name]!;
@@ -353,6 +378,8 @@ export async function readParts<P extends Parts, B extends string = never>(
 
 /** What a row is read again by: its MAC, or a version's, which has none, a hash of all of it. */
 const tokenOf = (table: Readable) => ('mac' in table ? sql`encode(${table}.mac, 'hex')` : sql`md5(to_jsonb(${table})::text)`);
+/** What an answer beside the parts is read again by: a hash of it. */
+const besideToken = sql`md5(aside.row::text)`;
 
 /**
  * A change's read and its decision, and what it writes held to what it
@@ -361,11 +388,11 @@ const tokenOf = (table: Readable) => ('mac' in table ? sql`encode(${table}.mac, 
  */
 async function decided<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>) {
   const parts = Object.entries(operation.read);
-  const { seen, unsealed, named: read, versions: copied, tokens, readAt } = await readParts(vault, operation.read);
+  const { seen, unsealed, named: read, versions: copied, tokens, readAt, beside } = await readParts(vault, operation.read, operation.beside);
   const checked = (operation.check === undefined ? undefined : await operation.check(seen, unsealed)) as C;
   // After the read, and the check: the entry's date is the decision's, and the write is sent next.
   const at = vault.now();
-  const plan = operation.decide(seen, at, unsealed, checked);
+  const plan = operation.decide(seen, at, unsealed, checked, beside);
   // Told before anything is sealed: a proof is spent by its hash's own bytes.
   if (!('refused' in plan) && plan.once !== undefined && !(Buffer.isBuffer(plan.once) && plan.once.length === 32)) throw new Error('a change spends a proof by the 32 bytes of its SHA-256');
   const refuse = (refusal: Refusal) => {
@@ -396,7 +423,10 @@ async function decided<P extends Parts, A, C = undefined>(vault: Running, operat
     if (row === null) group.deletes.push(toWire(table, was!, shape.key));
     else (was === null ? group.inserts : group.updates).push({ ...toWire(table, row), mac: `\\x${mac!.toString('hex')}` });
   }
-  const { used, until } = plan;
+  const { used, until, erase } = plan;
+  for (const place of [...(erase?.projects ?? []), ...(erase?.environments ?? [])]) {
+    if (!read.has(place)) throw new Error('a change erases the values of a place its decision read');
+  }
   // The time a decision goes by is a row's, an expiry it read: a decision that read no row has none to hold until.
   if (until !== undefined && !(Number.isFinite(until) && until > at && Number.isFinite(readAt))) throw new Error('a change holds until a time after its decision, by a row it read');
   if (used !== undefined) {
@@ -477,7 +507,11 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
   const entry = pending(key, plan.entry, dated, rows);
 
   // The same rows, read again by the same conditions: one that changed, went or came since makes the lists differ.
-  const again = sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || ${tokenOf(table)} FROM ${table} WHERE ${where}`), sql` UNION ALL `);
+  const again = sql.join([
+    ...parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || ${tokenOf(table)} FROM ${table} WHERE ${where}`),
+    // And what rode beside them, asked again: a count a write beside it moved makes the lists differ too.
+    ...Object.entries<SQL>(operation.beside ?? {}).map(([name, query]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || ${besideToken} FROM (${query}) aside`),
+  ], sql` UNION ALL `);
   // And in time, for a decision that holds until one: counted from the read, which came before the decision, so never past it.
   const inTime = until === undefined ? sql`` : sql` AND extract(epoch FROM clock_timestamp()) * 1000 < ${readAt! + (until - at)}::float8`;
   const statements: SQL[] = [sql`same AS (SELECT (SELECT coalesce(array_agg(x ORDER BY x COLLATE "C"), '{}') FROM (${again}) seen (x)) = ${sql.param(tokens.sort())}::text[]${inTime} AS ok)`];
@@ -510,6 +544,13 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
     if (inserts.length > 0) write(sql`INSERT INTO ${table} (${list(stored)}) SELECT ${list(stored, 'j')} FROM ${from(inserts)}`);
     if (updates.length > 0) write(sql`UPDATE ${table} SET (${list(set)}) = ROW(${list(set, 'j')}) FROM ${from(updates)} AND ${onKey}`);
     if (deletes.length > 0) write(sql`DELETE FROM ${table} USING ${from(deletes)} AND ${onKey}`);
+  }
+  // Every version under the places, emptied as 0.14 emptied one: what is left of it is what the log names.
+  const erased = [...(plan.erase?.projects ?? []).map(({ id }) => sql`s.project_id = ${id}::uuid`), ...(plan.erase?.environments ?? []).map(({ id }) => sql`s.environment_id = ${id}::uuid`)];
+  if (erased.length > 0) {
+    statements.push(sql`erased AS (UPDATE ${secretVersions} v SET ciphertext = ''::bytea, wrapped_dek = ''::bytea, plaintext = NULL FROM ${made}
+      AND v.secret_id IN (SELECT s.id FROM ${secrets} s WHERE ${sql.join(erased, sql` OR `)})
+      AND (octet_length(v.ciphertext) > 0 OR octet_length(v.wrapped_dek) > 0 OR v.plaintext IS NOT NULL))`);
   }
   // In the statement that writes its secret's row: the two are there together, or neither.
   if (versions.length > 0) {
