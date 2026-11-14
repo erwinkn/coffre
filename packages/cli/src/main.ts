@@ -33,7 +33,7 @@ import { serve } from './serve.ts';
 import { CheckFailed, memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
 import { interval, replaceFile, watch } from './watch.ts';
-import { BACKUP_USAGE, RESTORE_USAGE, VERIFY_BACKUP_USAGE } from './backup-help.ts';
+import { BACKUP_USAGE, NOT_IN_016, RESTORE_USAGE, VERIFY_BACKUP_USAGE } from './backup-help.ts';
 import { KEYS_USAGE, INSTANCE_USAGE, pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
   choose,
@@ -204,16 +204,9 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-/**
- * A command that reads what 0.16 deleted, refused by name until it is moved
- * (docs/design/0.16.md, "Build order", the core's step: `coffre restore`'s
- * check of a backup). `coffre backup`, `coffre restore` and `coffre verify
- * backup` read 0.14's audit log, its chain head and its envelopes, which
- * the 0.16 schema does not hold; their code stays in backup.ts and
- * restore.ts, to be moved, and loads for none of them.
- */
+/** `coffre backup`, `restore` and `verify backup`, refused until they are moved (`NOT_IN_016`). */
 function notIn016(command: string): never {
-  fail(`coffre ${command} is not in 0.16 yet: it reads 0.14's audit log and envelopes, which a 0.16 database does not hold`);
+  fail(`coffre ${command} is ${NOT_IN_016}`);
 }
 
 function attempt<T>(step: () => T): T {

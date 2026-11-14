@@ -2,7 +2,20 @@
 // --help: apart from the commands, which load the database driver, so that
 // help loads nothing.
 
+/**
+ * Why the three refuse until they are moved (docs/design/0.16.md, "Build
+ * order", the core's step: `coffre restore`'s check of a backup): they read
+ * 0.14's audit log, its chain head and its envelopes, which the 0.16 schema
+ * does not hold. Their code stays in backup.ts and restore.ts, to be moved,
+ * and loads for none of them.
+ */
+export const NOT_IN_016 = "not in 0.16 yet: it reads 0.14's audit log and envelopes, which a 0.16 database does not hold";
+const UNAVAILABLE = `Not in 0.16 yet: it reads 0.14's audit log and envelopes, which a 0.16
+database does not hold, and exits 1. What follows is what it did in 0.14.`;
+
 export const BACKUP_USAGE = `usage: coffre backup [<file>]
+
+${UNAVAILABLE}
 
 Dumps the database with pg_dump, as a backup login, a member of
 coffre_backup (\`coffre migrate --backup-login <login>\` grants it), into
@@ -32,6 +45,8 @@ a blank line skips them. Only local vault keys: one in a key service
 never leaves it.`;
 export const RESTORE_USAGE = `usage: coffre restore <dump> [--keys]
 
+${UNAVAILABLE}
+
 Restores a dump \`coffre backup\` made into an empty database, as its
 owner, with pg_restore, then checks it against the manifest beside the
 dump: every table's rows, counted and hashed, the migrations, the audit
@@ -47,6 +62,8 @@ ${KEYS_HELP}
 Exits 1 when a check fails.`;
 
 export const VERIFY_BACKUP_USAGE = `usage: coffre verify backup <dump> [--keys]
+
+${UNAVAILABLE}
 
 Restores a dump \`coffre backup\` made into an empty scratch database, then
 checks it as \`coffre restore\` does. Leaves owners, grants and row policies
