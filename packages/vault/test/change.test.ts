@@ -466,4 +466,7 @@ test('a refused change is logged once a minute for who asked and what, and the l
   // Not remembered as logged: the next one is.
   await change(vault, refusing('not_owner'));
   assert.equal((await logged()).length, 5);
+  // An operation that cannot say its refusal: refused all the same, said in the vault's own log, and not in the audit log.
+  assert.deepEqual(await change(vault, { read: nothing, decide: () => ({ refused: 'no' }), denied: () => { throw new Error('nothing to say'); } }), { refused: 'no' });
+  assert.deepEqual([errors.mock.callCount(), (await logged()).length], [2, 5]);
 });

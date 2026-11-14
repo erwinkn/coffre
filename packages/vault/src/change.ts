@@ -236,7 +236,16 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     read.set(row, nameOf(table, row));
   }
   const plan = operation.decide(seen as Seen<P>, at);
-  if ('refused' in plan) return { refused: plan.refused, said: operation.denied?.(seen as Seen<P>, at, plan) };
+  if ('refused' in plan) {
+    // What the log says of it is the operation's to say, and never costs the refusal: one that cannot be said is not logged.
+    let said: Denied | null | undefined;
+    try {
+      said = operation.denied?.(seen as Seen<P>, at, plan);
+    } catch (error) {
+      console.error('coffre: a refused change was not logged', error);
+    }
+    return { refused: plan.refused, said };
+  }
 
   const key = vault.keys[0]!;
   const rows: Entry['rows'][number][] = [];
