@@ -95,6 +95,12 @@ function subject(entry: AuditEntry): Part[] {
   return member === null ? ['someone'] : [{ member }];
 }
 
+/** An entry about its actor's own credential: the principal it names is who acted. */
+function own(entry: AuditEntry): boolean {
+  const actor = who(entry);
+  return typeof actor !== 'string' && text(entry.metadata.principal) === actor.member;
+}
+
 /** An MCP client, by the host its metadata document is at; one registered by its own request names none in the entry. */
 function app(entry: AuditEntry): Part[] {
   return [text(entry.metadata.host) ?? 'an MCP client'];
@@ -287,6 +293,7 @@ const REVOKED: Record<string, string> = {
   handle: 'ended a handle of',
   cli: 'ended a CLI session of',
   browser: 'ended a browser session of',
+  mcp: 'disconnected an MCP app of',
 };
 
 /** A CLI sign-in's label, as its CLI named it: `, “laptop”`. */
@@ -476,7 +483,8 @@ const TEMPLATES: Record<LogAction, Template> = {
     what: ({ entry }) => (entry.metadata.kind === 'handle' || entry.metadata.kind === 'personal' ? [] : subject(entry)),
     then: ({ entry }) => reaching(entry),
   },
-  'token.revoke': { did: ({ entry }) => REVOKED[text(entry.metadata.kind) ?? ''] ?? 'revoked a token of', what: (facts) => subject(facts.entry) },
+  // One's own, as Connected apps ends it most often, is "of their own": the entry names no subject then, only its principal.
+  'token.revoke': { did: ({ entry }) => REVOKED[text(entry.metadata.kind) ?? ''] ?? 'revoked a token of', what: ({ entry }) => (own(entry) ? ['their own'] : subject(entry)) },
   'device.start': { did: 'was asked for a CLI sign-in', what: () => [], then: labelled },
   'device.approve': { did: 'approved a CLI sign-in', what: () => [], then: labelled },
   'device.deny': { did: 'turned down a CLI sign-in', what: () => [], then: labelled },

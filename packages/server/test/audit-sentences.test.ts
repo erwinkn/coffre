@@ -10,7 +10,7 @@ import { after, beforeEach, test } from 'node:test';
 
 import { canonicalClaims, github, signin } from '@coffre/core/identity';
 import { LOG_ACTIONS, type KeyWrite } from '@coffre/core/vault';
-import { describe, lines, plain, runLabel, type AuditEntry } from '@coffre/ui/audit-sentences';
+import { describe, lines, plain, runLabel, who, type AuditEntry } from '@coffre/ui/audit-sentences';
 
 import {
   adoptFresh,
@@ -549,6 +549,21 @@ test('a refused change says what kind of change was refused, where and why, and 
   // A refused use is not logged (D236); every membership refused is logged as an addition; nobody who stands is refused their own sign-out.
   const never = ['secret.read', 'member.restore', 'member.role', 'sign_in', 'sign_out', 'device.start', 'token.exchange', 'oauth.register', 'mcp.token', 'mcp.ask', 'mcp.disconnect', 'upkeep.expire', 'vault.adopt'];
   assert.deepEqual([...new Set(entries.map((entry) => entry.action))].sort(), LOG_ACTIONS.filter((action) => !never.includes(action)).sort());
+});
+
+test("an app ended on Connected apps reads as disconnected: one's own, and an Owner's of someone else's", async () => {
+  await seed();
+  const client = JSON.stringify({ id: 'https://claude.ai/client.json', host: 'claude.ai', registration: 'cimd', redirectUri: 'https://claude.ai/callback', scopes: 'read' });
+  const [adas, eds] = [credential('ada-app', ada, { kind: 'mcp', label: 'Claude', client }), credential('ed-app', ed, { kind: 'mcp', label: 'Claude', client })];
+  await write(world, ...rows('credentials', adas, eds));
+  await ok('ada-cli', 'DELETE', `/apps/${adas.id}`);
+  await ok('cy-cli', 'DELETE', `/apps/${eds.id}`);
+  await sign();
+  const ended = (await logged()).filter((entry) => entry.action === 'token.revoke').reverse();
+  assert.deepEqual(ended.map((entry) => `${plain([who(entry)])} ${said(entry)}`), [
+    'ada@acme.example disconnected an MCP app of their own',
+    'cy@acme.example disconnected an MCP app of ed@acme.example',
+  ]);
 });
 
 test("a database the vault adopted begins its log with the adoption's entry", async () => {
