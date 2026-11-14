@@ -99,7 +99,10 @@ test('a person who does not run the instance sets up a service account where the
   assert.deepEqual([entry.action, entry.actor, entry.detail], ['member.add', dv, { member: fresh, role: 'member', scope: null, generation: 0 }]);
   // It holds nothing, and Dv set it up: theirs to give what they hold, and nobody else's but whoever runs the instance.
   assert.deepEqual(await set('dv-cli', fresh, onDev('viewer')), { answer: { changes: ['created'] } });
-  assert.deepEqual(await put('dv-cli', fresh, 'member'), { answer: { role: 'member', scope: null, created: false } }, 'asked again, it changes nothing');
+  assert.deepEqual(await put('dv-cli', fresh), { answer: { role: 'member', scope: null, created: false } }, 'asked again, it changes nothing');
+  await nothingWritten(async () => {
+    assert.deepEqual(await put('dv-cli', fresh, 'member'), { refused: 'no_access' }, 'one who does not run the instance names no role, `member` included (0.14.7)');
+  });
   // Mk, a Developer of all of market, gives developer on market/dev, so sets one up too.
   assert.deepEqual(await put('mk-cli', 'token:mine'), { answer: { role: 'member', scope: null, created: true } });
 

@@ -449,6 +449,19 @@ test('a member put: admitted, brought back or given a role, as their row calls f
   assert.equal(app.calls.length, before);
 });
 
+test("whoever does not run the instance names no role, a service account's `member` included: setting one up asks none (0.14.7's instance roles)", async () => {
+  const put = (label: string, member: string, body: unknown) => call(label, 'PUT', `/members/${member}`, body);
+  // Al, an Admin scoped to market, and Bo, who manages market's access, set service accounts up there, as no role is asked.
+  for (const label of ['al-cli', 'bo-cli']) {
+    assert.deepEqual(refused(await put(label, ci, { role: 'member' })), NO_ACCESS, label);
+    assert.deepEqual(refused(await put(label, 'token:bots', { role: 'member' })), NO_ACCESS, label);
+    assert.equal((await call('cy-cli', 'GET', '/members/token:bots/access'))[0], 404, label);
+  }
+  assert.deepEqual(await put('al-cli', 'token:bots', {}), [200, { member: 'token:bots', instanceRole: 'member', scope: { projects: 'all', environments: 'all' }, created: true }]);
+  assert.deepEqual((await put('al-cli', ci, {}))[0], 200);
+  assert.deepEqual((await put('bo-cli', 'token:robots', {}))[1].created, true);
+});
+
 test("a service account made with its grants, and given more, each in one change, by whoever may set it up or manages it", async () => {
   const put = (label: string, member: string, body: unknown) => cost(() => call(label, 'PUT', `/members/${member}`, body));
   const everywhere = { projects: 'all', environments: 'all' };
