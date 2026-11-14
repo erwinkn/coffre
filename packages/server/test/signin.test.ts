@@ -153,7 +153,7 @@ test("a first sign-in binds the account by its verified email and opens a browse
   // Bound by the provider's id, its issuer hashed as 0.14 kept it, and the subject.
   assert.deepEqual(await dbRows(sql`SELECT provider, issuer_hash, subject FROM identities WHERE principal = ${ada}`), [{ provider: 'acme', issuer_hash: hex(ISSUER), subject: 'acme-ada' }]);
   // Where to land is a path of this origin's, or the projects.
-  for (const next of ['//evil.example', 'https://evil.example/x', '/login']) {
+  for (const next of ['//evil.example', 'https://evil.example/x', '/login', '/.//evil.example', '/%2e//evil.example', '/x/..//evil.example', '/x/../login']) {
     assert.deepEqual(landed(await roundTrip(account('acme-ada', 'ada@acme.example'), { query: `?${new URLSearchParams({ next })}` })), [302, '/projects']);
   }
 });

@@ -71,7 +71,8 @@ export function clearCookieHeader(auth: AuthConfig, name: string): string {
 /**
  * A path on this origin, or `/projects`. `next` arrives in a query string,
  * so anything that could leave the origin (`//evil`, `/\evil`, a full URL)
- * is refused rather than repaired.
+ * is refused rather than repaired, before the URL parser resolves its dot
+ * segments and after: `/.//evil` comes out `//evil`, another host to a browser.
  */
 export function safeNext(raw: string | null, publicUrl: string): string {
   if (raw === null || !raw.startsWith('/') || raw.startsWith('//') || raw.startsWith('/\\')) {
@@ -79,7 +80,7 @@ export function safeNext(raw: string | null, publicUrl: string): string {
   }
   try {
     const url = new URL(raw, publicUrl);
-    if (url.origin !== new URL(publicUrl).origin) return '/projects';
+    if (url.origin !== new URL(publicUrl).origin || url.pathname.startsWith('//')) return '/projects';
     if (url.pathname === '/login' || url.pathname.startsWith('/auth/signin/')) return '/projects';
     return `${url.pathname}${url.search}${url.hash}`;
   } catch {
