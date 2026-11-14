@@ -279,14 +279,18 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
 
 /**
  * Parts read in one statement: each part's rows whose MAC is the vault's,
- * `named` by table and key, `tokens`, every row the statement found by
- * its part and MAC, the vault's or not, and `readAt`, the database's clock
- * as it read them, in milliseconds (none when it found no row, of a part
- * or beside one): a number, which no session's settings read another way.
- * `beside` rides in the same
- * statement and is no part: each a query of one jsonb column, `row`, given
- * back as read. No MAC is checked on it here, so whoever asks for one holds
- * it to its own (the log's head, sealed as the signer seals it: caller.ts).
+ * `named` by table and key; `versions`, the rows of a table with no MAC
+ * (a secret's versions), given unchecked: the engine opens one under its
+ * label before a change copies it or goes by it (`Value`, `vouched`);
+ * `tokens`, every row the statement found,
+ * by its part and what it is read again by (`tokenOf`), the vault's or
+ * not; and `readAt`, the database's clock as it read them, in
+ * milliseconds (none when it found no row, of a part or beside one): a
+ * number, which no session's settings read another way. `beside` rides in
+ * the same statement and is no part: each a query of one jsonb column,
+ * `row`, given back as read, with no token, since no write reads it again.
+ * No MAC is checked on it here, so whoever asks for one holds it to its
+ * own (the log's head, sealed as the signer seals it: caller.ts).
  */
 export async function readParts<P extends Parts, B extends string = never>(
   vault: Pick<Running, 'db' | 'keys'>,
@@ -304,7 +308,7 @@ export async function readParts<P extends Parts, B extends string = never>(
   ];
   // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts). Bounded as a
   // change's write is: a lock someone holds on a table it reads makes the call busy, and never holds it, nor the signer's upkeep.
-  const found = await bounded<{ part: string; row: Wire; token: string; read_at: number }>(
+  const found = await bounded<{ part: string; row: Wire; token: string | null; read_at: number }>(
     vault.db,
     sql`SELECT part, row, token, (extract(epoch FROM clock_timestamp()) * 1000)::float8 AS read_at FROM (${sql.join(arms, sql` UNION ALL `)}) parts`,
   );
