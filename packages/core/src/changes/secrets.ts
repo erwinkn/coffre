@@ -1,11 +1,13 @@
 /** The changes of keys and their values (`packages/vault/src/ops/secrets.ts`). */
-export type SecretsChanges = SecretWrite | ReferenceBreak;
+export type SecretsChanges = SecretWrite | SecretRefile | ReferenceBreak;
 
 export type SecretsAnswers = {
   /** Each key given a value: the version it is at now, and the nature it was written as. A key made a reference is given none. */
   'secret.write': { keys: Record<string, { version: number; nature: Nature }> };
   /** Where the reference read, as its source's rows say: null when the vault does not see them. */
   'reference.break': { source: SecretPath | null };
+  /** The keys filed there, by name, in order. */
+  'secret.refile': { moved: string[] };
 };
 
 /** A key by where it is held: `market/prod/STRIPE_KEY`. */
@@ -57,6 +59,22 @@ export type SecretWrite = {
   project: string;
   environment: string;
   keys: KeyWrite[];
+};
+
+/**
+ * A folder of one environment's keys renamed (`to`), or emptied (`to`
+ * null): every key filed there, archived ones too, all of them or none, by
+ * whoever writes keys there. A folder is a label, so renaming onto one
+ * that is there merges the two. A folder no key is filed in is no folder:
+ * refused `no_folder`. Folders are named as `SecretWrite`'s; past that, a
+ * fault.
+ */
+export type SecretRefile = {
+  op: 'secret.refile';
+  project: string;
+  environment: string;
+  folder: string;
+  to: string | null;
 };
 
 /**

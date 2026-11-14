@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
 
-import { environmentPath, personalOf, secretKey, slug } from '@coffre/core/schemas';
+import { environmentPath, folderName, personalOf, secretKey, slug } from '@coffre/core/schemas';
+import type { KeyWrite } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { changed } from '../change.ts';
+import type { ApiContext } from '../context.ts';
 import { ApiError, badRequest, refusal } from '../errors.ts';
 import { parsePath } from '../paths.ts';
 import { route } from '../route.ts';
@@ -65,6 +67,14 @@ const readPath = z.string().max(400).transform((text, issue) => {
 /** A reference's source, `market/prod/KEY`: a key of an environment, never of a personal config. */
 const sourcePath = readPath.refine((path) => path.key !== undefined && personalOf(path.environment) === null, 'a reference names its source as <project>/<environment>/<KEY>, never in a personal config');
 
+/** The keys a folder of one environment held, re-filed under `to`, or in none. */
+async function refiled(ctx: ApiContext, params: { project: string; environment: string; folder: string }, to: string | null): Promise<string[]> {
+  const { environment, mine } = environmentOf(params.environment);
+  const at = `${params.project}/${params.environment}`;
+  if (mine) throw new ApiError('not_implemented', `a folder of ${at}, your personal config, is not served yet`);
+  return (await changed(ctx, { op: 'secret.refile', project: params.project, environment, folder: params.folder, to }, `${at}, folder ${params.folder}`)).moved;
+}
+
 export const secretRoutes = {
   /**
    * The only way to open a value, and a POST so nothing can trigger it by
@@ -117,31 +127,76 @@ export const secretRoutes = {
    * Write values in one environment: `{ "KEY": "value" }`, or
    * `{ "KEY": { "value", "sensitivity": "sensitive" } }` to say who sees
    * it; `{ "KEY": { "ref": "billing/prod/STRIPE_KEY" } }` makes the key a
-   * reference to that one, which whoever reads here reads through it. One
+   * reference to that one, which whoever reads here reads through it;
+   * `{ "KEY": null }` archives the key, which takes `secret.archive`. One
    * call to the vault, which decides and writes all of them or none, and
    * says each value's sensitivity as written: a bare value is sensitive over
    * a sensitive one, and a secret otherwise (`secret.write`). A reference
-   * is answered with its source, as asked.
+   * is answered with its source, as asked, and a key archived as archived.
    *
    * Not served yet, each refused as a 400 by the input's shape or below:
-   * archiving a key (`null`), a generated value, a nature changed in place,
-   * a dry run, and `dev@me`.
+   * a generated value, a nature changed in place, a dry run, and `dev@me`.
    */
   ...route('PATCH /secrets/:project/:environment', {
-    input: z.record(secretKey, z.union([secretValue, z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']) }).strict(), z.object({ ref: sourcePath }).strict()]))
+    input: z.record(secretKey, z.union([secretValue, z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']) }).strict(), z.object({ ref: sourcePath }).strict()]).nullable())
       .refine((patch) => Object.keys(patch).length > 0, 'name at least one key'),
     query: z.object({}).strict(),
     run: async (ctx, { params, input }) => {
       const { environment, mine } = environmentOf(params.environment);
       if (mine) throw new ApiError('not_implemented', `a write to ${params.project}/${params.environment}, your personal config, is not served yet`);
-      const keys = Object.entries(input).map(([key, written]) => (typeof written === 'string' ? { key, value: written }
+      const keys = Object.entries(input).map(([key, written]): KeyWrite => (written === null ? { key, archived: true } : typeof written === 'string' ? { key, value: written }
         : 'ref' in written ? { key, ref: { project: written.ref.project, environment: written.ref.environment, key: written.ref.key! } }
           : { key, value: written.value, nature: written.sensitivity }));
       const answer = await changed(ctx, { op: 'secret.write', project: params.project, environment, keys }, `${params.project}/${params.environment}`);
-      const references = keys.flatMap((item) => (item.ref === undefined ? [] : [[item.key, { reference: `${item.ref.project}/${item.ref.environment}/${item.ref.key}` }] as const]));
+      const told = keys.flatMap((item): [string, { reference: string } | { archived: true }][] => (item.ref !== undefined ? [[item.key, { reference: `${item.ref.project}/${item.ref.environment}/${item.ref.key}` }]]
+        : item.archived === true ? [[item.key, { archived: true }]] : []));
       // As entries: a key named __proto__ is a key like any other.
-      return { operationId: ctx.shown.request, keys: Object.fromEntries([...Object.entries(answer.keys).map(([key, { version, nature }]) => [key, { version, sensitivity: nature }] as const), ...references]) };
+      return { operationId: ctx.shown.request, keys: Object.fromEntries([...Object.entries(answer.keys).map(([key, { version, nature }]) => [key, { version, sensitivity: nature }] as const), ...told]) };
     },
+  }),
+
+  /**
+   * Archive one key, or bring it back (`archived`), and file it in a
+   * folder, or in none (`folder`): one call to the vault, which decides
+   * both or neither (`secret.write`). Archiving takes `secret.archive`, a
+   * return `secret.read` too, since the value serves again; filing takes
+   * `secret.write`, archived or not. Answered with the key and what was
+   * asked of it, which is what it now is.
+   *
+   * Not served yet, 501: a rename (`key`), and a fork's key reset to what
+   * it inherits (`inherit`).
+   */
+  ...route('PATCH /secrets/:project/:environment/:key', {
+    input: z.object({ key: secretKey, archived: z.boolean(), folder: folderName.nullable(), inherit: z.boolean() }).partial().strict()
+      .refine((patch) => patch.key !== undefined || patch.archived !== undefined || patch.folder !== undefined || patch.inherit !== undefined, 'provide a key, an archived flag, a folder or inherit')
+      .refine((patch) => patch.inherit === undefined || Object.keys(patch).length === 1, 'inherit goes alone'),
+    run: async (ctx, { params, input }) => {
+      const at = `${params.project}/${params.environment}/${params.key}`;
+      if (input.inherit !== undefined) throw new ApiError('not_implemented', `resetting ${at} to what it inherits is not served yet`);
+      const { archived, folder } = input;
+      // Its own name beside what else is asked is no rename, as in 0.14; alone, it is asked as one.
+      if (input.key !== undefined && (input.key !== params.key || (archived === undefined && folder === undefined))) throw new ApiError('not_implemented', `renaming ${at} is not served yet`);
+      const { environment, mine } = environmentOf(params.environment);
+      if (mine) throw new ApiError('not_implemented', `a change to ${at}, in your personal config, is not served yet`);
+      await changed(ctx, { op: 'secret.write', project: params.project, environment, keys: [{ key: params.key, archived, folder }] }, at);
+      return { operationId: ctx.shown.request, key: params.key, ...(archived === undefined ? {} : { archived }), ...(folder === undefined ? {} : { folder }) };
+    },
+  }),
+
+  /**
+   * Rename a folder of an environment's keys: every key filed there,
+   * archived ones too, at once, by whoever writes keys there
+   * (`secret.refile`). A folder is a label, so renaming onto one that is
+   * there merges them.
+   */
+  ...route('PATCH /folders/:project/:environment/:folder', {
+    input: z.object({ name: folderName }).strict(),
+    run: async (ctx, { params, input }) => ({ operationId: ctx.shown.request, folder: input.name, moved: await refiled(ctx, params, input.name) }),
+  }),
+
+  /** Empty a folder of an environment's keys: each stays where it is, in no folder. */
+  ...route('DELETE /folders/:project/:environment/:folder', {
+    run: async (ctx, { params }) => ({ operationId: ctx.shown.request, folder: null, moved: await refiled(ctx, params, null) }),
   }),
 
   /**

@@ -33,10 +33,12 @@ const PERSONAL = `coffre_pat_${'c'.repeat(43)}`;
  * Bo's instance role, which holds nothing, reaches every project but billing.
  * A viewer holds nothing in a protected environment.
  */
+let market: ReturnType<typeof project>;
 beforeEach(async () => {
   await emptyDatabase(world.owner);
   for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
-  const [market, billing] = [project('market'), project('billing')];
+  market = project('market');
+  const billing = project('billing');
   const prod = environment(market, 'prod');
   const adas = environment(market, 'prod-ada', { parentId: prod.id, owner: ada });
   const staging = environment(market, 'staging', { protected: true });
@@ -209,7 +211,7 @@ test('a write is one change of the vault and no statement of the app; what it re
   app.calls.length = 0;
   const shapes: [string, unknown, number][] = [
     ['market/prod', { API_KEY: 'a\0b' }, 400], ['market/prod', { API_KEY: '\ud800' }, 400], ['market/prod', { API_KEY: 'x'.repeat(64 * 1024 + 1) }, 400], ['market/prod', { 'not a key': 'x' }, 400], ['market/prod', {}, 400],
-    ['market/prod', { API_KEY: null }, 400], ['market/prod', { API_KEY: { ref: 'market/prod' } }, 400],
+    ['market/prod', { API_KEY: { ref: 'market/prod' } }, 400],
     ['market/prod', { API_KEY: { ref: 'market/prod@me/FLAG' } }, 400], ['market/prod', { API_KEY: { ref: 'market/prod/FLAG', value: 'x' } }, 400], ['market/prod', { API_KEY: { sensitivity: 'sensitive' } }, 400],
     ['market/prod?dryRun=1', { API_KEY: 'x' }, 400], ['market/prod@me', { API_KEY: 'x' }, 501], ['Market/prod', { API_KEY: 'x' }, 400],
   ];
@@ -248,6 +250,74 @@ test('a key made a reference, and a reference broken, is one change each: it rea
   }
   world.memory.reads.clear();
   assert.deepEqual((await reveal('ada-cli', 'market/prod/LINK')).map((part, i) => (i === 0 ? part : (part as Body).reason)), [404, 'no_value']);
+});
+
+test('a key archived, brought back or filed, and a folder of keys renamed or emptied, is one change each', async () => {
+  // Dee maintains market: she archives and brings back, which a developer does not.
+  const dee = user('dee');
+  await write(world, ...rows('roles', role(false, 'maintainer', ['secret.read', 'secret.write', 'secret.archive'])), ...rows('principals', principal(dee)),
+    ...rows('grants', grant(dee, 'maintainer', { project: market })), ...rows('credentials', credential('dee-cli', dee, { lastUsedAt: new Date() })));
+  const call = (label: string, method: string, path: string, body?: unknown) =>
+    cost(() => answered(app.request(`/api/${path}`, as(label, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }))));
+  const filed = async () => Object.fromEntries((await rowsOf<{ key: string; folder: string | null; archived: boolean }>(world.owner,
+    sql`SELECT s.key, s.folder, s.archived_at IS NOT NULL AS archived FROM secrets s JOIN environments e ON e.id = s.environment_id WHERE e.slug = 'prod' AND s.key IN ('DATABASE_URL', 'FLAG', 'OLD') ORDER BY s.key`)).map((row) => [row.key, [row.folder, row.archived]]));
+
+  // `null` archives a key, beside a value written: one change.
+  const [[status, body], calls, statements] = await call('dee-cli', 'PATCH', 'secrets/market/prod', { DATABASE_URL: null, API_KEY: 'k1' });
+  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  assert.deepEqual(body.keys, { API_KEY: { version: 1, sensitivity: 'secret' }, DATABASE_URL: { archived: true } });
+  world.memory.reads.clear();
+  assert.deepEqual((await reveal('dee-cli', 'market/prod/DATABASE_URL')).map((part, i) => (i === 0 ? part : (part as Body).reason)), [404, 'unknown_key']);
+  // A developer archives nothing.
+  assert.deepEqual((await call('bo-cli', 'PATCH', 'secrets/market/prod', { FLAG: null }))[0].map((part, i) => (i === 0 ? part : (part as Body).reason)), [403, 'no_access']);
+
+  // One key: brought back and filed at once, or filed alone, archived or not.
+  const [[back, brought], did, ran] = await call('dee-cli', 'PATCH', 'secrets/market/prod/DATABASE_URL', { archived: false, folder: 'db' });
+  assert.deepEqual([back, did, ran], [200, ['change'], 0], JSON.stringify(brought));
+  assert.deepEqual({ ...brought, operationId: 'x' }, { operationId: 'x', key: 'DATABASE_URL', archived: false, folder: 'db' });
+  for (const key of ['FLAG', 'OLD']) assert.equal((await call('bo-cli', 'PATCH', `secrets/market/prod/${key}`, { folder: 'db' }))[0][0], 200, key);
+  // Its own name beside what is asked is no rename.
+  assert.deepEqual((await call('bo-cli', 'PATCH', 'secrets/market/prod/FLAG', { key: 'FLAG', folder: 'db' }))[0][1].folder, 'db');
+  assert.deepEqual(await filed(), { DATABASE_URL: ['db', false], FLAG: ['db', false], OLD: ['db', true] });
+  const refused: [string, string, unknown, number, string][] = [
+    // A developer brings back nothing, a viewer files nothing, and a key not there is not filed.
+    ['bo-cli', 'OLD', { archived: false }, 403, 'no_access'], ['ada-cli', 'FLAG', { folder: 'x' }, 403, 'no_access'], ['bo-cli', 'NOPE', { folder: 'x' }, 404, 'unknown_key'],
+  ];
+  for (const [label, key, patch, code, reason] of refused) {
+    const [[got, said]] = await call(label, 'PATCH', `secrets/market/prod/${key}`, patch);
+    assert.deepEqual([got, said.reason], [code, reason], `${label} ${key}`);
+  }
+  // What the app refuses by its shape, and what is not served yet: the vault is not asked.
+  app.calls.length = 0;
+  const unserved: [string, unknown, number][] = [
+    ['market/prod/FLAG', { key: 'NEW_FLAG' }, 501], ['market/prod/FLAG', { key: 'FLAG' }, 501], ['market/prod/FLAG', { inherit: true }, 501], ['market/prod@me/FLAG', { folder: 'x' }, 501],
+    ['market/prod/FLAG', {}, 400], ['market/prod/FLAG', { inherit: true, folder: 'x' }, 400], ['market/prod/FLAG', { folder: ' x' }, 400], ['market/prod/FLAG', { folder: '\ud800' }, 400], ['market/prod/FLAG', { archived: 'yes' }, 400], ['market/prod/FLAG', { sensitivity: 'plain' }, 400],
+  ];
+  for (const [path, patch, code] of unserved) assert.equal((await call('bo-cli', 'PATCH', `secrets/${path}`, patch))[0][0], code, `${path} ${JSON.stringify(patch)}`);
+  assert.deepEqual(app.calls, []);
+
+  // A folder renamed: every key in it, archived ones too, by whoever writes there; then emptied, and gone.
+  assert.equal((await call('ada-cli', 'PATCH', 'folders/market/prod/db', { name: 'data' }))[0][0], 403);
+  // A key moved out of it behind the vault: none is left behind, so none moves.
+  const behind = (folder: string) => world.owner.execute(sql`UPDATE secrets SET folder = ${folder} WHERE key = 'FLAG' AND environment_id = (SELECT e.id FROM environments e JOIN projects p ON p.id = e.project_id WHERE p.slug = 'market' AND e.slug = 'prod')`);
+  await behind('hidden');
+  const [[tampered, said]] = await call('bo-cli', 'PATCH', 'folders/market/prod/db', { name: 'data' });
+  assert.deepEqual([tampered, said.error, said.reason], [409, 'conflict', 'unreadable']);
+  await behind('db');
+  assert.deepEqual(await filed(), { DATABASE_URL: ['db', false], FLAG: ['db', false], OLD: ['db', true] });
+  const [[renamed, moved], asked, queried] = await call('bo-cli', 'PATCH', 'folders/market/prod/db', { name: 'data' });
+  assert.deepEqual([renamed, asked, queried], [200, ['change'], 0], JSON.stringify(moved));
+  assert.deepEqual({ ...moved, operationId: 'x' }, { operationId: 'x', folder: 'data', moved: ['DATABASE_URL', 'FLAG', 'OLD'] });
+  assert.deepEqual(await filed(), { DATABASE_URL: ['data', false], FLAG: ['data', false], OLD: ['data', true] });
+  const [[emptied, out]] = await call('bo-cli', 'DELETE', 'folders/market/prod/data');
+  assert.deepEqual([emptied, out.folder, out.moved], [200, null, ['DATABASE_URL', 'FLAG', 'OLD']]);
+  assert.deepEqual(await filed(), { DATABASE_URL: [null, false], FLAG: [null, false], OLD: [null, true] });
+  const [[gone, why]] = await call('bo-cli', 'DELETE', 'folders/market/prod/data');
+  assert.deepEqual([gone, why.error, why.reason], [404, 'not_found', 'no_folder']);
+  app.calls.length = 0;
+  const shapes: [string, string, unknown, number][] = [['DELETE', 'folders/market/prod@me/data', undefined, 501], ['PATCH', 'folders/market/prod/%20data', { name: 'x' }, 400], ['PATCH', 'folders/market/prod/data', { name: 'a/b' }, 400], ['PATCH', 'folders/market/prod/data', { name: '\ud800' }, 400]];
+  for (const [method, path, input, code] of shapes) assert.equal((await call('bo-cli', method, path, input))[0][0], code, path);
+  assert.deepEqual(app.calls, []);
 });
 
 test('a path is a route or it is not: its method, its segments and its body are held before any handler runs', async () => {
