@@ -94,7 +94,11 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   broken_chain: ['conflict', 'the environment inherits from one that is gone'],
   // Projects and environments (routes/places.ts).
   exists: ['conflict', 'that is there already: its slug is taken'],
-  referenced: ['conflict', 'a reference held elsewhere reads a value in it: archiving would stop that read, so break the reference first'],
+  referenced: ['conflict', 'a reference held elsewhere reads a value in it, which this would stop or send through a second reference: break that reference first'],
+  // References (routes/secrets.ts).
+  reference_to_itself: ['conflict', 'a key cannot be a reference to itself'],
+  reference_to_reference: ['conflict', 'that is itself a reference: a reference reads a value, so point at its source instead'],
+  no_reference: ['not_found', 'that key is no reference'],
   inherited: ['conflict', 'a fork inherits from it: archive the fork first'],
   parent_archived: ['conflict', 'it inherits from an environment that is archived or deleted: restore that first'],
   too_deep: ['conflict', 'that environment already inherits from three: fork one higher up'],
