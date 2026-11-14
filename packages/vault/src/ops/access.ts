@@ -1,10 +1,12 @@
-import { EVERYWHERE, isInstanceRole, isScope, normalScope, ownsInstance, runsInstance, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
-import type { AccessAnswers, AccessChanges, MemberAdd, MemberRemove, MemberRestore, MemberRole, Presented, ScopeInput, Standing } from '@coffre/core/vault';
-import { grants, identities, principals, projects } from '@coffre/db/schema';
+import { randomUUID } from 'node:crypto';
+
+import { allows, EVERYWHERE, isInstanceRole, isScope, normalScope, ownsInstance, PROJECT_ONLY_PERMISSIONS, ROLE_ID, runsInstance, unscoped, type Filter, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
+import type { AccessAnswers, AccessChange, AccessChanges, AccessGrant, MemberAdd, MemberRemove, MemberRestore, MemberRole, Presented, ScopeInput, Standing } from '@coffre/core/vault';
+import { environments, grants, identities, principals, projects, roles } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, refusedTo, type Asking, type Shown } from '../caller.ts';
-import { amended, drop, part, put, type Operation, type Parts, type Refusal, type Seen, type Unsealed } from '../change.ts';
+import { amended, drop, part, put, type Operation, type Parts, type Refusal, type Seen, type Unsealed, type Write } from '../change.ts';
 import type { Said } from '../entry.ts';
 import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
@@ -309,6 +311,138 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
   };
 }
 
+/** The most places one change of grants names: as many as a credential's scope does. */
+const MOST_PLACES = 1000;
+
+/** An end as the app sends one: an ISO 8601 time, which the row keeps to the millisecond. */
+const ENDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/;
+
+/** One place's change, as asked: a project's slug, an environment's within it, the role or null, the end or null. */
+type Asked = AccessGrant['changes'][number];
+
+function asked(value: unknown): value is Asked {
+  if (typeof value !== 'object' || value === null) return false;
+  const { project, environment, role, expiresAt } = value as Record<string, unknown>;
+  return typeof project === 'string' && SLUG.test(project) && (environment === null || (typeof environment === 'string' && SLUG.test(environment)))
+    && (role === null || (typeof role === 'string' && ROLE_ID.test(role)))
+    && (expiresAt === null || (typeof expiresAt === 'string' && ENDS.test(expiresAt) && Number.isFinite(Date.parse(expiresAt)) && aDay(expiresAt)));
+}
+
+/** Whether an ISO 8601 time's date is one the calendar has: `Date.parse` reads February 30 as March 2. */
+function aDay(time: string): boolean {
+  const [year, month, day] = time.slice(0, 10).split('-').map(Number) as [number, number, number];
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDate() === day;
+}
+
+/**
+ * A person's grants set at several places, all or none (`access.grant`; a
+ * change that only takes roles away is logged `access.revoke`, as 0.14 did).
+ * At each place the caller manages access (`grant.manage`), and gives no
+ * role to themselves; a role is a project role there is, never one that
+ * holds what only a project has on an environment; an end is after now. A
+ * live grant asked as it is changes nothing; any other row at the place, a
+ * lapsed grant or one of a membership before a removal, is replaced in
+ * place, in the member's generation, or dropped.
+ *
+ * Not yet: a service account's grants, which weigh a project's protected
+ * environments through `givesService`; refused.
+ */
+function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation<Parts, AccessAnswers['access.grant']> {
+  const shown = presented(input);
+  const { principal } = input;
+  const changes = Array.isArray(input.changes) ? [...input.changes] : [];
+  const path = (change: Asked) => (change.environment === null ? change.project : `${change.project}/${change.environment}`);
+  if (!isMember(principal) || changes.length === 0 || changes.length > MOST_PLACES || !changes.every(asked) || new Set(changes.map(path)).size !== changes.length) {
+    throw new TypeError('a change of grants names a member, and 1 to 1,000 places by slug, each once, with a project role or null and an ISO 8601 end or null');
+  }
+  // A place with no grant yet gets one under an id drawn here: a decision draws nothing.
+  const ids = changes.map(() => randomUUID());
+  const action = changes.every((change) => change.role === null) ? 'access.revoke' : 'access.grant';
+
+  const named = sql`(SELECT p.id FROM projects p WHERE p.slug = ANY(${sql.param([...new Set(changes.map((change) => change.project))])}::text[]))`;
+  const onProjects = sql`(SELECT p.id FROM projects p WHERE p.slug = ANY(${sql.param(changes.filter((change) => change.environment === null).map((change) => change.project))}::text[]))`;
+  // Slugs hold no slash, so a path names one environment.
+  const onEnvironments = sql`(SELECT e.id FROM environments e JOIN projects p ON p.id = e.project_id WHERE p.slug || '/' || e.slug = ANY(${sql.param(changes.filter((change) => change.environment !== null).map(path))}::text[]))`;
+  const read = {
+    ...callerParts(shown.token, named),
+    member: part(principals, eq(principals.id, principal)),
+    project: part(projects, sql`${projects.slug} = ANY(${sql.param([...new Set(changes.map((change) => change.project))])}::text[])`),
+    environment: part(environments, sql`${environments.id} IN ${onEnvironments}`),
+    // Every row at the places asked, whatever its generation: a place holds one grant a member, and a row left from before is replaced.
+    held: part(grants, sql`${grants.principal} = ${principal} AND (${grants.projectId} IN ${onProjects} OR ${grants.environmentId} IN ${onEnvironments})`),
+    given: part(roles, sql`NOT ${roles.instance} AND ${roles.id} = ANY(${sql.param([...new Set(changes.flatMap((change) => (change.role === null ? [] : [change.role])))])}::text[])`),
+  };
+  /** Each place asked, as far as it is there. */
+  const placed = (seen: Seen<typeof read>) =>
+    changes.map((change) => {
+      const project = seen.project.find((row) => row.slug === change.project);
+      const environment = change.environment === null ? null : seen.environment.find((row) => row.projectId === project?.id && row.slug === change.environment);
+      return { project, environment };
+    });
+  return {
+    read,
+    denied: refusedTo(action, shown, vault.workloads, {
+      objects: (seen: Seen<typeof read>) => [
+        ...seen.member.map((row) => `principal:${row.id}`),
+        ...placed(seen).flatMap(({ project, environment }) => (environment == null ? (project === undefined ? [] : [`project:${project.id}`]) : [`environment:${environment.id}`])),
+      ],
+    }),
+    decide(seen: Seen<typeof read>, at: number) {
+      const caller = asking(seen, shown, vault, at);
+      if ('refused' in caller) return caller;
+      const places = placed(seen);
+      // One answer whether a place is not there or not theirs to manage, and for a service account's grants, not given here yet: none says which.
+      if (!principal.startsWith('user:')) return { refused: 'no_access' };
+      for (const [i, { project, environment }] of places.entries()) {
+        // A personal config is its owner's alone: nobody is granted it.
+        if (project === undefined || environment === undefined || environment?.owner != null) return { refused: 'no_access' };
+        const manages = environment === null ? allows(caller.holds, 'grant.manage', { projectId: project.id }) : caller.may('grant.manage', environment);
+        // Managing access never reads a value: nobody gives themselves a role, though they may give one up.
+        if (!manages || (principal === caller.principal && changes[i]!.role !== null)) return { refused: 'no_access' };
+      }
+      // To whoever manages access at every place asked, what 0.14 told them of the member.
+      const [member] = seen.member;
+      if (member === undefined) return { refused: 'not_a_member' };
+      if (member.status !== 'active') return { refused: 'removed' };
+      // Asked of a place they manage, what 0.14 called invalid.
+      for (const [i, { role, expiresAt }] of changes.entries()) {
+        if (role === null) continue;
+        const definition = seen.given.find((row) => !row.instance && row.id === role);
+        if (definition === undefined || (places[i]!.environment !== null && definition.permissions.some((permission) => PROJECT_ONLY_PERMISSIONS.includes(permission as Permission)))) return { refused: 'invalid' };
+        if (expiresAt !== null && Date.parse(expiresAt) <= at) return { refused: 'invalid' };
+      }
+
+      const now = new Date(at);
+      const writes: Write[] = [];
+      const lines: Record<string, unknown>[] = [];
+      const outcomes = changes.map(({ role, expiresAt }, i): AccessChange => {
+        const { project, environment } = places[i] as { project: Row<typeof projects>; environment: Row<typeof environments> | null };
+        const was = seen.held.find((row) => row.principal === principal && (environment === null ? row.projectId === project.id : row.environmentId === environment.id));
+        // What the member holds there now: a grant of this membership, not lapsed.
+        const current = was !== undefined && was.generation === member.generation && (was.expiresAt === null || was.expiresAt.getTime() > at) ? was : undefined;
+        const ends = expiresAt === null ? null : new Date(Date.parse(expiresAt));
+        const place = environment === null ? { project: project.id } : { environment: environment.id };
+        if (role === null) {
+          if (was !== undefined) writes.push(drop(grants, was));
+          if (current === undefined) return 'unchanged';
+          lines.push({ ...place, role: null, was: current.role });
+          return 'revoked';
+        }
+        if (current !== undefined && current.role === role && current.expiresAt?.getTime() === ends?.getTime()) return 'unchanged';
+        const grant: Fresh<typeof grants> = { id: was?.id ?? ids[i]!, principal, generation: member.generation, projectId: environment === null ? project.id : null, environmentId: environment?.id ?? null, role, expiresAt: ends, grantedAt: now, grantedBy: caller.principal };
+        writes.push(put(grants, grant, was ?? null));
+        lines.push({ ...place, role, expiresAt: ends?.toISOString() ?? null, was: current?.role ?? null });
+        return current === undefined ? 'created' : 'updated';
+      });
+      return {
+        writes,
+        entry: said(action, caller, shown, [`principal:${principal}`, ...places.map(({ project, environment }) => (environment === null ? `project:${project!.id}` : `environment:${environment!.id}`))], { member: principal, changes: lines }),
+        answer: { changes: outcomes },
+      };
+    },
+  };
+}
+
 /** A row as read, but for its MAC: the engine seals what a change writes. */
 function withoutMac<T extends { mac: unknown }>(row: T): Omit<T, 'mac'> {
   const { mac: _, ...kept } = row;
@@ -321,4 +455,5 @@ export const accessOperations: Operations<AccessChanges> = {
   'member.restore': admit('member.restore'),
   'member.role': memberRole,
   'member.remove': memberRemove,
+  'access.grant': accessGrant,
 };
