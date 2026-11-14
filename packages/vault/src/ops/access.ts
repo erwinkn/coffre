@@ -4,7 +4,7 @@ import { grants, identities, principals, projects } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, refusedTo, type Asking, type Shown } from '../caller.ts';
-import { drop, part, put, type Operation, type Parts, type Refusal, type Seen } from '../change.ts';
+import { amended, drop, part, put, type Operation, type Parts, type Refusal, type Seen, type Unsealed } from '../change.ts';
 import type { Said } from '../entry.ts';
 import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
@@ -275,7 +275,7 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
   return {
     read,
     denied: deniedTo('member.remove', shown, vault),
-    decide(seen: Seen<typeof read>, at: number) {
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       if (!runs(caller)) return { refused: 'no_access' };
@@ -284,6 +284,8 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
       if (was.role === 'owner' && !ownsAllAsking(caller)) return { refused: 'no_access' };
       if (named(vault, principal)) return { refused: 'configured_owner' };
       if (ownsAll(was) && !anotherOwner(seen.owners, principal)) return { refused: 'last_owner' };
+      // An account of theirs the vault cannot read may be one still live: removed, they would sign in with it once back.
+      if (unsealed.accounts > 0) return { refused: 'tampered' };
 
       const now = new Date(at);
       const generation = was.generation + 1;
@@ -294,7 +296,7 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
         writes: [
           put(principals, { ...withoutMac(was), status: 'removed', role: 'member', scope: null, generation, statusChangedAt: now, statusChangedBy: caller.principal }, was),
           ...seen.held.map((grant) => drop(grants, grant)),
-          ...live.map((account) => put(identities, { ...withoutMac(account), revokedAt: now, revokedBy: caller.principal }, account)),
+          ...live.map((account) => amended(identities, account, { revokedAt: now, revokedBy: caller.principal })),
         ],
         entry: said('member.remove', caller, shown, [
           `principal:${principal}`,

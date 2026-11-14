@@ -285,6 +285,22 @@ test('a removal revokes the member\'s sign-in accounts, so that back in, they bi
   assert.equal((await row(bo))!.generation, 1);
 });
 
+test('a removal that finds an account of the member\'s it cannot read refuses, and removes nothing', async () => {
+  await write(world, ...rows('identities', identity(bo, { email: 'bo@acme.example' })));
+  const before = [await members(), await count('grants'), await kept()];
+  // Marked revoked behind the vault, as one that would hide it from a read of live accounts; then edited: neither is taken as it says.
+  for (const edit of [sql`UPDATE identities SET revoked_at = now() WHERE principal = ${bo}`, sql`UPDATE identities SET revoked_at = NULL, email = 'eve@acme.example' WHERE principal = ${bo}`]) {
+    await world.owner.execute(edit);
+    assert.deepEqual(await remove('fay-cli', bo), { refused: 'tampered' });
+    assert.deepEqual([await members(), await count('grants'), await kept()], before);
+  }
+  // Another member's account, edited, is not this removal's to refuse.
+  await world.owner.execute(sql`DELETE FROM identities WHERE principal = ${bo}`);
+  await write(world, ...rows('identities', identity(eve)));
+  await world.owner.execute(sql`UPDATE identities SET email = 'x@acme.example' WHERE principal = ${eve}`);
+  assert.ok('answer' in (await remove('fay-cli', bo)));
+});
+
 test('a grant hidden from a removal and put back once the member is brought back reaches nothing: it is of the generation the removal ended', async () => {
   // The writer the design assumes deletes Bo's grants before the removal, which finds none to drop, and puts them back, MACs and all, after.
   const [{ hidden }] = (await rowsOf<{ hidden: string }>(world.owner, sql`WITH gone AS (DELETE FROM grants WHERE principal = ${bo} RETURNING *) SELECT json_agg(gone)::text AS hidden FROM gone`)) as [{ hidden: string }];
