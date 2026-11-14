@@ -1,3 +1,4 @@
+import type { CallerIdentity } from '../identity/aws.ts';
 import type { VerifiedUnder } from '../identity/proofs.ts';
 import type { Issued } from './signin.ts';
 
@@ -5,14 +6,16 @@ import type { Issued } from './signin.ts';
  * The changes of workloads signing in (`packages/vault/src/ops/workloads.ts`,
  * docs/design/0.16.md, "A workload signing in").
  */
-export type WorkloadChanges = TokenExchange;
+export type WorkloadChanges = TokenExchange | WorkloadSignin | WorkloadRenew;
 
 export type WorkloadAnswers = {
   'token.exchange': Exchanged;
+  'workload.signin': Session;
+  'workload.renew': Renewed;
 };
 
-/** The workloads' changes nobody asks: a CI run has no credential yet, only its platform's proof. */
-export type WorkloadsUnasked = 'token.exchange';
+/** The workloads' changes nobody asks: a CI run, or a workload signing in, has no credential yet, only its platform's proof. */
+export type WorkloadsUnasked = 'token.exchange' | 'workload.signin';
 
 /**
  * A CI run trades its platform's ID token for a service token of five
@@ -38,3 +41,49 @@ export type TokenExchange = { op: 'token.exchange'; service: string; token: stri
 
 /** The token made, and the binding that issued it, by which the app counts a binding's rate. */
 export type Exchanged = Issued & { binding: string };
+
+/**
+ * A workload's proof, by its kind: a platform's ID token, with the keys the
+ * app verified it under (`token.exchange`'s `token` and `under`), or STS's
+ * answer to the `GetCallerIdentity` request the workload signed, which the
+ * app checked whole and sent.
+ */
+export type WorkloadProof = { oidc: { token: string; under: VerifiedUnder } } | { aws: CallerIdentity };
+
+/**
+ * A workload trades its proof for a session bound to a key it holds,
+ * issued by the oldest of the service's bindings with a policy, of that
+ * proof's profiles, that takes it.
+ *
+ * - `key` is the thumbprint of the key the request's own proof (RFC 9449)
+ *   named, which the app held to the request: the session is that key's
+ *   alone, and a token whose audience names a key names this one.
+ * - `publicUrl` and `credential` as for `token.exchange`.
+ *
+ * Refused as `token.exchange` is, and `frozen` for a service, a binding or
+ * every workload a manager froze, as 0.14 refused it. A binding whose
+ * sources the request comes from outside, or that lists reads where the
+ * deployment lets none (`noReads`), is `no_match`. A refusal writes nothing
+ * and is not logged.
+ */
+export type WorkloadSignin = { op: 'workload.signin'; service: string; proof: WorkloadProof; key: string; publicUrl: string; credential: string };
+
+/**
+ * The session made: its token's expiry, an hour on or its hard end, and
+ * that hard end; the environments it reaches as of now, by id, as its row
+ * lists them, which the app names by path; and the binding that issued it,
+ * by which the app counts a binding's rate.
+ */
+export type Session = Issued & { binding: string; notAfter: string; places: string[] };
+
+/**
+ * A workload's session moves its own expiry on, by its key's proof: an
+ * hour from now, never past its hard end. A frozen session renews, so that
+ * lifting the freeze restores it; one stopped for any other reason, or
+ * narrowed from another, does not. Refused `expired` within five seconds of
+ * its expiry, so that a renewal that comes late revives nothing.
+ */
+export type WorkloadRenew = { op: 'workload.renew' };
+
+/** The session's expiry, moved on, or as it was at its hard end. */
+export type Renewed = { expiresAt: string };

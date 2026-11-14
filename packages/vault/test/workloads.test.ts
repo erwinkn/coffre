@@ -18,7 +18,7 @@ import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
 import { Signer } from '../src/signer.ts';
 import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
-import { amend, binding, environment, grant, instance, principal, project, role, rows, tokenOf, write } from './world.ts';
+import { amend, binding, environment, grant, instance, principal, project, role, rows, session as sessionRow, tokenOf, write } from './world.ts';
 
 const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
@@ -324,4 +324,299 @@ test('what the contract takes is checked before anything is read: a fault, never
     { request: 7 }, { ip: '\ud800' },
   ];
   for (const more of wrong) assert.throws(() => OPERATIONS['token.exchange']({ ...ok, ...more } as never, deciding), TypeError, JSON.stringify(more).slice(0, 80));
+});
+
+// A workload trades a proof for a session bound to its key (`workload.signin`), and renews it (`workload.renew`).
+
+const KEY = 'NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs';
+const OTHER_KEY = 'oKIywvGUpTVTyxMQ3bwIIeQUudfr_CkLMjCE19ECD-U';
+const POD = { iss: KUBE, sub: 'system:serviceaccount:ci:runner' };
+const KUBE_FETCHED = { issuer: KUBE, jwksUri: `${KUBE}/openid/v1/jwks` };
+/** A pod's ID token: the app verified its signature, so its bytes are any. */
+const podToken = (claims: Record<string, unknown> = {}) => idToken({ ...POD, ...claims });
+const AWS_ANSWER = { account: '123456789012', arn: 'arn:aws:sts::123456789012:assumed-role/deployer/i-0abc', userId: 'AROAEXAMPLEROLEID01:i-0abc' };
+
+const signin = (proof: Asked<'workload.signin'>['proof'], label: string, more: Partial<Asked<'workload.signin'>> = {}): Asked<'workload.signin'> =>
+  ({ ...from, op: 'workload.signin', service: DEPLOY, proof, key: KEY, publicUrl: ORIGIN, credential: tokenOf(label).toString('hex'), ...more });
+const oidc = (token: string, under = KUBE_FETCHED) => ({ oidc: { token, under } });
+const renew = (label: string, proof: string | null = KEY, more: Partial<Presented> = {}): Asked<'workload.renew'> => ({ ...from, op: 'workload.renew', token: tokenOf(label).toString('hex'), proof, ...more });
+const outcome = async (input: Asked<'workload.signin'> | Asked<'workload.renew'>, through = vault) => {
+  const done = await through.change(input);
+  return 'refused' in done ? done.refused : 'made';
+};
+/** Who a session is, with its key's proof or another's. */
+const session = async (label: string, proof: string | null = KEY) => {
+  world.memory.callers.clear();
+  const answer = await vault.caller({ ...shown(label), proof });
+  return 'refused' in answer ? answer.refused : { principal: answer.principal, kind: answer.credential.kind, scope: answer.holds.credentialScope };
+};
+const sessions = () => rowsOf<{ id: string; kind: string; created_by: string; scope: string | null; places: string | null; jkt: string | null; expires_at: Date | string; not_after: Date | string | null; label: string | null }>(
+  world.owner, sql`SELECT id, kind, created_by, scope, places, jkt, expires_at, not_after, label FROM ${credentials} WHERE kind = 'workload' ORDER BY created_at, id`);
+const iso = (value: Date | string | null) => (value === null ? null : new Date(value).toISOString());
+
+/** `pods`, made in March, and `any pod`, made in May, take a pod's token for a session; `aws` takes STS's answer. Market has prod, staging, an archived environment and Ada's personal config. */
+async function workloadWorld() {
+  const staging = environment(market, 'staging');
+  const old = environment(market, 'old', { archivedAt: new Date(Date.UTC(2026, 0, 1)) });
+  const mine = environment(market, 'prod-ada', { owner: 'user:ada@acme.example', parentId: prod.id });
+  const shop = project('shop');
+  const pods = binding(DEPLOY, { profile: 'custom', issuer: KUBE, jwksUri: KUBE_FETCHED.jwksUri, claims: canonicalClaims({ sub: POD.sub }), scope: VIEWER, policy: '{}', label: 'pods', createdAt: new Date(Date.UTC(2026, 2, 1)) });
+  const anyPod = binding(DEPLOY, { profile: 'custom', issuer: KUBE, jwksUri: KUBE_FETCHED.jwksUri, claims: '{}', scope: '[]', policy: '{}', label: 'any pod', createdAt: new Date(Date.UTC(2026, 4, 1)) });
+  const aws = binding(DEPLOY, { profile: 'aws', issuer: 'urn:coffre:aws', jwksUri: 'urn:coffre:aws', claims: canonicalClaims({ account: AWS_ANSWER.account, role_id: 'AROAEXAMPLEROLEID01' }), scope: JSON.stringify([{ projectId: market.id, environmentId: prod.id, role: 'viewer' }]), policy: '{"sessionHours":2}', label: 'aws' });
+  await write(world, ...rows('projects', shop), ...rows('environments', staging, old, mine, environment(shop, 'prod')), ...rows('bindings', pods, anyPod, aws));
+  return { staging, pods, anyPod, aws };
+}
+
+test("a workload's ID token is traded at the oldest binding with a policy that takes it, for a session bound to its key, with its hard end and the places it reaches", async () => {
+  const { staging, pods, anyPod } = await workloadWorld();
+  const token = podToken();
+  const done = await vault.change(signin(oidc(token), 's-1'));
+  assert.ok(!('refused' in done), JSON.stringify(done));
+  // A token that does not name the key ends the session at its own `exp`, sooner than an hour.
+  const notAfter = new Date(seconds(290) * 1000).toISOString();
+  assert.deepEqual({ ...done.answer, credential: undefined }, { principal: DEPLOY, credential: undefined, expiresAt: notAfter, notAfter, places: [prod.id, staging.id], binding: pods.id });
+  const [row] = await sessions();
+  assert.deepEqual({ ...row, id: undefined, expires_at: iso(row!.expires_at), not_after: iso(row!.not_after), places: JSON.parse(row!.places!) }, {
+    id: undefined, kind: 'workload', created_by: `binding:${pods.id}`, scope: VIEWER, jkt: KEY, label: 'pods', expires_at: notAfter, not_after: notAfter,
+    places: [{ environmentId: prod.id, personal: false }, { environmentId: staging.id, personal: false }],
+  });
+  // It stands with its key's proof alone, as the service, within its binding's scope.
+  assert.deepEqual(await session('s-1'), { principal: DEPLOY, kind: 'workload', scope: JSON.parse(VIEWER) });
+  assert.equal(await session('s-1', null), 'unauthenticated');
+  assert.equal(await session('s-1', OTHER_KEY), 'unauthenticated');
+  // One entry, which ages out, as 0.14's `token.exchange` of kind `workload`; the binding used at its date.
+  const [entry] = (await entries()).filter((one) => one.action === 'token.exchange');
+  assert.equal(entry!.kept, false);
+  const signedPart = token.slice(0, token.lastIndexOf('.'));
+  assert.deepEqual({ ...entry!.detail, run: undefined }, {
+    kind: 'workload', credential: done.answer.credential, binding: pods.id, generation: 0, issuer: KUBE, proved: 'oidc', key: KEY, expiresAt: notAfter, notAfter, run: undefined,
+    proof: createHash('sha256').update(signedPart).digest('hex'),
+  });
+  assert.deepEqual([entry!.actor, entry!.objects], [DEPLOY, [`principal:${DEPLOY}`, `credential:${done.answer.credential}`, `binding:${pods.id}`]]);
+  assert.equal((await lastUsed())[pods.id], entry!.at);
+  assert.equal((await lastUsed())[anyPod.id], null);
+  // The token is spent: again, for another session, replayed, and nothing written.
+  assert.equal(await spentCount(), 1);
+  world.tick(1000);
+  assert.equal(await outcome(signin(oidc(token), 's-2')), 'replayed');
+  assert.deepEqual([(await sessions()).length, await spentCount()], [1, 1]);
+  // Another pod: May's binding, which reaches nothing and lists no place.
+  const other = await vault.change(signin(oidc(podToken({ sub: 'system:serviceaccount:ci:other' })), 's-3'));
+  assert.ok(!('refused' in other));
+  assert.deepEqual([other.answer.binding, other.answer.places], [anyPod.id, []]);
+  assert.deepEqual(await session('s-3'), { principal: DEPLOY, kind: 'workload', scope: [] });
+  // A CI run's exchange takes no binding with a policy, and a session no binding without one.
+  assert.equal(await refusal(exchange(podToken(), 'r-1', { under: KUBE_FETCHED })), 'no_match');
+  await amend(world, 'bindings', sql`${bindings.id} IN (${pods.id}, ${anyPod.id})`, { policy: null });
+  assert.equal(await outcome(signin(oidc(podToken()), 's-4')), 'no_match');
+  await amend(world, 'bindings', sql`${bindings.id} IN (${pods.id}, ${anyPod.id})`, { policy: '{}' });
+  // A token past its `exp` within the clock's tolerance reads, but its session would end before it began.
+  assert.equal(await outcome(signin(oidc(podToken({ exp: seconds(-10) })), 's-5')), 'expired');
+  // Market archived: the session reaches no place it lists.
+  await amend(world, 'projects', sql`id = ${market.id}`, { archivedAt: new Date(world.now()) });
+  const archived = await vault.change(signin(oidc(podToken()), 's-6'));
+  assert.ok(!('refused' in archived));
+  assert.deepEqual(archived.answer.places, []);
+  assert.deepEqual(await checked(), []);
+});
+
+test("a token that names the session's key is not spent, and the binding's hours end the session; one for another key is refused audience", async () => {
+  // GitHub's tokens name the key: their audience is this instance's URL with its thumbprint.
+  const keyed = binding(DEPLOY, { claims: canonicalClaims(MAIN), scope: VIEWER, policy: '{"keyAudience":true,"sessionHours":3}', label: 'keyed', createdAt: new Date(Date.UTC(2026, 0, 1)) });
+  await write(world, ...rows('bindings', keyed));
+  const token = idToken({ aud: `${ORIGIN}#jkt=${KEY}` });
+  const first = await vault.change(signin(oidc(token, FETCHED), 'g-1'));
+  assert.ok(!('refused' in first), JSON.stringify(first));
+  assert.deepEqual([first.answer.binding, first.answer.expiresAt, first.answer.notAfter], [keyed.id, new Date(world.now() + 3_600_000).toISOString(), new Date(world.now() + 3 * 3_600_000).toISOString()]);
+  // The same token again makes another session of the same key: it works for no other.
+  assert.equal(await outcome(signin(oidc(token, FETCHED), 'g-2')), 'made');
+  assert.equal(await spentCount(), 0);
+  assert.equal(await outcome(signin(oidc(token, FETCHED), 'g-3', { key: OTHER_KEY })), 'audience');
+  assert.equal(await outcome(signin(oidc(idToken({ aud: ORIGIN }), FETCHED), 'g-3')), 'audience');
+  // `?jkt=`, for a platform that refuses a `#` in an audience.
+  assert.equal(await outcome(signin(oidc(idToken({ aud: `${ORIGIN}?jkt=${KEY}` }), FETCHED), 'g-4')), 'made');
+  assert.deepEqual(await checked(), []);
+});
+
+test("STS's answer is taken at the oldest aws binding of its role: nothing is spent, the binding's hours end the session, and a root's or a contradictory answer is refused", async () => {
+  const { aws } = await workloadWorld();
+  const done = await vault.change(signin({ aws: AWS_ANSWER }, 'a-1'));
+  assert.ok(!('refused' in done), JSON.stringify(done));
+  assert.deepEqual({ ...done.answer, credential: undefined }, {
+    principal: DEPLOY, credential: undefined, binding: aws.id, places: [prod.id],
+    expiresAt: new Date(world.now() + 3_600_000).toISOString(), notAfter: new Date(world.now() + 2 * 3_600_000).toISOString(),
+  });
+  assert.equal(await outcome(signin({ aws: AWS_ANSWER }, 'a-2')), 'made', 'nothing spent');
+  assert.equal(await spentCount(), 0);
+  const [entry] = (await entries()).filter((one) => one.action === 'token.exchange');
+  assert.deepEqual([entry!.detail.proved, entry!.detail.proof, entry!.detail.issuer], ['aws', null, 'urn:coffre:aws']);
+  const cases: [string, typeof AWS_ANSWER][] = [
+    ['no_match', { ...AWS_ANSWER, arn: 'arn:aws:iam::123456789012:root', userId: '123456789012' }],
+    ['no_match', { ...AWS_ANSWER, arn: 'arn:aws:iam::123456789012:user/ada', userId: 'AIDAEXAMPLEUSERID01' }],
+    ['no_match', { ...AWS_ANSWER, userId: 'AROAANOTHERROLEID01:i-0abc' }],
+    ['malformed', { ...AWS_ANSWER, account: '210987654321' }],
+    ['malformed', { ...AWS_ANSWER, userId: 'AROAEXAMPLEROLEID01:i-0def' }],
+  ];
+  for (const [word, answer] of cases) assert.equal(await outcome(signin({ aws: answer }, 'a-3')), word, JSON.stringify(answer));
+  // An ID token takes no aws binding, nor STS's answer any other.
+  await amend(world, 'bindings', sql`${bindings.id} = ${aws.id}`, { revokedAt: new Date(world.now()), revokedBy: 'user:root@acme.example' });
+  assert.equal(await outcome(signin({ aws: AWS_ANSWER }, 'a-3')), 'no_match');
+  assert.deepEqual(await checked(), []);
+});
+
+test("a binding's policy refuses the session: outside its sources, or listing reads where the deployment lets none; and a freeze of the service, the binding or every workload refuses it, frozen", async () => {
+  const { pods, anyPod } = await workloadWorld();
+  await amend(world, 'bindings', sql`${bindings.id} = ${anyPod.id}`, { revokedAt: new Date(world.now()), revokedBy: 'user:root@acme.example' });
+  await amend(world, 'bindings', sql`${bindings.id} = ${pods.id}`, { policy: '{"sources":["10.0.0.0/8"]}' });
+  assert.equal(await outcome(signin(oidc(podToken()), 'p-1')), 'no_match');
+  assert.equal(await outcome(signin(oidc(podToken()), 'p-1', { ip: null })), 'no_match');
+  assert.equal(await outcome(signin(oidc(podToken()), 'p-1', { ip: '10.1.2.3' })), 'made');
+  await amend(world, 'bindings', sql`${bindings.id} = ${pods.id}`, { policy: JSON.stringify({ reads: { [prod.id]: { keys: '*' } } }) });
+  const strict = openLocalVault(world.db, { ...world, workloads: { noReads: true, useOnly: false } }, { wake: world.wake, now: world.now });
+  assert.equal(await outcome(signin(oidc(podToken()), 'p-2'), strict), 'no_match');
+  assert.equal(await outcome(signin(oidc(podToken()), 'p-2')), 'made');
+  // A deployment that takes no workloads makes no session; one that takes key-bound sessions alone makes them.
+  const none = openLocalVault(world.db, { ...world, workloads: null }, { wake: world.wake, now: world.now });
+  assert.equal(await outcome(signin(oidc(podToken()), 'p-3'), none), 'no_match');
+  const useOnly = openLocalVault(world.db, { ...world, workloads: { noReads: false, useOnly: true } }, { wake: world.wake, now: world.now });
+  assert.equal(await outcome(signin(oidc(podToken()), 'p-3'), useOnly), 'made');
+  const frozen = new Date(world.now());
+  for (const [table, where] of [['bindings', sql`${bindings.id} = ${pods.id}`], ['principals', sql`id = ${DEPLOY}`], ['policy', sql`only_row`]] as const) {
+    await amend(world, table, where, table === 'policy' ? { workloadsFrozenAt: frozen } : { frozenAt: frozen });
+    assert.equal(await outcome(signin(oidc(podToken()), 'p-4')), 'frozen', table);
+    await amend(world, table, where, table === 'policy' ? { workloadsFrozenAt: null } : { frozenAt: null });
+  }
+  assert.equal(await outcome(signin(oidc(podToken()), 'p-4')), 'made');
+  // Refusals write nothing, spend nothing, and are not logged.
+  assert.deepEqual([(await sessions()).length, await spentCount(), (await entries()).filter((one) => one.action === 'token.exchange').length], [4, 4, 4]);
+  assert.deepEqual(await checked(), []);
+});
+
+test("a row written behind the vault refuses the sign-in, tampered: a binding, the service, the instance's row, and a place its sessions would list", async () => {
+  const { staging } = await workloadWorld();
+  for (const [table, where] of [['bindings', `profile = 'custom' AND label = 'pods'`], ['principals', `id = '${DEPLOY}'`], ['policy', 'only_row'], ['environments', `id = '${staging.id}'`], ['projects', `id = '${market.id}'`]] as const) {
+    const [{ mac }] = await rowsOf<{ mac: Buffer }>(world.owner, sql`SELECT mac FROM ${sql.identifier(table)} WHERE ${sql.raw(where)}`) as [{ mac: Buffer }];
+    await zero(table, where);
+    assert.equal(await outcome(signin(oidc(podToken()), 't-1')), 'tampered', table);
+    await world.owner.execute(sql`UPDATE ${sql.identifier(table)} SET mac = ${mac} WHERE ${sql.raw(where)}`);
+  }
+  // A place of a project no binding's scope names decides nothing, and is not read.
+  await zero('environments', `project_id <> '${market.id}'`);
+  assert.equal(await outcome(signin(oidc(podToken()), 't-1')), 'made');
+  await world.owner.execute(sql`DELETE FROM policy`);
+  assert.equal(await outcome(signin(oidc(podToken()), 't-2')), 'adopting');
+  // The signer finds the place left zeroed, and the instance's row gone.
+  assert.deepEqual(await checked(), ['row', 'row']);
+});
+
+test('more bindings of a proof\'s profiles on an issuer than a service may hold: none of them answers; bindings of no policy count for nothing', async () => {
+  await workloadWorld();
+  const more = Array.from({ length: 15 }, (_, n) => binding(DEPLOY, { profile: 'custom', issuer: KUBE, jwksUri: KUBE_FETCHED.jwksUri, claims: canonicalClaims({ sub: `x${n}` }), scope: '[]', policy: '{}', createdAt: new Date(Date.UTC(2026, 5, 1, n)) }));
+  await write(world, ...rows('bindings', ...more));
+  assert.equal(await outcome(signin(oidc(podToken()), 'm-1')), 'no_match');
+  await amend(world, 'bindings', sql`${bindings.id} = ${more[0]!.id}`, { policy: null });
+  assert.equal(await outcome(signin(oidc(podToken()), 'm-1')), 'made');
+  assert.deepEqual(await checked(), []);
+});
+
+test('two sign-ins with one token at once: the first spends it, and the second is refused; a binding revoked meanwhile makes none', async () => {
+  const { pods } = await workloadWorld();
+  const deciding = { workloads: world.workloads, owners: [] };
+  const token = podToken();
+  const [first, second] = await Promise.all(['c-1', 'c-2'].map((label) => prepare(world, OPERATIONS['workload.signin'](signin(oidc(token), label), deciding))));
+  assert.ok(!('refused' in first!) && !('refused' in second!));
+  assert.deepEqual([await written(world, first!), await written(world, second!)], ['made', 'spent']);
+  assert.deepEqual([(await sessions()).length, await spentCount()], [1, 1]);
+  const ready = await prepare(world, OPERATIONS['workload.signin'](signin(oidc(podToken()), 'c-3'), deciding));
+  assert.ok(!('refused' in ready));
+  await amend(world, 'bindings', sql`${bindings.id} = ${pods.id}`, { revokedAt: new Date(world.now()), revokedBy: 'user:root@acme.example' });
+  assert.equal(await written(world, ready), 'moved');
+  assert.deepEqual([(await sessions()).length, await spentCount()], [1, 1]);
+  assert.deepEqual(await checked(), []);
+});
+
+test("keys a binding carries: a session's token is verified by the vault, under the keys on the row", async () => {
+  const [known, stranger] = [pair(), pair()];
+  const jwks = jwksOf({ key: known.publicKey, kid: 'k1' });
+  const kube = binding(DEPLOY, { profile: 'custom', issuer: KUBE, jwksUri: carriedUri(jwks), jwks, claims: canonicalClaims({ sub: POD.sub }), scope: VIEWER, policy: '{}' });
+  await write(world, ...rows('bindings', kube));
+  const under = { issuer: KUBE, jwksUri: kube.jwksUri };
+  assert.equal(await outcome(signin(oidc(signed(known.privateKey, 'k1'), under), 'k-1')), 'made');
+  assert.equal(await outcome(signin(oidc(signed(stranger.privateKey, 'k2'), under), 'k-2')), 'unknown_signer');
+  assert.equal(await outcome(signin(oidc(signed(stranger.privateKey, 'k1'), under), 'k-2')), 'malformed');
+  assert.deepEqual(await checked(), []);
+});
+
+test('what a sign-in takes is checked before anything is read: a fault, never a refusal', () => {
+  const deciding = { workloads: world.workloads, owners: [] };
+  const ok = signin(oidc(podToken()), 'x');
+  const wrong: Partial<Record<keyof Asked<'workload.signin'>, unknown>>[] = [
+    { service: 7 }, { proof: null }, { proof: {} }, { proof: { oidc: { token: 'x', under: KUBE_FETCHED }, aws: AWS_ANSWER } }, { proof: { enrollment: 'code' } },
+    { proof: { oidc: { token: 7, under: KUBE_FETCHED } } }, { proof: { oidc: { token: 'x', under: null } } }, { proof: { oidc: null } },
+    { proof: { aws: null } }, { proof: { aws: { ...AWS_ANSWER, arn: 7 } } }, { proof: { aws: { account: AWS_ANSWER.account, arn: AWS_ANSWER.arn } } },
+    { key: null }, { key: 'short' }, { key: `${KEY}=` }, { publicUrl: 7 }, { credential: 'ABC' }, { ip: 7 },
+  ];
+  for (const more of wrong) assert.throws(() => OPERATIONS['workload.signin']({ ...ok, ...more } as never, deciding), TypeError, JSON.stringify(more).slice(0, 80));
+  assert.throws(() => OPERATIONS['workload.renew']({ ...renew('x'), token: 'ABC' } as never, deciding), TypeError);
+});
+
+test("a session renews itself with its key's proof: an hour on, never past its hard end; frozen it renews, stopped otherwise it is told why", async () => {
+  const { aws } = await workloadWorld();
+  const made = await vault.change(signin({ aws: AWS_ANSWER }, 'r-1'));
+  assert.ok(!('refused' in made));
+  const notAfter = made.answer.notAfter;
+  const used = await lastUsed();
+  world.tick(30 * 60_000);
+  const done = await vault.change(renew('r-1'));
+  assert.ok(!('refused' in done), JSON.stringify(done));
+  assert.equal(done.answer.expiresAt, new Date(world.now() + 3_600_000).toISOString());
+  assert.equal(iso((await sessions())[0]!.expires_at), done.answer.expiresAt);
+  assert.deepEqual(await lastUsed(), used, "a renewal is no use of its binding, as in 0.14");
+  const [entry] = (await entries()).filter((one) => one.action === 'workload.renew');
+  assert.equal(entry!.kept, false);
+  assert.deepEqual(entry!.detail, { credential: made.answer.credential, binding: aws.id, expiresAt: done.answer.expiresAt, notAfter });
+  // Without its key, or with another, it is no one.
+  assert.equal(await outcome(renew('r-1', null)), 'unauthenticated');
+  assert.equal(await outcome(renew('r-1', OTHER_KEY)), 'unauthenticated');
+  // Frozen, it renews, so that lifting the freeze restores it; outside its binding's sources, it is told so.
+  await amend(world, 'bindings', sql`${bindings.id} = ${aws.id}`, { frozenAt: new Date(world.now()) });
+  assert.equal(await outcome(renew('r-1')), 'made');
+  assert.equal(await session('r-1'), 'frozen');
+  await amend(world, 'bindings', sql`${bindings.id} = ${aws.id}`, { frozenAt: null, policy: '{"sessionHours":2,"sources":["10.0.0.0/8"]}' });
+  assert.equal(await outcome(renew('r-1')), 'source');
+  await amend(world, 'bindings', sql`${bindings.id} = ${aws.id}`, { policy: '{"sessionHours":2}' });
+  // Near its hard end, it moves to it and no further; at it, nothing moves.
+  world.tick(50 * 60_000);
+  const last = await vault.change(renew('r-1'));
+  assert.ok(!('refused' in last));
+  assert.equal(last.answer.expiresAt, notAfter);
+  const again = await vault.change(renew('r-1'));
+  assert.ok(!('refused' in again));
+  assert.equal(again.answer.expiresAt, notAfter);
+  assert.equal((await entries()).filter((one) => one.action === 'workload.renew').at(-1)!.detail.unchanged, true);
+  // Within five seconds of its end, a renewal comes too late; past it, the session is no one.
+  world.tick(new Date(notAfter).getTime() - world.now() - 4_000);
+  assert.equal(await outcome(renew('r-1')), 'expired');
+  world.tick(4_000);
+  assert.equal(await outcome(renew('r-1')), 'unauthenticated');
+  assert.deepEqual(await checked(), []);
+});
+
+test('only a workload\'s own session renews: not a narrowed one, nor any other credential; one revoked meanwhile is not revived', async () => {
+  const { aws } = await workloadWorld();
+  const parent = await vault.change(signin({ aws: AWS_ANSWER }, 'n-1'));
+  assert.ok(!('refused' in parent));
+  await write(world, ...rows('credentials',
+    sessionRow('n-2', aws, { jkt: KEY, ancestors: JSON.stringify([parent.answer.credential]), expiresAt: new Date(world.now() + 600_000), notAfter: new Date(world.now() + 3_600_000), scope: '[]' }),
+    { ...sessionRow('n-3', aws), kind: 'service', jkt: null, notAfter: null, createdBy: DEPLOY }));
+  assert.equal(await outcome(renew('n-2')), 'narrowed');
+  assert.equal(await outcome(renew('n-3', null)), 'unauthenticated');
+  const deciding = { workloads: world.workloads, owners: [] };
+  world.tick(10 * 60_000);
+  const ready = await prepare(world, OPERATIONS['workload.renew'](renew('n-1'), deciding));
+  assert.ok(!('refused' in ready));
+  await amend(world, 'credentials', sql`${credentials.id} = ${parent.answer.credential}`, { revokedAt: new Date(world.now()), revokedBy: DEPLOY });
+  assert.equal(await written(world, ready), 'moved');
+  assert.equal(await outcome(renew('n-1')), 'unauthenticated');
+  assert.deepEqual(await checked(), []);
 });
