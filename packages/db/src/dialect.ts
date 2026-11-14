@@ -1,30 +1,9 @@
 import { TOMBSTONE } from '@coffre/core/schemas';
-import { getTableColumns, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
-import type { PgTable } from 'drizzle-orm/pg-core';
+import { sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 import { sentPrepared, type Queryable } from './database.ts';
 
-/**
- * Postgres's ways, in one place: the server's queries.ts uses these rather
- * than spell them out.
- */
-
-export type Table = PgTable;
-
-/**
- * Lock the rows a select reads until the transaction ends.
- *
- * `no key update` is for rows others reference by foreign key: it keeps out
- * every other writer of the row, but not an insert that points at it.
- * `share` keeps out every writer, but not another `share`.
- */
-export function forUpdate<Query extends { for: (strength: 'update' | 'no key update' | 'share') => unknown }>(
-  db: Queryable,
-  query: Query,
-  strength: 'update' | 'no key update' | 'share' = 'update',
-): ReturnType<Query['for']> {
-  return query.for(strength) as ReturnType<Query['for']>;
-}
+/** Postgres's ways, in one place: the queries use these rather than spell them out. */
 
 /**
  * The rows a hand-written query answers, as the driver gives them. Column
@@ -53,32 +32,6 @@ export async function rowsOf<Row>(db: Queryable, query: SQL, { prepare = false }
   return prepare ? sentPrepared(rows) : rows();
 }
 
-/** Insert the rows whose unique keys are free; returns how many that was. */
-export async function insertIfAbsent(db: Queryable, table: Table, rows: object[]): Promise<number> {
-  return changedRows(await db.insert(table).values(rows as never).onConflictDoNothing());
-}
-
-/**
- * Insert the rows, or where one repeats the unique key `target`, overwrite
- * `columns` of the existing row with the values it was about to insert.
- */
-export async function upsert<T extends Table>(
-  db: Queryable,
-  table: T,
-  rows: object[],
-  target: (keyof T['$inferSelect'])[],
-  columns: (keyof T['$inferSelect'])[],
-): Promise<void> {
-  const all = getTableColumns(table) as Record<string, ReturnType<typeof getTableColumns>[string]>;
-  const incoming = (name: string) => sql`excluded.${sql.identifier(all[name].name)}`;
-  const set = Object.fromEntries(columns.map((name) => [name, incoming(name as string)]));
-  const query = db.insert(table).values(rows as never);
-  await query.onConflictDoUpdate({
-    target: target.map((name) => all[name as string]) as never,
-    set: set as never,
-  });
-}
-
 /** A tombstone's slug, `@coffre/core/schemas`'s `isTombstone` in SQL. No LIKE wildcard is a `~`. */
 export function tombstone(slug: SQLWrapper): SQL {
   return sql`${slug} LIKE ${`%${TOMBSTONE}%`}`;
@@ -92,14 +45,6 @@ export function truth(condition: SQL): SQL<boolean> {
 /** How many rows an insert, update or delete touched. */
 export function changedRows(result: unknown): number {
   return (result as { count?: number | null }).count ?? 0;
-}
-
-/** Whether an insert or update failed on a unique constraint: SQLSTATE 23505, anywhere in its causes. */
-export function isUniqueViolation(error: unknown): boolean {
-  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
-    if ((cause as { code?: unknown }).code === '23505') return true;
-  }
-  return false;
 }
 
 /**

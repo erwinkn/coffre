@@ -97,7 +97,7 @@ A read walks the chain nearest first, in one read-only snapshot, so a
 write that sets a key and ends its removal meanwhile is seen whole or not
 at all, and the snapshot closes before the vault is asked. A key is settled by the first
 environment that holds it live or dismissed it. That's the whole rule.
-It's `readableValues` in `packages/server/src/api/references.ts`, a loop
+It's `readableValues` in 0.14.7's [`packages/server/src/api/references.ts`](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/src/api/references.ts), a loop
 over the layers.
 
 **Reset to the parent** archives the override row. Archived rows are not

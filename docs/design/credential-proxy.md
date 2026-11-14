@@ -1211,7 +1211,7 @@ one value for it.
 Tested with DFNS's own SDK (`@dfns/sdk`, a dev dependency): it reads its
 organization from the placeholder, and a fake DFNS reads the token it gets
 with the SDK's own `extractTokenScope` and requires the real one
-(`packages/server/test/credential-proxy-placeholders.test.ts`).
+(0.14.7's [`packages/server/test/credential-proxy-placeholders.test.ts`](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/test/credential-proxy-placeholders.test.ts)).
 
 **Redis.** The same tunnel, intercepting the first `AUTH <password>` or
 `HELLO 3 AUTH <user> <password>` and replacing the handle with the real
@@ -1382,7 +1382,7 @@ for VPC Services, and nothing here was run against a real one:
   binding's one host, so the key reaches no other.
 - *Streamed bodies.* An upload streams through a service binding in
   workerd, 24 MiB with its length kept (`FixedLengthStream`), as
-  `packages/server/test/credential-proxy-egress-workers.test.ts` checks.
+  0.14.7's [`packages/server/test/credential-proxy-egress-workers.test.ts`](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/test/credential-proxy-egress-workers.test.ts) checks.
   Through a VPC Service it is untested, and Cloudflare documents no limit
   of its own beyond Workers' (the request into coffre's Worker is capped
   by plan anyway: 100 MB on Free and Pro). Streamed answers are untested

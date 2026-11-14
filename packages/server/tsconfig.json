@@ -4,106 +4,24 @@
     // For the tests of the repo's own scripts, which are plain JavaScript.
     "allowJs": true
   },
-  // The vault's declaration of `cloudflare:workers`, for test/workers/coffre-worker.ts, which runs the vault's Worker beside coffre's.
+  // The vault's declaration of `cloudflare:workers`, for test/workers/app-worker.ts, which runs the vault's Worker beside coffre's.
   "include": ["src/**/*.ts", "test/**/*.ts", "../vault/src/cloudflare-workers.d.ts"],
-  // 0.14's files that do not build on 0.16 yet (docs/design/0.16.md, "Build order"): each one has type errors or
-  // imports one that does. Neither `pnpm typecheck` nor the test suite (scripts/test-files.mjs) reads them. Each
-  // goes from this list when its area is moved, deleted or rewritten; one named here that no longer exists fails
-  // the suite. Nothing outside this list imports a file in it.
+  // 0.14's files that do not build on 0.16 yet (docs/design/0.16.md, "Build order"), kept as the source of what is
+  // still to port: neither `pnpm typecheck` nor the test suite (scripts/test-files.mjs) reads them, and the 0.14
+  // files they import are gone (the v0.14.7 tag has them, and 0.14's tests). Each goes from this list when its area
+  // is moved or rewritten; one named here that no longer exists fails the suite.
   "exclude": [
-    // Secrets' generated values, forks, dismissals (W418).
-    "src/api/references.ts",
-
-    // The member report's lists (W419); the client generator still reads its named types from api/access.ts,
-    // api/members.ts and api/settings.ts.
-    "src/api/access.ts",
-    "src/api/members.ts",
-    "src/api/settings.ts",
-    "test/roles-api.test.ts",
-    "test/secrets-api.test.ts",
-    "test/vault-api.test.ts",
-    "test/offboarding.test.ts",
-    "test/admin-api.test.ts",
-    "test/api-routes.test.ts",
-    "test/instance-roles.test.ts",
-
-    // The freezes standing, roles over HTTP, a request's cost (W420).
-    "src/api/roles.ts",
-    "src/api/freezes.ts",
-    "test/roles.test.ts",
-    "test/one-access.test.ts",
-
-    // MCP and sign-in (W421).
-    "test/mcp-values.test.ts",
-    "test/auth-boundary.test.ts",
-
-    // Workloads, plugins, the credential proxy, tunnels and the Node entry (W422).
-    "src/accesses.ts",
+    // Workloads' sign-in and renewal, their alerts, the AWS proof and vault-kv (W422).
     "src/alerts.ts",
     "src/auth-routes.ts",
-    "src/api/enrollments.ts",
-    "src/api/narrow.ts",
-    "src/api/personal-tokens.ts",
-    "src/api/services.ts",
-    "src/api/workload-routes.ts",
     "src/api/workloads.ts",
     "src/db/workloads.ts",
-    "src/node.ts",
-    "src/node-sockets.ts",
     "src/plugins/vault-kv.ts",
     "src/workload-sessions.ts",
     "src/workloads/aws.ts",
-    "test/workers/coffre-worker.ts",
-    "test/workers/egress-worker.ts",
-    "test/cloudflare-handler.test.ts",
-    "test/credential-proxy.test.ts",
-    "test/credential-proxy-body.test.ts",
-    "test/credential-proxy-cache.test.ts",
-    "test/credential-proxy-path.test.ts",
-    "test/credential-proxy-placeholders.test.ts",
-    "test/credential-proxy-properties.test.ts",
-    "test/credential-proxy-tunnel.test.ts",
-    "test/credential-proxy-tunnel-coffre-workers.test.ts",
-    "test/credential-proxy-workload.test.ts",
-    // These two type-check, but bundle the workers above when they run.
-    "test/credential-proxy-egress-workers.test.ts",
-    "test/credential-scopes.test.ts",
-    "test/kept-access.test.ts",
-    "test/personal-tokens.test.ts",
-    "test/natures-properties.test.ts",
-    "test/personal-overlay.test.ts",
-    "test/plain-values.test.ts",
-    "test/secret-use.test.ts",
-    "test/sensitive-values.test.ts",
-    "test/service-sensitive.test.ts",
-    "test/service-setup.test.ts",
-    "test/use-only.test.ts",
-    "test/vault-kv.test.ts",
-    "test/vault-kv-login.test.ts",
-    "test/workload-aws.test.ts",
-    "test/workload-bindings.test.ts",
-    "test/workload-declarations.test.ts",
-    "test/workload-exchange.test.ts",
-    "test/workload-session-properties.test.ts",
-    "test/workload-sessions.test.ts",
-    "test/workload-unknown-key.test.ts",
 
-    // No area's own: 0.14's queries, which every area above imports, and 0.14's fixture and database helpers, with
-    // the tests of the skeleton's own files that still run on them. Each is ported to test/app-fixture.ts or goes.
-    "src/db/queries.ts",
-    "test/api-fixture.ts",
-    "test/api-fixture.test.ts",
-    "test/db/engine.ts",
-    "test/db/tables.ts",
-    "test/db/dialect.test.ts",
-    "test/db/hyperdrive-cache.test.ts",
-    "test/db/prepared.test.ts",
-    "test/bench/ci.ts",
-    "test/body-limits.test.ts",
-    "test/fetch-api.test.ts",
-    "test/logged.test.ts",
-    "test/migration-door.test.ts",
-    "test/start-handler.test.ts",
-    "test/operations-properties.test.ts"
+    // The Node entry, in 0.16.1 (docs/design/0.16.md, "Node in 0.16.0").
+    "src/node.ts",
+    "src/node-sockets.ts"
   ]
 }

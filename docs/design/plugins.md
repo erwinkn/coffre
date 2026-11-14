@@ -518,7 +518,7 @@ PR 1's code:
   dispatch.
 - `packages/server/src/plugins/vault-kv.ts`.
 - `dev/deployment`: the `plugins` line and `routes/v1.$.ts`.
-- `packages/server/test/vault-kv.test.ts`: ESO's requests as its Go client
+- 0.14.7's [`packages/server/test/vault-kv.test.ts`](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/test/vault-kv.test.ts): ESO's requests as its Go client
   sends them, on Postgres and SQLite.
 
 It was also run against `pnpm dev` with HashiCorp's Go client

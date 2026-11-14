@@ -698,9 +698,8 @@ queries reach the database:
   use `bytea`.
 - **Ids come from the application.** Writes know their keys before insertion
   and do not read them back.
-- **Named operations.** Insert if absent, upsert, row locks, rows changed,
-  recognising a duplicate key, the clock and reading a condition stay in
-  `dialect.ts`. Services contain no database branches.
+- **Named operations.** Rows changed, a tombstone's test, the clock and
+  reading a condition stay in `dialect.ts`. Services contain no database branches.
 - **Shared constraints.** Active identities use a unique index on a generated
   column that holds the subject only while the identity is not revoked.
   Emails are stored lowercase. No query filters on a JSON field.
