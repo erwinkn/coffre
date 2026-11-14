@@ -4,13 +4,15 @@ import { isUnreachable } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
 import { ApiError } from './api/errors.ts';
+import { exchangeToken } from './exchange.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
 import { describeSignin, finishSignin, logout, pollDevice, PROVIDER_PATH, signOut, startDevice, startSignin } from './signin.ts';
 
-type Handler = (request: Request, runtime: CoffreRuntime, sourceIp: string | null) => Promise<Response>;
+/** `track`: work the response must not cut short, which the platform keeps the request alive for (`requestScope`). */
+type Handler = (request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void) => Promise<Response>;
 
 /**
  * Exact paths outside the API's route table, and the one method each
@@ -33,13 +35,15 @@ const PATHS: Record<string, { method: 'GET' | 'POST'; handler: Handler; browserF
   '/api/auth/device/token': { method: 'POST', handler: pollDevice },
   '/api/auth/logout': { method: 'POST', handler: logout },
   '/auth/signout': { method: 'POST', handler: signOut, browserForm: true },
+  // A CI run's exchange (exchange.ts): its platform's ID token, for a five-minute token of its service.
+  '/api/auth/oidc': { method: 'POST', handler: exchangeToken },
 };
 
 /**
  * coffre's own paths: health, sign-in and the API. Null for any other, a page's,
  * which the deployment's Start app renders.
  */
-export async function coffreRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | null> {
+export async function coffreRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): Promise<Response | null> {
   const { pathname } = new URL(request.url);
   const exact = PATHS[pathname];
   if (exact !== undefined) {
@@ -47,7 +51,7 @@ export async function coffreRoute(request: Request, runtime: CoffreRuntime, sour
     const method = request.method === 'HEAD' && exact.method === 'GET' ? 'GET' : request.method;
     if (method !== exact.method) return methodNotAllowed([exact.method]);
     if (exact.browserForm && !isSameOrigin(request, runtime.publicUrl)) return errorResponse(new ApiError('cross_origin', 'this must be sent from coffre itself'));
-    return exact.handler(request, runtime, sourceIp);
+    return exact.handler(request, runtime, sourceIp, track);
   }
   if (pathname === '/api' || pathname.startsWith('/api/')) return fetchApi(request, runtime, { sourceIp });
   // A provider's round trip: leaving for it, and back.

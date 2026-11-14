@@ -77,6 +77,7 @@ export async function fetchApi(request: Request, runtime: CoffreRuntime, options
       caller: () => (asked ??= ask(shown)),
       auth: runtime.auth,
       rotateAfterDays: runtime.rotateAfterDays,
+      transport: runtime.transport,
     });
   } catch (error) {
     return errorResponse(error);

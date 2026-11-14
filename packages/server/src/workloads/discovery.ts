@@ -9,7 +9,8 @@ import { FetchRefused, type WorkloadTransport } from './transport.ts';
  * discovery document that may have changed since an owner looked.
  *
  * The document must name the issuer exactly as the binding does, and its
- * `jwks_uri` must pass the same checks as the issuer.
+ * `jwks_uri` must pass the same checks as the issuer, and be at most the
+ * 2,048 characters a binding keeps.
  */
 export async function discoverKeys(transport: WorkloadTransport, issuer: string, options: { allowLoopback: boolean }): Promise<string> {
   const url = new URL(`${issuer.replace(/\/$/, '')}/.well-known/openid-configuration`);
@@ -25,6 +26,7 @@ export async function discoverKeys(transport: WorkloadTransport, issuer: string,
     throw new DiscoveryFailed(`the issuer's discovery document names ${typeof named === 'string' ? `"${named}"` : 'no issuer'}, not "${issuer}"`);
   }
   if (typeof keys !== 'string') throw new DiscoveryFailed("the issuer's discovery document names no jwks_uri");
+  if (keys.length > MOST_URL) throw new DiscoveryFailed(`the issuer's jwks_uri is longer than the ${MOST_URL.toLocaleString('en')} characters a binding keeps`);
   try {
     checkFetchUrl(keys, "the issuer's jwks_uri", { allowLoopback: options.allowLoopback, path: true, query: true });
   } catch (error) {
@@ -33,6 +35,9 @@ export async function discoverKeys(transport: WorkloadTransport, issuer: string,
   }
   return keys;
 }
+
+/** The longest keys' address a binding keeps, as the vault takes one. */
+const MOST_URL = 2048;
 
 /** The issuer could not be asked, or did not answer as an OpenID Connect issuer does. */
 export class DiscoveryFailed extends Error {

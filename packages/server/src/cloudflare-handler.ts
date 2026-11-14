@@ -5,6 +5,7 @@ import { cloudflareSourceIp } from './auth.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
 import { createRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
+import { fetchTransport } from './workloads/transport.ts';
 
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
 
@@ -64,7 +65,7 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     request(env, ctx) {
       const entry = configured(env);
       const pool = new HyperdrivePool(entry.config.database.hyperdrive.connectionString);
-      const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault);
+      const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, fetchTransport());
       const left: Promise<unknown>[] = [];
       let closing: Promise<void> | undefined;
       /**

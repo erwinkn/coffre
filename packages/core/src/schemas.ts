@@ -52,6 +52,17 @@ export const secretKey = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
  * as `service:<name>`, though the API, the vault and the log keep the
  * `token:<name>` their signed entries hold.
  */
+/** A service account by its member id, `token:<name>`, as the vault takes one (`principals_id_check`). */
+export const SERVICE_MEMBER = /^token:[^\s:]\S*$/;
+/** A service account's member id as the vault's contract takes one: `SERVICE_MEMBER`, in 256 characters of well-formed Unicode with no NUL. */
+export function isServiceMember(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 256 && !/[\0\p{Cs}]/u.test(value) && SERVICE_MEMBER.test(value);
+}
+/** A row's id as the vault draws and takes one: a UUID, in lowercase. */
+export const ROW_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A row's id as a request may spell it: any UUID, in the lowercase the vault takes. */
+export const rowId = z.uuid().transform((id) => id.toLowerCase());
+
 export function shownMember(member: string): string {
   return member.startsWith('token:') ? `service:${member.slice('token:'.length)}` : member;
 }

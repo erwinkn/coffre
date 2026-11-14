@@ -1,4 +1,4 @@
-import { environmentPath, folderName, secretKey, slug } from '@coffre/core/schemas';
+import { environmentPath, folderName, rowId, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import type { ApiContext } from './context.ts';
@@ -36,13 +36,13 @@ export function route<
   return { [key]: def } as { [K in Key]: Route<Key, S, Output, Q> };
 }
 
-/** What each named segment of a path may hold: an area adds the segments its routes name. */
+/** What each named segment of a path may hold, and how the route reads it: an area adds the segments its routes name. */
 export const PARAMS: Record<string, z.ZodType<string>> = {
   project: slug,
   // A slug, or `<slug>@me` for the caller's personal config of it.
   environment: environmentPath,
   key: secretKey,
   folder: folderName,
-  // A row's id: an identity's, a credential's. In lowercase, as the vault takes one and Postgres writes one.
-  id: z.uuid().transform((id) => id.toLowerCase()),
+  // A row's id: an identity's, a credential's, a binding's; any UUID, read in lowercase.
+  id: rowId,
 };

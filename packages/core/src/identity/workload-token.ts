@@ -83,6 +83,8 @@ export function decodeWorkloadToken(token: string): DecodedToken {
   if (header.crit !== undefined) throw malformed('names a critical header extension');
   for (const name of ['iss', 'sub'] as const) {
     if (typeof claims[name] !== 'string' || claims[name] === '') throw malformed(`has no ${name}, as a nonempty string`);
+    // A database stores no NUL, and UTF-8 no lone surrogate: a claim with one could match nothing, and is no text.
+    if (/[\0\p{Cs}]/u.test(claims[name])) throw malformed(`has an ${name} with a NUL or a lone surrogate`);
   }
   for (const name of ['exp', 'iat'] as const) {
     if (typeof claims[name] !== 'number' || !Number.isFinite(claims[name])) throw malformed(`has no ${name}, as a finite number`);

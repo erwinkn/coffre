@@ -125,6 +125,15 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   // The instance's roles (routes/roles.ts), as 0.14.7 answered.
   role_granted: ['conflict', 'a grant names that role: revoke it first'],
   policy_changed: ['conflict', 'the role changed since this change was weighed: weigh it again'],
+  // Trust bindings (routes/bindings.ts): as 0.14 answered.
+  // A token's and a trust binding's alike (routes/tokens.ts too), as 0.14.7 answered both.
+  unknown_principal: ['not_found', 'no such service account, or it was removed'],
+  no_grants: ['bad_request', 'a credential reaches only what its account holds when it is made: give the account a grant first'],
+  unknown_binding: ['not_found', 'no such live trust binding of that service account, or none on that issuer'],
+  keys_differ: ['conflict', "its other bindings on that issuer verify with other keys: replace their keys with these first, or replace those bindings with this one"],
+  same_keys: ['conflict', 'its bindings on that issuer carry these keys already'],
+  too_many_bindings: ['conflict', 'a service account holds at most 16 trust bindings'],
+  no_reads: ['bad_request', 'this instance lets no binding list reads (noReads): its services read plain values only'],
   // Any operation's: the vault refuses to decide on a row it did not write, and the operator must look (`noteTampered`).
   tampered: ['tampered', "a record coffre's vault reads failed its integrity check: whoever runs coffre has the details in its server log"],
   adopting: ['adopting', "coffre's vault has not taken over its database yet; try again in a moment"],
@@ -133,8 +142,6 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   unknown_code: ['not_found', 'that code is unknown or has expired'],
   // Tokens, handles and sessions (routes/tokens.ts): one answer for a credential that is not there, ended, or not the caller's to end.
   unknown_credential: ['not_found', 'unknown credential'],
-  unknown_principal: ['not_found', 'no such service account'],
-  no_grants: ['bad_request', 'a credential reaches only what its account holds when it is made: give the account a grant first'],
 };
 
 /** Refusals about the instance, not what was asked for: their words are the same whatever the request named. */

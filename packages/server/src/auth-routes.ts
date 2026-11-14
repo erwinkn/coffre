@@ -9,12 +9,12 @@ import { errorResponse, jsonResponse, readLimitedJson } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
-// 0.14's workload exchanges under `/api/auth`, the source to port from when
-// workloads join the 0.16 skeleton. Sign-in's paths are in signin.ts.
+// 0.14's workload sessions under `/api/auth`, the source to port from when
+// they join the 0.16 skeleton with the gate. Sign-in's paths are in
+// signin.ts, a CI run's exchange in exchange.ts.
 
-/** An exchange's body: the service and the token, and nothing else, in at most this many bytes. */
+/** A sign-in's body, in at most this many bytes. */
 const EXCHANGE_BODY_BYTES = 16 * 1024;
-const exchangeBody = z.object({ service: z.string().max(120), token: z.string().max(8 * 1024) }).strict();
 
 const REFUSED_CODE = { 401: 'unauthenticated', 429: 'too_many_requests', 503: 'unavailable' } as const;
 
@@ -44,47 +44,6 @@ async function admission(workloads: WorkloadService, sourceIp: string | null): P
   } catch (error) {
     console.error('workload limiter failed', logged(error));
     return refuseExchange(new ExchangeRefused('busy', 'coffre cannot count exchanges right now: try again shortly', 503));
-  }
-}
-
-/** Whether this instance leaves services nothing but key-bound sessions (`useOnly`, docs/design/workload-access.md, section 6.3). */
-function useOnly(runtime: CoffreRuntime): boolean {
-  return runtime.auth.mode === 'signin' && runtime.auth.signin.workloads?.useOnly === true;
-}
-
-/**
- * POST /api/auth/oidc: a CI run's ID token, for a five-minute credential of
- * the service it names (docs/design/oidc.md). `{ service, token }` answers
- * `{ token, expiresAt }`.
- *
- * Admission comes before anything else: both limits, one per source address
- * and one for all, then the body, read only to its limit. A limiter that
- * fails refuses, and never lets a request through. `asked` says what the
- * body asks for, for a plugin whose clients write it in their own words, a
- * Vault login's `{ role, jwt }` (`PluginContext.exchange`): read past
- * admission too, and checked as the route's own.
- */
-export async function exchangeWorkloadToken(
-  request: Request,
-  runtime: CoffreRuntime,
-  sourceIp: string | null,
-  asked: (body: unknown) => unknown = (body) => body,
-) {
-  const workloads = runtime.workloads;
-  if (workloads === null) return errorResponse(notFound('this instance trusts no workloads'));
-  // A strict instance issues no bearer credential to a service: its workloads sign in with a key.
-  if (useOnly(runtime)) {
-    return jsonResponse({ error: 'gone', reason: 'use_only', message: 'this instance signs services in at /api/auth/workload, with a key (useOnly): it issues no bearer credential' }, 410);
-  }
-  const refused = await admission(workloads, sourceIp);
-  if (refused !== null) return refused;
-  try {
-    const body = exchangeBody.parse(asked(await readLimitedJson(request, EXCHANGE_BODY_BYTES)));
-    return jsonResponse(await workloads.exchange(body, { requestId: crypto.randomUUID(), sourceIp }));
-  } catch (error) {
-    if (error instanceof UnknownKey) await unknownKeyAlert(runtime, error, sourceIp);
-    if (error instanceof ExchangeRefused) return refuseExchange(error);
-    return errorResponse(error);
   }
 }
 

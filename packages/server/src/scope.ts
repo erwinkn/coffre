@@ -43,7 +43,7 @@ export function requestScope(
       tracked(
         (async () => {
           try {
-            return (await coffreRoute(request, runtime, sourceIp(request))) ?? errorResponse(new ApiError('not_found', 'no such path'));
+            return (await coffreRoute(request, runtime, sourceIp(request), track)) ?? errorResponse(new ApiError('not_found', 'no such path'));
           } catch (error) {
             return errorResponse(error);
           }

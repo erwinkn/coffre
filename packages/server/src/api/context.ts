@@ -2,6 +2,7 @@ import type { AuthConfig } from '@coffre/core/identity';
 import type { Called, Presented, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
+import type { WorkloadTransport } from '../workloads/transport.ts';
 import { refusal } from './errors.ts';
 
 /** What every handler works with: the app's database, the vault, and what the request showed. */
@@ -22,6 +23,8 @@ export type ApiContext = {
   auth: AuthConfig;
   /** Days a value may go unchanged before the pages flag it for rotation, as the deployment says (`rotateAfterDays`); null for no flag. */
   rotateAfterDays: number | null;
+  /** How the app asks an issuer where its keys are, when a binding is made (`discoverKeys`). */
+  transport: WorkloadTransport;
 };
 
 /** Who a request is, as the vault answers it; its refusal, thrown as the API's. */
