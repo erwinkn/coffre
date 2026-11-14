@@ -5,7 +5,7 @@
 // `vault.change` where none is yet. Every one reads as a sentence, with no
 // fallback, and says what happened.
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { after, beforeEach, test } from 'node:test';
 
 import { canonicalClaims, github, signin } from '@coffre/core/identity';
@@ -177,7 +177,7 @@ test('every action the vault writes reads as a sentence, with no fallback, and s
     ['DELETE', '/freezes/token%3Aci'],
   ] as const) await ok('cy-cli', method, path, body);
   await ok('ed-cli', 'DELETE', `/identities/${eds.id}`);
-  // Refused where nothing was found: said as it was asked.
+  // Refused where no row was found: said with no place, not the one asked.
   assert.equal((await call('ada-cli', 'PUT', '/projects/nope', {}))[0], 403);
   const token = await ok('cy-cli', 'POST', '/members/token:ci/tokens', { label: 'deploy', expiresInDays: 1 });
   await ok('cy-cli', 'DELETE', `/members/token:ci/tokens/${token.id as string}`);
@@ -288,13 +288,13 @@ test('every action the vault writes reads as a sentence, with no fallback, and s
     'workload.freeze: froze the workloads of service:ci: the key leaked in a build log',
     'workload.unfreeze: unfroze the workloads of service:ci',
     'account.unlink: unlinked a github account',
-    'project.create: tried to create project nope: no access',
+    'project.create: tried to create a project: no access',
     'token.create: issued a bearer token to service:ci, reaching viewer on 1 place',
     'token.revoke: revoked a bearer token of service:ci',
     'upstream.freeze: froze the upstream credential stripe in market/prod',
     'upstream.thaw: unfroze the upstream credential stripe in market/prod',
-    'token.bind: trusted CI runs to sign in as service:ci, reaching viewer on 1 place',
-    'token.unbind: stopped trusting CI runs to sign in as service:ci',
+    'token.bind: trusted tokens from https://kubernetes.acme.example to sign in as service:ci, reaching viewer on 1 place',
+    'token.unbind: removed a trust binding of service:ci',
     'sign_in: signed in with github',
     'account.link: linked a github account',
     'device.start: was asked for a CLI sign-in',
@@ -351,9 +351,13 @@ test('what an entry says follows what its detail recorded, not what was asked', 
   await keys({ key: 'A', folder: 'two' }, { key: 'B', value: 'b2' });
   await keys({ key: 'A', folder: 'three' }, { key: 'B', folder: 'three' });
   await ok('cy-cli', 'PATCH', '/secrets/market/dev/A', { key: 'Z' });
-  // Refusals record neither a folder's new name nor a freeze's target.
-  assert.equal((await call('ada-cli', 'PATCH', '/folders/apps', { name: 'tools' }))[0], 403);
-  assert.equal((await call('ada-cli', 'POST', '/freezes', { target: 'instance', reason: 'drill' }))[0], 403);
+  // A nature asked of a key that has it already writes no key, and says so.
+  await ok('cy-cli', 'PATCH', '/secrets/market/dev', { Z: { sensitivity: 'secret' } });
+  // A binding is said by its profile: a CI run's, or a platform's workloads.
+  const bind = (profile: string, issuer: string, claims: Record<string, unknown>, policy: Record<string, unknown> | null) =>
+    made(app.vault.change({ ...as('cy-cli'), op: 'token.bind', member: 'token:ci', binding: { profile, issuer, claims, keys: { uri: `${issuer}/jwks` }, policy, scope: null, label: profile, replaces: [] } }));
+  await bind('github', GITHUB, { ...MAIN, ref: 'refs/heads/release', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/release' }, null);
+  await bind('kubernetes', 'https://kubernetes.acme.example', { sub: 'system:serviceaccount:ci:runner', 'kubernetes.io.serviceaccount.uid': '0c6a2b9e-4f1d-4e3a-9b7c-5d8e2f1a3b4c' }, { sessionHours: 2 });
   await sign();
   assert.deepEqual((await logged()).reverse().map((entry) => `${entry.action}: ${said(entry)}`), [
     'secret.write: added market/dev: 2 secrets',
@@ -373,9 +377,139 @@ test('what an entry says follows what its detail recorded, not what was asked', 
     'secret.write: changed market/dev: 2 secrets',
     'secret.write: moved market/dev: 2 secrets to the folder three',
     'secret.rename: renamed market/dev/A to Z',
-    'folder.refile: tried to refile a folder: no access',
-    'workload.freeze: tried to freeze workloads: no access',
+    'secret.write: changed nothing in market/dev',
+    'token.bind: trusted CI runs to sign in as service:ci, reaching viewer on 1 place',
+    'token.bind: trusted kubernetes workloads to sign in as service:ci, reaching viewer on 1 place',
   ]);
+});
+
+/**
+ * A refused change is logged once a minute per caller and action (D236): one
+ * entry stands for every refusal of that kind, each asking its own key, kind
+ * or direction. So it says who, what kind of change, where its own rows put
+ * it, and why, and nothing any one request named.
+ */
+test('a refused change says what kind of change was refused, where and why, and nothing one request asked', async () => {
+  await seed();
+  // What Ed, a member who holds nothing, is refused: made first, by Cy.
+  for (const [method, path, body] of [
+    ['PATCH', '/secrets/market/dev', { A: 'a1' }],
+    ['PATCH', '/secrets/market/dev/A', { folder: 'kept' }],
+    ['PATCH', '/secrets/market/prod', { LINK: { ref: 'market/dev/A' } }],
+    ['PATCH', '/projects/billing', { archived: true }],
+    ['PUT', '/projects/market/old', {}],
+    ['PATCH', '/projects/market/old', { archived: true }],
+    // Ada writes in market/dev, where S is sensitive: making it a secret in place is an Owner's.
+    ['PATCH', `/access/${ada}`, { 'market/dev': 'developer' }],
+    ['PATCH', '/secrets/market/dev', { S: 's1' }],
+    ['PATCH', '/secrets/market/dev', { S: { sensitivity: 'sensitive' } }],
+  ] as const) await ok('cy-cli', method, path, body);
+  assert.equal((await call('ada-cli', 'PATCH', '/secrets/market/dev', { S: { sensitivity: 'secret' } }))[0], 409);
+  const token = await ok('cy-cli', 'POST', '/members/token:ci/tokens', { label: 'deploy', expiresInDays: 1 });
+  for (const [method, path, body] of [
+    ['PATCH', '/secrets/market/dev', { A: 'mine' }],
+    ['PATCH', '/secrets/market/dev/A', { key: 'B' }],
+    ['PATCH', '/folders/market/dev/kept', { name: 'filed' }],
+    ['DELETE', '/secrets/market/prod/LINK/reference'],
+    ['PATCH', '/projects/market/dev/dismissals', { X: null }],
+    ['PUT', '/projects/shop', { name: 'Shop' }],
+    ['PATCH', '/projects/market', { slug: 'mart' }],
+    ['PATCH', '/projects/market', { archived: true }],
+    ['PATCH', '/projects/billing', { archived: false }],
+    ['PATCH', '/projects/market', { folder: 'apps' }],
+    ['DELETE', '/projects/market'],
+    ['PATCH', '/folders/apps', { name: 'tools' }],
+    ['PUT', '/projects/market/qa', { from: 'dev' }],
+    ['PATCH', '/projects/market/dev', { slug: 'development' }],
+    ['PATCH', '/projects/market/dev', { archived: true }],
+    ['PATCH', '/projects/market/old', { archived: false }],
+    ['DELETE', '/projects/market/dev'],
+    ['PATCH', '/projects/market/dev', { protected: true }],
+    ['PATCH', '/projects/market/prod', { protected: false }],
+    ['PUT', `/members/${ada}`, { role: 'auditor' }],
+    ['DELETE', `/members/${ada}`],
+    ['PATCH', `/access/${ada}`, { 'market/dev': 'developer' }],
+    ['PATCH', `/access/${ada}`, { market: null }],
+    ['PUT', '/roles/developer', { name: 'Developer', description: 'Writes.', permissions: ['secret.read', 'secret.use'], protected: [] }],
+    ['PUT', '/settings', { serviceAccounts: { environments: { only: ['dev'] } } }],
+    ['POST', '/freezes', { target: 'service:ci', reason: 'drill' }],
+    ['DELETE', '/freezes/token%3Aci'],
+    ['POST', '/members/token:ci/tokens', { label: 'mine', expiresInDays: 1 }],
+    ['DELETE', `/members/token:ci/tokens/${token.id as string}`],
+    ['DELETE', `/identities/${randomUUID()}`],
+  ] as const) assert.notEqual((await call('ed-cli', method, path, body))[0], 200, `${method} ${path}`);
+  const refused = async (asked: Promise<{ answer: unknown } | { refused: string }>) => assert.ok('refused' in (await asked));
+  for (const op of ['upstream.freeze', 'upstream.thaw'] as const) await refused(app.vault.change({ ...as('ed-cli'), op, project: 'market', environment: 'prod', upstream: 'stripe' }));
+  const kube = 'https://kubernetes.acme.example';
+  await refused(app.vault.change({ ...as('ed-cli'), op: 'token.bind', member: 'token:ci', binding: { profile: 'custom', issuer: kube, claims: { sub: 'pods' }, keys: { uri: `${kube}/jwks` }, policy: null, scope: null, label: null, replaces: [] } }));
+  await refused(app.vault.change({ ...as('ed-cli'), op: 'token.unbind', member: 'token:ci', binding: randomUUID() }));
+  await refused(app.vault.change({ ...as('ed-cli'), op: 'account.link', account: { provider: 'github', issuer: 'https://github.com', subject: 'gh-ed-2', emails: ['ed@acme.example'] } }));
+  await refused(app.vault.change({ ...as('ed-cli'), op: 'device.decide', userCode: 'BCDF-GHJK', approve: true }));
+  await refused(app.vault.change({ ...as('ed-cli'), op: 'device.decide', userCode: 'BCDF-GHJK', approve: false }));
+  await refused(app.vault.change({ ...as('ed-cli'), op: 'mcp.decide', approval: randomUUID(), approve: true, digest: 'a'.repeat(64) }));
+  await refused(app.vault.change({ ...as('ed-cli'), op: 'mcp.decide', approval: randomUUID(), approve: false, digest: 'a'.repeat(64) }));
+  await refused(app.vault.change({ ...as('ed-cli'), op: 'workload.renew' }));
+  const challenge = createHash('sha256').update('verifier').digest('base64url');
+  await refused(app.vault.change({ ...as('ed-cli'), op: 'mcp.connect', client: { id: randomUUID(), name: 'Zed', host: null, registration: 'dcr', redirectUri: REDIRECT }, scopes: ['read'], code: 'a'.repeat(64), challenge }));
+  await sign();
+
+  const entries = (await logged()).filter((entry) => entry.decision === 'deny').reverse();
+  for (const entry of entries) {
+    const { parts } = describe([entry]);
+    // Its places are the entry's own rows', and no word of it is a value its detail recorded.
+    assert.deepEqual(parts.filter((part) => typeof part !== 'string'), entry.project === null ? [] : [{ place: [entry.project, entry.environment].filter(Boolean).join('/') }]);
+    const words = parts.filter((part) => typeof part === 'string').join('');
+    const asked = Object.entries(entry.metadata).filter(([name, value]) => name !== 'refused' && typeof value === 'string').map(([, value]) => value as string);
+    for (const value of asked) assert.ok(!new RegExp(`\\b${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(words), `${entry.action} says "${value}": ${plain(parts)}`);
+  }
+  assert.deepEqual(entries.map((entry) => `${entry.action}: ${plain(describe([entry]).parts)}`), [
+    'secret.loosen: tried to make a sensitive value secret in place at market/dev: only an Owner of the project does it in place',
+    'secret.write: tried to write secrets at market/dev: no access',
+    'secret.rename: tried to rename a key at market/dev: no access',
+    'secret.refile: tried to move keys between folders at market/dev: no access',
+    'reference.break: tried to break a reference at market/prod: no access',
+    'missing.dismiss: tried to change which missing keys are dismissed at market/dev: no access',
+    'project.create: tried to create a project: no access',
+    'project.update: tried to change a project at market: no access',
+    'project.archive: tried to archive a project at market: no access',
+    'project.restore: tried to restore a project at billing: no access',
+    'project.move: tried to move a project between folders at market: no access',
+    'project.delete: tried to delete a project at market: no access',
+    'folder.refile: tried to change a folder: no access',
+    'environment.create: tried to create an environment at market/dev: no access',
+    'environment.update: tried to change an environment at market/dev: no access',
+    'environment.archive: tried to archive an environment at market/dev: no access',
+    'environment.restore: tried to restore an environment at market/old: no access',
+    'environment.delete: tried to delete an environment at market/dev: no access',
+    'environment.protect: tried to protect an environment at market/dev: no access',
+    'environment.unprotect: tried to unprotect an environment at market/prod: no access',
+    'member.add: tried to change a membership: no access',
+    'member.remove: tried to remove a member: no access',
+    'access.grant: tried to change access at market/dev: no access',
+    'access.revoke: tried to take away access at market: no access',
+    'policy.change: tried to change a role: no access',
+    'settings.change: tried to change where people set up service accounts: no access',
+    'workload.freeze: tried to freeze workloads: no access',
+    'workload.unfreeze: tried to unfreeze workloads: no access',
+    'token.create: tried to issue a credential: no access',
+    'token.revoke: tried to end a credential: unknown credential',
+    'account.unlink: tried to unlink a sign-in account: unknown identity',
+    'upstream.freeze: tried to freeze an upstream credential at market/prod: no access',
+    'upstream.thaw: tried to unfreeze an upstream credential at market/prod: no access',
+    'token.bind: tried to change a trust binding: no access',
+    'token.unbind: tried to remove a trust binding: no access',
+    'account.link: tried to link a sign-in account: no access',
+    'device.approve: tried to approve a CLI sign-in: unknown code',
+    'device.deny: tried to turn down a CLI sign-in: unknown code',
+    'mcp.approve: tried to approve a change asked through MCP: no access',
+    'mcp.deny: tried to turn down a change asked through MCP: no access',
+    'workload.renew: tried to renew a workload session: unauthenticated',
+    'mcp.connect: tried to connect an MCP client: unknown client',
+  ]);
+  // Every action a caller who stands can be refused: the others are never refused one, or logged.
+  // A refused use is not logged (D236); every membership refused is logged as an addition; nobody who stands is refused their own sign-out.
+  const never = ['secret.read', 'member.restore', 'member.role', 'sign_in', 'sign_out', 'device.start', 'token.exchange', 'oauth.register', 'mcp.token', 'mcp.ask', 'mcp.disconnect', 'upkeep.expire', 'vault.adopt'];
+  assert.deepEqual([...new Set(entries.map((entry) => entry.action))].sort(), LOG_ACTIONS.filter((action) => !never.includes(action)).sort());
 });
 
 test("a database the vault adopted begins its log with the adoption's entry", async () => {

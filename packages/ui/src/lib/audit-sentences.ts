@@ -41,21 +41,19 @@ export type Part = string | { place: string } | { member: string };
 
 export type Sentence = { parts: Part[]; refused: boolean };
 
-/** What one template needs: the line's leading entry, its batch, and how it was decided. */
+/** What one template needs: the line's leading entry, and its batch. */
 type Facts = {
   entry: AuditEntry;
   /** Every entry of the batch, the lead included, a read of several once per secret (`perSecret`). */
   batch: AuditEntry[];
   /** Secrets the batch was about. */
   count: number;
-  refused: boolean;
 };
 
+/** An allowed entry's sentence; a refused one has none (`refusal`). */
 type Template = {
   /** What they did: "revealed". */
   did: string | ((facts: Facts) => string);
-  /** What they tried, after "tried to": "reveal". */
-  tried: string | ((facts: Facts) => string);
   /** To what: "market/prod/API_KEY". */
   what: (facts: Facts) => Part[];
   /** Said only of what happened: ", now version 5". */
@@ -73,10 +71,9 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-/** The entry's place, as deep as it goes; a refusal's, where no row was found, as it was asked. */
-function place(entry: Pick<AuditEntry, 'project' | 'environment' | 'key'> & Partial<Pick<AuditEntry, 'decision' | 'metadata'>>): Part[] {
-  const asked = entry.project === null && entry.decision === 'deny' ? (entry.metadata ?? {}) : {};
-  const path = [entry.project ?? text(asked.project), entry.environment ?? text(asked.environment), entry.key].filter((part): part is string => part !== null);
+/** The entry's place, as deep as it goes. */
+function place(entry: Pick<AuditEntry, 'project' | 'environment' | 'key'>): Part[] {
+  const path = [entry.project, entry.environment, entry.key].filter((part): part is string => part !== null);
   return path.length === 0 ? ['coffre'] : [{ place: path.join('/') }];
 }
 
@@ -131,7 +128,7 @@ function secrets(facts: Facts): Part[] {
   const held = facts.batch.filter(referred).length;
   return [
     ...environmentOf(entry),
-    facts.refused ? ', ' : ': ',
+    ': ',
     plural(facts.count, 'secret'),
     ...(held === 0 ? [] : [`, ${held} through ${held === 1 ? 'a reference' : 'references'}`]),
     ...mine,
@@ -151,19 +148,15 @@ function intoFolder(folder: unknown): Part[] {
   return [text(folder) === null ? ' out of its folder' : ` to the folder ${text(folder)}`];
 }
 
-const READ_VERBS: Record<string, [did: string, tried: string]> = {
-  reveal: ['revealed', 'reveal'],
-  run: ['ran', 'run'],
-  compare: ['compared', 'compare'],
-  copy: ['copied', 'copy'],
+const READ_VERBS: Record<string, string> = {
+  reveal: 'revealed',
+  run: 'ran',
+  compare: 'compared',
+  copy: 'copied',
   // The credential proxy's: a value injected into a request for its person, or one handed to their app.
-  use: ['used', 'use'],
-  expose: ['was given', 'be given'],
+  use: 'used',
+  expose: 'was given',
 };
-
-function readVerb({ entry }: Facts): [string, string] {
-  return READ_VERBS[text(entry.metadata.purpose) ?? 'reveal'] ?? READ_VERBS.reveal!;
-}
 
 /**
  * What a write did to one key, from its line of the entry (`keys`): made it
@@ -218,19 +211,18 @@ function updated(kind: 'project' | 'environment'): Template {
   const renamed = ({ metadata }: AuditEntry) => text(metadata.from) !== null && metadata.from !== metadata.slug;
   return {
     did: ({ entry }) => (renamed(entry) ? 'renamed' : 'changed'),
-    tried: 'change',
     what: placeWhat(kind),
     then: ({ entry }) => (renamed(entry) ? [`, was ${text(entry.metadata.from)}`] : []),
   };
 }
 
 /** Archived, restored or deleted: a deleted one is named by its tombstone from then on, `market~deleted-2026-10-05`, as every entry about it is. */
-const plainly = (kind: 'project' | 'environment', did: string, tried: string): Template => ({ did, tried, what: placeWhat(kind) });
+const plainly = (kind: 'project' | 'environment', did: string): Template => ({ did, what: placeWhat(kind) });
 
 /** An environment made: a fork names the one it inherits from, a copy the one it copied. */
 function created(kind: 'project' | 'environment'): Template {
   return {
-    ...plainly(kind, 'created', 'create'),
+    ...plainly(kind, 'created'),
     then: ({ entry }) =>
       text(entry.metadata.inherits) !== null
         ? [`, inheriting from ${text(entry.metadata.inherits)}`]
@@ -245,20 +237,18 @@ const changesOf = ({ metadata }: AuditEntry) => (Array.isArray(metadata.changes)
  * A grant's sentence, and a revocation's, from what changed: the action is the
  * request's (a grant if it gives any role), and its lines only what changed, a
  * role given (`role`) or taken (`role: null`), each at its own place, which the
- * server names the entry for (`viewOf`). Refused, nothing changed: what was asked.
+ * server names the entry for (`viewOf`).
  */
 const accessSentence: Template = {
   did: ({ entry }) => {
     const [first] = changesOf(entry);
     return first === undefined ? 'left' : first.role === null ? 'took' : 'gave';
   },
-  tried: ({ entry }) => (entry.action === 'access.revoke' ? 'take' : 'give'),
-  what: ({ entry, refused }) => {
+  what: ({ entry }) => {
     const [first] = changesOf(entry);
-    if (first === undefined && !refused) return ['the access of ', ...subject(entry), ' on ', ...environmentOf(entry), ' as it was'];
-    const taking = first === undefined ? entry.action === 'access.revoke' : first.role === null;
-    if (!taking) return [...subject(entry), ` ${text(first?.role) ?? 'a role'} on `, ...environmentOf(entry)];
-    const role = text(first?.was);
+    if (first === undefined) return ['the access of ', ...subject(entry), ' on ', ...environmentOf(entry), ' as it was'];
+    if (first.role !== null) return [...subject(entry), ` ${text(first.role) ?? 'a role'} on `, ...environmentOf(entry)];
+    const role = text(first.was);
     return [...(role === null ? ['access to '] : [`${role} on `]), ...environmentOf(entry), ' from ', ...subject(entry)];
   },
   then: ({ entry }) => {
@@ -285,14 +275,13 @@ function others(entry: AuditEntry): Part[] {
 }
 
 /** Who a revoked credential was: a token, or a session or handle ended. */
-const REVOKED: Record<string, [did: string, tried: string]> = {
-  personal: ['revoked a personal token of', 'revoke a personal token of'],
-  service: ['revoked a bearer token of', 'revoke a bearer token of'],
-  handle: ['ended a handle of', 'end a handle of'],
-  cli: ['ended a CLI session of', 'end a CLI session of'],
-  browser: ['ended a browser session of', 'end a browser session of'],
+const REVOKED: Record<string, string> = {
+  personal: 'revoked a personal token of',
+  service: 'revoked a bearer token of',
+  handle: 'ended a handle of',
+  cli: 'ended a CLI session of',
+  browser: 'ended a browser session of',
 };
-const revoked = ({ entry }: Facts) => REVOKED[text(entry.metadata.kind) ?? ''] ?? ['revoked a token of', 'revoke a token of'];
 
 /** A CLI sign-in's label, as its CLI named it: `, “laptop”`. */
 const labelled = ({ entry }: Facts): Part[] => (text(entry.metadata.label) === null ? [] : [`, “${text(entry.metadata.label)}”`]);
@@ -300,26 +289,39 @@ const labelled = ({ entry }: Facts): Part[] => (text(entry.metadata.label) === n
 /** A trust binding's keys replaced, rather than a binding made. */
 const rekeyed = ({ entry }: Facts) => entry.metadata.reason === 'keys_replaced';
 
+/** The profiles whose tokens are CI runs'; every other binding trusts a workload. */
+const CI_PROFILES = ['github', 'github-reusable', 'github-reusable-organization', 'gitlab'];
+
+/** Whom a binding trusts, by its profile: CI runs, a platform's workloads, or a custom issuer's tokens. */
+function trusted({ metadata }: AuditEntry): string {
+  const profile = text(metadata.profile) ?? 'custom';
+  if (CI_PROFILES.includes(profile)) return 'CI runs';
+  return profile === 'custom' ? `tokens from ${text(metadata.issuer) ?? 'an issuer'}` : `${profile} workloads`;
+}
+
 /** What a freeze is on: the whole instance, a service account's workloads, a binding's or a session. */
 function frozen({ entry }: Facts): Part[] {
   const target = text(entry.metadata.target);
-  // A refusal records no target.
   if (target === null) return ['workloads'];
   if (target === 'instance') return ['every workload'];
   if (target.startsWith('token:')) return ['the workloads of ', { member: target }];
   return [target.startsWith('binding:') ? 'the workloads of a trust binding of ' : 'a workload session of ', ...subject(entry)];
 }
 
+/** A write that wrote no key: a nature asked of keys that had it already. The entry does not say why. */
+const empty = ({ metadata }: AuditEntry) => Array.isArray(metadata.keys) && metadata.keys.length === 0;
+
 /** A write's sentence, and a loosening's: one key as what was done to it; a batch as what was done to every key, or as written. */
 const writeSentence: Template = {
   did: ({ entry, batch }) => {
+    if (empty(entry)) return 'changed nothing in';
     const kinds = new Set(batch.map(written));
     if (batch.length === 1 || (kinds.size === 1 && !kinds.has('reference') && !kinds.has('own'))) return WRITTEN[written(entry)];
     return [...kinds].every((kind) => kind === 'add' || kind === 'change') ? 'wrote' : 'changed';
   },
-  tried: ({ entry }) => (entry.action === 'secret.loosen' ? 'loosen' : 'change'),
-  what: (facts) => [...secrets(facts), ...(facts.batch.length === 1 && written(facts.entry) === 'reference' ? [' a reference'] : [])],
+  what: (facts) => (empty(facts.entry) ? environmentOf(facts.entry) : [...secrets(facts), ...(facts.batch.length === 1 && written(facts.entry) === 'reference' ? [' a reference'] : [])]),
   then: ({ entry, batch }) => {
+    if (empty(entry)) return [];
     const kind = written(entry);
     const folder = entry.metadata.folder;
     // A folder said of the batch only where every key moved to it.
@@ -334,18 +336,13 @@ const writeSentence: Template = {
 // --- one template per action ----------------------------------------------------
 
 const TEMPLATES: Record<LogAction, Template> = {
-  'secret.read': {
-    did: (facts) => readVerb(facts)[0],
-    tried: (facts) => readVerb(facts)[1],
-    what: secrets,
-  },
+  'secret.read': { did: ({ entry }) => READ_VERBS[text(entry.metadata.purpose) ?? 'reveal'] ?? READ_VERBS.reveal!, what: secrets },
   // One key as what was done to it; a batch as what was done to every key, or as written.
   'secret.write': writeSentence,
   // A nature marked looser in place, by an Owner of the project: its own action, as 0.14.7 logged it.
   'secret.loosen': writeSentence,
   'secret.rename': {
     did: 'renamed',
-    tried: 'rename',
     what: ({ entry }) => {
       const [here, mine] = asPersonal(entry);
       return [...place({ ...here, key: text(entry.metadata.key) ?? entry.key }), ...(text(entry.metadata.to) === null ? [] : [` to ${text(entry.metadata.to)}`]), ...mine];
@@ -358,13 +355,12 @@ const TEMPLATES: Record<LogAction, Template> = {
       return forks === 0 ? [] : [`, and in ${plural(forks, 'fork')}`];
     },
   },
-  'secret.refile': { did: 'moved', tried: 'move', what: ({ entry }) => keysIn(entry, list(entry.metadata.keys)), then: ({ entry }) => intoFolder(entry.metadata.to) },
+  'secret.refile': { did: 'moved', what: ({ entry }) => keysIn(entry, list(entry.metadata.keys)), then: ({ entry }) => intoFolder(entry.metadata.to) },
   // The source, by id alone in the entry, is no path the page can say.
-  'reference.break': { did: 'broke', tried: 'break', what: ({ entry }) => ['the reference ', ...place(entry)] },
+  'reference.break': { did: 'broke', what: ({ entry }) => ['the reference ', ...place(entry)] },
   // What changed, by key: dismissed, brought back, both, or neither (asked as it was).
   'missing.dismiss': {
     did: ({ entry }) => (list(entry.metadata.dismissed).length > 0 ? 'dismissed' : list(entry.metadata.restored).length > 0 ? 'restored' : 'left'),
-    tried: 'dismiss',
     what: ({ entry }) => {
       const dismissed = list(entry.metadata.dismissed);
       const restored = list(entry.metadata.restored);
@@ -380,89 +376,78 @@ const TEMPLATES: Record<LogAction, Template> = {
   },
   'project.create': created('project'),
   'project.update': updated('project'),
-  'project.archive': plainly('project', 'archived', 'archive'),
-  'project.restore': plainly('project', 'restored', 'restore'),
-  'project.delete': plainly('project', 'deleted', 'delete'),
-  'project.move': { ...plainly('project', 'moved', 'move'), then: ({ entry }) => intoFolder(entry.metadata.to) },
-  // A folder renamed, or emptied: every project filed there. A refusal records neither.
+  'project.archive': plainly('project', 'archived'),
+  'project.restore': plainly('project', 'restored'),
+  'project.delete': plainly('project', 'deleted'),
+  'project.move': { ...plainly('project', 'moved'), then: ({ entry }) => intoFolder(entry.metadata.to) },
+  // A folder renamed, or emptied: every project filed there.
   'folder.refile': {
     did: ({ entry }) => (text(entry.metadata.to) === null ? 'emptied' : 'renamed'),
-    tried: ({ entry }) => (!('to' in entry.metadata) ? 'refile' : text(entry.metadata.to) === null ? 'empty' : 'rename'),
     what: ({ entry }) => [text(entry.metadata.folder) === null ? 'a folder' : `the folder ${text(entry.metadata.folder)}`],
     then: ({ entry }) => [...(text(entry.metadata.to) === null ? [] : [` to ${text(entry.metadata.to)}`]), `, ${plural(list(entry.metadata.projects).length, 'project')}`],
   },
   'environment.create': created('environment'),
   'environment.update': updated('environment'),
-  'environment.archive': plainly('environment', 'archived', 'archive'),
-  'environment.restore': plainly('environment', 'restored', 'restore'),
-  'environment.delete': plainly('environment', 'deleted', 'delete'),
-  'environment.protect': { did: 'protected', tried: 'protect', what: ({ entry }) => environmentOf(entry) },
-  'environment.unprotect': { did: 'unprotected', tried: 'unprotect', what: ({ entry }) => environmentOf(entry) },
+  'environment.archive': plainly('environment', 'archived'),
+  'environment.restore': plainly('environment', 'restored'),
+  'environment.delete': plainly('environment', 'deleted'),
+  'environment.protect': { did: 'protected', what: ({ entry }) => environmentOf(entry) },
+  'environment.unprotect': { did: 'unprotected', what: ({ entry }) => environmentOf(entry) },
   // An upstream credential a deployment names, frozen in one environment.
-  'upstream.freeze': { did: 'froze the upstream credential', tried: 'freeze the upstream credential', what: ({ entry }) => [`${text(entry.metadata.upstream) ?? ''} in `, ...environmentOf(entry)] },
-  'upstream.thaw': { did: 'unfroze the upstream credential', tried: 'unfreeze the upstream credential', what: ({ entry }) => [`${text(entry.metadata.upstream) ?? ''} in `, ...environmentOf(entry)] },
+  'upstream.freeze': { did: 'froze the upstream credential', what: ({ entry }) => [`${text(entry.metadata.upstream) ?? ''} in `, ...environmentOf(entry)] },
+  'upstream.thaw': { did: 'unfroze the upstream credential', what: ({ entry }) => [`${text(entry.metadata.upstream) ?? ''} in `, ...environmentOf(entry)] },
   'access.grant': accessSentence,
   'access.revoke': accessSentence,
-  'member.add': { did: 'added', tried: 'add', what: ({ entry }) => [...subject(entry), ...asRole(entry)] },
-  'member.restore': { did: 'brought back', tried: 'bring back', what: ({ entry }) => [...subject(entry), ...asRole(entry)] },
+  'member.add': { did: 'added', what: ({ entry }) => [...subject(entry), ...asRole(entry)] },
+  'member.restore': { did: 'brought back', what: ({ entry }) => [...subject(entry), ...asRole(entry)] },
   'member.remove': {
     did: 'removed',
-    tried: 'remove',
     what: (facts) => subject(facts.entry),
     then: ({ entry }) => (Array.isArray(entry.metadata.revoked) && entry.metadata.revoked.length > 0 ? [`, who held ${plural(entry.metadata.revoked.length, 'grant')}`] : []),
   },
   'member.role': {
     did: 'made',
-    tried: 'make',
     what: ({ entry }) => [...subject(entry), ` ${article(roleName(text(entry.metadata.role) ?? 'member') ?? 'Member')}`, ...scoped(entry)],
   },
   // Where people set up service accounts themselves, which those who run the instance set.
   'settings.change': {
     did: 'set',
-    tried: 'set',
     what: ({ entry }) => ['where people set up service accounts', ...setting(entry.metadata.serviceAccounts).map((words) => `: ${words}`)],
     then: ({ entry }) => setting(entry.metadata.was).map((words) => `, was ${words}`),
   },
   // The roles an Owner edits (docs/design/roles.md), the vault's to change.
   'policy.change': {
-    did: ({ entry }) => POLICY_VERBS[policyOf(entry).verb][0],
-    tried: ({ entry }) => POLICY_VERBS[policyOf(entry).verb][1],
+    did: ({ entry }) => policyOf(entry).verb,
     what: ({ entry }) => policyOf(entry).what,
   },
-  // A binding trusts CI runs to sign in as a service; removing one is its tombstone. New keys uploaded replace the bindings that named the old.
+  // A binding trusts CI runs or a workload to sign in as a service; removing one is its tombstone. New keys uploaded replace the bindings that named the old.
   'token.bind': {
-    did: (facts) => (rekeyed(facts) ? 'replaced the keys of' : 'trusted CI runs to sign in as'),
-    tried: (facts) => (rekeyed(facts) ? 'replace the keys of' : 'trust CI runs to sign in as'),
+    did: (facts) => (rekeyed(facts) ? 'replaced the keys of' : `trusted ${trusted(facts.entry)} to sign in as`),
     what: (facts) => [...(rekeyed(facts) ? [`${plural(Array.isArray(facts.entry.metadata.bindings) ? facts.entry.metadata.bindings.length : 0, 'trust binding')} of `] : []), ...subject(facts.entry)],
     then: (facts) => (rekeyed(facts) ? [] : [...inGitHubEnvironment(facts.entry), ...reaching(facts.entry)]),
   },
-  'token.unbind': {
-    did: 'stopped trusting CI runs to sign in as',
-    tried: 'stop trusting CI runs to sign in as',
-    what: (facts) => subject(facts.entry),
-  },
-  'workload.freeze': { did: 'froze', tried: 'freeze', what: frozen, then: ({ entry }) => (text(entry.metadata.reason) === null ? [] : [`: ${text(entry.metadata.reason)}`]) },
-  'workload.unfreeze': { did: 'unfroze', tried: 'unfreeze', what: frozen },
+  // Its entry names the binding by id alone, not whom it trusted.
+  'token.unbind': { did: 'removed a trust binding of', what: (facts) => subject(facts.entry) },
+  'workload.freeze': { did: 'froze', what: frozen, then: ({ entry }) => (text(entry.metadata.reason) === null ? [] : [`: ${text(entry.metadata.reason)}`]) },
+  'workload.unfreeze': { did: 'unfroze', what: frozen },
   // An MCP client a person connected, such as Claude.
-  'mcp.connect': { did: 'connected', tried: 'connect', what: ({ entry }) => app(entry) },
+  'mcp.connect': { did: 'connected', what: ({ entry }) => app(entry) },
   // A change an MCP client asked for, on its access token: it waits for the person's approval.
-  'mcp.ask': { did: 'was asked by an MCP client for', tried: 'be asked by an MCP client for', what: ({ entry }) => tool(entry) },
+  'mcp.ask': { did: 'was asked by an MCP client for', what: ({ entry }) => tool(entry) },
   // A person's decision, on coffre's page, on a change an MCP client asked for; the change's own entry follows, through the approval.
-  'mcp.approve': { did: 'approved', tried: 'approve', what: ({ entry }) => tool(entry) },
-  'mcp.deny': { did: 'turned down', tried: 'turn down', what: ({ entry }) => tool(entry) },
+  'mcp.approve': { did: 'approved', what: ({ entry }) => tool(entry) },
+  'mcp.deny': { did: 'turned down', what: ({ entry }) => tool(entry) },
   'mcp.disconnect': {
     did: 'disconnected',
-    tried: 'disconnect',
     // The vault's own, on a code or a token used twice, names whose it was.
     what: ({ entry }) => [...app(entry), ...(entry.actorType === 'system' && text(entry.metadata.principal) !== null ? [' of ', ...subject(entry)] : [])],
     then: ({ entry }) => [DISCONNECTED[text(entry.metadata.reason) ?? ''] ?? ''],
   },
   // What lapsed, removed by the vault itself: sessions, sign-in codes, apps never connected.
-  'upkeep.expire': { did: 'removed what had lapsed', tried: 'remove what had lapsed', what: () => [] },
+  'upkeep.expire': { did: 'removed what had lapsed', what: () => [] },
   // The log's first entry: an instance upgraded from 0.14 names where 0.14's log, archived, ends.
   'vault.adopt': {
     did: ({ entry }) => (entry.metadata.archive == null ? 'started the log' : 'took over the 0.14 database'),
-    tried: 'take over the database',
     what: () => [],
     then: ({ entry }) => (number(record(entry.metadata.archive).seq) === null ? [] : [`, its log archived through entry ${number(record(entry.metadata.archive).seq)}`]),
   },
@@ -470,53 +455,41 @@ const TEMPLATES: Record<LogAction, Template> = {
   // Detail, hidden unless asked for.
   sign_in: {
     did: ({ entry }) => (entry.metadata.kind === 'cli' ? 'signed in to the CLI' : 'signed in'),
-    tried: 'sign in',
     what: ({ entry }) => (text(entry.metadata.provider) === null ? [] : [`with ${text(entry.metadata.provider)}`]),
     // Made an Owner by the vault, as the deployment names them one.
     then: ({ entry }) => (entry.metadata.owner === 'made' ? [', made an Owner: the deployment names them one'] : entry.metadata.owner === 'restored' ? [', brought back as an Owner: the deployment names them one'] : []),
   },
-  sign_out: { did: 'signed out', tried: 'sign out', what: () => [] },
+  sign_out: { did: 'signed out', what: () => [] },
   // A personal token is its person's own, a handle a run's; a bearer token is a service account's.
   'token.create': {
     did: ({ entry }) => (entry.metadata.kind === 'handle' ? 'made a handle' : entry.metadata.kind === 'personal' ? 'made a personal token' : 'issued a bearer token to'),
-    tried: ({ entry }) => (entry.metadata.kind === 'handle' ? 'make a handle' : entry.metadata.kind === 'personal' ? 'make a personal token' : 'issue a bearer token to'),
     what: ({ entry }) => (entry.metadata.kind === 'handle' || entry.metadata.kind === 'personal' ? [] : subject(entry)),
     then: ({ entry }) => reaching(entry),
   },
-  'token.revoke': { did: (facts) => revoked(facts)[0], tried: (facts) => revoked(facts)[1], what: (facts) => subject(facts.entry) },
-  'device.start': { did: 'was asked for a CLI sign-in', tried: 'be asked for a CLI sign-in', what: () => [], then: labelled },
-  'device.approve': { did: 'approved a CLI sign-in', tried: 'approve a CLI sign-in', what: () => [], then: labelled },
-  'device.deny': { did: 'turned down a CLI sign-in', tried: 'turn down a CLI sign-in', what: () => [], then: labelled },
+  'token.revoke': { did: ({ entry }) => REVOKED[text(entry.metadata.kind) ?? ''] ?? 'revoked a token of', what: (facts) => subject(facts.entry) },
+  'device.start': { did: 'was asked for a CLI sign-in', what: () => [], then: labelled },
+  'device.approve': { did: 'approved a CLI sign-in', what: () => [], then: labelled },
+  'device.deny': { did: 'turned down a CLI sign-in', what: () => [], then: labelled },
   // A CI run's ID token, or a workload's proof, exchanged for a session.
   'token.exchange': {
     did: ({ entry }) => (entry.metadata.kind === 'workload' ? 'started a workload session' : 'signed in for a CI run'),
-    tried: ({ entry }) => (entry.metadata.kind === 'workload' ? 'start a workload session' : 'sign in for a CI run'),
     what: () => [],
   },
-  'workload.renew': { did: 'renewed its workload session', tried: 'renew its workload session', what: () => [] },
+  'workload.renew': { did: 'renewed its workload session', what: () => [] },
   // Anyone may register an MCP client: what it reaches is the person's to connect.
-  'oauth.register': { did: 'registered an MCP client', tried: 'register an MCP client', what: () => [] },
+  'oauth.register': { did: 'registered an MCP client', what: () => [] },
   'mcp.token': {
     did: ({ entry }) => (entry.metadata.grant === 'refresh_token' ? 'refreshed the tokens of' : 'gave its first tokens to'),
-    tried: 'give tokens to',
     what: ({ entry }) => app(entry),
   },
-  'account.link': { did: 'linked', tried: 'link', what: ({ entry }) => [`a ${text(entry.metadata.provider) ?? 'sign-in'} account`] },
-  'account.unlink': { did: 'unlinked', tried: 'unlink', what: ({ entry }) => [`a ${text(entry.metadata.provider) ?? 'sign-in'} account`] },
+  'account.link': { did: 'linked', what: ({ entry }) => [`a ${text(entry.metadata.provider) ?? 'sign-in'} account`] },
+  'account.unlink': { did: 'unlinked', what: ({ entry }) => [`a ${text(entry.metadata.provider) ?? 'sign-in'} account`] },
 };
 
 /** An instance role's name, from its slug; null for none it knows. */
 function roleName(role: string): string | null {
   return isInstanceRole(role) ? INSTANCE_ROLES[role].name : null;
 }
-
-/** What a role's change did, as `did` and `tried` say it. */
-const POLICY_VERBS = {
-  edit: ['edited', 'edit'],
-  reset: ['reset', 'reset'],
-  make: ['made', 'make'],
-  delete: ['deleted', 'delete'],
-} as const;
 
 /**
  * A `policy.change` entry, from its role, its `definition` and the one it
@@ -526,17 +499,17 @@ const POLICY_VERBS = {
  *   edited the Developer role         made the Release manager role
  *   reset the Auditor instance role   deleted the Release manager role
  */
-function policyOf(entry: AuditEntry): { verb: keyof typeof POLICY_VERBS; what: Part[] } {
+function policyOf(entry: AuditEntry): { verb: 'edited' | 'reset' | 'made' | 'deleted'; what: Part[] } {
   const instance = entry.metadata.instance === true;
   const id = text(entry.metadata.role);
   const shipped = id === null ? null : instance ? (isInstanceRole(id) ? INSTANCE_ROLES[id] : null) : isBuiltinRole(id) ? ROLES[id] : null;
   const definition = entry.metadata.definition === null ? null : record(entry.metadata.definition);
   const name = text(definition?.name) ?? text(record(entry.metadata.was).name) ?? shipped?.name ?? id;
-  const verb = definition === null || entry.reason === 'role_granted'
-    ? 'delete'
+  const verb = definition === null
+    ? 'deleted'
     : shipped !== null && JSON.stringify(definition) === JSON.stringify(normalDefinition(shipped))
       ? 'reset'
-      : entry.metadata.was === null ? 'make' : 'edit';
+      : entry.metadata.was === null ? 'made' : 'edited';
   return { verb, what: [name === null ? 'a role' : `the ${name} ${instance ? 'instance role' : 'role'}`] };
 }
 
@@ -592,6 +565,82 @@ function setting(scope: unknown): string[] {
 function asRole(entry: AuditEntry): Part[] {
   const role = roleName(text(entry.metadata.role) ?? '');
   return role === null || role === 'Member' ? [] : [` as ${article(role)}`, ...scoped(entry)];
+}
+
+/**
+ * A refused change in words, after "tried to": its kind alone. The vault
+ * logs a refusal once a minute per caller and action (D236), so one entry
+ * stands for every one refused them that minute, each asking its own key,
+ * kind or direction: none of those is the entry's to say.
+ */
+const TRIED: Record<LogAction, string> = {
+  'secret.read': 'read secrets',
+  'secret.write': 'write secrets',
+  'secret.loosen': 'make a sensitive value secret in place',
+  'secret.rename': 'rename a key',
+  'secret.refile': 'move keys between folders',
+  'reference.break': 'break a reference',
+  'missing.dismiss': 'change which missing keys are dismissed',
+  'project.create': 'create a project',
+  'project.update': 'change a project',
+  'project.archive': 'archive a project',
+  'project.restore': 'restore a project',
+  'project.move': 'move a project between folders',
+  'project.delete': 'delete a project',
+  'folder.refile': 'change a folder',
+  'environment.create': 'create an environment',
+  'environment.update': 'change an environment',
+  'environment.archive': 'archive an environment',
+  'environment.restore': 'restore an environment',
+  'environment.delete': 'delete an environment',
+  'environment.protect': 'protect an environment',
+  'environment.unprotect': 'unprotect an environment',
+  'upstream.freeze': 'freeze an upstream credential',
+  'upstream.thaw': 'unfreeze an upstream credential',
+  // Every membership asked is logged as an addition, a role change and a return too.
+  'member.add': 'change a membership',
+  'member.restore': 'change a membership',
+  'member.role': "change a member's instance role",
+  'member.remove': 'remove a member',
+  'access.grant': 'change access',
+  'access.revoke': 'take away access',
+  'policy.change': 'change a role',
+  'settings.change': 'change where people set up service accounts',
+  sign_in: 'sign in',
+  sign_out: 'sign out',
+  'token.create': 'issue a credential',
+  'token.revoke': 'end a credential',
+  'account.link': 'link a sign-in account',
+  'account.unlink': 'unlink a sign-in account',
+  'device.start': 'start a CLI sign-in',
+  'device.approve': 'approve a CLI sign-in',
+  'device.deny': 'turn down a CLI sign-in',
+  'token.exchange': 'start a session from a CI run or a workload',
+  'workload.renew': 'renew a workload session',
+  'token.bind': 'change a trust binding',
+  'token.unbind': 'remove a trust binding',
+  'workload.freeze': 'freeze workloads',
+  'workload.unfreeze': 'unfreeze workloads',
+  'mcp.connect': 'connect an MCP client',
+  'mcp.token': 'get tokens for an MCP client',
+  'mcp.disconnect': 'disconnect an MCP client',
+  'oauth.register': 'register an MCP client',
+  'mcp.ask': 'ask for a change through MCP',
+  'mcp.approve': 'approve a change asked through MCP',
+  'mcp.deny': 'turn down a change asked through MCP',
+  'upkeep.expire': 'remove what had lapsed',
+  'vault.adopt': 'take over the database',
+};
+
+/**
+ * A refused entry's sentence: what kind of change, where the entry's own
+ * rows put it (its project and environment, never a name the caller asked
+ * for), and why. "tried to rename a key at market/dev: no access".
+ */
+function refusal(entry: AuditEntry): Part[] {
+  const kind = Object.hasOwn(TRIED, entry.action) ? TRIED[entry.action as LogAction] : entry.action;
+  const at = entry.project === null ? [] : [' at ', { place: [entry.project, entry.environment].filter((part) => part !== null).join('/') }];
+  return ['tried to ', kind, ...at, `: ${reasonInWords(entry.reason)}`];
 }
 
 /** Why something was refused, in words. Codes from the vault and the app. */
@@ -704,26 +753,17 @@ export function describe(batch: AuditEntry[]): Sentence {
   const same = batch.filter((other) => other.action === entry.action).flatMap(perSecret);
   const denied = same.filter((other) => other.decision === 'deny');
   const refused = denied.length === same.length;
-  const facts: Facts = {
-    entry,
-    batch: same,
-    count: new Set(same.map((other) => `${other.project}/${other.environment}/${other.key}`)).size,
-    refused,
-  };
+  if (refused) return { parts: refusal(entry), refused };
+  const facts: Facts = { entry, batch: same, count: new Set(same.map((other) => `${other.project}/${other.environment}/${other.key}`)).size };
   const template = Object.hasOwn(TEMPLATES, entry.action) ? TEMPLATES[entry.action as LogAction] : undefined;
   if (template === undefined) return { parts: [entry.action, ' ', ...place(entry)], refused };
-  const say = (verb: Template['did']) => (typeof verb === 'string' ? verb : verb(facts));
   const what = template.what(facts);
   const gap = what.length === 0 ? [] : [' '];
-  if (refused) {
-    const reason = reasonInWords((denied[0] ?? entry).reason);
-    return { parts: ['tried to ', say(template.tried), ...gap, ...what, `: ${reason}`], refused };
-  }
   const partly = denied.length === 0 ? [] : [`, ${denied.length} refused: ${reasonInWords(denied[0]!.reason)}`];
   // A change that changed nothing, and one made through an MCP client's approval, say so.
   const unchanged = entry.metadata.unchanged === true ? [', unchanged'] : [];
   const approved = text(entry.metadata.via) === null ? [] : [', approved through MCP'];
-  return { parts: [say(template.did), ...gap, ...what, ...(template.then?.(facts) ?? []), ...unchanged, ...approved, ...partly], refused };
+  return { parts: [typeof template.did === 'string' ? template.did : template.did(facts), ...gap, ...what, ...(template.then?.(facts) ?? []), ...unchanged, ...approved, ...partly], refused };
 }
 
 /** Who acted, as a part: a member links to their page; coffre itself is text. */
