@@ -29,7 +29,9 @@ import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport
 import { openApp, PUBLIC_URL, SESSION } from './app-fixture.ts';
 
 const ISSUER = 'https://sso.acme.example';
-/** A provider of the test's own, whose callback vouches for an account of Eve's, a new one each round, whenever its state matches. */
+/** The account Acme vouches for next: each round, one of Eve's she signs in with, and another she links. */
+let account = { subject: '', email: '' };
+/** A provider of the test's own, whose callback vouches for `account` whenever its state matches. */
 const acme: SigninProvider = {
   id: 'acme',
   issuer: ISSUER,
@@ -41,7 +43,7 @@ const acme: SigninProvider = {
   },
   async finish(callback, _redirectUri, pending) {
     if (callback.searchParams.get('state') !== pending.state) throw new SigninError('state_mismatch', 'the state does not match');
-    return { subject: `acme-eve-${round}`, emails: ['eve@acme.example'], name: null };
+    return { subject: account.subject, emails: [account.email], name: null };
   },
 };
 
@@ -70,12 +72,14 @@ const PENDING = '__Host-coffre_signin';
  * inherits from dev, prod (protected), busy (KEY, and MIRROR, a reference
  * to dev's API_KEY), and Ada's personal config of dev.
  *
- * Cy owns the instance, and has a browser session. Ada views market/dev
+ * Cy owns the instance, and has a browser session and a personal token
+ * scoped to market/dev. Ada views market/dev
  * alone, so that nothing grown elsewhere is hers to read; ci, a service
  * account, views market. Bo leads market: he reads, writes, manages
  * its environments, the project and its access. Dee holds nothing. Eve
- * signs in with Acme: each round binds an account of hers by her email, and
- * unlinks it.
+ * signs in with Acme: each round binds an account of hers by her email,
+ * links a second on that session, and unlinks both. busy's KEY has more
+ * versions than a page of its history, and each round writes more.
  */
 before(async () => {
   await emptyDatabase(world.owner);
@@ -107,8 +111,10 @@ before(async () => {
     ...rows('identities', cys),
     ...rows('credentials',
       ...[ada, bo, cy, dee, eve].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who)), credential('ci-token', ci, { scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) }),
-      credential('cy-web', cy, { kind: 'browser', identityId: cys.id })),
+      credential('cy-web', cy, { kind: 'browser', identityId: cys.id }),
+      credential('cy-dev', cy, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: dev.id, role: 'viewer' }]) })),
   );
+  for (let i = 0; i < 21; i++) await api('bo-cli', 'PATCH', '/secrets/market/busy', { KEY: `fake-history-${i}` });
   // A round first, unmeasured: the database's migrations, which the app asks once, are no request's cost.
   await costs();
 });
@@ -156,12 +162,17 @@ const take = async <T>(response: Promise<Response>, keep: (body: T, answered: Re
   return answered;
 };
 const cookieOf = (response: Response, name: string) => response.headers.getSetCookie().find((line) => line.startsWith(`${name}=`))!.slice(name.length + 1).split(';')[0]!;
+const unlink = async (subject: string) => {
+  const [bound] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM identities WHERE subject = ${subject}`);
+  return api('eve-cli', 'DELETE', `/identities/${bound!.id}`);
+};
 const release = { name: 'Release', description: 'Ships.', permissions: ['secret.use', 'secret.write'], protected: ['secret.use'] };
 
 /**
- * Every route the API serves, in an order that runs as a cycle: what an
- * entry makes, one after it ends, so that a round leaves the instance as it
- * found it, but for the places it made and the versions it wrote.
+ * Every route coffre serves, its health and sign-in with the API's, in an
+ * order that runs as a cycle: what an entry makes, one after it ends, so
+ * that a round leaves the instance as it found it, but for the places it
+ * made and the versions it wrote.
  *
  * Not served yet, and priced here once they are: the freezes standing
  * (`GET /freezes`), a workload's session approved, a binding's enrollments,
@@ -175,17 +186,22 @@ const requests: Record<string, Entry> = {
   'GET /me, by whoever runs the instance': { request: () => api('cy-cli', 'GET', '/me'), calls: ['caller'], statements: 1 },
   'GET /projects': { request: () => api('ada-cli', 'GET', '/projects'), calls: ['caller'], statements: 2, fixed: true },
   'GET /projects, by whoever runs the instance': { request: () => api('cy-cli', 'GET', '/projects'), calls: ['caller'], statements: 2 },
+  // Whoever runs it, on a token scoped to one environment: what the scope reaches, in the same statements.
+  'GET /projects, on a scoped token': { request: () => api('cy-dev', 'GET', '/projects'), calls: ['caller'], statements: 2, fixed: true },
   // A caller who reaches no project: no count of their keys to read.
   'GET /projects, reaching nothing': { request: () => api('dee-cli', 'GET', '/projects'), calls: ['caller'], statements: 1, fixed: true },
   'GET /personal/:project': { request: () => api('bo-cli', 'GET', '/personal/market'), calls: ['caller'], statements: 1, fixed: true },
   'GET /secrets/:project/:environment': { request: () => api('ada-cli', 'GET', '/secrets/market/dev'), calls: ['caller'], statements: 1, fixed: true },
   'GET /secrets/:project/:environment, a fork': { request: () => api('bo-cli', 'GET', '/secrets/market/dev-fork'), calls: ['caller'], statements: 1, fixed: true },
-  'GET /secrets/:project/:environment/:key/versions': { request: () => api('ada-cli', 'GET', '/secrets/market/dev/API_KEY/versions'), calls: ['caller'], statements: 1, fixed: true },
+  // A page of a key's history, 20 versions of the more it has, which each round grows; and one shorter than a page.
+  'GET /secrets/:project/:environment/:key/versions': { request: () => api('bo-cli', 'GET', '/secrets/market/busy/KEY/versions'), calls: ['caller'], statements: 1, fixed: true },
+  'GET /secrets/:project/:environment/:key/versions, a short history': { request: () => api('ada-cli', 'GET', '/secrets/market/dev/API_KEY/versions'), calls: ['caller'], statements: 1, fixed: true },
   'GET /projects/:project/:environment/missing': { request: () => api('ada-cli', 'GET', '/projects/market/dev/missing'), calls: ['caller'], statements: 1 },
   'GET /references': { request: () => api('ada-cli', 'GET', `/references?path=${encodeURIComponent('market/dev/API_KEY')}`), calls: ['caller'], statements: 1 },
   // Its readers, for whoever manages either end's access: one more statement for them all.
   'GET /references, by a manager': { request: () => api('bo-cli', 'GET', `/references?path=${encodeURIComponent('market/dev/API_KEY')}`), calls: ['caller'], statements: 2 },
   'GET /members': { request: () => api('cy-cli', 'GET', '/members'), calls: ['caller'], statements: 1 },
+  'GET /members, by a project manager': { request: () => api('bo-cli', 'GET', '/members'), calls: ['caller'], statements: 1 },
   'GET /members?path=': { request: () => api('bo-cli', 'GET', '/members?path=market'), calls: ['caller'], statements: 2 },
   'GET /members/:member/access': { request: () => api('cy-cli', 'GET', `/members/${ada}/access`), calls: ['caller'], statements: 1, fixed: true },
   'GET /roles': { request: () => api('cy-cli', 'GET', '/roles'), calls: ['caller'], statements: 1 },
@@ -200,6 +216,10 @@ const requests: Record<string, Entry> = {
   "POST /reveals, a CI run's seven keys": { request: () => reveal('ci-token', 'market/dev', SEVEN), calls: ['use'], statements: 0 },
   'GET /projects/:project/:environment/version': { request: () => api('ada-cli', 'GET', '/projects/market/dev/version'), calls: ['peek'], statements: 0 },
 
+  // Health: liveness asks nothing; readiness, whether the database has this release's migrations, two statements.
+  'GET /livez': { request: () => app.request('/livez'), calls: [], statements: 0 },
+  'GET /readyz': { request: () => app.request('/readyz'), calls: [], statements: 2, fixed: true },
+
   // Signing in: the sign-in page asks nothing; a device login's start reads its cap, one statement of one row however many wait.
   'GET /api/auth': { request: () => app.request('/api/auth'), calls: [], statements: 0 },
   'POST /api/auth/device': { request: () => take<typeof device>(app.request('/api/auth/device', { method: 'POST', body: '{}' }), (body) => (device = body)), calls: ['change'], statements: 1, fixed: true },
@@ -212,6 +232,7 @@ const requests: Record<string, Entry> = {
   'POST /api/auth/logout': { request: () => app.request('/api/auth/logout', { method: 'POST', headers: { authorization: `Bearer ${collected}` } }), calls: ['change'], statements: 0 },
   'GET /auth/signin/:provider': {
     request: async () => {
+      account = { subject: `acme-eve-${round}`, email: 'eve@acme.example' };
       const left = await app.request('/auth/signin/acme');
       leaving = { state: new URL(left.headers.get('location')!).searchParams.get('state')!, pending: cookieOf(left, PENDING) };
       return left;
@@ -226,19 +247,31 @@ const requests: Record<string, Entry> = {
     },
     calls: ['change'], statements: 0,
   },
-  'POST /auth/signout': { request: () => app.request('/auth/signout', { method: 'POST', headers: { cookie: `${SESSION}=${browser}`, 'sec-fetch-site': 'same-origin' } }), calls: ['change'], statements: 0 },
-  // The account the round's sign-in bound, found as the test's owner, which no request's count sees.
-  'DELETE /identities/:id': {
+  // A second account linked on the session that asked: leaving for the provider asks nothing, and coming back is one change.
+  'GET /auth/signin/:provider?link=1': {
     request: async () => {
-      const [bound] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM identities WHERE subject = ${`acme-eve-${round}`}`);
-      return api('eve-cli', 'DELETE', `/identities/${bound!.id}`);
+      account = { subject: `acme-eve-work-${round}`, email: 'eve@work.example' };
+      const left = await app.request('/auth/signin/acme?link=1', { headers: { cookie: `${SESSION}=${browser}` } });
+      leaving = { state: new URL(left.headers.get('location')!).searchParams.get('state')!, pending: cookieOf(left, PENDING) };
+      return left;
     },
+    calls: [], statements: 0,
+  },
+  'GET /auth/callback/:provider, linking': {
+    request: () => app.request(`/auth/callback/acme?${new URLSearchParams({ state: leaving.state, code: 'c' })}`, { headers: { cookie: `${PENDING}=${leaving.pending}; ${SESSION}=${browser}` } }),
     calls: ['change'], statements: 0,
   },
+  'POST /auth/signout': { request: () => app.request('/auth/signout', { method: 'POST', headers: { cookie: `${SESSION}=${browser}`, 'sec-fetch-site': 'same-origin' } }), calls: ['change'], statements: 0 },
+  // The accounts the round's sign-in bound and linked, found as the test's owner, which no request's count sees.
+  'DELETE /identities/:id': { request: () => unlink(`acme-eve-${round}`), calls: ['change'], statements: 0 },
+  'DELETE /identities/:id, the linked one': { request: () => unlink(`acme-eve-work-${round}`), calls: ['change'], statements: 0 },
 
   // Every change: one call to the vault, `change`, and no statement.
   'PATCH /secrets/:project/:environment': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy', { KEY: `fake-${round}` }), calls: ['change'], statements: 0 },
   'PATCH /secrets/:project/:environment@me': { request: () => api('ada-cli', 'PATCH', '/secrets/market/dev@me', { LOCAL: `fake-${round}` }), calls: ['change'], statements: 0 },
+  // A fork's own value over the one it inherits, then inherited again.
+  "PATCH /secrets/:project/:environment, a fork's own": { request: () => api('bo-cli', 'PATCH', '/secrets/market/dev-fork', { API_KEY: `fake-${round}` }), calls: ['change'], statements: 0 },
+  'PATCH /secrets/:project/:environment/:key, inherited': { request: () => api('bo-cli', 'PATCH', '/secrets/market/dev-fork/API_KEY', { inherit: true }), calls: ['change'], statements: 0 },
   'POST /secrets/:project/:environment/:key/restore': { request: () => api('bo-cli', 'POST', '/secrets/market/busy/KEY/restore', { version: 1 }), calls: ['change'], statements: 0 },
   'PATCH /secrets/:project/:environment/:key': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy/KEY', { folder: 'kept' }), calls: ['change'], statements: 0 },
   'PATCH /folders/:project/:environment/:folder': { request: () => api('bo-cli', 'PATCH', '/folders/market/busy/kept', { name: 'filed' }), calls: ['change'], statements: 0 },
@@ -265,6 +298,8 @@ const requests: Record<string, Entry> = {
   'DELETE /members/:member, a service account': { request: () => api('cy-cli', 'DELETE', '/members/token:deploy'), calls: ['change'], statements: 0 },
   // A member's tokens, handles and sessions: a list is `caller` and one statement; each made or ended, one change.
   'GET /members/:member/tokens': { request: () => api('bo-cli', 'GET', `/members/${ci}/tokens`), calls: ['caller'], statements: 1 },
+  'GET /members/:member/tokens, by the service itself': { request: () => api('ci-token', 'GET', `/members/${ci}/tokens`), calls: ['caller'], statements: 1 },
+  "GET /members/:member/tokens, a person's own": { request: () => api('bo-cli', 'GET', `/members/${bo}/tokens`), calls: ['caller'], statements: 1 },
   'POST /members/:member/tokens': {
     request: () => take<{ id: string }>(api('bo-cli', 'POST', `/members/${bo}/tokens`, { label: 'script', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } }), (body) => (personal = body.id)),
     calls: ['change'], statements: 0,
@@ -301,6 +336,7 @@ const requests: Record<string, Entry> = {
   'PUT /roles/:role': { request: () => api('cy-cli', 'PUT', '/roles/release', release), calls: ['change'], statements: 0 },
   'DELETE /roles/:role': { request: () => api('cy-cli', 'DELETE', '/roles/release'), calls: ['change'], statements: 0 },
   'PUT /instance-roles/:role': { request: () => api('cy-cli', 'PUT', '/instance-roles/auditor', { name: 'Auditor', description: `Round ${round}.`, permissions: ['audit.read'], protected: [] }), calls: ['change'], statements: 0 },
+  'DELETE /instance-roles/:role': { request: () => api('cy-cli', 'DELETE', '/instance-roles/auditor'), calls: ['change'], statements: 0 },
   'PUT /settings': { request: () => api('cy-cli', 'PUT', '/settings', { serviceAccounts: {} }), calls: ['change'], statements: 0 },
   'POST /freezes': { request: () => api('cy-cli', 'POST', '/freezes', { target: 'service:ci', reason: 'the key leaked in a build log' }), calls: ['change'], statements: 0 },
   'DELETE /freezes/:target': { request: () => api('cy-cli', 'DELETE', `/freezes/${encodeURIComponent(ci)}`), calls: ['change'], statements: 0 },

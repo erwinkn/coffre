@@ -141,9 +141,10 @@ database; `pnpm test` runs each on its private clone too.
 - **Request cost** (`request-cost.test.ts`): after any growth Hegel draws
   (writes elsewhere, other projects and forks, members, the reader's role
   flipped, protection, roles, references in, sensitivity, tokens), each
-  route the API serves makes the same calls to the vault and runs the same
-  statements, and a caller reads the same rows of their own view. Postgres
-  only.
+  route coffre serves, health and sign-in with the API's, makes the same
+  calls to the vault and runs the same statements, and a caller reads the
+  same rows of their own view, a page of a key's history among them, which
+  each round grows. Postgres only.
 
 ## Native dependencies
 
