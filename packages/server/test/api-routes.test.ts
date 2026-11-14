@@ -81,37 +81,6 @@ test('a null needs secret.archive, and a refused patch writes none of its keys',
   assert.deepEqual((await dev.secrets.set('market/prod', { B: 'changed' })).keys, { B: { version: 2, sensitivity: 'secret' } });
 });
 
-test('a place patch changes only the fields it names', async () => {
-  await root.projects.update('market', { name: 'Marketplace' });
-  await root.projects.update('market', { archived: true });
-  const [project] = (await root.projects.list()).projects;
-  assert.equal(project.slug, 'market');
-  assert.equal(project.name, 'Marketplace');
-  assert.notEqual(project.archivedAt, null);
-
-  await root.projects.update('market', { archived: false });
-  assert.equal((await root.projects.list()).projects[0].name, 'Marketplace');
-});
-
-test('a place created without a name takes its slug as one, which older CLIs print', async () => {
-  const made = await root.projects.create('billing');
-  assert.deepEqual(made, { project: { slug: 'billing', name: 'billing', archivedAt: null }, created: true });
-  assert.equal((await root.environments.create('billing/staging')).environment.name, 'staging');
-  // A name sent, as a CLI before 0.6.2 sends one, is kept.
-  assert.equal((await root.environments.create('billing/prod', { name: 'Prod' })).environment.name, 'Prod');
-  const billing = (await root.projects.list()).projects.find((project) => project.slug === 'billing')!;
-  assert.deepEqual(billing.environments.map(({ slug, name }) => ({ slug, name })), [
-    { slug: 'prod', name: 'Prod' },
-    { slug: 'staging', name: 'staging' },
-  ]);
-});
-
-test('a patch with a field the route does not know is refused', async () => {
-  const response = await raw('PATCH', '/projects/market', { name: 'M', owner: 'someone' });
-  assert.equal(response.status, 400);
-  assert.equal((await response.json()).error, 'bad_request');
-});
-
 // --- declarative access -------------------------------------------------------
 
 test('access says what someone should hold; sending it again changes nothing', async () => {

@@ -54,26 +54,6 @@ async function logged(action: string) {
   return rows.map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
 }
 
-const folderOf = async (client: CoffreClient, slug: string) =>
-  (await client.projects.list()).projects.find((project) => project.slug === slug)?.folder;
-
-test('a project moves into a folder and out of it, logged, by whoever manages it', async () => {
-  assert.equal(await folderOf(root, 'acme'), null);
-  assert.equal((await root.projects.update('acme', { folder: 'Clients' })).project.folder, 'Clients');
-  assert.equal(await folderOf(developer, 'acme'), 'Clients');
-  // Moving it where it is changes nothing and logs nothing.
-  await root.projects.update('acme', { folder: 'Clients' });
-  await root.projects.update('acme', { folder: null });
-  assert.equal(await folderOf(root, 'acme'), null);
-  assert.deepEqual((await logged('project.move')).map((entry) => entry.metadata), [
-    { slug: 'acme', from: null, to: 'Clients' },
-    { slug: 'acme', from: 'Clients', to: null },
-  ]);
-  // A viewer of the project does not arrange the instance's list.
-  await assert.rejects(developer.projects.update('acme', { folder: 'Mine' }), { status: 403 });
-  assert.equal(await folderOf(root, 'acme'), null);
-});
-
 test("a secret's folder arranges its environment's list, and changes nothing else", async () => {
   await developer.secrets.update('market/prod/DATABASE_URL', { folder: 'database' });
   await developer.secrets.update('market/prod/STRIPE_KEY', { folder: 'stripe' });
@@ -91,50 +71,6 @@ test("a secret's folder arranges its environment's list, and changes nothing els
   ]);
   // Moving needs write, as renaming does.
   await assert.rejects(reader.secrets.update('market/prod/PORT', { folder: 'web' }), { status: 403 });
-});
-
-test("renaming a folder of projects re-files every project in it, onto one that exists merges them, and removing one leaves each where it is", async () => {
-  await root.projects.create('globex', { name: 'Globex' });
-  await root.projects.update('acme', { folder: 'Clients' });
-  await root.projects.update('globex', { folder: 'Clients' });
-  await root.projects.update('market', { folder: 'Partners' });
-  assert.deepEqual(await root.folders.rename('Clients', 'Customers'), { folder: 'Customers', moved: ['acme', 'globex'] });
-  assert.deepEqual([await folderOf(root, 'acme'), await folderOf(root, 'globex')], ['Customers', 'Customers']);
-  // Onto a folder that exists: one folder now, as labels are.
-  await root.folders.rename('Partners', 'Customers');
-  assert.equal(await folderOf(root, 'market'), 'Customers');
-  assert.deepEqual(await root.folders.remove('Customers'), { folder: null, moved: ['acme', 'globex', 'market'] });
-  assert.deepEqual((await root.projects.list()).projects.map((project) => project.folder), [null, null, null]);
-  // One project.move per project, under one operation per call.
-  const moves = await logged('project.move');
-  assert.deepEqual(moves.slice(3).map((entry) => entry.metadata), [
-    { slug: 'acme', from: 'Clients', to: 'Customers' },
-    { slug: 'globex', from: 'Clients', to: 'Customers' },
-    { slug: 'market', from: 'Partners', to: 'Customers' },
-    { slug: 'acme', from: 'Customers', to: null },
-    { slug: 'globex', from: 'Customers', to: null },
-    { slug: 'market', from: 'Customers', to: null },
-  ]);
-  await assert.rejects(root.folders.rename('Customers', 'Anything'), { status: 404 }, 'a folder nothing is in is no folder');
-  await assert.rejects(root.folders.rename('Clients', 'a/b'), { status: 400 });
-});
-
-test('a folder of projects is renamed only by who manages every project in it, and never re-files one they cannot see', async () => {
-  await root.access.set(`user:${DEVELOPER}`, { 'market/prod': 'developer', acme: 'owner' });
-  await root.projects.create('hidden', { name: 'Hidden' });
-  await root.projects.update('acme', { folder: 'Clients' });
-  await root.projects.update('hidden', { folder: 'Clients' });
-  // The developer owns acme, and cannot see hidden: refused whole, and nothing moved.
-  await assert.rejects(developer.folders.rename('Clients', 'Mine'), { status: 403 });
-  await assert.rejects(developer.folders.remove('Clients'), { status: 403 });
-  assert.deepEqual([await folderOf(root, 'acme'), await folderOf(root, 'hidden')], ['Clients', 'Clients']);
-  // A folder of projects they do not see at all is, to them, none.
-  await root.projects.update('acme', { folder: null });
-  await assert.rejects(developer.folders.remove('Clients'), { status: 404 });
-  // Once every project in it is theirs to manage, it is theirs to rename.
-  await root.projects.update('hidden', { folder: null });
-  await root.projects.update('acme', { folder: 'Clients' });
-  assert.deepEqual(await developer.folders.rename('Clients', 'Mine'), { folder: 'Mine', moved: ['acme'] });
 });
 
 test("an environment's key folder renames and removes as a whole, by who writes there, archived keys too", async () => {
@@ -159,10 +95,8 @@ test("an environment's key folder renames and removes as a whole, by who writes 
   assert.deepEqual(await developer.folders.removeKeys('market/prod', 'reference'), { folder: null, moved: ['PORT'] });
 });
 
-test('a folder is a plain name: no slash, no control character, no space at either end', async () => {
+test("a key's folder is a plain name: no slash, no control character, no space at either end", async () => {
   for (const folder of ['a/b', ' padded', 'padded ', '', 'tab\there', 'x'.repeat(65)]) {
-    await assert.rejects(root.projects.update('acme', { folder }), { status: 400 }, JSON.stringify(folder));
     await assert.rejects(root.secrets.update('market/prod/PORT', { folder }), { status: 400 }, JSON.stringify(folder));
   }
-  assert.equal((await root.projects.update('acme', { folder: 'Clients · EU' })).project.folder, 'Clients · EU');
 });

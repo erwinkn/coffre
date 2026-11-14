@@ -1,14 +1,25 @@
 /** The changes of projects and environments (`packages/vault/src/ops/places.ts`). */
-export type PlacesChanges = ProjectCreate | EnvironmentCreate | ProjectEdit | EnvironmentEdit;
+export type PlacesChanges = ProjectCreate | EnvironmentCreate | ProjectEdit | EnvironmentEdit | FolderRefile;
 
-/** An edit answers the place's id; asked for what is so already, it changes nothing, and is logged all the same. */
-type Edited = { id: string };
+/**
+ * An edit answers the place as it leaves it, `archivedAt` in ISO 8601;
+ * asked for what is so already, it changes nothing, and is logged all the
+ * same.
+ */
+export type ProjectEdited = { id: string; slug: string; archivedAt: string | null; folder: string | null };
+export type EnvironmentEdited = { id: string; slug: string; archivedAt: string | null; protected: boolean };
 
 export type PlacesAnswers = {
   'project.create': { id: string };
-  /** Its slug is the one asked for, or, for a personal config, the one made for it, which only a list for deletion shows. */
+  /**
+   * Its slug is the one asked for, or, for a personal config, the one made
+   * for it, which only a list for deletion shows. A personal config is
+   * `protected` as the environment it is a config of is.
+   */
   'environment.create': { id: string; slug: string; protected: boolean };
-} & { [K in ProjectEdit['op'] | EnvironmentEdit['op']]: Edited };
+  /** The projects it filed, by slug. */
+  'folder.refile': { moved: string[] };
+} & { [K in ProjectEdit['op']]: ProjectEdited } & { [K in EnvironmentEdit['op']]: EnvironmentEdited };
 
 /**
  * Make a project, as an Admin or Owner of the instance whose scope takes in
@@ -95,3 +106,13 @@ export type EnvironmentEdit = { project: string; environment: string } & (
   | { op: 'upstream.freeze'; upstream: string }
   | { op: 'upstream.thaw'; upstream: string }
 );
+
+/**
+ * A folder of projects renamed, `to` a name shaped as `project.move`
+ * takes one, or emptied, `to` null: every project filed there, archived
+ * ones included, in one change, by whoever manages each of them
+ * (`project.manage`). A folder is a label, so renaming onto one that is
+ * there merges the two. A folder none of whose projects the caller may
+ * file is no folder of theirs: refused as one with no project.
+ */
+export type FolderRefile = { op: 'folder.refile'; folder: string; to: string | null };

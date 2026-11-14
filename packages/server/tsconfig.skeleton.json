@@ -4,5 +4,5 @@
   // file goes when `pnpm typecheck` passes for the whole package again.
   "extends": "../../tsconfig.base.json",
   "include": [],
-  "files": ["src/cloudflare.ts", "src/start.ts", "src/routes.ts", "test/app.test.ts", "test/app-workers.test.ts", "test/workers/app-worker.ts", "../vault/src/cloudflare-workers.d.ts"]
+  "files": ["src/cloudflare.ts", "src/start.ts", "src/routes.ts", "test/app.test.ts", "test/places.test.ts", "test/app-workers.test.ts", "test/workers/app-worker.ts", "../vault/src/cloudflare-workers.d.ts"]
 }

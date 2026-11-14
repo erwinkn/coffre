@@ -1,4 +1,4 @@
-import { environmentPath, secretKey, slug } from '@coffre/core/schemas';
+import { environmentPath, folderName, secretKey, slug } from '@coffre/core/schemas';
 import type { z } from 'zod';
 
 import type { ApiContext } from './context.ts';
@@ -42,4 +42,5 @@ export const PARAMS: Record<string, z.ZodType<string>> = {
   // A slug, or `<slug>@me` for the caller's personal config of it.
   environment: environmentPath,
   key: secretKey,
+  folder: folderName,
 };

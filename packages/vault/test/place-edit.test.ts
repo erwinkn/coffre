@@ -234,7 +234,8 @@ test('an environment of an archived project is archived whatever references it: 
 });
 
 test('a project filed in a folder by whoever manages it, and taken out of it', async () => {
-  await answered(edit('cy-cli', 'project.move', 'market', { folder: 'Payments' }));
+  // An edit answers the place as it leaves it.
+  assert.deepEqual(await answered(edit('cy-cli', 'project.move', 'market', { folder: 'Payments' })), { id: market.id, slug: 'market', archivedAt: null, folder: 'Payments' });
   assert.deepEqual(await projectRow(market.id), { slug: 'market', archived: false, folder: 'Payments' });
   assert.deepEqual((await written()).detail, { slug: 'market', from: null, to: 'Payments' });
   await answered(edit('dee-cli', 'project.move', 'market', { folder: null }));
@@ -339,7 +340,7 @@ test('a fork is restored only through a chain the vault reads: a parent deleted,
 });
 
 test('an environment protected by whoever manages the project\'s environments, and unprotected by an Owner of the project alone (0.14, R30)', async () => {
-  await answered(edit('ada-cli', 'environment.protect', 'market/prod'));
+  assert.deepEqual(await answered(edit('ada-cli', 'environment.protect', 'market/prod')), { id: prod.id, slug: 'prod', archivedAt: null, protected: true });
   assert.equal((await environmentRow(prod.id))!.protected, true);
   assert.deepEqual([(await written()).action, (await written()).detail], ['environment.protect', { slug: 'prod' }]);
   // A maintainer only writes where it is protected: Ada reads prod no more.
@@ -545,4 +546,75 @@ test('an edit holds each row it uses to what it is used for, not only to the con
   await amend(world, 'secrets', sql`id = ${reference.id}`, { archivedAt: ARCHIVED });
   const inside = secret(prod, 'SELF', { sourceId: reference.sourceId });
   assert.ok('answer' in (await seeing(by('ada-cli', 'environment.archive', { environment: 'prod' }), (seen) => ({ ...seen, reader: [sealed(inside), ...seen.reader] }))));
+});
+
+test('a folder of projects renamed, or emptied, whole: by whoever manages every project in it, in one change', async () => {
+  const refile = (label: string, folder: unknown, to: unknown) => vault.change({ ...shown(label), op: 'folder.refile', folder, to } as never) as Promise<{ answer: { moved: string[] } } | { refused: string }>;
+  const folders = async () => [(await projectRow(market.id))!.folder, (await projectRow(billing.id))!.folder];
+  await answered(edit('dee-cli', 'project.move', 'market', { folder: 'Payments' }));
+  await answered(edit('dee-cli', 'project.move', 'billing', { folder: 'Payments' }));
+  // Cy owns market, not billing: half a folder renamed would be two folders. Refused whole, and logged once, naming both.
+  const before = await state();
+  assert.deepEqual(await refile('cy-cli', 'Payments', 'Mine'), { refused: 'no_access' });
+  assert.deepEqual(await state(), before);
+  const [refusedOne] = await denied();
+  assert.deepEqual([refusedOne![0], refusedOne![1], refusedOne![2], [...(refusedOne![3] as string[])].sort()], ['folder.refile', cy, { refused: 'no_access' }, [`project:${billing.id}`, `project:${market.id}`].sort()]);
+  // Dee owns the instance.
+  assert.deepEqual(await refile('dee-cli', 'Payments', 'Money'), { answer: { moved: ['billing', 'market'] } });
+  assert.deepEqual(await folders(), ['Money', 'Money']);
+  const entry = await written();
+  assert.deepEqual([entry.action, entry.detail], ['folder.refile', { folder: 'Payments', to: 'Money', projects: ['billing', 'market'] }]);
+  assert.ok(entry.objects.includes(`project:${market.id}`) && entry.objects.includes(`project:${billing.id}`), entry.objects.join());
+  // Onto a folder that is there, the two are one; emptied, each project stays where it is, in none.
+  await answered(edit('dee-cli', 'project.move', 'market', { folder: 'Other' }));
+  assert.deepEqual(await refile('cy-cli', 'Other', 'Money'), { answer: { moved: ['market'] } });
+  assert.deepEqual(await refile('dee-cli', 'Money', null), { answer: { moved: ['billing', 'market'] } });
+  assert.deepEqual(await folders(), [null, null]);
+  // A folder nothing is in is none, to anyone.
+  assert.deepEqual(await refile('dee-cli', 'Money', 'X'), { refused: 'no_access' });
+  // A deletion's tombstone filed there is no project: it neither stops a refile nor moves with one.
+  await amend(world, 'projects', sql`id = ${billing.id}`, { slug: 'billing~deleted-2026-11-01', folder: 'T' });
+  await answered(edit('cy-cli', 'project.move', 'market', { folder: 'T' }));
+  assert.deepEqual(await refile('cy-cli', 'T', 'U'), { answer: { moved: ['market'] } });
+  assert.deepEqual(await folders(), ['U', 'T']);
+  // A grant on another project of the folder's is not one on its own.
+  assert.deepEqual(await refile('bo-cli', 'U', 'V'), { refused: 'no_access' });
+  for (const [folder, to] of [['', 'X'], [' a', 'X'], [null, 'X'], ['U', 'a/b'], ['U', ''], ['U', 7], [7, 'X'], ['U', undefined]]) {
+    await assert.rejects(refile('dee-cli', folder, to), TypeError, JSON.stringify([folder, to]));
+  }
+});
+
+test('a folder renamed as a project is filed into it or out of it, or its manager loses a grant: the rename commits second, writes nothing, and starts over', async () => {
+  const prepared = async (input: Presented & Change) => {
+    const one = await prepare(world, OPERATIONS[input.op](input as never, { workloads: world.workloads }) as Operation<Parts, unknown>);
+    assert.ok(!('refused' in one), 'refused' in one ? one.refused : '');
+    return one;
+  };
+  const refile = (label: string, folder: string, to: string) => ({ ...shown(label), op: 'folder.refile', folder, to }) as Presented & Change;
+  const folders = async () => [(await projectRow(market.id))!.folder, (await projectRow(billing.id))!.folder];
+  /** The stale rename refused at its commit: no row changed, and no entry kept beyond the change that came first. */
+  const stale = async (one: Awaited<ReturnType<typeof prepared>>) => {
+    const before = await state();
+    assert.equal(await commit(world, one), false);
+    assert.deepEqual(await state(), before);
+  };
+  // Cy owns market, alone in Mine: billing filed there as Cy renames it makes Mine one Cy does not manage whole.
+  await answered(edit('cy-cli', 'project.move', 'market', { folder: 'Mine' }));
+  let one = await prepared(refile('cy-cli', 'Mine', 'Ours'));
+  await answered(edit('dee-cli', 'project.move', 'billing', { folder: 'Mine' }));
+  await stale(one);
+  assert.deepEqual(await vault.change(refile('cy-cli', 'Mine', 'Ours') as never), { refused: 'no_access' });
+  assert.deepEqual(await folders(), ['Mine', 'Mine']);
+  // Market taken out of Mine as Dee renames it: the rename starts over, and moves billing alone.
+  one = await prepared(refile('dee-cli', 'Mine', 'Ours'));
+  await answered(edit('cy-cli', 'project.move', 'market', { folder: 'Other' }));
+  await stale(one);
+  assert.deepEqual(await vault.change(refile('dee-cli', 'Mine', 'Ours') as never), { answer: { moved: ['billing'] } });
+  assert.deepEqual(await folders(), ['Other', 'Ours']);
+  // Cy's grant on market made a viewer's as Cy renames Other: the grant it was decided by is not the one there.
+  one = await prepared(refile('cy-cli', 'Other', 'Ours'));
+  await amend(world, 'grants', sql`principal = ${cy}`, { role: 'viewer' });
+  await stale(one);
+  assert.deepEqual(await vault.change(refile('cy-cli', 'Other', 'Ours') as never), { refused: 'no_access' });
+  assert.deepEqual(await folders(), ['Other', 'Ours']);
 });
