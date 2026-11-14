@@ -14,6 +14,7 @@ import { sql } from 'drizzle-orm';
 import { credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, signerOf, user, write } from '@coffre/vault/testing';
 
 import { holesOf } from '../src/api/audit.ts';
+import { logStretch, stretchOf } from '../src/db/queries/audit.ts';
 import { openApp } from './app-fixture.ts';
 
 const app = await openApp();
@@ -332,4 +333,43 @@ test("holes by the trees' counts: uses below the first not pruned are not missin
   assert.deepEqual(holesOf(head, at(7, false, 4), all.slice(2), false), [{ above: 7, below: 5, kept: 1, aging: 0 }]);
   // That entry missing: the page starts at its own first.
   assert.deepEqual(holesOf(head, null, all.slice(2), false), []);
+});
+
+test('a stretch by many objects reads twice its rows in index rows and one more per object, however many each one holds', async () => {
+  // 60,000 entries, each about one of 200 environments, 20 to each of 10 projects, and so in the index under both: 120,000 rows.
+  await world.owner.execute(sql`INSERT INTO log (seq, kept, leaf, body) SELECT g, true, g, '{}' FROM generate_series(1000000, 1059999) g`);
+  await world.owner.execute(sql`INSERT INTO log_index (object, seq) SELECT o, g FROM generate_series(1000000, 1059999) g, LATERAL (VALUES ('environment:e' || g % 200), ('project:p' || g % 200 / 20)) objects(o)`);
+  await world.owner.execute(sql`ANALYZE log_index`);
+  const objects = [...Array.from({ length: 10 }, (_, p) => `project:p${p}`), ...Array.from({ length: 200 }, (_, e) => `environment:e${e}`)];
+  const at = { objects, below: null, rows: 1000 };
+  const [plan] = await rowsOf<{ 'QUERY PLAN': [{ Plan: Node }] }>(world.owner, sql`EXPLAIN (ANALYZE, FORMAT JSON) ${stretchOf(at)}`);
+  type Node = { 'Relation Name'?: string; 'Actual Rows': number; 'Actual Loops': number; Plans?: Node[] };
+  const indexRows = (node: Node): number => (node['Relation Name'] === 'log_index' ? node['Actual Rows'] * node['Actual Loops'] : 0) + (node.Plans ?? []).reduce((sum, child) => sum + indexRows(child), 0);
+  const read = indexRows(plan!['QUERY PLAN'][0].Plan);
+  // A hash of every object's newest would read 70,000: each project's 1,000 and each environment's 300.
+  assert.ok(read <= 2 * 1000 + objects.length, `${read} index rows`);
+  // The newest thousand, each once, and more below.
+  const stretch = await logStretch(world.owner, at);
+  assert.deepEqual([stretch.rows.length, stretch.rows[0]!.seq, stretch.rows.at(-1)!.seq, stretch.more], [1000, 1059999, 1059000, true]);
+  // The last of them: the end, not more.
+  assert.deepEqual(await logStretch(world.owner, { objects: ['environment:e7'], below: 1000207, rows: 3 }).then(({ rows, more }) => [rows.map(({ seq }) => seq), more]), [[1000207, 1000007], false]);
+});
+
+test('a page about more places than the index is read by reads the log itself, and shows the same', async () => {
+  // Market grows ten thousand environments: Al reads the log of each, which no statement could read the index by.
+  await world.owner.execute(sql`
+    INSERT INTO environments SELECT (jsonb_populate_record(NULL::environments, to_jsonb(e) || jsonb_build_object('id', gen_random_uuid(), 'slug', 'more-' || g, 'name', 'more-' || g))).*
+    FROM environments e JOIN projects p ON p.id = e.project_id, generate_series(1, 10000) g WHERE p.slug = 'market' AND e.slug = 'prod'`);
+  const [scoped, , statements] = await page('al-cli');
+  assert.deepEqual(brief(scoped), ['secret.read market/dev/API_KEY proven', 'secret.write market/staging/TOKEN proven', 'secret.write market/dev/API_KEY proven', 'project.move market proven', 'environment.create market/qa proven']);
+  assert.deepEqual([scoped.holes, scoped.more, statements], [null, false, 3]);
+  // Two at a time, a page reads four of the log and shows what of them is Al's: the pages go on where each stopped, and show it all.
+  const shown: string[] = [];
+  let next: number | null = null;
+  do {
+    const [paged]: [Page, string[], number] = await page('al-cli', `?limit=2${next === null ? '' : `&before=${next}`}`);
+    shown.push(...brief(paged));
+    next = paged.next;
+  } while (next !== null);
+  assert.deepEqual(shown, brief(scoped));
 });

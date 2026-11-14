@@ -59,34 +59,63 @@ export async function logPlaces(db: Queryable, at: { slug: string; key?: string;
 }
 
 /**
- * A stretch of the log, newest first: up to `rows` entries at or below
- * `before`, the entry at `before` included when it is there (the page
- * above's last, for its holes to meet this page's). From `log` itself, by
- * its key; or, for `objects`, from `log_index`, the newest `rows` of each
- * object merged, each one index probe and a walk back, so the statement
- * reads about `rows` index rows and one per object, however long the log.
- * An entry that mentions two of them comes once.
+ * The most objects a page reads `log_index` by. Each is one index probe and
+ * one subquery of the statement, which Postgres nests: at ten thousand it
+ * runs out of stack. A page about more reads the log itself.
  */
-export async function logStretch(db: Queryable, at: { objects: readonly string[] | null; before: number | null; rows: number }): Promise<LogRow[]> {
-  const { objects, before, rows } = at;
+export const MOST_OBJECTS = 1000;
+
+/**
+ * How many index rows the merge reads for each entry it keeps: an entry is
+ * in the index under every object it mentions, and a page's objects are a
+ * project's and its environments', which an entry about an environment
+ * both mentions.
+ */
+const COPIES = 2;
+
+/** A stretch of the log, newest first, and whether it stopped before the end of what it reads. */
+export type Stretch = { rows: LogRow[]; more: boolean };
+
+/**
+ * A stretch of the log, newest first: up to `rows` entries at or below
+ * `below`. From `log` itself, by its key; or, for `objects`, from
+ * `log_index` (`stretchOf`). An entry that mentions two of them comes once.
+ */
+export async function logStretch(db: Queryable, at: { objects: readonly string[] | null; below: number | null; rows: number }): Promise<Stretch> {
+  const { objects, rows } = at;
+  if (objects !== null && objects.length === 0) return { rows: [], more: false };
+  const read = await rowsOf<LogRow & { merged: number }>(db, stretchOf(at));
+  const more = read.length === rows || (objects !== null && read[0]?.merged === rows * COPIES);
+  return { rows: read.map(({ merged: _, ...row }) => row), more };
+}
+
+/**
+ * `logStretch`'s statement. For `objects`, each one's newest `rows`, merged
+ * newest first as one Merge Append under a `LIMIT`, which stops it: the
+ * statement reads `COPIES` × `rows` index rows and one more per object,
+ * however long the log (audit.test.ts holds it to that). Only then
+ * does it drop an entry two objects share, from those it read. A `DISTINCT`
+ * over the merge would read the same, but Postgres plans it as a hash of
+ * every object's `rows` once the objects are a few dozen: 210 objects at a
+ * thousand rows, 210,000 index rows in 175 ms, where this reads 2,210 in
+ * 16 ms (drive: W419-plans/audit-stretch-explain.txt). `merged` says how many
+ * the merge read, for `more`: fewer than it may, and it reached the end.
+ */
+export function stretchOf(at: { objects: readonly string[] | null; below: number | null; rows: number }): SQL {
+  const { objects, below, rows } = at;
   if (objects === null) {
-    const below = before === null ? sql`` : sql`WHERE l.seq <= ${before}`;
+    const where = below === null ? sql`` : sql`WHERE l.seq <= ${below}`;
     // By the column, not the number it is read as: the key's order, read backwards.
-    return rowsOf<LogRow>(db, sql`SELECT l.seq::float8 AS seq, l.kept, l.leaf::float8 AS leaf, l.body FROM log l ${below} ORDER BY l.seq DESC LIMIT ${rows}`);
+    return sql`SELECT l.seq::float8 AS seq, l.kept, l.leaf::float8 AS leaf, l.body, 0 AS merged FROM log l ${where} ORDER BY l.seq DESC LIMIT ${rows}`;
   }
-  if (objects.length === 0) return [];
-  const below = before === null ? sql`` : sql`AND seq < ${before}`;
-  // Each object's newest, merged: Postgres reads them as one Merge Append, drops an entry two objects share as they
-  // come, and stops at `rows` distinct ones, so a shared entry costs the page none of its stretch.
-  const each: SQL[] = objects.map((object) => sql`(SELECT seq FROM log_index WHERE object = ${object} ${below} ORDER BY seq DESC LIMIT ${rows})`);
-  return rowsOf<LogRow>(
-    db,
-    sql`
-      SELECT l.seq::float8 AS seq, l.kept, l.leaf::float8 AS leaf, l.body
-      FROM (SELECT DISTINCT seq FROM (${sql.join(each, sql` UNION ALL `)}) each ORDER BY seq DESC LIMIT ${rows}) found
-      JOIN log l ON l.seq = found.seq
-      ORDER BY l.seq DESC`,
-  );
+  const where = below === null ? sql`` : sql`AND seq <= ${below}`;
+  const each: SQL[] = objects.map((object) => sql`(SELECT seq FROM log_index WHERE object = ${object} ${where} ORDER BY seq DESC LIMIT ${rows})`);
+  return sql`
+    WITH merged AS MATERIALIZED (SELECT seq FROM (${sql.join(each, sql` UNION ALL `)}) each ORDER BY seq DESC LIMIT ${rows * COPIES})
+    SELECT l.seq::float8 AS seq, l.kept, l.leaf::float8 AS leaf, l.body, (SELECT count(*) FROM merged)::int AS merged
+    FROM (SELECT DISTINCT seq FROM merged ORDER BY seq DESC LIMIT ${rows}) found
+    JOIN log l ON l.seq = found.seq
+    ORDER BY l.seq DESC`;
 }
 
 /** A tile of a tree's hashes, by its level and its number (`@coffre/core/log`). */
