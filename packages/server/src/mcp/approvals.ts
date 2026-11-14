@@ -240,8 +240,9 @@ function unread(error: unknown): Detail[] {
  * - Approve of a change: the change, on the person's session with the
  *   connection and the approval named (`via`): the vault writes the
  *   approval approved in the change's own write. Refused (another version
- *   set since, `stale`; expired; disconnected), nothing is written, and the
- *   approval still waits: the page shows why, and the person reloads it.
+ *   set since, `stale`, worded as the key changed since they were asked;
+ *   expired; disconnected), nothing is written, and the approval still
+ *   waits: the page shows why, and the person reloads it. Nothing retries.
  * - Approve of a value shown: the value first, read as the person's own
  *   reveal, then `mcp.decide`. Should the second be refused (expired, or
  *   decided in another tab meanwhile), the person still sees the value,
@@ -288,9 +289,18 @@ export async function decide(ctx: ApiContext, id: string, input: Decide): Promis
     }
     if (basisOf(replaced) !== input.basis) throw conflict('this changed since you opened it: open the approval again');
   }
-  const { shown = [] } = await change.apply({ ...ctx, via: { connection: row.connectionId, approval: id, digest: input.digest } }, args, { value: input.value, replaced });
-  return { status: 'approved', outcome: change.done(args, new Date()), shown };
+  try {
+    const { shown = [] } = await change.apply({ ...ctx, via: { connection: row.connectionId, approval: id, digest: input.digest } }, args, { value: input.value, replaced });
+    return { status: 'approved', outcome: change.done(args, new Date()), shown };
+  } catch (error) {
+    // Between Approve's read and the vault's write, the key changed: nothing is, and the person decides on it as it is now.
+    if (error instanceof ApiError && error.reason === 'stale') throw conflict(STALE);
+    throw error;
+  }
 }
+
+/** What the person reads when the key changed between Approve's read and the vault's write. */
+export const STALE = 'this key changed since you were asked, so nothing was changed: open the approval again to see it as it is now';
 
 /**
  * An approval, its tool and its client, if the caller is its person on a

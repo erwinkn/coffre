@@ -295,8 +295,8 @@ export const bindingRoutes = {
    * replaced. Asking the issuer costs one `caller` and one statement more,
    * first, which keep it to whoever manages the service (`mayBind`).
    * `?dryRun=1` answers what it would do (`BindingPlan`) and makes nothing:
-   * one weigh, and no statement, since the weighing itself says whether the
-   * caller may bind before the issuer is asked.
+   * the same, but weighed, not made: with discovery, one `caller`, one
+   * statement and one weigh; with keys uploaded or a URN, one weigh.
    */
   ...route('POST /members/:member/bindings', {
     input: z.object({
@@ -333,26 +333,6 @@ export const bindingRoutes = {
       // A URN's keys are its issuer, which keeps one source of keys.
       const urn = Object.hasOwn(PROFILE_URNS, input.profile);
       const binding = (keys: { uri: string } | { jwks: unknown }) => ({ profile: input.profile, issuer, claims: input.claims, keys, policy: input.policy ?? null, scope: input.scope ?? null, label: input.label ?? null, replaces: input.replaces ?? [] });
-      if (query.dryRun !== undefined) {
-        // Weighed with its issuer standing in for where its keys are, which nothing it reaches depends on; the issuer
-        // is asked only once the weighing said the caller may bind, so no one else makes coffre fetch a host they name.
-        const plan = await bindingChange<'token.bind'>(ctx, { op: 'token.bind', member, binding: binding(uploaded ? { jwks: input.jwks } : { uri: issuer }) }, member, 'weigh');
-        const jwksUri = carried !== null ? `${CARRIED}${carried.digest}` : urn ? issuer : await discovered(ctx, issuer, workloads);
-        // What it replaces turns on where its keys are, the bindings on its issuer under others going: weighed again
-        // with the keys discovery found, when they are not where the issuer stood in for them.
-        const { replaced } = uploaded || jwksUri === issuer ? plan : await bindingChange<'token.bind'>(ctx, { op: 'token.bind', member, binding: binding({ uri: jwksUri }) }, member, 'weigh');
-        const asked = new Set(input.replaces ?? []);
-        return {
-          profile: checked.profile,
-          issuer,
-          jwksUri,
-          keys: carried?.keys ?? null,
-          claims: checked.claims,
-          scope: plan.bindings[0]!.scope,
-          policy: (input.policy as PolicyView | undefined) ?? null,
-          replaces: replaced.map((id) => ({ id, why: asked.has(id) ? ('asked' as const) : ('keys_moved' as const) })),
-        };
-      }
       let keys: { uri: string } | { jwks: unknown };
       // Keys uploaded with it; a URN's, its issuer; else where its issuer's discovery says they are, asked only for whoever may bind.
       if (uploaded) keys = { jwks: input.jwks };
@@ -361,7 +341,24 @@ export const bindingRoutes = {
         await mayBind(ctx, member);
         keys = { uri: await discovered(ctx, issuer, workloads) };
       }
-      const bound = await bindingChange<'token.bind'>(ctx, { op: 'token.bind', member, binding: binding(keys) }, member);
+      const change = { op: 'token.bind', member, binding: binding(keys) } as const;
+      if (query.dryRun !== undefined) {
+        // Weighed as it would be made, keys and all: what it reaches and what it replaces are one answer's, since a binding
+        // replaced may be what the scope it inherits comes from.
+        const plan = await bindingChange<'token.bind'>(ctx, change, member, 'weigh');
+        const asked = new Set(input.replaces ?? []);
+        return {
+          profile: checked.profile,
+          issuer,
+          jwksUri: 'uri' in keys ? keys.uri : `${CARRIED}${carried!.digest}`,
+          keys: carried?.keys ?? null,
+          claims: checked.claims,
+          scope: plan.bindings[0]!.scope,
+          policy: (input.policy as PolicyView | undefined) ?? null,
+          replaces: plan.replaced.map((id) => ({ id, why: asked.has(id) ? ('asked' as const) : ('keys_moved' as const) })),
+        };
+      }
+      const bound = await bindingChange<'token.bind'>(ctx, change, member);
       return { binding: bound.bindings[0]!, replaced: bound.replaced };
     },
   }),

@@ -18,6 +18,7 @@ import { sql } from 'drizzle-orm';
 
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
+import type { BindingPlan } from '../src/api/routes/bindings.ts';
 import { openApp } from './app-fixture.ts';
 
 const KUBE = 'https://kubernetes.acme.example';
@@ -191,20 +192,18 @@ test('a binding is checked before anything is asked: its profile\'s rules, its k
   assert.deepEqual(refused(await call('ada-cli', 'POST', `/members/${ada}/bindings`, { profile: 'custom', issuer: KUBE, claims: POD })), [400, 'bad_request', undefined]);
 });
 
-test("a preview (`?dryRun=1`) is the binding weighed and not made: one weigh, its issuer asked only once that says the caller may bind, nothing written; a refusal is logged as the change's", async () => {
+test("a preview (`?dryRun=1`) is the binding weighed and not made, as it would be made: whoever may bind, then its issuer asked, then one weigh; nothing written", async () => {
   const [[status, body], calls, statements] = await bind('ada-cli', { label: 'pods', scope: { 'market/dev': 'developer' } }, '?dryRun=1');
   assert.equal(status, 200, JSON.stringify(body));
   assert.deepEqual(body, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, keys: null, claims: POD, scope: { 'market/dev': 'developer' }, policy: null, replaces: [] });
-  // Weighed again with the keys discovery found, which are not at the issuer's own URL: what it replaces turns on them.
-  assert.deepEqual([calls, statements, fetched], [['weigh', 'weigh'], 0, [`${KUBE}/.well-known/openid-configuration`]]);
+  assert.deepEqual([calls, statements, fetched], [['caller', 'weigh'], 1, [`${KUBE}/.well-known/openid-configuration`]]);
   assert.deepEqual(((await list('ada-cli'))[0][1] as { bindings: unknown[] }).bindings, [], 'nothing made');
   assert.deepEqual(await pending(), [], 'nothing logged');
 
-  // Whoever does not manage the service makes coffre ask no issuer anything; the log says they asked, as of a change.
+  // Whoever does not manage the service makes coffre ask no issuer anything, as a binding made does.
   fetched.length = 0;
   const [answer, refusedCalls, refusedStatements] = await bind('bo-cli', {}, '?dryRun=1');
-  assert.deepEqual([refused(answer), refusedCalls, refusedStatements, fetched], [[403, 'vault_refused', 'no_access'], ['weigh'], 0, []]);
-  assert.deepEqual((await pending()).map((entry) => [entry.action, entry.detail.refused]), [['token.bind', 'no_access']]);
+  assert.deepEqual([refused(answer), refusedCalls, refusedStatements, fetched], [[403, 'vault_refused', 'no_access'], ['caller'], 1, []]);
   // The keys' preview is not served yet.
   const [keysAnswer] = await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: KUBE, jwks: { keys: [] } }));
   assert.equal(keysAnswer[0], 501);
@@ -226,6 +225,33 @@ test("a preview says what the binding replaces: those asked, and those on its is
   const [[made, answer]] = await bind('ada-cli', { scope: { 'market/dev': 'developer' }, replaces: [named.id] });
   assert.equal(made, 200, JSON.stringify(answer));
   assert.deepEqual([...(answer as { replaced: string[] }).replaced].sort(), [moved.id, named.id].sort());
+});
+
+test("a preview is the binding's own answer: the scope it inherits from what it replaces, as the binding made reaches", async () => {
+  // ci holds Developer on market/dev and Viewer on market/prod. A binding of its under the keys discovery finds reaches market/prod alone.
+  const prodOnly = JSON.stringify([{ projectId: ids.market, environmentId: ids.prod, role: 'viewer' }]);
+  const kept = binding(ci, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, claims: JSON.stringify({ sub: 'system:serviceaccount:ci:kept' }), scope: prodOnly });
+  await write(world, ...rows('bindings', kept));
+  // With no scope said, the preview reaches what the binding made reaches, and replaces what it replaces: nothing.
+  const [[status, plan]] = await bind('ada-cli', {}, '?dryRun=1');
+  assert.equal(status, 200, JSON.stringify(plan));
+  const [[made, answer]] = await bind('ada-cli', {});
+  assert.equal(made, 200, JSON.stringify(answer));
+  const { binding: { scope }, replaced } = answer as { binding: { scope: Record<string, string> }; replaced: string[] };
+  assert.deepEqual([(plan as BindingPlan).scope, (plan as BindingPlan).replaces], [scope, replaced]);
+  assert.deepEqual(scope, { 'market/dev': 'developer', 'market/prod': 'viewer' });
+});
+
+test("a preview refuses no binding for those only a stand-in for its keys would replace", async () => {
+  // Two bindings under the keys discovery finds at one environment, in roles no binding could inherit both of: a stand-in
+  // for the keys would replace both and be refused; the binding replaces neither, and its preview says so.
+  const dev = (role: string) => JSON.stringify([{ projectId: ids.market, environmentId: ids.dev, role }]);
+  await write(world, ...rows('bindings',
+    binding(ci, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, claims: JSON.stringify({ sub: 'system:serviceaccount:ci:a' }), scope: dev('viewer') }),
+    binding(ci, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, claims: JSON.stringify({ sub: 'system:serviceaccount:ci:b' }), scope: dev('developer') })));
+  const [[again, second]] = await bind('ada-cli', { claims: { sub: 'system:serviceaccount:ci:c' } }, '?dryRun=1');
+  assert.equal(again, 200, JSON.stringify(second));
+  assert.deepEqual((second as BindingPlan).replaces, []);
 });
 
 test("the vault's refusals, in words: who does not manage the service, a role the instance lacks, a service that is not there", async () => {

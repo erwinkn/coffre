@@ -4,7 +4,7 @@
 // runs the API's own route on Approve, as the person, with the connection
 // and the approval named.
 import { apiMember, shownMember } from '@coffre/client';
-import { INSTANCE_ROLE_NAMES, INSTANCE_ROLES, makesProjects, ROLE_NAMES, runsInstance, scopeInWords, type InstanceRole, type Permission } from '@coffre/core/access';
+import { INSTANCE_ROLE_NAMES, INSTANCE_ROLES, makesProjects, ownsInstance, ROLE_NAMES, runsInstance, scopeInWords, type InstanceRole, type Permission } from '@coffre/core/access';
 import { instanceRole, roleId, scopeInput, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
@@ -32,6 +32,32 @@ function splitEnvironment(path: string): { project: string; environment: string 
 /** Refuse now, as the API would on Approve, when the person does not run the instance. */
 export function instanceOnly({ connection }: ToolContext): void {
   if (!runsInstance(connection.called.holds)) throw forbidden('only an admin or owner of the whole instance can do this');
+}
+
+/**
+ * Refuse now, as the vault would on Approve, what only an Owner of the
+ * whole instance asks of a person's instance role (`member.role` and
+ * `member.remove`): to make one an Owner, to change or remove an Owner, or
+ * to change their own. Whether the member is an Owner now is read only when
+ * nothing else said it: one statement, the member's access. A role asked
+ * as it is already, which the vault lets any admin ask, is refused here
+ * too.
+ */
+async function ownerOnly(tool: ToolContext, member: string, role: InstanceRole | 'removed'): Promise<void> {
+  const { called } = tool.connection;
+  if (called.holds.credentialScope == null && ownsInstance(called.holds)) return;
+  const owner = async () => {
+    try {
+      return (await runRoute('GET /members/:member/access', { member }, undefined, tool.ctx)).instanceRole === 'owner';
+    } catch (error) {
+      // Someone not a member yet holds no role.
+      if (error instanceof ApiError && error.code === 'not_found') return false;
+      throw error;
+    }
+  };
+  if (role === 'owner' || (role !== 'removed' && member === called.principal) || (await owner())) {
+    throw forbidden('only an owner of the whole instance can make someone an owner, change or remove an owner, or change their own role');
+  }
 }
 
 /**
@@ -250,7 +276,12 @@ const ADMIT = changeTool({
       if (access !== undefined && (!service || role !== undefined || scope !== undefined)) {
         throw badRequest('access comes with a service account, and no role or scope: a person is given grants once a member (set_access)');
       }
-      if (!service || (role ?? 'member') !== 'member' || scope !== undefined) return instanceOnly(tool);
+      if (!service || (role ?? 'member') !== 'member' || scope !== undefined) {
+        instanceOnly(tool);
+        // A person's role kept as it is (none asked) is no change of it.
+        if (!service && role !== undefined) await ownerOnly(tool, apiMember(member), role);
+        return;
+      }
       if (!(await runRoute('GET /me', {}, undefined, tool.ctx)).setsUpServices) throw forbidden('you set up no service account: the instance keeps them to admins where you hold access');
     },
     // What it gives, as the page says it: the grants as they were, or the instance role as the instance defines it, which
@@ -291,7 +322,12 @@ const OFFBOARD = changeTool({
       result: { member: shownMember(apiMember(member)), removed: true },
       text: `${shownMember(apiMember(member))} is offboarded. describe_member lists the secrets they read or wrote, to rotate.`,
     }),
-    check: async (tool, { member }) => (apiMember(member).startsWith('token:') && !runsInstance(tool.connection.called.holds) ? manages(tool, apiMember(member)) : instanceOnly(tool)),
+    check: async (tool, { member }) => {
+      const named = apiMember(member);
+      if (named.startsWith('token:')) return runsInstance(tool.connection.called.holds) ? undefined : manages(tool, named);
+      instanceOnly(tool);
+      await ownerOnly(tool, named, 'removed');
+    },
     preview: async (ctx, { member }) => {
       const named = apiMember(member);
       if (!(await runRoute('GET /me', {}, undefined, ctx)).runsInstance) {

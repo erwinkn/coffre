@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { allows, useOnly, withinCredential, type Permission } from '@coffre/core/access';
 import { formatRecipe, parseRecipe, recipeProblem } from '@coffre/core/recipe';
-import type { Answers, KeyOutcome, KeyWrite, MissingDismiss, Nature, Presented, ReferenceBreak, SecretPath, SecretRefile, SecretRename, SecretsChanges, SecretWrite } from '@coffre/core/vault';
+import type { Answers, KeyOutcome, KeyWrite, MissingDismiss, Nature, Presented, ReferenceBreak, Replaces, SecretPath, SecretRefile, SecretRename, SecretsChanges, SecretWrite } from '@coffre/core/vault';
 import { dismissedKeys, environments, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
@@ -101,6 +101,26 @@ function generatedBy(key: string, generated: unknown): boolean {
 const located = (path: unknown): path is SecretPath =>
   typeof path === 'object' && path !== null && text((path as SecretPath).project) && text((path as SecretPath).environment) && typeof (path as SecretPath).key === 'string' && KEY.test((path as SecretPath).key);
 
+/** What a key read when its author looked, as said: a version's id, a reference's source's, or null. */
+const replacing = (replaces: unknown): replaces is Replaces => replaces === null || (typeof replaces === 'string' && VERSION_ID.test(replaces))
+  || (typeof replaces === 'object' && Object.keys(replaces).length === 1 && typeof (replaces as { source: unknown }).source === 'string' && VERSION_ID.test((replaces as { source: string }).source));
+
+/**
+ * Whether a key no longer reads what its author read (`replaces`): `now`,
+ * what it reads, its own live row or the one it inherits, null for none,
+ * and `replaced`, the version rows read by the ids changes name. Null: no
+ * value and no reference; a source: a reference to it, which holds no
+ * version of its own; a version: that one, of that very key, and no other.
+ */
+function stale(replaces: Replaces, now: Row<typeof secrets> | null, replaced: readonly Row<typeof secretVersions>[]): boolean {
+  if (replaces === null || typeof replaces === 'object') {
+    const source = replaces?.source ?? null;
+    return now === null ? source !== null : now.currentVersion !== null || now.sourceId !== source;
+  }
+  const listed = replaced.find((row) => row.id === replaces);
+  return now === null || listed?.secretId !== now.id || listed.version !== now.currentVersion;
+}
+
 /** One key's item, on its own: what it does, with what it says it with. */
 function valid(item: KeyWrite): boolean {
   if (typeof item !== 'object' || item === null || typeof item.key !== 'string' || !KEY.test(item.key)) return false;
@@ -108,17 +128,15 @@ function valid(item: KeyWrite): boolean {
   if (item.inherit !== undefined) {
     return typeof item.inherit === 'boolean' && [item.value, item.nature, item.generated, item.replaces, item.restore, item.ref, item.archived, item.folder].every((said) => said === undefined);
   }
-  if (!(item.archived === undefined || typeof item.archived === 'boolean') || !(item.folder === undefined || filed(item.folder))) return false;
+  if (!(item.archived === undefined || typeof item.archived === 'boolean') || !(item.folder === undefined || filed(item.folder)) || !(item.replaces === undefined || replacing(item.replaces))) return false;
   // A key is archived with no value written over it or restored, and made no reference.
   if (item.value !== undefined) {
     return written(item.value) && (item.nature === undefined || NATURES.includes(item.nature)) && item.ref === undefined && item.restore === undefined && item.archived !== true
       // A value a client generated is never plain.
-      && (item.generated === undefined || (generatedBy(item.key, item.generated) && item.nature !== 'plain'))
-      && (item.replaces === undefined || item.replaces === null || (typeof item.replaces === 'string' && VERSION_ID.test(item.replaces))
-        || (typeof item.replaces === 'object' && Object.keys(item.replaces).length === 1 && typeof item.replaces.source === 'string' && VERSION_ID.test(item.replaces.source)));
+      && (item.generated === undefined || (generatedBy(item.key, item.generated) && item.nature !== 'plain'));
   }
-  // Only a value is generated, or replaces the version listed.
-  if (item.generated !== undefined || item.replaces !== undefined) return false;
+  // Only a value is generated.
+  if (item.generated !== undefined) return false;
   if (item.restore !== undefined) return Number.isSafeInteger(item.restore) && item.restore >= 1 && item.restore <= MOST_VERSION && item.nature === undefined && item.ref === undefined && item.archived !== true;
   if (item.ref !== undefined) return located(item.ref) && item.nature === undefined && item.archived !== true;
   // A mark goes alone.
@@ -165,12 +183,13 @@ function valid(item: KeyWrite): boolean {
  * either archived, leaves the other a half of a pair that is no more,
  * which a listing shows as typed (`routes/keys.ts`). A generated value is
  * never plain, nor kept plain over a plain one: a secret, or sensitive
- * over a sensitive one. A value that says the version it `replaces` (a
- * regenerate, 0.14's `regenerated`) is written only over that version,
- * the one the key reads now, its own live one or, where it holds none
- * live, the one it inherits, as their sealed rows say: anything else is
- * `stale`, and the decision, made again under the lock when a row it read
- * moved, finds it so too.
+ * over a sensitive one. A key's change that says what it `replaces` (a
+ * regenerate, 0.14's `regenerated`, or an MCP approval's value, version
+ * restored, archiving or return) is made only over that, what the key
+ * reads now, its own live value or, where it holds none live, the one it
+ * inherits, as their sealed rows say: anything else is `stale`, and the
+ * decision, made again under the lock when a row it read moved, finds it
+ * so too.
  *
  * A key made a reference (0.14's `referenceTargets` and the vault's
  * `referenceRefusal`) takes `secret.write` here, and `secret.read` where its
@@ -259,7 +278,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
   // The keys whose value comes with no nature said, typed or restored: what each is now decides it.
   const bare = items.flatMap((item) => ((item.value !== undefined && item.nature === undefined) || item.restore !== undefined ? [item.key] : []));
   // The keys whose parents decide: one reset, or made live (a reset one written over stops being one), whose dismissal ends.
-  const inheriting = items.flatMap((item) => ([item.value, item.restore, item.ref, item.inherit].some((said) => said !== undefined) || item.archived === false ? [item.key] : []));
+  // And one that says what it `replaces`, which may be what a parent passes down.
+  const inheriting = items.flatMap((item) => ([item.value, item.restore, item.ref, item.inherit, item.replaces].some((said) => said !== undefined) || item.archived === false ? [item.key] : []));
   // The keys marked, whose value is kept: one the environment does not hold is told inherited from one it does not have at all.
   const marks = items.flatMap((item) => (item.value === undefined && item.nature !== undefined ? [item.key] : []));
   const resolving = [...inheriting, ...marks];
@@ -488,14 +508,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           // since it was listed is one whose listed version is no longer read, which a client knows to list again.
           const now = was !== null && was.archivedAt === null ? was : passedDown(key, 'read');
           if (now === undefined) return { refused: 'unreadable' };
-          // Null: no value, and no reference; a source: a reference to it, which holds no version of its own. Otherwise a reference holds none listed.
-          if (replaces === null || typeof replaces === 'object') {
-            const source = replaces?.source ?? null;
-            if (now === null ? source !== null : now.currentVersion !== null || now.sourceId !== source) return { refused: 'stale' };
-          } else {
-            const listed = seen.replaced.find((row) => row.id === replaces);
-            if (now === null || listed?.secretId !== now.id || listed.version !== now.currentVersion) return { refused: 'stale' };
-          }
+          if (stale(replaces, now, seen.replaced)) return { refused: 'stale' };
         }
         // An archived key keeps its name: it is brought back, not written over. In a fork, one reset to what a parent passes
         // down is an override set aside, which a value, a version or a reference written over it makes one again, as in 0.14.
@@ -668,13 +681,18 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
  * above are found by their `parent_id`, and one edited out of its place
  * would hide a fork from the cascade, or a parent's key from the names a key
  * moved aside avoids, which it would shadow once put back.
+ *
+ * Saying what it `replaces`, as a write does, it renames only the key its
+ * author read: one renamed and another made under its name since is
+ * `stale`, by the same check, on the version row its read finds by id.
  */
 function secretRename(input: Presented & SecretRename, vault: Deciding): Operation<Parts, Answers['secret.rename']> {
   const shown = presented(input);
-  const { project: projectSlug, environment: environmentSlug, key, to } = input;
+  const { project: projectSlug, environment: environmentSlug, key, to, replaces } = input;
   const mine = input.mine ?? false;
-  if (!text(projectSlug) || !text(environmentSlug) || typeof mine !== 'boolean' || typeof key !== 'string' || !KEY.test(key) || typeof to !== 'string' || !KEY.test(to)) {
-    throw new TypeError('a key is renamed by its place\'s slugs, or the caller\'s personal config of it, its name and the one it takes, each as a key is named');
+  if (!text(projectSlug) || !text(environmentSlug) || typeof mine !== 'boolean' || typeof key !== 'string' || !KEY.test(key) || typeof to !== 'string' || !KEY.test(to)
+    || !(replaces === undefined || replacing(replaces))) {
+    throw new TypeError('a key is renamed by its place\'s slugs, or the caller\'s personal config of it, its name and the one it takes, each as a key is named, and what it replaces, as a write says it');
   }
   const { project, here, environment } = keysPlace(shown.token, projectSlug, environmentSlug, mine);
   // Each name a key moved aside may take starts with this much of the new one.
@@ -701,6 +719,8 @@ function secretRename(input: Presented & SecretRename, vault: Deciding): Operati
     secret: part(secrets, sql`${secrets.projectId} = ${project} AND (${secrets.environmentId} = ${here} OR ${secrets.environmentId} IN ${below}) AND ${named(secrets.key)}`),
     inherited: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} IN ${above} AND ${secrets.environmentId} IS DISTINCT FROM ${here} AND starts_with(${secrets.key}, ${stem})`),
     dismissed: part(dismissedKeys, sql`(${dismissedKeys.environmentId} = ${here} OR ${dismissedKeys.environmentId} IN ${below}) AND ${named(dismissedKeys.key)}`),
+    // The version it replaces, by its id, as a write's.
+    replaced: part(secretVersions, sql`${secretVersions.id} = ANY(${sql.param(typeof replaces === 'string' ? [replaces] : [])}::uuid[])`),
   };
   const placed = (seen: Seen<typeof read>) => {
     const place = seen.project.find((row) => row.slug === projectSlug && live(row));
@@ -735,6 +755,8 @@ function secretRename(input: Presented & SecretRename, vault: Deciding): Operati
       if (unsealed.environments + unsealed.secret + unsealed.dismissed > 0) return { refused: 'unreadable' };
       const row = seen.secret.find((found) => found.environmentId === environment.id && found.key === key);
       if (row === undefined) return { refused: 'unknown_key' };
+      // Held to what its author read, as a write is, before an archived key is refused: an archived key reads nothing here, and is renamed by nobody.
+      if (replaces !== undefined && stale(replaces, row.archivedAt === null ? row : null, seen.replaced)) return { refused: 'stale' };
       if (row.archivedAt !== null) return { refused: 'archived' };
       const entry = (lines: Record<string, unknown>[], forks: string[]) => ({
         kept: true,

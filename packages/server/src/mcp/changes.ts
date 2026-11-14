@@ -8,6 +8,7 @@
 // and the change itself. No tool takes a value: the person types one on the page.
 import { shownMember } from '@coffre/client';
 import type { Permission } from '@coffre/core/access';
+import type { KeyWrite, Replaces } from '@coffre/core/vault';
 import { encodedLength, formatRecipe, MIN_BYTES, randomValue, type Encoding, type Generation } from '@coffre/core/recipe';
 import { secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
@@ -100,9 +101,8 @@ export async function needs({ ctx }: ToolContext, path: string, permission: Perm
  * person: its version's id, which no other version of it or of any key
  * shares, or that it is new, a reference or archived. A key renamed and
  * another made under its name, at the same version number, is another
- * state. Approve writes over the version this read found, the reference to
- * the source it found, or where it found neither, over nothing (`replaces`),
- * so a write between Approve's read and the vault's refuses it too.
+ * state. Approve changes the key over what this read found (`replacing`),
+ * so a change between Approve's read and the vault's refuses it too.
  */
 type Held = { absent: true } | { versionId: string | null; reference: { path: string; sourceId: string } | null; archived: boolean; parent: string | null };
 
@@ -120,17 +120,27 @@ export async function current(ctx: ApiContext, path: string): Promise<Replaced &
 }
 
 /**
- * A key's value written over what Approve read, as the page showed it: the
- * version's id, the reference's source, or neither. Anything else since is
- * `stale`, refused by the vault. PATCH's own change, made here: its input
- * takes a version's id to replace, never none.
+ * What a key read when Approve read it again, as the page showed it, said
+ * as the vault holds a change to it (`replaces`): the reference's source,
+ * the version's id, or nothing, for a key that is not there or archived,
+ * which reads nothing here (in a fork, a listing shows what a parent passes
+ * down in its place). Anything else by the time the vault writes is
+ * `stale`, and nothing is changed.
  */
-async function written(ctx: ApiContext, secret: string, write: { value: string; generated?: Generation }, replaced: Replaced | undefined): Promise<void> {
-  const { project, environment, key } = splitSecret(secret);
+function replacing(replaced: Replaced | undefined): Replaces {
   const held = replaced?.state as Held | undefined;
   if (held === undefined) throw conflict('coffre could not read what this replaces: open the approval again');
-  const replaces = 'absent' in held ? null : held.reference !== null ? { source: held.reference.sourceId } : held.versionId;
-  await changed(ctx, { op: 'secret.write', project, environment, mine: false, keys: [{ key, ...write, replaces }] }, secret);
+  return 'absent' in held || held.archived ? null : held.reference !== null ? { source: held.reference.sourceId } : held.versionId;
+}
+
+/**
+ * A key's change made over what Approve read (`replacing`): the API's
+ * routes take no `replaces` but a value's, so the change is made here, as
+ * theirs, in one call to the vault.
+ */
+async function written(ctx: ApiContext, secret: string, write: Omit<KeyWrite, 'key' | 'replaces' | 'inherit'>, replaced: Replaced | undefined): Promise<void> {
+  const { project, environment, key } = splitSecret(secret);
+  await changed(ctx, { op: 'secret.write', project, environment, mine: false, keys: [{ key, ...write, replaces: replacing(replaced) } as KeyWrite] }, secret);
 }
 
 /** What every change tool answers: where its approval stands, and once made, what the change answered. */
@@ -308,12 +318,15 @@ const RENAME = secretTool({
       return { result: { secret: renamed }, text: `${secret} is now ${renamed}. Whatever reads the old name must read the new one.` };
     },
     check: async (tool, { secret }) => needs(tool, secret, 'secret.write'),
-    preview: async (ctx, { secret, newKey }) => {
+    replaces: async (ctx, { secret }) => current(ctx, secret),
+    preview: async (_ctx, { secret, newKey }, _viewing, replaced) => {
       const { project, environment } = splitSecret(secret);
-      return [{ label: 'Secret', value: secret, kind: 'mono' }, { label: 'Becomes', value: `${project}/${environment}/${newKey}`, kind: 'mono' }, ...(await current(ctx, secret)).details];
+      return [{ label: 'Secret', value: secret, kind: 'mono' }, { label: 'Becomes', value: `${project}/${environment}/${newKey}`, kind: 'mono' }, ...replaced];
     },
-    apply: async (ctx, { secret, newKey }) => {
-      await runRoute('PATCH /secrets/:project/:environment/:key', splitSecret(secret), { key: newKey }, ctx);
+    // PATCH's rename, of the key the page showed: another made under its name since is `stale`.
+    apply: async (ctx, { secret, newKey }, { replaced }) => {
+      const { project, environment, key } = splitSecret(secret);
+      await changed(ctx, { op: 'secret.rename', project, environment, mine: false, key, to: newKey, replaces: replacing(replaced) }, secret);
       return {};
     },
   },
@@ -334,13 +347,15 @@ function archiving(archived: boolean): Tool {
       summary: ({ secret }) => `${archived ? 'archive' : 'unarchive'} ${secret}`,
       done: ({ secret }) => ({ result: { secret, archived }, text: `${secret} is ${archived ? 'archived' : 'live again'}.` }),
       check: async (tool, { secret }) => needs(tool, secret, 'secret.archive'),
-      preview: async (ctx, { secret }) => [
+      replaces: async (ctx, { secret }) => current(ctx, secret),
+      preview: async (_ctx, { secret }, _viewing, replaced) => [
         { label: 'Secret', value: secret, kind: 'mono' },
-        ...(await current(ctx, secret)).details,
+        ...replaced,
         { label: 'Then', value: archived ? 'not set by coffre run or exports; every version stays restorable' : 'set again by coffre run and exports' },
       ],
-      apply: async (ctx, { secret }) => {
-        await runRoute('PATCH /secrets/:project/:environment/:key', splitSecret(secret), { archived }, ctx);
+      // PATCH's archiving, or return, of the key the page showed.
+      apply: async (ctx, { secret }, { replaced }) => {
+        await written(ctx, secret, { archived }, replaced);
         return {};
       },
     },
@@ -370,9 +385,9 @@ const RESTORE = secretTool({
         ...(old === undefined ? [] : [{ label: 'That version set', value: old.createdAt, kind: 'time' as const }]),
       ];
     },
-    // What it replaces was read again on Approve, as the page showed it; a restore names no version to replace, as a value does.
-    apply: async (ctx, { secret, version }) => {
-      await runRoute('POST /secrets/:project/:environment/:key/restore', splitSecret(secret), { version }, ctx);
+    // The restore route's change, over the version the page showed: a rotation since is `stale`.
+    apply: async (ctx, { secret, version }, { replaced }) => {
+      await written(ctx, secret, { restore: version }, replaced);
       return {};
     },
   },

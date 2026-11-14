@@ -336,7 +336,7 @@ test("a value written between Approve's read and its change refuses the change i
     const decided = await decide(id, true, { value: 'v', shown });
     assert.equal(app.beforeChange.next, null, 'the write came between');
     assert.equal(decided.status, 409, key);
-    assert.match(decided.body.message!, /changed since it was listed/);
+    assert.match(decided.body.message!, /changed since you were asked/);
     assert.equal(await valueOf(key), 'by-root');
     assert.equal((await view(id)).body.approval.status, 'pending', 'the person reloads, sees the value now, and decides again');
   }
@@ -353,7 +353,7 @@ test("a reference made, or pointed elsewhere, between Approve's read and its cha
     const decided = await decide(id, true, { value: 'v', shown });
     assert.equal(app.beforeChange.next, null, 'the reference came between');
     assert.equal(decided.status, 409, key);
-    assert.match(decided.body.message!, /changed since it was listed/);
+    assert.match(decided.body.message!, /changed since you were asked/);
     assert.equal(await valueOf(key), reads, 'still the reference made between');
     assert.equal((await view(id)).body.approval.status, 'pending');
   }
@@ -374,7 +374,7 @@ test("Approve racing another Approve, a denial, the expiry, or the connection's 
   const token = await connect('dev-web', 'read write');
   const races: [string, (id: string, shown: View) => Promise<void>, RegExp, string][] = [
     // Its write moved the version on too: the change's own decision refuses it first (`stale`), the approval's second.
-    ['another Approve', async (id, shown) => assert.equal((await decide(id, true, { value: 'from-the-other-tab', shown })).body.status, 'approved'), /changed since it was listed|decided already/, 'from-the-other-tab'],
+    ['another Approve', async (id, shown) => assert.equal((await decide(id, true, { value: 'from-the-other-tab', shown })).body.status, 'approved'), /changed since you were asked|decided already/, 'from-the-other-tab'],
     ['a denial', async (id, shown) => assert.equal((await decide(id, false, { shown })).body.status, 'denied'), /decided already/, VALUE],
     ['the expiry', async (id) => void (await world.owner.execute(sql`UPDATE mcp_approvals SET expires_at = now() + interval '2 seconds' WHERE id = ${id}::uuid`)), /has expired/, VALUE],
     ["the connection's end", async () => {

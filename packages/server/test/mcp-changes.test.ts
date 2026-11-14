@@ -10,18 +10,18 @@ import { rowsOf } from '@coffre/db/dialect';
 import { credential, emptyDatabase, environment, grant, identity, instance, principal, project, role, rows, secret, signerOf, user, value, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 
-import { approvalWait } from '../src/mcp/approvals.ts';
+import { approvalWait, STALE } from '../src/mcp/approvals.ts';
 import { randomOf } from '../src/mcp/changes.ts';
 import { app, callRaw, connect, fromPage, KUBE } from './mcp-fixture.ts';
 
 const { world } = app;
-const [root, dev, other] = [user('root'), user('dev'), user('other')];
+const [root, admin, dev, other] = [user('root'), user('admin'), user('dev'), user('other')];
 const ci = 'token:ci';
 const ALL = 'read write manage-access';
 approvalWait.ms = 50;
 
 /**
- * market/prod holds API_KEY and OLD_KEY. Root owns the instance; dev leads
+ * market/prod holds API_KEY and OLD_KEY. Root owns the instance, and admin administers it; dev leads
  * market, so manages ci, a service account that views market/prod and holds
  * a token, `ci-token`; other views market/prod. Each person has a browser
  * session, `<name>-web`.
@@ -31,7 +31,7 @@ beforeEach(async () => {
   for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
   const market = project('market');
   const prod = environment(market, 'prod');
-  const people = [root, dev, other].map((who) => [who, identity(who)] as const);
+  const people = [root, admin, dev, other].map((who) => [who, identity(who)] as const);
   await write(
     world,
     ...rows('policy', instance()),
@@ -42,8 +42,9 @@ beforeEach(async () => {
       role(false, 'viewer', ['secret.read', 'secret.use'], []),
       role(false, 'lead', ['secret.read', 'secret.use', 'secret.write', 'secret.archive', 'environment.manage', 'project.manage', 'grant.manage']),
       role(true, 'owner', ['secret.read', 'secret.use', 'secret.write', 'secret.archive', 'environment.manage', 'project.manage', 'grant.manage', 'audit.read']),
+      role(true, 'admin', ['secret.read', 'secret.use', 'secret.write', 'secret.archive', 'environment.manage', 'project.manage', 'grant.manage', 'audit.read']),
       role(true, 'member', [])),
-    ...rows('principals', principal(root, { role: 'owner' }), principal(dev), principal(other), principal(ci)),
+    ...rows('principals', principal(root, { role: 'owner' }), principal(admin, { role: 'admin' }), principal(dev), principal(other), principal(ci)),
     ...rows('grants', grant(dev, 'lead', { project: market }), grant(other, 'viewer', { environment: prod }), grant(ci, 'viewer', { environment: prod })),
     ...rows('identities', ...people.map(([, id]) => id)),
     ...rows('credentials',
@@ -147,6 +148,57 @@ test("a secret renamed, archived, brought back and restored to a version, each o
   assert.equal((await approve(restore, 'dev-web', page)).body.status, 'approved');
   assert.equal(await valueOf('API_KEY'), 'v1');
   assert.equal((await keys()).find((key) => key.key === 'API_KEY')!.version, 3);
+});
+
+test("archive_secret and rename_secret act on the key the page showed: one renamed away and another made under its name between Approve's read and the write is refused, and nothing changes", async () => {
+  const token = await connect('dev-web', ALL);
+  for (const [tool, key, args] of [['archive_secret', 'API_KEY', {}], ['rename_secret', 'OLD_KEY', { newKey: 'RENAMED' }]] as const) {
+    const id = await asked(token, tool, { secret: `market/prod/${key}`, ...args });
+    const page = await view(id, 'dev-web');
+    app.beforeChange.next = async () => {
+      await api('root-web', 'PATCH', `/secrets/market/prod/${key}`, { key: `${key}_SAVED` });
+      await api('root-web', 'PATCH', '/secrets/market/prod', { [key]: 'another' });
+    };
+    const decided = await approve(id, 'dev-web', page);
+    assert.equal(app.beforeChange.next, null, 'the swap came between');
+    assert.deepEqual([decided.status, decided.body.message], [409, STALE], tool);
+    assert.equal((await view(id, 'dev-web')).status, 'pending', 'nothing retries: the person opens it again');
+    const after = await keys();
+    assert.deepEqual([after.find((each) => each.key === key)?.archived, await valueOf(key)], [false, 'another'], `${tool}: the key made since is as it was`);
+    assert.ok(!after.some((each) => each.key === 'RENAMED'), tool);
+  }
+});
+
+test("restore_secret_version writes over the version the page showed: a rotation between Approve's read and the write is refused, and stands", async () => {
+  await api('root-web', 'PATCH', '/secrets/market/prod', { API_KEY: 'v2' });
+  const id = await asked(await connect('dev-web', ALL), 'restore_secret_version', { secret: 'market/prod/API_KEY', version: 1 });
+  const page = await view(id, 'dev-web');
+  app.beforeChange.next = async () => void (await api('root-web', 'PATCH', '/secrets/market/prod', { API_KEY: 'emergency' }));
+  const decided = await approve(id, 'dev-web', page);
+  assert.equal(app.beforeChange.next, null, 'the rotation came between');
+  assert.deepEqual([decided.status, decided.body.message], [409, STALE]);
+  assert.deepEqual([await valueOf('API_KEY'), (await keys()).find((key) => key.key === 'API_KEY')!.version], ['emergency', 3]);
+  assert.equal((await view(id, 'dev-web')).status, 'pending');
+});
+
+test("what only an Owner of the instance may do of an instance role is refused an admin before anyone is asked: an Owner made, changed or removed, their own changed", async () => {
+  const approvals = async () => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM mcp_approvals`))[0]!.n;
+  const token = await connect('admin-web', ALL);
+  for (const [tool, args] of [
+    ['admit_member', { member: 'user:new@acme.example', role: 'owner' }],
+    ['admit_member', { member: root, role: 'admin' }],
+    ['admit_member', { member: admin, role: 'member' }],
+    ['offboard_member', { member: root }],
+  ] as const) {
+    assert.match(await refused(token, tool, args), /only an owner of the whole instance/, JSON.stringify(args));
+  }
+  assert.equal(await approvals(), 0, 'nothing asked');
+  // What an admin may do is asked: another's role that is no Owner's, a member admitted with none.
+  await asked(token, 'admit_member', { member: other, role: 'admin' });
+  await asked(token, 'admit_member', { member: 'user:new@acme.example' });
+  // And an Owner asks for an Owner.
+  await asked(await connect('root-web', ALL), 'admit_member', { member: 'user:new@acme.example', role: 'owner' });
+  assert.equal(await approvals(), 3);
 });
 
 test('create_project is refused before anyone is asked unless the person makes projects; create_environment makes a fork that inherits', async () => {
