@@ -265,6 +265,19 @@ export async function manageByCli(cli: Cli): Promise<string> {
     return run.output;
   };
   const [coffre, service, agent] = [as(cli, ''), as(ci, ', as the service'), as(helper, ', with a personal token')];
+  // A revocation takes up to the vault's memory, 2 seconds (D218): the token was asked about a moment ago. Asked every
+  // 250 ms until refused, for that and a second more.
+  const revoked = async (who: Cli, label: string, args: string[]): Promise<void> => {
+    for (const started = Date.now(); ; await sleep(250)) {
+      const run = await who.run(args, {});
+      const waited = Date.now() - started;
+      if (run.code === 0 && waited < 3000) continue;
+      expect(run.code === 1, `coffre ${args.join(' ')}${label} exited ${run.code} ${waited} ms after its token was revoked, not 1`, run.output);
+      expect(/does not know this bearer token/.test(run.output), `a revoked token${label} was not refused plainly`, run.output);
+      steps.push(`${args.slice(0, 2).join(' ')}${label}`);
+      return;
+    }
+  };
   try {
     const value = `cli-value-${randomBytes(8).toString('hex')}`;
     await coffre(['projects', 'create', 'conformance-cli', '--name', 'CLI']);
@@ -299,8 +312,7 @@ export async function manageByCli(cli: Cli): Promise<string> {
     expect(/Nothing changed\. Re-run with --apply/.test(preview), 'tokens revoke without --apply did not preview', preview);
     await service(['get', 'conformance-cli/ci/API_TOKEN']);
     await coffre(['tokens', 'revoke', 'conformance-deploy', listed!.id, '--apply']);
-    const gone = await service(['get', 'conformance-cli/ci/API_TOKEN'], undefined, 1);
-    expect(/does not know this bearer token/.test(gone), 'a revoked token was not refused plainly', gone);
+    await revoked(ci, ', as the service', ['get', 'conformance-cli/ci/API_TOKEN']);
 
     // A personal token, for an agent with a CLI of its own: it reads as the admin, within its scope, and makes no token.
     const personal = join(cli.home, 'agent-token');
@@ -318,7 +330,7 @@ export async function manageByCli(cli: Cli): Promise<string> {
     const [mine] = JSON.parse(await coffre(['tokens', '--json'])) as { id: string; label: string }[];
     expect(mine?.label === 'conformance-agent', 'tokens --json does not list the personal token', mine);
     await coffre(['tokens', 'revoke', mine!.id, '--apply']);
-    await agent(['get', 'conformance-cli/ci/API_TOKEN'], undefined, 1);
+    await revoked(helper, ', with a personal token', ['get', 'conformance-cli/ci/API_TOKEN']);
 
     await coffre(['revoke', 'conformance-cli', 'conformance-deploy', '--env', 'ci', '--service']);
     await coffre(['archive', 'conformance-cli/ci/API_TOKEN']);

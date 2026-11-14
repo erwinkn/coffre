@@ -150,7 +150,7 @@ In order, since each builds on the ones before:
 | sealing race | A grant inserted while a change waits on the vault's held change lock is not sealed by the change, which goes through once the lock is let go, keeps no MAC, and reads nothing; removal recovers the member. 0.14's race held the log's head, which no 0.16 change locks |
 | forged credential, forged identity, forged approval, edited generation | Owner-written authentication rows cannot mint sessions or revive old tokens. The signer names the inserted credential and identity in its alert; the approval and the generation, edited under the rows' own MACs, are refused and not named, as above |
 
-A check that waits on a revocation, a reused MCP refresh token's or a row the vault no longer takes, waits the vault's default memory of a caller, 2 seconds (`memorySeconds`, D218), and a second more: a deployment that raised it raises the wait.
+A check that waits on a revocation, a reused MCP refresh token's, a service or personal token revoked by the CLI, or a row the vault no longer takes, waits the vault's default memory of a caller, 2 seconds (`memorySeconds`, D218), and a second more: a deployment that raised it raises the wait.
 
 All table inspection and tampering goes through the one database. There
 is no vault file or Durable Object to discover. The canary scan reads every
