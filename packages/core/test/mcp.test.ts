@@ -28,7 +28,7 @@ test('scopes: Read always, in catalogue order, offline_access dropped, the unkno
 test('redirects: HTTPS, or HTTP on loopback; never a custom scheme', () => {
   assert.equal(redirectKind('https://claude.ai/api/mcp/auth_callback'), 'https');
   for (const loopback of ['http://localhost/callback', 'http://127.0.0.1:33418/', 'http://[::1]:9/cb']) assert.equal(redirectKind(loopback), 'loopback');
-  for (const refused of ['cursor://anysphere.cursor-mcp/oauth/callback', 'http://app.example/cb', 'https://u:p@app.example/cb', 'https://app.example/cb#x', 'not a url']) {
+  for (const refused of ['cursor://anysphere.cursor-mcp/oauth/callback', 'http://app.example/cb', 'https://u:p@app.example/cb', 'https://app.example/cb#x', 'not a url', 'https://app.example/cb\0', 'https://app.example/\udc00']) {
     assert.throws(() => redirectKind(refused), ClientInvalid, refused);
   }
   assert.equal(redirectHost('http://127.0.0.1:5/cb'), 'localhost');
@@ -74,6 +74,7 @@ test("a client's document names itself, a public client, and redirects on its ow
   for (const document of refused) assert.throws(() => clientFromDocument(id, document), ClientInvalid, JSON.stringify(document));
   assert.equal(clientName('  Cla‮ude\u0007 ', 'host'), 'Claude', 'no control or bidirectional characters');
   assert.equal(clientName(undefined, 'vscode.dev'), 'vscode.dev');
+  assert.equal(clientName('\udc00Zed\ud800', 'host'), 'Zed', 'no half of a surrogate pair');
   // Cut to 100, then trimmed, and never through a character: the name the vault keeps is the name as shown.
   assert.equal(clientName(`${'a'.repeat(99)} b`, 'host'), 'a'.repeat(99));
   assert.equal(clientName(`${'a'.repeat(99)}😀`, 'host'), 'a'.repeat(99));

@@ -103,6 +103,8 @@ export type RedirectKind = 'https' | 'loopback';
  * scheme, no fragment, no user or password.
  */
 export function redirectKind(value: string): RedirectKind {
+  // The URL parser drops a trailing NUL, but the vault keeps the text as given, and Postgres stores no NUL nor half of a surrogate pair.
+  if (/[\0\p{Cs}]/u.test(value)) throw new ClientInvalid('a redirect holds a NUL or half of a surrogate pair');
   let url: URL;
   try {
     url = new URL(value);
@@ -234,7 +236,8 @@ export function registrationRedirects(value: unknown): { kept: string[]; dropped
 /** A client's name as shown: its own, cut short, or its host when it gives none. */
 export function clientName(value: unknown, fallback: string): string {
   // Control and bidirectional characters could make one name look like another.
-  const name = typeof value === 'string' ? value.replace(/[\p{Cc}\p{Cf}]/gu, '').trim() : '';
+  // Half of a surrogate pair goes too: it is no text Postgres stores.
+  const name = typeof value === 'string' ? value.replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, '').trim() : '';
   // Cut on a whole character, and trimmed again: what the vault keeps is the name as shown (`named` in its ops/mcp.ts).
   return name === '' ? fallback : name.slice(0, MAX_NAME).replace(/[\uD800-\uDBFF]$/, '').trim();
 }

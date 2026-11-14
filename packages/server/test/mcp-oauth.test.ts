@@ -307,7 +307,7 @@ test('refresh tokens rotate, may narrow the scopes, never widen them, and a repl
   const other = await connect({ scope: 'read' });
   const [widened, wide] = await refresh(other, { scope: 'read write' });
   assert.deepEqual([widened, wide.error], [400, 'invalid_scope']);
-  assert.deepEqual([(await refresh(other, { scope: 'read bogus' }))[1].error, (await refresh(other, { client_id: CLAUDE }))[1].error], ['invalid_scope', 'invalid_grant']);
+  assert.deepEqual([(await refresh(other, { scope: 'read bogus' }))[1].error, (await refresh(other, { client_id: CLAUDE }))[1].error, (await refresh(other, { client_id: '\0' }))[1].error], ['invalid_scope', 'invalid_grant', 'invalid_grant']);
   assert.equal((await standing(ada)).length, 1, 'a refused refresh ends nothing');
 });
 
@@ -320,6 +320,8 @@ test('a code is for its client, its redirect and its verifier only (its minute, 
     [{ client_id: CLAUDE }, 'another client'], [{ redirect_uri: 'http://localhost:7001/callback' }, 'not the one the code was sent to'],
     [{ redirect_uri: 'ftp://localhost/callback' }, 'not the one the code was sent to'], [{ code_verifier: pkce().verifier }, 'does not match'],
     [{ code_verifier: 'short' }, 'does not match'], [{ resource: 'https://elsewhere.example/mcp' }, 'issues tokens for'], [{ code: 'unknown' }, 'unknown code'],
+    // Text the vault cannot take is refused here, not left to fault there.
+    [{ client_id: '\0' }, 'another client'], [{ redirect_uri: `${redirect}\0` }, 'not the one the code was sent to'],
   ] as const) {
     const [status, body] = await token({ ...redeem, ...wrong });
     assert.equal(status, 400, JSON.stringify(wrong));
@@ -334,10 +336,10 @@ test('a code is for its client, its redirect and its verifier only (its minute, 
 test('revocation, by either token, ends the connection; anything else is answered the same, and a stranger\'s string asks the vault nothing', async () => {
   const first = await connect();
   // Another client's token, or one that is not coffre's, ends nothing.
-  for (const fields of [{ token: first.refresh_token, client_id: CLAUDE }, { token: 'coffre_mcp_nonsense' }, { token: 'whatever' }] as Record<string, string>[]) {
+  for (const fields of [{ token: first.refresh_token, client_id: CLAUDE }, { token: first.refresh_token, client_id: '\0' }, { token: 'coffre_mcp_nonsense' }, { token: 'whatever' }] as Record<string, string>[]) {
     const [response, calls] = await cost(() => form('/api/oauth/revoke', fields));
     assert.equal(response.status, 200);
-    assert.deepEqual(calls, fields.token === 'whatever' || fields.token === 'coffre_mcp_nonsense' ? [] : ['change']);
+    assert.deepEqual(calls, fields.client_id === CLAUDE ? ['change'] : [], JSON.stringify(fields));
   }
   assert.equal((await standing(ada)).length, 1);
   const [revoked, calls, statements] = await cost(() => form('/api/oauth/revoke', { token: first.access_token, client_id: CLAUDE_CODE }));
@@ -373,6 +375,8 @@ test('registration keeps the redirects coffre accepts and leaves out the rest, a
   for (const [body, error] of [
     [{ client_name: 'Secretive', redirect_uris: ['https://x.example/cb'], token_endpoint_auth_method: 'client_secret_basic' }, 'invalid_client_metadata'],
     [{ client_name: 'Nowhere', redirect_uris: ['cursor://only'] }, 'invalid_redirect_uri'],
+    [{ client_name: 'Nul', redirect_uris: ['https://x.example/cb\0'] }, 'invalid_redirect_uri'],
+    [{ client_name: 'Half', redirect_uris: ['https://x.example/\udc00'] }, 'invalid_redirect_uri'],
     [{ client_name: 'Many', redirect_uris: Array.from({ length: 11 }, (_, i) => `https://x.example/${i}`) }, 'invalid_redirect_uri'],
     [['not', 'an', 'object'], 'invalid_client_metadata'],
   ] as const) {
@@ -382,6 +386,8 @@ test('registration keeps the redirects coffre accepts and leaves out the rest, a
   // A name that is all control characters, or none: called what it is.
   const unnamed = (await (await register({ client_name: '\u0007​', redirect_uris: ['https://x.example/cb'] })).json()) as Record<string, unknown>;
   assert.equal(unnamed.client_name, 'Unnamed app');
+  const half = (await (await register({ client_name: '\udc00', redirect_uris: ['https://x.example/cb'] })).json()) as Record<string, unknown>;
+  assert.equal(half.client_name, 'Unnamed app', 'half of a surrogate pair is no text');
   const long = (await (await register({ client_name: `${'a'.repeat(99)} b`, redirect_uris: ['https://x.example/cb'] })).json()) as Record<string, unknown>;
   assert.equal(long.client_name, 'a'.repeat(99), 'cut, then trimmed');
 });
