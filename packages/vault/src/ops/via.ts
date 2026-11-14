@@ -49,8 +49,9 @@ export function through<P extends Parts, A, C>(operation: Operation<P, A, C>, vi
   return {
     ...operation,
     read,
-    decide(seen, at, unsealed, checked) {
-      const plan = operation.decide(seen, at, unsealed, checked);
+    // What rides beside the read (`beside`) goes to the operation too: a removal counts what it ends there.
+    decide(seen, at, unsealed, checked, rode) {
+      const plan = operation.decide(seen, at, unsealed, checked, rode);
       if ('refused' in plan) return plan;
       if (!stands(seen, plan.entry.credential, at)) return { refused: 'disconnected' };
       const [row] = seen.viaApproval as Row<typeof mcpApprovals>[];
