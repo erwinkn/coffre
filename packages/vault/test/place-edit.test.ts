@@ -517,7 +517,7 @@ test('an edit holds each row it uses to what it is used for, not only to the con
   const deciding = { workloads: world.workloads, owners: world.owners };
   const seeing = async (input: Presented & Change, more: (seen: Seen<Parts>) => Seen<Parts>) => {
     const operation = OPERATIONS[input.op](input as never, deciding) as Operation<Parts, { id: string }>;
-    return change(world, { read: operation.read, decide: (seen, at, unsealed) => operation.decide(more(seen), at, unsealed) });
+    return change(world, { read: operation.read, decide: (seen, at, unsealed) => operation.decide(more(seen), at, unsealed, undefined) });
   };
   const by = (label: string, op: string, more: object) => ({ ...shown(label), op, project: 'market', ...more }) as Presented & Change;
   // Billing, live, before market: Ada does not rename billing's prod by naming market's.

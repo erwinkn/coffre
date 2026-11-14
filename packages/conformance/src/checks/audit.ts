@@ -97,12 +97,12 @@ export async function checkpoints(deployment: Deployment, { admin }: People): Pr
   expect(after.checkpoint.seq > (before.through ?? -1), 'the checkpoint does not cover what was written before it', { before, after });
   const { entries } = await admin.api.audit.list({ detail: '1', limit: 20 });
   const signed = entries.filter((entry) => entry.action === 'audit.checkpoint' && entry.decision === 'allow');
+  const [newest, previous] = signed;
   expect(
-    signed.length >= 2 && signed.every((entry) => entry.author === 'vault' && entry.detail),
+    newest !== undefined && previous !== undefined && signed.every((entry) => entry.author === 'vault' && entry.detail),
     "the checkpoints are not the vault's entries, hidden as detail",
     signed,
   );
-  const [newest, previous] = signed as [AuditEntryView, AuditEntryView];
   expect(newest.metadata.seq === after.checkpoint.seq, 'the newest checkpoint entry is not the one verified', { signed, after });
   expect(previous.seq <= after.checkpoint.seq, 'the newest checkpoint does not cover the one before it', signed);
   return `${after.entries} entries verified through ${after.through}, checkpointed at ${after.checkpoint.seq}`;

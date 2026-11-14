@@ -38,7 +38,7 @@ async function vaultOn(database: string): Promise<TestVault> {
   const woken: Buffer[] = [];
   let now = Date.now();
   const vault: TestVault = {
-    db: own.db, owner: owner.db, keys: [keyOf(SEED)], keks, cap: { count: 1000, windowMs: 15 * 60_000 }, workloads: { noReads: false, useOnly: false }, memory: memoryOf(2),
+    db: own.db, owner: owner.db, keys: [keyOf(SEED)], keks, cap: { count: 1000, windowMs: 15 * 60_000 }, workloads: { noReads: false, useOnly: false }, memory: memoryOf(2), refused: new Map(), owners: [],
     now: () => now, tick: (ms) => void (now += ms), wake: (hash) => void woken.push(hash), woken,
     close: async () => void (await Promise.all([owner.close(), own.close()])),
   };

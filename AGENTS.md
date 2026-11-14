@@ -127,7 +127,11 @@ release after the code stops using it. 0.4.0 is a clean break: one baseline,
 for new databases only, and no code for earlier releases'
 deployments or data. `pnpm test:compat` holds the newest release to this
 checkout's schema, through that release's own conformance, in CI on every
-change; it was off for 0.4.0, which had no earlier release on its schema.
+change; it was off for 0.4.0, which had no earlier release on its schema,
+and is off again for 0.16.0, which upgrades 0.14 in place and offline, so
+0.14's code never serves on 0.16's schema: the job passes, saying why,
+while npm's newest `@coffre/cli` is below 0.16.0, and holds 0.16.0 from
+0.16.1 on, by itself.
 
 **Transactions and the vault.** No app database transaction may stay open across
 any vault call. Prepare outside SQL; commit app writes and their audit together,
@@ -213,7 +217,8 @@ unsupported diff select full validation.
   requires a synthetic destructive migration to fail it. `--schema` applies a
   published version's migrations instead, to check past releases. It needs
   network and Postgres. Workers only: the newest release's Node deployment
-  runs on SQLite, which this checkout no longer migrates.
+  runs on SQLite, which this checkout no longer migrates. CI runs it only
+  once a 0.16 release is on npm ("Migrations: expand, then contract").
 - `pnpm test:consumer [<dir>]` packs the eight packages, runs the packed CLI's
   `init` for both kinds outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,

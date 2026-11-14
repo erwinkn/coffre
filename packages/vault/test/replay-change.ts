@@ -42,7 +42,7 @@ function act(p: string, op: Op, t: string) {
     target: part(principals, eq(principals.id, id(t))),
     owners: part(principals, and(eq(principals.role, 'owner'), eq(principals.status, 'active'))),
   };
-  return {
+  const operation: Operation<typeof read, null> = {
     read,
     decide({ caller: [by], target: [who], owners }: Seen<typeof read>) {
       const was = roleOf(who!);
@@ -51,7 +51,8 @@ function act(p: string, op: Op, t: string) {
       const row = op === 'Remove' ? { ...kept, status: 'removed', role: 'member', generation: kept.generation + 1 } : { ...kept, status: 'active', role: op === 'Promote' ? 'owner' : 'member' };
       return { writes: [put(principals, row, who!)], entry: { kept: true, action: 'member.role', actor: id(p), credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null };
     },
-  } satisfies Operation<typeof read, null>;
+  };
+  return operation;
 }
 
 const vault = await openTestVault();

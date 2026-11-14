@@ -310,7 +310,21 @@ jobs:
           # The schema comes from this checkout's sources; the release from npm.
           build: 'false'
       - name: The newest release of this line, migrated with this revision's migrations
-        run: pnpm test:compat
+        # 0.16 upgrades a 0.14 database in place, with coffre offline
+        # (docs/design/0.16.md, "Upgrade from 0.14"): no release before 0.16.0
+        # serves on 0.16's schema, by design, as none before 0.4.0 served on
+        # 0.4.0's. So the check waits for an earlier release on this schema:
+        # while npm's newest @coffre/cli is below 0.16.0 it says so and passes,
+        # and once 0.16.0 is published it holds it, from 0.16.1 on, by itself.
+        run: |
+          set -o pipefail
+          newest="$(npm view @coffre/cli versions --json | node -p '[].concat(JSON.parse(require("fs").readFileSync(0, "utf8"))).filter((v) => /^\d+\.\d+\.\d+$/.test(v)).join("\n")' | sort -V | tail -n1)"
+          [[ -n "$newest" ]] || { echo 'npm lists no release of @coffre/cli' >&2; exit 1; }
+          if [[ "$(printf '%s\n' "$newest" 0.16.0 | sort -V | head -n1)" != 0.16.0 ]]; then
+            echo "::notice title=Previous release on this schema::not run: the newest release, $newest, is below 0.16.0, which no release before serves on (0.16 upgrades 0.14 in place, offline); it runs once 0.16.0 is published"
+            exit 0
+          fi
+          pnpm test:compat
 
   validate:
     name: Validate
