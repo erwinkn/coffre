@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type { AccessFault } from './access-fault.ts';
 import type { CallerKind, CredentialScope, GrantPlace, Holdings, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
 import type { AccessAnswers, AccessChanges } from './changes/access.ts';
+import type { FreezeAnswers, FreezeChanges } from './changes/freezes.ts';
 import type { PlacesAnswers, PlacesChanges } from './changes/places.ts';
 import type { SecretsAnswers, SecretsChanges } from './changes/secrets.ts';
 import type { SigninAnswers, SigninChanges, Unasked } from './changes/signin.ts';
@@ -155,10 +156,11 @@ export type Refused = { refused: string };
  * Each area's are in a file of its own (`changes/`), with what each
  * answers once it is made.
  */
-export type Change = SecretsChanges | PlacesChanges | AccessChanges | SigninChanges | WorkloadChanges;
-export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers & SigninAnswers & WorkloadAnswers;
+export type Change = SecretsChanges | PlacesChanges | AccessChanges | SigninChanges | WorkloadChanges | FreezeChanges;
+export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers & SigninAnswers & WorkloadAnswers & FreezeAnswers;
 
 export type * from './changes/access.ts';
+export type * from './changes/freezes.ts';
 export type * from './changes/places.ts';
 export type * from './changes/secrets.ts';
 export type * from './changes/signin.ts';

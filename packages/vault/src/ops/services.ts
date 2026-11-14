@@ -1,6 +1,6 @@
 import { isScope, managesService, runsInstance, type Permission, type Place, type RoleDefinition, type Scope, type ServiceAccount } from '@coffre/core/access';
 import { environments, grants, policy, principals, projects, roles } from '@coffre/db/schema';
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 
 import type { Asking, callerParts } from '../caller.ts';
 import { part, type Seen, type Unsealed } from '../change.ts';
@@ -28,11 +28,17 @@ export const held = ({ holds }: Asking) => (Object.hasOwn(holds.policy.instanceR
 /** Whether the caller runs the instance (`runsInstance`). */
 export const runs = (caller: Asking) => runsInstance(held(caller));
 
-/** `member` if it names a service account, else null. */
-export const serviceNamed = (member: string | null) => (member?.startsWith('token:') === true ? member : null);
+/**
+ * A service account: by its id, or as SQL that selects it, a binding's or a
+ * session's member, which the read finds with the row that names it.
+ */
+export type ServiceIn = string | SQL | null;
+
+/** `member` if it names a service account, or selects one, else null. */
+export const serviceNamed = (member: ServiceIn) => (typeof member === 'string' ? (member.startsWith('token:') ? member : null) : member);
 
 /** The projects a service account's grants are on, as SQL for `callerParts`: what the caller holds there says whether they manage it. */
-export function projectsOf(member: string | null) {
+export function projectsOf(member: ServiceIn) {
   const service = serviceNamed(member);
   return service === null ? NOWHERE : sql`(SELECT coalesce(g.project_id, e.project_id) FROM grants g LEFT JOIN environments e ON e.id = g.environment_id WHERE g.principal = ${service})`;
 }
@@ -43,9 +49,9 @@ export function projectsOf(member: string | null) {
  * instance's setting of where people set service accounts up. Nothing for
  * a member that is none.
  */
-export function serviceParts(member: string | null) {
+export function serviceParts(member: ServiceIn) {
   const service = serviceNamed(member);
-  const of = (where: (id: string) => ReturnType<typeof sql>) => (service === null ? sql`false` : where(service));
+  const of = (where: (id: string | SQL) => SQL) => (service === null ? sql`false` : where(service));
   return {
     account: part(principals, of((id) => sql`${principals.id} = ${id}`)),
     held: part(grants, of((id) => sql`${grants.principal} = ${id}`)),

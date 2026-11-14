@@ -3,6 +3,7 @@ import type { Answers, Asked, Change } from '@coffre/core/vault';
 import type { Operation, Parts } from '../change.ts';
 import type { Deciding } from '../vault.ts';
 import { accessOperations } from './access.ts';
+import { freezeOperations } from './freezes.ts';
 import { placeOperations } from './places.ts';
 import { secretOperations } from './secrets.ts';
 import { signinOperations } from './signin.ts';
@@ -16,4 +17,4 @@ import { workloadOperations } from './workloads.ts';
 export type Operations<C extends Change> = { [K in C['op']]: (input: Asked<K>, vault: Deciding) => Operation<Parts, Answers[K], unknown> };
 
 /** Every change the vault makes: each area's are in a file of its own. */
-export const OPERATIONS: Operations<Change> = { ...secretOperations, ...placeOperations, ...accessOperations, ...signinOperations, ...workloadOperations };
+export const OPERATIONS: Operations<Change> = { ...secretOperations, ...placeOperations, ...accessOperations, ...signinOperations, ...workloadOperations, ...freezeOperations };
