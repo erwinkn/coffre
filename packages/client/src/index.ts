@@ -256,7 +256,7 @@ export function createClient(options: ClientOptions) {
         call('PATCH /secrets/:project/:environment/:key', place(path), patch),
       /**
        * In a fork, a key back to its parent's value (`true`), its own kept,
-       * or its own served again (`false`); `from` holds the parent's.
+       * or its own served again (`false`); the answer says which, `inherit`.
        */
       inherit: (path: string, inherit: boolean) =>
         call('PATCH /secrets/:project/:environment/:key', place(path), { inherit }),
