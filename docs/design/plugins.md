@@ -347,7 +347,7 @@ plugins: [
 |---|---|
 | `GET /v1/<mount>/data/<project>/<env>` | Every value of the environment, as `data.data`. This is the API's reveal, purpose `run` |
 | `GET /v1/<mount>/data/<project>/<env>/<KEY>` | `{ KEY: value }`. The API's reveal of one key, purpose `reveal` |
-| `GET /v1/auth/token/lookup-self` | Who the token is: `type: "service"`, `ttl` the seconds it has left and `expire_time` when it ends, as `GET /api/me` says (both 0 and null behind Cloudflare Access), no `namespace_path` |
+| `GET /v1/auth/token/lookup-self` | Who the token is: `type: "service"`, `ttl` the seconds it has left and `expire_time` when it ends, as `GET /api/me` says (0 and null for a credential with no end), no `namespace_path` |
 | `GET /v1/sys/internal/ui/mounts/<mount>[/…]` | The mount, KV version `"2"`. No token is needed: it holds no secret, and Vault's UI asks for it unauthenticated too |
 | Any other method (PUT, POST, PATCH, DELETE) | 405 `coffre's Vault API is read only` |
 | Any query on a read: `?version=N`, `?read_snapshot_id=…` | 400 before anything is read: coffre serves current values only |
@@ -373,7 +373,9 @@ reads only the fork gets 403, never a partial map. A test holds both.
 **Errors.** One rule: **404 means only that the environment or key a read
 names is not there**, because ESO reads a 404 as the secret deleted, and
 with `deletionPolicy: Delete` it deletes its target. So the API's 404 on a
-read becomes `404 {"errors":[]}`, and nothing else does. Whatever coffre
+read becomes `404 {"errors":[]}`, and nothing else does. On 0.16 that is
+a key that is not there: an environment that is not there is the vault's
+403, as one the token cannot read, since it says neither which. Whatever coffre
 does not serve is a 400 or a 405: a path, a query, a header, a method. An
 outage keeps its 503. coffre's 401 and 403 become Vault's `403 permission
 denied`, with coffre's reason after it.
@@ -518,8 +520,10 @@ PR 1's code:
   dispatch.
 - `packages/server/src/plugins/vault-kv.ts`.
 - `dev/deployment`: the `plugins` line and `routes/v1.$.ts`.
-- 0.14.7's [`packages/server/test/vault-kv.test.ts`](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/test/vault-kv.test.ts): ESO's requests as its Go client
-  sends them, on Postgres and SQLite.
+- `packages/server/test/vault-kv.test.ts` and `vault-kv-login.test.ts`:
+  ESO's requests as its Go client sends them, each read's cost (one `use`,
+  no statement of the app's) and a login's (what `POST /api/auth/oidc`
+  costs).
 
 It was also run against `pnpm dev` with HashiCorp's Go client
 v1.22.0 making ESO's calls (`dev/vault-kv/main.go` reproduces it), and with

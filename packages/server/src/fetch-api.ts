@@ -9,7 +9,7 @@ import { bearerToken, presented, sessionCookie, sessionCookieName } from './auth
 import { BROWSERS_ONLY, machineCredential, unadmitted, unregisteredMe, type Admission } from './behind-access.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
-import { dpopToken, provenSession, SessionRefused, sessionStopped } from './sessions.ts';
+import { dpopToken, provenSession, SessionRefused, sessionStopped, withNonce } from './sessions.ts';
 import { describeSignin } from './signin.ts';
 
 /**
@@ -135,13 +135,6 @@ export async function fetchApi(request: Request, runtime: CoffreRuntime, options
   return response;
 }
 
-/** An answer to a workload, with the nonce its next proof signs: a response of its own, since another's headers may be immutable. */
-function withNonce(response: Response, nonce: string): Response {
-  const headers = new Headers(response.headers);
-  headers.set('dpop-nonce', nonce);
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
-}
-
 /**
  * Whether a page's request is the browser opening it, as a tab or a window:
  * a page another site embeds, as a frame or an image, is that site's doing,
@@ -171,12 +164,23 @@ export function pageCredential(page: Request, auth: AuthConfig): Record<string, 
  * admitted with, as its own route would.
  */
 export function pageClient(page: Request, runtime: CoffreRuntime, sourceIp: string | null, access?: Admission): CoffreClient {
-  const credential = pageCredential(page, runtime.auth);
+  return inProcess(new URL(page.url).origin, pageCredential(page, runtime.auth), runtime, { sourceIp, page, access });
+}
+
+/**
+ * The API in process as whoever `token` is, a token a plugin read from its
+ * request (`PluginContext.api`): sent as a bearer token, never a cookie, so
+ * it is held to what the CLI's is. Behind Access, refused as any bearer
+ * token is (`apiCredential`). The vault is asked who it is once, by the
+ * first call that needs to know, and the answer is every call's.
+ */
+export function tokenClient(token: string, runtime: CoffreRuntime, sourceIp: string | null): CoffreClient {
+  return inProcess(runtime.publicUrl, { authorization: `Bearer ${token}` }, runtime, { sourceIp });
+}
+
+/** A client whose calls go straight to `fetchApi` with `headers`, asking the vault about their caller once for all of them. */
+function inProcess(url: string, headers: Record<string, string>, runtime: CoffreRuntime, options: { sourceIp: string | null; page?: Request; access?: Admission }): CoffreClient {
   let asked: Promise<Called> | undefined;
   const caller: AskCaller = (shown) => (asked ??= callerOf(runtime.vault, shown));
-  return createClient({
-    url: new URL(page.url).origin,
-    headers: () => credential,
-    transport: (request) => fetchApi(request, runtime, { sourceIp, caller, page, access }),
-  });
+  return createClient({ url, headers: () => headers, transport: (request) => fetchApi(request, runtime, { ...options, caller }) });
 }

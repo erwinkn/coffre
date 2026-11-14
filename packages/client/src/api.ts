@@ -438,6 +438,16 @@ export type Api = {
       };
     };
     output: {
+      issuer: string;
+      jwksUri: string;
+      keys: {
+        kid: string | null;
+        alg: "ES256" | "RS256";
+        thumbprint: string;
+      }[];
+      replaces: string[];
+      withheld: string[];
+    } | {
       bindings: {
         id: string;
         scope: {
@@ -1950,6 +1960,18 @@ export type InheritResult = {
   archived?: boolean;
   operationId: string | null;
   key: string;
+};
+
+export type KeysPlan = {
+  issuer: string;
+  jwksUri: string;
+  keys: {
+    kid: string | null;
+    alg: "ES256" | "RS256";
+    thumbprint: string;
+  }[];
+  replaces: string[];
+  withheld: string[];
 };
 
 export type ListedReference = {

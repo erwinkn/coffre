@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # The restore drill of docs/restore.md, on this machine: run the Workers
-# example over a seeded database, back the database up with `coffre backup`,
-# restore it into a new one with `coffre restore --keys`, and run the
-# example over that with the same keys, checking everything came back; then
-# `coffre verify backup` with the wrong vault key, and the example once more
-# with the wrong KEK.
+# example over a seeded database, back it up with pg_dump as the backup
+# login, restore it with pg_restore into a new database, and run the example
+# over that with the same keys and a signer whose storage is new, as a
+# restore deploys: everything comes back, and the signer goes on from the
+# backup's head with nothing to report. Then the example once more with the
+# wrong KEK, which serves nothing.
 #
 #   pnpm build && ./scripts/restore-drill.sh
 #
-# It uses the compose Postgres, the dev IdP for sign-in and .env.dev's keys,
-# on ports 3400 to 3402 and 8481 (COFFRE_DEV_PORT, COFFRE_DEV_IDP_PORT), over
-# coffre_drill, coffre_drill_restored and coffre_drill_scratch
-# (COFFRE_DRILL_DATABASE names the first), and PostgreSQL's pg_dump and
-# pg_restore on PATH, of the compose server's major version, 16. The
-# databases, the processes and the dump go when it ends, however it ends.
+# It uses the compose Postgres and its own pg_dump and pg_restore, the dev
+# IdP for sign-in and .env.dev's keys, on ports 3400 to 3402 and 8481
+# (COFFRE_DEV_PORT, COFFRE_DEV_IDP_PORT), over coffre_drill and
+# coffre_drill_restored (COFFRE_DRILL_DATABASE names the first). It waits a
+# minute and more for the signer's first check. The databases, the
+# processes and the dump go when it ends, however it ends.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -28,7 +29,6 @@ port="${COFFRE_DEV_PORT:-3400}"
 idp_port="${COFFRE_DEV_IDP_PORT:-8481}"
 source_db="${COFFRE_DRILL_DATABASE:-coffre_drill}"
 restored_db="${source_db}_restored"
-scratch_db="${source_db}_scratch"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/coffre-drill.XXXXXX")"
 export COFFRE_DEV_URL="http://127.0.0.1:$port" COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port" COFFRE_DEV_IDP_PORT="$idp_port"
 # The drill's stack is never behind a tunnel, whatever the shell exports.
@@ -46,7 +46,7 @@ stop_coffre() {
 cleanup() {
     stop_coffre
     if [ -n "$idp" ]; then kill "$idp" 2>/dev/null || true; fi
-    for db in "$source_db" "$restored_db" "$scratch_db"; do
+    for db in "$source_db" "$restored_db"; do
         psql_as_owner -d postgres -c "DROP DATABASE IF EXISTS $db WITH (FORCE)" || true
     done
     rm -rf "$scratch"
@@ -96,41 +96,29 @@ DATABASE_URL="$(owner_url "$source_db")" node --conditions=coffre:source dev/see
 node scripts/restore-drill.mjs prepare >"$scratch/state.json"
 stop_coffre
 
-# Every connection string and key reaches the CLI on stdin, as in a pipeline; never an argument.
-cli() { HOME="$scratch/home" node --conditions=coffre:source packages/cli/src/main.ts "$@"; }
-mkdir -p "$scratch/home"
+log "backing up $source_db with pg_dump, as coffre_backup_login"
+# The compose server's own tools, of its version: the dump on this machine's disk.
+docker compose exec -T -e PGPASSWORD=local-backup-only postgres \
+    pg_dump -h 127.0.0.1 -U coffre_backup_login --format=custom --enable-row-security -d "$source_db" >"$scratch/backup.dump"
 
-log "backing up $source_db with coffre backup, as coffre_backup_login"
-backup_url="postgresql://coffre_backup_login:local-backup-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$source_db"
-printf '%s' "$backup_url" | cli backup "$scratch/backup.dump"
-
-log "restoring into $restored_db with coffre restore, checked with the keys"
-# The logins and their passwords, which a dump of one database leaves out.
+log "restoring into $restored_db with pg_restore"
 node --conditions=coffre:source scripts/ensure-database.mjs "$restored_db"
-printf '%s\n%s\n%s\n' "$(owner_url "$restored_db")" "$COFFRE_VAULT_KEY" "$COFFRE_APP_KEY" | cli restore "$scratch/backup.dump" --keys
-
-log 'checking the backup again, with the wrong vault key'
-node --conditions=coffre:source scripts/ensure-database.mjs "$scratch_db"
-if printf '%s\n%s\n%s\n' "$(owner_url "$scratch_db")" "$(openssl rand -base64 32)" "$COFFRE_APP_KEY" | cli verify backup "$scratch/backup.dump" --keys >"$scratch/wrong-key.log" 2>&1; then
-    cat "$scratch/wrong-key.log" >&2
-    echo 'coffre verify backup passed with the wrong vault key' >&2
-    exit 1
-fi
-grep "none of the vault keys given is this instance's" "$scratch/wrong-key.log" || { cat "$scratch/wrong-key.log" >&2; exit 1; }
-
+docker compose exec -T postgres pg_restore -U coffre_owner --no-owner --exit-on-error --single-transaction -d "$restored_db" <"$scratch/backup.dump"
 # Migrate reasserts database privileges, which a dump of one database leaves out.
 DATABASE_URL="$(owner_url "$restored_db")" pnpm --dir packages/db run db:migrate --backup-login coffre_backup_login >/dev/null
 COFFRE_RUNTIME_ROLE=coffre_runtime DATABASE_URL="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$restored_db" \
     pnpm --dir packages/db run db:verify:runtime >/dev/null
 
-log 'checking the restored instance, with the same keys'
+log 'checking the restored instance, with the same keys and a signer whose storage is new'
 start_coffre "$restored_db" "$COFFRE_VAULT_KEY"
 node scripts/restore-drill.mjs check "$scratch/state.json"
-# As CI does: the token piped to `coffre login --token`, in a home of the
-# drill's own, then the canary's value to the check; never an argument.
-state() { node -p "JSON.parse(require('fs').readFileSync('$scratch/state.json')).$1"; }
-state token | cli login "$COFFRE_DEV_URL" --token >/dev/null
-state canary | cli verify instance "$COFFRE_DEV_URL" --canary market/prod/DRILL_CANARY
+log "the signer's first check, a minute on"
+sleep 70
+grep -F "a log begun that it did not sign, from its head" "$scratch/coffre-$restored_db.log" >/dev/null || { cat "$scratch/coffre-$restored_db.log" >&2; echo 'the signer did not say it went on from the head' >&2; exit 1; }
+if grep -F "coffre's signer reports" "$scratch/coffre-$restored_db.log" >&2; then echo 'the signer found something in the restored database' >&2; exit 1; fi
+# The log has no hole: one entry per number, and the head counts them all.
+[[ "$(psql_as_owner -d "$restored_db" -At -c 'SELECT count(*) = max(seq) + 1 AND count(*) = (SELECT size FROM log_head) FROM log')" == t ]] || { echo 'the log has a hole, or its head does not count it' >&2; exit 1; }
+echo "    the signer went on from the backup's head, found nothing, and the log has no hole"
 stop_coffre
 
 log 'once more, with the wrong KEK'

@@ -1,9 +1,7 @@
 import { createHash } from 'node:crypto';
 
-import { differingClaims, PROFILE_URNS } from '@coffre/core/identity';
+import type { CallerIdentity } from '@coffre/core/identity';
 
-import { ExchangeRefused, type MatchedProof, type ProofContext, type ProofKind } from '../api/workloads.ts';
-import { liveBindings, memberStanding, type BindingRow } from '../db/queries.ts';
 import { capped, FETCH_DEADLINE_MS, FetchRefused, USER_AGENT } from './transport.ts';
 
 /**
@@ -25,6 +23,13 @@ import { capped, FETCH_DEADLINE_MS, FetchRefused, USER_AGENT } from './transport
  * Coffre forwards it only to STS's commercial hosts, exactly as signed,
  * so it offers no request of coffre's to anyone else.
  */
+
+/**
+ * A proof refused before STS is asked, or by STS: why, in the words a
+ * workload's sign-in answers (`exchange.ts`), and what to fix.
+ */
+export type AwsRefusal = { refused: 'malformed' | 'signature' | 'audience' | 'too_old'; message: string };
+const refusal = (refused: AwsRefusal['refused'], message: string): AwsRefusal => ({ refused, message });
 
 /** What the workload sends, the one key of `{ "proof": { "aws": … } }`. */
 export type AwsProofInput = { url: string; headers: Record<string, string>; body: string };
@@ -71,8 +76,8 @@ export type CheckedAwsRequest = { url: string; region: string; headers: Record<s
  * covers, the audience and key, then the time. Returns the request to
  * forward, or why not.
  */
-export function checkAwsRequest(input: unknown, expected: { publicUrl: string; jkt: string; now: number }): CheckedAwsRequest | ExchangeRefused {
-  const malformed = (why: string) => new ExchangeRefused('malformed', `the aws proof ${why}`);
+export function checkAwsRequest(input: unknown, expected: { publicUrl: string; jkt: string; now: number }): CheckedAwsRequest | AwsRefusal {
+  const malformed = (why: string) => refusal('malformed', `the aws proof ${why}`);
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return malformed('is { url, headers, body }');
   const { url, headers: given, body, ...rest } = input as Record<string, unknown>;
   if (Object.keys(rest).length > 0) return malformed(`holds url, headers and body, not ${Object.keys(rest).join(', ')}`);
@@ -105,7 +110,7 @@ export function checkAwsRequest(input: unknown, expected: { publicUrl: string; j
   if (signed.length !== sorted.length || signed.some((name, i) => name !== sorted[i])) return malformed('lists its SignedHeaders twice or out of order');
   const unsigned = MUST_SIGN.filter((name) => !signed.includes(name));
   if (unsigned.length > 0) {
-    return new ExchangeRefused('signature', `the aws proof's signature does not cover ${unsigned.join(', ')}: the SDK signs the audience and the key`);
+    return refusal('signature', `the aws proof's signature does not cover ${unsigned.join(', ')}: the SDK signs the audience and the key`);
   }
   for (const name of signed) {
     if (!(FORWARDED as readonly string[]).includes(name) || name === 'authorization') return malformed(`signs a header coffre does not forward: ${name}`);
@@ -126,21 +131,18 @@ export function checkAwsRequest(input: unknown, expected: { publicUrl: string; j
   if (headers['x-amz-content-sha256'] !== undefined && headers['x-amz-content-sha256'] !== BODY_DIGEST) return malformed("has an x-amz-content-sha256 other than its body's");
 
   if (headers['x-coffre-audience'] !== expected.publicUrl) {
-    return new ExchangeRefused('audience', `the aws proof is for ${JSON.stringify(headers['x-coffre-audience'])}, not ${expected.publicUrl}`);
+    return refusal('audience', `the aws proof is for ${JSON.stringify(headers['x-coffre-audience'])}, not ${expected.publicUrl}`);
   }
-  if (headers['x-coffre-key'] !== expected.jkt) return new ExchangeRefused('audience', "the aws proof names another key than the DPoP proof's");
+  if (headers['x-coffre-key'] !== expected.jkt) return refusal('audience', "the aws proof names another key than the DPoP proof's");
   const date = AMZ_DATE.exec(headers['x-amz-date']!);
   if (date === null) return malformed('has an x-amz-date that is not <yyyymmdd>T<hhmmss>Z');
   if (!headers['x-amz-date']!.startsWith(scopeDate)) return malformed("has an x-amz-date of another day than its credential's scope");
   const [, y, mo, d, h, mi, s] = date.map(Number) as [number, number, number, number, number, number, number];
   const at = Date.UTC(y, mo - 1, d, h, mi, s);
-  if (expected.now - at > MAX_SKEW_MS) return new ExchangeRefused('too_old', `the aws proof was signed more than ${MAX_SKEW_MS / 60_000} minutes ago`);
-  if (at - expected.now > MAX_SKEW_MS) return new ExchangeRefused('not_yet_valid', 'the aws proof says it was signed in the future');
+  if (expected.now - at > MAX_SKEW_MS) return refusal('too_old', `the aws proof was signed more than ${MAX_SKEW_MS / 60_000} minutes ago`);
+  if (at - expected.now > MAX_SKEW_MS) return refusal('too_old', 'the aws proof says it was signed in the future');
   return { url, region, headers, body };
 }
-
-/** What STS says signed it. */
-export type CallerIdentity = { account: string; arn: string; userId: string };
 
 /** How coffre asks STS: one POST, the response's status and at most `MAX_BODY_BYTES` of its body. */
 export type StsTransport = (request: CheckedAwsRequest) => Promise<{ status: number; body: string }>;
@@ -201,7 +203,7 @@ const THROTTLED = new Set(['Throttling', 'ThrottlingException', 'RequestLimitExc
  * named by its error code, unless it is throttling; anything else is STS
  * unavailable, which the caller tries again.
  */
-export function readStsAnswer(answer: { status: number; body: string }): CallerIdentity | ExchangeRefused {
+export function readStsAnswer(answer: { status: number; body: string }): CallerIdentity | AwsRefusal {
   if (answer.status === 200) {
     const result = element(answer.body, 'GetCallerIdentityResult', { text: false });
     const [arn, userId, account] = result === null ? [] : [element(result, 'Arn'), element(result, 'UserId'), element(result, 'Account')];
@@ -212,95 +214,7 @@ export function readStsAnswer(answer: { status: number; body: string }): CallerI
   if (answer.status === 429 || (code !== null && THROTTLED.has(code))) throw new StsUnavailable(`is throttling (${answer.status}${code === null ? '' : `: ${code}`})`);
   if (answer.status >= 400 && answer.status < 500) {
     const named = code !== null && /^[A-Za-z.]{1,64}$/.test(code) ? `: ${code}` : '';
-    return new ExchangeRefused('signature', `STS refused the aws proof (${answer.status}${named})`);
+    return refusal('signature', `STS refused the aws proof (${answer.status}${named})`);
   }
   throw new StsUnavailable(`answered ${answer.status}`);
-}
-
-/** An assumed role's session, as a binding names its role: by account and the role's unique ID, which a role made again under the same name does not keep. */
-export type AwsIdentity = { account: string; roleId: string; arn: string; role: string; session: string };
-
-const ACCOUNT = /^\d{12}$/;
-const ASSUMED_ROLE = /^arn:aws:sts::(\d{12}):assumed-role\/([\w+=,.@-]{1,64})\/([\w+=,.@-]{2,64})$/;
-const ROLE_SESSION = /^(AROA[A-Z0-9]{8,124}):([\w+=,.@-]{2,64})$/;
-
-/**
- * The role a caller's identity is a session of, or why none: an account's
- * root, a federated user and an IAM user are refused, since each means a
- * long-lived key on disk, which a workload does not hold. Only the
- * commercial partition's ARNs, `arn:aws:`, are roles here.
- */
-export function assumedRole(identity: CallerIdentity): AwsIdentity | ExchangeRefused {
-  const refused = (what: string) => new ExchangeRefused('no_match', `the aws proof is signed by ${what}, which no binding takes: sign with a role's credentials`);
-  if (!ACCOUNT.test(identity.account)) throw new StsUnavailable('answered an account that is not 12 digits');
-  if (/^arn:aws:iam::\d{12}:root$/.test(identity.arn)) return refused("an account's root");
-  if (/^arn:aws:sts::\d{12}:federated-user\//.test(identity.arn)) return refused('a federated user');
-  if (/^arn:aws:iam::\d{12}:user\//.test(identity.arn) || identity.userId.startsWith('AIDA')) return refused('an IAM user, whose access key lives on a disk');
-  const role = ASSUMED_ROLE.exec(identity.arn);
-  const session = ROLE_SESSION.exec(identity.userId);
-  if (role === null || session === null) return refused(`${identity.arn.startsWith('arn:aws:') ? 'what is not an assumed role' : 'another partition than aws'}`);
-  if (role[1] !== identity.account || session[2] !== role[3]) throw new StsUnavailable('answered an Arn, UserId and Account that disagree');
-  return { account: identity.account, roleId: session[1]!, arn: identity.arn, role: role[2]!, session: role[3]! };
-}
-
-/** The claims an `aws` binding matches, as the proof makes them. */
-export function awsClaims(identity: AwsIdentity): { account: string; role_id: string } {
-  return { account: identity.account, role_id: identity.roleId };
-}
-
-/** The oldest of `bindings` the identity matches: an `aws` binding naming its account and role ID. */
-export function matchAwsBinding(bindings: readonly BindingRow[], identity: AwsIdentity): BindingRow | null {
-  const claims = awsClaims(identity);
-  return bindings.find((row) => row.profile === 'aws' && differingClaims('aws', JSON.parse(row.claims), claims).length === 0) ?? null;
-}
-
-/** A service's live `aws` bindings. */
-async function awsBindings(ctx: ProofContext): Promise<BindingRow[]> {
-  const standing = await memberStanding(ctx.db, ctx.service);
-  if (standing === null || standing.status !== 'active') return [];
-  const live = await liveBindings(ctx.db, ctx.chainKey, ctx.service, standing.generation);
-  return live.filter((row) => row.profile === 'aws' && row.issuer === PROFILE_URNS.aws && row.policy !== null);
-}
-
-export type AwsProofOptions = {
-  /** How STS is asked; the standard `fetch` unless a test fakes STS. */
-  sts?: StsTransport;
-  /** Milliseconds since the epoch, for `x-amz-date`. */
-  now?: () => number;
-};
-
-/**
- * The `aws` entry of `PROOFS`. Its check runs in the exchange's order:
- * the request's shape, then the service's `aws` bindings, then STS, so a
- * proof no binding could take costs one read and asks STS nothing. Nothing
- * is spent and nothing ends the session early: the request names its key.
- */
-export function awsProof(options: AwsProofOptions = {}): ProofKind {
-  const sts = options.sts ?? stsFetch();
-  const now = options.now ?? Date.now;
-  return {
-    profiles: ['aws'],
-    lifetimeMs: 60 * 60 * 1000,
-    async verify(input: unknown, ctx: ProofContext): Promise<MatchedProof | ExchangeRefused> {
-      const request = checkAwsRequest(input, { publicUrl: ctx.publicUrl, jkt: ctx.jkt, now: now() });
-      if (request instanceof ExchangeRefused) return request;
-      const bindings = await awsBindings(ctx);
-      if (bindings.length === 0) return new ExchangeRefused('no_match', `${ctx.service.slice('token:'.length)} has no aws binding`);
-      let identity: AwsIdentity | ExchangeRefused;
-      try {
-        const answer = readStsAnswer(await sts(request));
-        identity = answer instanceof ExchangeRefused ? answer : assumedRole(answer);
-      } catch (error) {
-        if (!(error instanceof StsUnavailable)) throw error;
-        console.error({ event: 'sts_unavailable', region: request.region, requestId: ctx.requestId, error: error.message }, 'STS could not check an aws proof');
-        return new ExchangeRefused('issuer_unavailable', 'STS could not be asked about the aws proof: try again', 503);
-      }
-      if (identity instanceof ExchangeRefused) return identity;
-      const binding = matchAwsBinding(bindings, identity);
-      if (binding === null) {
-        return new ExchangeRefused('no_match', `no aws binding of ${ctx.service.slice('token:'.length)} names role ${identity.role} (${identity.roleId}) of account ${identity.account}`);
-      }
-      return { binding, claims: { ...awsClaims(identity), arn: identity.arn, session: identity.session } };
-    },
-  };
 }

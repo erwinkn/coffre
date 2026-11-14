@@ -5,6 +5,7 @@ import {
   hashToken,
   seal,
   SigninError,
+  tokenKind,
   unseal,
   type AuthConfig,
   type PendingSignin,
@@ -24,6 +25,7 @@ import { apiCredential, isSameOrigin } from './fetch-api.ts';
 import { errorResponse, jsonResponse, readJson } from './http.ts';
 import { logged } from '@coffre/db/dialect';
 import type { CoffreRuntime } from './runtime.ts';
+import { dpopToken, provenSession, SessionRefused, withNonce } from './sessions.ts';
 
 /**
  * Sign-in's paths outside the API (docs/design/0.16.md, "Signing in from
@@ -342,15 +344,21 @@ export const signOut: Path = async (request, runtime, sourceIp, _track, access) 
 
 /**
  * POST /api/auth/logout: end the credential the request carries, `coffre
- * logout`: a bearer token, or the browser's session from coffre's own
- * pages. One that no longer stands is signed out already. Behind Access,
- * the browser's session alone (`apiCredential`).
+ * logout`: a bearer token, the browser's session from coffre's own pages,
+ * or a workload's session with its key's proof, held to the request and
+ * taken by its gate as any of its requests (`provenSession`), its answer
+ * carrying the gate's nonce. One that no longer stands is signed out
+ * already. Behind Access, the browser's session alone (`apiCredential`).
  */
 export const logout: Path = async (request, runtime, sourceIp, _track, access) => {
+  const session = runtime.auth.mode === 'cloudflare' ? null : dpopToken(request);
+  if (session !== null) return sessionLogout(request, runtime, session, sourceIp);
   try {
     const credential = apiCredential(request, runtime.auth, access);
     if (credential === null) throw unadmitted(access);
     if (credential.ambient && !isSameOrigin(request, runtime.publicUrl)) throw new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself');
+    // The vault would not find it without its proof, and the session would stand: this says why.
+    if (tokenKind(credential.token) === 'workload') throw new ApiError('unauthenticated', "a workload's session signs out with its key's proof, Authorization: DPoP, never as a bearer token", 'workload');
     // Behind Access, both cookies cleared, in place of any the check set (`ended`).
     access?.ended();
     const shown = presented(credential.token, sourceIp);
@@ -361,6 +369,23 @@ export const logout: Path = async (request, runtime, sourceIp, _track, access) =
     return errorResponse(error);
   }
 };
+
+/** A workload's session ending itself, a stopped or narrowed one too, as the vault lets it. */
+async function sessionLogout(request: Request, runtime: CoffreRuntime, session: string, sourceIp: string | null): Promise<Response> {
+  let nonce: string | null = null;
+  try {
+    const proven = await provenSession(request, runtime, session);
+    nonce = proven.nonce;
+    const shown = presented(session, sourceIp, proven.proof);
+    const ended = await ask<'credential.end'>(runtime, { ...shown, op: 'credential.end', credential: null, of: null });
+    const response = 'refused' in ended && ended.refused !== 'unauthenticated' ? refused('POST /api/auth/logout', shown.request, ended.refused) : jsonResponse({ signedOut: true });
+    return withNonce(response, nonce);
+  } catch (error) {
+    if (error instanceof SessionRefused) return error.response;
+    const response = errorResponse(error);
+    return nonce === null ? response : withNonce(response, nonce);
+  }
+}
 
 /** A device login's body carries a short label or a device code, nothing more: read in at most this many bytes, as anyone may call it. */
 const DEVICE_BODY_BYTES = 4 * 1024;

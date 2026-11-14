@@ -1,5 +1,5 @@
 import { keyCheckOf } from '@coffre/core/kek';
-import { PURPOSES, type About, type Answers, type Asked, type Change, type McpUnasked, type Presented, type Unasked, type UseInput, type Vault, type WorkloadsUnasked } from '@coffre/core/vault';
+import { PURPOSES, type About, type Answers, type Asked, type Change, type McpUnasked, type Presented, type Unasked, type Upstream, type UseInput, type Vault, type WorkloadsUnasked } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { logged } from '@coffre/db/dialect';
 
@@ -50,10 +50,30 @@ function asked(input: UseInput): Ask {
   // A copy: an array that crossed from another isolate may have holes, which no check of its items sees.
   const keys = input.keys === null ? null : Array.isArray(input.keys) ? [...input.keys] : undefined;
   const named = keys === null || (keys !== undefined && keys.length <= 1000 && keys.every(text));
-  if (!text(project) || !text(environment) || typeof mine !== 'boolean' || !named || !PURPOSES.includes(purpose) || !(upstream === null || text(upstream)) || typeof fresh !== 'boolean') {
-    throw new TypeError('a use names a place by its slugs, 1,000 keys at most, and a purpose the contract has');
+  const to = upstreamOf(upstream);
+  if (!text(project) || !text(environment) || typeof mine !== 'boolean' || !named || !PURPOSES.includes(purpose) || to === undefined || typeof fresh !== 'boolean') {
+    throw new TypeError('a use names a place by its slugs, 1,000 keys at most, a purpose the contract has, and its upstream as { credential, host?, egress?: true }');
   }
-  return { ...presented(input), project, environment, mine, keys: keys as string[] | null, purpose, upstream, fresh };
+  return { ...presented(input), project, environment, mine, keys: keys as string[] | null, purpose, upstream: to, fresh };
+}
+
+/** A host exactly as a URL's `hostname` spells it, 253 characters at most: no port, lower case, IPv6 bracketed, a name in punycode. */
+function hostname(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 253) return false;
+  try {
+    return new URL(`https://${value}/`).hostname === value;
+  } catch {
+    return false;
+  }
+}
+
+/** A use's upstream, rebuilt from its fields alone; undefined for one the contract does not have. */
+function upstreamOf(value: unknown): Upstream | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const { credential, host, egress, ...rest } = value as Record<string, unknown>;
+  if (Object.keys(rest).length > 0 || !text(credential) || !(host === undefined || hostname(host)) || !(egress === undefined || egress === true)) return undefined;
+  return { credential, ...(host === undefined ? {} : { host }), ...(egress === true ? { egress } : {}) };
 }
 
 /** The changes nobody asks, by name: each rests on a proof, which a weighing would try and not spend. */

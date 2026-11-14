@@ -3,11 +3,13 @@
 // local stack, as its Owner through the dev IdP:
 //
 //   prepare     before the backup: a canary, a grant, a removal whose
-//               session is kept, a token, and checkpoints. Prints what the
-//               checks after need, as JSON.
-//   check       after the restore, with the same keys: everything is back.
-//   wrong-kek   after the restore, with another KEK: nobody signs in, reads
-//               and writes answer 503, and readiness goes red.
+//               session is kept, and a token. Prints what the checks after
+//               need, as JSON.
+//   check       after the restore, with the same keys: everything is back,
+//               and a new write reads back.
+//   wrong-kek   after the restore, with another KEK: the signer cannot take
+//               the database's head as the vault's, so nobody signs in, and
+//               reads and writes answer 503.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -23,20 +25,6 @@ const { trySignIn, signIn, send, call } = browser(API, process.env.COFFRE_DEV_ID
 const say = (line) => process.stderr.write(`    ${line}\n`);
 const member = (principal) => `/api/members/${encodeURIComponent(principal)}`;
 
-/** What the Cron trigger does every five minutes: a heartbeat, and the vault's checkpoint. */
-async function beat() {
-    const response = await fetch(`${API}/cdn-cgi/handler/scheduled?cron=*/5+*+*+*+*`);
-    assert.ok(response.ok, `the scheduled handler answered ${response.status}`);
-    const ready = await (await fetch(`${API}/readyz`)).json();
-    assert.deepEqual([ready.ok, ready.checkpointed], [true, true], `not ready after a beat: ${JSON.stringify(ready)}`);
-}
-
-async function verified(admin) {
-    const verification = await call(admin, 'GET', '/api/audit/verification');
-    assert.ok(verification.ok, `verification failed: ${JSON.stringify(verification)}`);
-    return verification;
-}
-
 async function reveal(session, path) {
     return (await call(session, 'POST', '/api/reveals', { path })).values;
 }
@@ -47,34 +35,25 @@ async function prepare() {
     await call(admin, 'PATCH', '/api/secrets/market/prod', { DRILL_CANARY: canary });
     say(`wrote ${CANARY}`);
 
-    // Access changes, so members, grants and generations are not the seed's.
+    // Access changes, so members and grants are not the seed's.
     await call(admin, 'PATCH', `/api/access/${encodeURIComponent('user:outsider@acme.example')}`, { 'market/dev': 'viewer' });
     const leaver = await signIn(LEAVER);
     assert.equal((await send(leaver, 'GET', '/api/me')).status, 200);
     await call(admin, 'DELETE', member(`user:${LEAVER}`));
+    // An instance remembers a caller's rows for `memorySeconds`, 2 by default: what a revocation waits at most.
+    await new Promise((resolve) => setTimeout(resolve, 3000));
     const refused = (await send(leaver, 'GET', '/api/me')).status;
     assert.notEqual(refused, 200, 'a removed member’s session still works');
     say(`granted outsider viewer on market/dev; removed ${LEAVER}, whose session now answers ${refused}`);
 
-    // A token for `coffre verify instance`: it reads the canary's environment, and audits its project.
-    await call(admin, 'PATCH', `/api/access/${encodeURIComponent('token:ci-deploy')}`, { market: 'auditor' });
+    // A token of ci-deploy's, which reads market/prod (the seed's grant).
     const { token } = await call(admin, 'POST', `${member('token:ci-deploy')}/tokens`, { label: 'drill', expiresInDays: 1 });
-
-    await beat();
-    await beat();
-    const verification = await verified(admin);
     const members = await call(admin, 'GET', '/api/members');
-    say(`verified through ${verification.through}, checkpointed at ${verification.checkpoint.seq}`);
-    process.stdout.write(JSON.stringify({ canary, leaver, token, verification, members }));
+    process.stdout.write(JSON.stringify({ canary, leaver, token, members }));
 }
 
 async function check(before) {
     const admin = await signIn(ADMIN);
-    const verification = await verified(admin);
-    assert.ok(verification.through > before.verification.through, 'verification stopped short of the restored log');
-    assert.deepEqual(verification.checkpoint, before.verification.checkpoint, 'the newest checkpoint is not the one backed up');
-    say(`verified through ${verification.through}, the backup's checkpoint at ${verification.checkpoint.seq} still holding`);
-
     assert.deepEqual(await call(admin, 'GET', '/api/members'), before.members, 'members or grants differ from the backup');
     say('members, owners, grants and the removed are as backed up');
 
@@ -88,17 +67,14 @@ async function check(before) {
 
     await call(admin, 'PATCH', '/api/secrets/market/dev', { DRILL_AFTER: 'written after the restore' });
     assert.equal((await reveal(admin, 'market/dev/DRILL_AFTER')).DRILL_AFTER, 'written after the restore');
-    await beat();
-    const after = await verified(admin);
-    assert.ok(after.checkpoint.seq > before.verification.checkpoint.seq);
-    say(`a new write reads back; the next beat checkpoints at ${after.checkpoint.seq}, and the log verifies through ${after.through}`);
+    say('a new write reads back');
 }
 
 async function wrongKek(before) {
-    // The vault seals every member's row under keys that come from its KEK: under another, it can check
-    // nobody's, the Owner's included, so every request it is asked about is an outage, never a verdict.
+    // The vault's keys come from its KEK: under another, the database's head is no word of the vault's, and the new
+    // signer goes on from no head it cannot vouch for. The vault serves nothing, so nothing opens and nothing is written.
     assert.equal(await trySignIn(ADMIN), null, 'signed in under the wrong KEK');
-    say(`${ADMIN} cannot sign in: the vault can say of nobody who they are`);
+    say(`${ADMIN} cannot sign in`);
     const asToken = (method, path, body) => fetch(`${API}${path}`, {
         method,
         headers: { authorization: `Bearer ${before.token}`, 'content-type': 'application/json' },
@@ -111,12 +87,7 @@ async function wrongKek(before) {
     say(`revealing ${CANARY} with the drill's token answers ${response.status}: ${answer}`);
     const write = await asToken('PATCH', '/api/secrets/market/dev', { DRILL_WRONG: 'never stored' });
     assert.equal(write.status, 503, 'a value was written under the wrong KEK');
-    say(`writing answers ${write.status} too: nothing is wrapped under the wrong KEK`);
-
-    await fetch(`${API}/cdn-cgi/handler/scheduled?cron=*/5+*+*+*+*`);
-    const ready = await (await fetch(`${API}/readyz`)).json();
-    assert.equal(ready.checkpointed, false, 'the vault checkpointed under the wrong KEK');
-    say(`and /readyz turns red: ${JSON.stringify(ready)}`);
+    say(`writing answers ${write.status} too`);
 }
 
 const [step, state] = process.argv.slice(2);

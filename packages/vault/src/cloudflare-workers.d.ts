@@ -13,7 +13,9 @@ declare module 'cloudflare:workers' {
   }
   /** A Durable Object's state, the part the signer's uses (cloudflare-signer.ts). */
   export type DurableObjectState = {
-    storage: import('./signer-host.ts').Storage;
+    /** `name`: the one it was got by, `idFromName`. */
+    id: { readonly name?: string };
+    storage: import('./signer-host.ts').Storage & { deleteAlarm(): Promise<void> };
     blockConcurrencyWhile<T>(run: () => Promise<T>): Promise<T>;
   };
   export abstract class DurableObject<Env = unknown> {

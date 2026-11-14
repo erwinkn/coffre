@@ -29,6 +29,16 @@
   can still take away their role and grants. The deployment's configured
   Owner is refused 409 `configured_owner` where 0.14.7 said 403
   `not_allowed`.
+- **The Vault KV adapter is back** (`vaultKv()`, `docs/vault.md`): External
+  Secrets Operator, `vault kv get` and the rest read through `/v1` as on
+  0.14, a read the API's reveal as the token's holder (one vault `use`),
+  and ESO's Kubernetes login a workload exchange. Two answers change. An
+  environment that is not there is 403, as one the token cannot read,
+  where 0.14 said 404: the vault says neither which, and ESO keeps its
+  target rather than delete it. Behind Cloudflare Access, which 0.16.0
+  serves to browsers alone, every token is refused before anything is
+  read. A plugin's context gives `api(token)`, `exchange` and `signOut`
+  again, each coffre's own route in process.
 - **Postgres only.** coffre no longer runs on SQLite. `@coffre/db` drops its
   SQLite schema, migrations and driver (`@libsql/client`), and a `file:`
   URL is refused wherever a database URL is taken (`createCoffre`,
@@ -55,6 +65,26 @@
   typecheck until the line goes. `auditChainKey` stays, as the key the
   sign-in state and Access sessions are sealed under.
 
+- **A proxied use's entry says where the value went again.** As in 0.14.7,
+  it names the host and whether the request left through the deployment's
+  egress, and one key sent through two credentials or to two hosts within
+  the minute is two entries. `UseInput.upstream` is `{ credential, host?,
+  egress?: true }`, no longer the credential's name alone. A presigned
+  URL's method, path and expiry are no longer logged: an entry stands for a
+  minute of the credential's uses, and says only what holds for all of them.
+- **A workload signs in with its key again.** `POST /api/auth/workload`
+  (a platform's ID token, or a signed `GetCallerIdentity`), `POST
+  /api/auth/workload/renew` and `POST /api/auth/logout` with the session's
+  DPoP proof are served on 0.16, each decided by the vault. A binding's
+  `sources` outside the request's address now refuse `no_match` (0.14.7:
+  `source`), an AWS proof signed in the future `too_old` (0.14.7:
+  `not_yet_valid`), and a session's token sent to `logout` as a bearer is
+  refused 401 `workload`.
+- **Re-keying's preview is served again.** `POST
+  /members/:member/bindings/keys?dryRun=1` (`coffre trust … --replace-keys`
+  without `--apply`) answers 0.14.7's `KeysPlan`: the keys as checked, the
+  bindings on the issuer they would replace, and the places whose sensitive
+  values the new bindings would withhold. It was 501.
 - **The vault is told of workloads too.** It decides each CI run's
   sign-in now, on its own configuration: a deployment that trusts
   workloads adds `workloads: {}` to `vault(env => …)` in
