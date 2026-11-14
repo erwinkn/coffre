@@ -107,7 +107,7 @@ async function admission(workloads: WorkloadsConfig, sourceIp: string | null): P
 const WORDS: Record<string, string> = {
   audience: 'the token is not for this instance: its audience is not one a binding of the service takes',
   expired: 'the token has expired: ask your CI for a fresh one',
-  too_old: 'the token was issued more than an hour ago: ask your CI for a fresh one',
+  too_old: 'the token is out of its time: issued over an hour ago, not valid yet, or valid for longer than the binding allows: ask your CI for a fresh one',
   malformed: "the token breaks its platform's rules, or its signature does not hold",
   replayed: 'this token was exchanged already: ask your CI for a fresh one',
   unknown_signer: "the token is signed by a key the binding's keys lack: if its issuer rotated them, upload them again",

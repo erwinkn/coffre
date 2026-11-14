@@ -61,7 +61,7 @@ export type AuditEntryView = {
   relatedSeq: number | null;
   /** The request that wrote it. */
   requestId: string | null;
-  /** For a CI run's exchange: the run the issuer said it was for. What the issuer asserted, not proof of which run sent the request. */
+  /** For a CI run's exchange, and each entry written on the credential it bought: the run the issuer said it was for, and the exchange's seq. What the issuer asserted, not proof of which run sent the request. */
   run: { exchangeSeq: number; claims: Record<string, string | number> } | null;
   /** For an entry written on a personal token: the token, by its id and its label. The entry's actor is its person. */
   token: { id: string; label: string } | null;
@@ -223,7 +223,7 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
   const more = (taken < read.length || beyond) && stretch.at(-1)?.seq !== 0;
   const next = more && stretch.length > 0 ? stretch.at(-1)!.seq : null;
 
-  const ids = { projects: new Set<string>(), environments: new Set<string>(), secrets: new Set<string>(), credentials: new Set<string>() };
+  const ids = { projects: new Set<string>(), environments: new Set<string>(), secrets: new Set<string>(), credentials: new Set<string>(), runs: new Set<string>() };
   for (const { body } of shown) {
     for (const object of mentionsOf(body)) {
       const [kind, id] = [object.slice(0, object.indexOf(':')), object.slice(object.indexOf(':') + 1)];
@@ -232,7 +232,11 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
       else if (kind === 'environment') ids.environments.add(id);
       else if (kind === 'secret') ids.secrets.add(id);
     }
-    if (typeof body.credential === 'string' && UUID.test(body.credential)) ids.credentials.add(body.credential);
+    if (typeof body.credential === 'string' && UUID.test(body.credential)) {
+      ids.credentials.add(body.credential);
+      // A service's entry may be a CI run's: its credential's exchange says which run, as 0.14.7's page did.
+      if (actionOf(body) !== 'token.exchange' && actorOf(body)?.startsWith('token:')) ids.runs.add(body.credential);
+    }
   }
   const proving = head === null ? [] : shown.flatMap(({ row }) => (placed(head, row) === 'within' ? [row] : []));
   const found = await logProofs(ctx.db, tilesOf(head, proving), {
@@ -240,6 +244,7 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
     environments: [...ids.environments],
     secrets: [...ids.secrets],
     credentials: [...ids.credentials],
+    runs: [...ids.runs],
   });
   const proofOf = prover(head, found.tiles);
   const entries = shown.map(({ row, body }) => ({ ...viewOf(row, body, found), proof: proofOf(row) }));
@@ -477,7 +482,7 @@ function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logPro
     operationId: null,
     relatedSeq: null,
     requestId: typeof body.request === 'string' ? body.request : null,
-    run: body.action === 'token.exchange' ? { exchangeSeq: row.seq, claims: runClaims(detail.run) } : null,
+    run: body.action === 'token.exchange' ? { exchangeSeq: row.seq, claims: runClaims(detail.run) } : runOf(body, names.firsts),
     token: credential?.kind === 'personal' ? { id: body.credential as string, label: credential.label ?? '' } : null,
     metadata: detail,
   };
@@ -489,6 +494,19 @@ function actorParts(actor: string | null): Pick<AuditEntryView, 'actorType' | 'a
   if (actor.startsWith('user:')) return { actorType: 'user', actorId: actor.slice('user:'.length) };
   if (actor.startsWith('token:')) return { actorType: 'service', actorId: actor.slice('token:'.length) };
   return { actorType: 'system', actorId: actor };
+}
+
+/**
+ * The run a service's entry was written for: its credential's exchange, the
+ * first entry naming it, by the same service. Null for any other credential,
+ * or once the exchange has aged out of the log.
+ */
+function runOf(body: Body, firsts: ReadonlyMap<string, { seq: number; body: string }>): AuditEntryView['run'] {
+  const first = typeof body.credential === 'string' ? firsts.get(body.credential) : undefined;
+  if (first === undefined) return null;
+  const exchange = parsed(first.body);
+  if (actionOf(exchange) !== 'token.exchange' || actorOf(exchange) !== actorOf(body) || exchange.credential !== body.credential) return null;
+  return { exchangeSeq: first.seq, claims: runClaims(detailOf(exchange).run) };
 }
 
 function runClaims(run: unknown): Record<string, string | number> {

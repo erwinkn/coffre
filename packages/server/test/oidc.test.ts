@@ -10,7 +10,9 @@ import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:cryp
 import { after, beforeEach, mock, test } from 'node:test';
 
 import { canonicalClaims, github, signin, type RateLimiter, type WorkloadAlert } from '@coffre/core/identity';
-import { binding, emptyDatabase, environment, grant, instance, principal, project, role, rows, write } from '@coffre/vault/testing';
+import { credentials } from '@coffre/db/schema';
+import { binding, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, signerOf, write } from '@coffre/vault/testing';
+import { eq } from 'drizzle-orm';
 
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -131,6 +133,32 @@ test("a run's token buys a five-minute token of its service, the issuer's keys f
   // The keys are kept: the next run fetches nothing.
   assert.equal((await exchange(idToken())).status, 200);
   assert.deepEqual(fetched, [KEYS]);
+});
+
+test("the audit page leads each entry a run's credential wrote to its run, through the exchange, after the credential's row is gone", async () => {
+  // An auditor who writes, too: their write is no run's.
+  const AUD = 'user:aud@acme.example';
+  await write(world, ...rows('roles', role(true, 'auditor', ['secret.write', 'audit.read'])), ...rows('principals', principal(AUD, { role: 'auditor' })), ...rows('credentials', credential('aud-cli', AUD)));
+  const call = (bearer: string, path: string, init: RequestInit = {}) => app.request(path, { ...init, headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' } });
+  const wrote = await call('aud-cli', '/api/secrets/market/prod', { method: 'PATCH', body: JSON.stringify({ API_KEY: 'v1' }) });
+  assert.equal(wrote.status, 200, await wrote.text());
+  const run = await exchange(idToken());
+  assert.equal(run.status, 200, JSON.stringify(run.body));
+  assert.equal((await call(run.body.token!, '/api/reveals', { method: 'POST', body: JSON.stringify({ path: 'market/prod/API_KEY' }) })).status, 200);
+  await (await signerOf(world)).sign();
+  // Whoever owns the database deletes the credential's row: the log alone leads from the read to the run.
+  await world.owner.delete(credentials).where(eq(credentials.principal, DEPLOY));
+
+  type Entry = { seq: number; action: string; actorId: string; run: { exchangeSeq: number; claims: Record<string, unknown> } | null };
+  const got = await call('aud-cli', '/api/audit?detail=1');
+  assert.equal(got.status, 200);
+  const entries = ((await got.json()) as { entries: Entry[] }).entries.filter((entry) => entry.action !== 'test.write');
+  assert.deepEqual(entries.map((entry) => `${entry.actorId} ${entry.action}`), ['deploy secret.read', 'deploy token.exchange', 'aud@acme.example secret.write']);
+  const [read, exchanged, written] = entries as [Entry, Entry, Entry];
+  assert.equal(exchanged.run?.exchangeSeq, exchanged.seq);
+  assert.equal(exchanged.run?.claims.ref, MAIN.ref);
+  assert.deepEqual(read.run, exchanged.run);
+  assert.equal(written.run, null);
 });
 
 test('a token is spent once: the same token again is replayed, by the vault', async () => {
