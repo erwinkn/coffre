@@ -271,7 +271,7 @@ export function scopeFrom(values: string[] | undefined, flag = '--scope'): Recor
   }));
 }
 
-/** A token's scope in words; null for one unscoped, which reaches all its account holds. A binding's null reaches nothing (`describeBinding`). */
+/** A token's scope in words. 0.16 lists one with none as `{}`, nothing; null is an older server's, for one it had not sealed yet. A binding's null reaches nothing (`describeBinding`). */
 export function reaches(scope: Record<string, string> | null): string {
   return scope === null ? 'all its account holds' : credentialScopeInWords(scope);
 }
