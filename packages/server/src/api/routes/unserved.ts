@@ -18,8 +18,6 @@ const unserved = <const Key extends string>(key: Key, what: string) =>
   });
 
 export const unservedRoutes = {
-  // Every freeze standing, for the service accounts' pages: freezing and lifting one are served (routes/freezes.ts).
-  ...unserved('GET /freezes', 'the freezes standing'),
   // A workload's session approved, and a binding's enrollments.
   ...unserved('POST /members/:member/tokens/:id/approve', 'approving a token'),
   ...unserved('GET /members/:member/bindings/:id/enrollments', "a binding's enrollments"),

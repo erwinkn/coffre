@@ -1,7 +1,8 @@
 // Freezes over HTTP on the 0.16 contract (docs/design/workload-access.md,
 // section 8.2; docs/design/0.16.md, "The server"): a workload's use frozen
 // and the freeze lifted, each one change of the vault's, the target in any
-// spelling `freezeTarget` takes and answered in its one. What each costs,
+// spelling `freezeTarget` takes and answered in its one; and the freezes
+// standing, each listed to whoever may know of it. What each costs,
 // request-cost.test.ts holds.
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
@@ -38,7 +39,9 @@ beforeEach(async () => {
     ...rows('policy', instance()),
     ...rows('grants', grant(bo, 'manager', { project: market }), grant(eve, 'viewer', { project: market }), grant(ci, 'maintainer', { project: market })),
     ...rows('bindings', bound),
-    ...rows('credentials', ...[cy, bo, eve].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who)), pod),
+    ...rows('credentials', ...[cy, bo, eve].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who)), pod,
+      // Bo's personal token, scoped to market: a scoped credential manages no service account.
+      credential('bo-market', bo, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'manager' }]) })),
   );
   await app.request('/livez');
   await app.request('/api/me', { headers: { authorization: 'Bearer nobody' } });
@@ -108,6 +111,62 @@ test('what the vault would take as a fault is told before any call; an upstream 
   ]) assert.deepEqual(refused(await call('cy-cli', 'POST', '/freezes', bad)), [400, 'bad_request', undefined], JSON.stringify(bad));
   assert.deepEqual(refused(await call('cy-cli', 'DELETE', '/freezes/nothing')), [400, 'bad_request', undefined]);
   assert.deepEqual(refused(await call('cy-cli', 'POST', '/freezes', { target: 'credential:00000000-0000-4000-8000-000000000000/stripe', reason: 'x' })), [501, 'not_implemented', undefined]);
-  assert.deepEqual(refused(await call('cy-cli', 'GET', '/freezes')), [501, 'not_implemented', undefined]);
   assert.equal(app.calls.length, before);
+});
+
+const listed = async (label: string) => {
+  const [status, body] = await call(label, 'GET', '/freezes');
+  assert.equal(status, 200, JSON.stringify(body));
+  return (body.freezes as { target: string; service: string | null; frozenAt: string }[]).map((freeze) => [freeze.target, freeze.service, typeof freeze.frozenAt]);
+};
+
+test("the freezes standing: every workload's for anyone, a service account's for whoever manages it, and only of what is still there", async () => {
+  assert.deepEqual(await listed('cy-cli'), []);
+  await freeze('cy-cli', 'instance');
+  for (const target of [ci, `binding:${bound.id}`, `session:${pod.id}`]) assert.equal((await freeze('bo-cli', target))[0][0], 200, target);
+  const all = [['instance', null, 'string'], [`binding:${bound.id}`, ci, 'string'], [`session:${pod.id}`, ci, 'string'], [ci, ci, 'string']];
+  // Cy runs the instance, Bo manages ci; Eve, who views market, manages no service: she sees the instance's alone.
+  assert.deepEqual(await listed('cy-cli'), all);
+  assert.deepEqual(await listed('bo-cli'), all);
+  assert.deepEqual(await listed('eve-cli'), [all[0]]);
+  assert.deepEqual(await listed('bo-market'), [all[0]]);
+  // Each as its row keeps the time it was frozen at.
+  const [, body] = await call('bo-cli', 'GET', '/freezes');
+  assert.deepEqual((body.freezes as { frozenAt: string }[])[3]!.frozenAt, new Date((await frozenAt('principals', ci))!).toISOString());
+
+  // A frozen credential that is no workload's session, which the vault never freezes, is no freeze standing.
+  await write(world, ...rows('credentials', credential('ci-token', ci, { kind: 'service', frozenAt: new Date(), notAfter: new Date(Date.UTC(2027, 0, 1)) })));
+  assert.deepEqual(await listed('cy-cli'), all);
+  // Of ci's generation before it was let back in: none of its bindings or sessions stands.
+  await world.owner.execute(sql`UPDATE principals SET generation = 1 WHERE id = ${ci}`);
+  assert.deepEqual(await listed('cy-cli'), [all[0], all[3]]);
+  await world.owner.execute(sql`UPDATE principals SET generation = 0 WHERE id = ${ci}`);
+  // A revoked binding, an ended session: no longer there to stop, no longer listed. Then ci removed: none of its.
+  await world.owner.execute(sql`UPDATE bindings SET revoked_at = now() WHERE id = ${bound.id}`);
+  await world.owner.execute(sql`UPDATE credentials SET not_after = now() - interval '1 second' WHERE id = ${pod.id}`);
+  assert.deepEqual(await listed('cy-cli'), [all[0], all[3]]);
+  await world.owner.execute(sql`UPDATE principals SET status = 'removed' WHERE id = ${ci}`);
+  assert.deepEqual(await listed('cy-cli'), [all[0]]);
+  assert.deepEqual(refused(await call('nobody', 'GET', '/freezes')), [401, 'unauthenticated', 'unauthenticated']);
+});
+
+test('past 1,000 freezes standing, the listing is refused, never cut short', async () => {
+  const frozen = new Date();
+  await write(world, ...rows('principals', ...Array.from({ length: 1000 }, (_, i) => principal(`token:s${i}`, { frozenAt: frozen }))));
+  assert.equal((await listed('cy-cli')).length, 1000);
+  await freeze('cy-cli', 'instance');
+  assert.deepEqual(refused(await call('cy-cli', 'GET', '/freezes')), [409, 'conflict', 'too_many_to_list']);
+});
+
+test("past 1,000 grants of the service accounts frozen to weigh, a manager's listing is refused; whoever runs the instance weighs none", async () => {
+  const market = (await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM projects WHERE slug = 'market'`))[0]!;
+  const places = Array.from({ length: 1000 }, (_, i) => environment(market, `e${i}`));
+  await write(world, ...rows('environments', ...places), ...rows('grants', ...places.map((place) => grant(ci, 'viewer', { environment: place }))));
+  await freeze('bo-cli', ci);
+  // ci holds its project's grant and 1,000 more: 1,001 to weigh.
+  assert.deepEqual(refused(await call('bo-cli', 'GET', '/freezes')), [409, 'conflict', 'too_many_to_list']);
+  assert.deepEqual(await listed('cy-cli'), [[ci, ci, 'string']]);
+  // Eve may manage some service account, and is weighed as Bo is; on a scoped token Bo may manage none, and reads no grant.
+  assert.deepEqual(refused(await call('eve-cli', 'GET', '/freezes')), [409, 'conflict', 'too_many_to_list']);
+  assert.deepEqual(await listed('bo-market'), []);
 });

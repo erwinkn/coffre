@@ -1,10 +1,13 @@
+import { runsInstance } from '@coffre/core/access';
 import { freezeTarget } from '@coffre/core/identity';
 import type { Frozen } from '@coffre/core/vault';
 import { z } from 'zod';
 
+import { freezes } from '../../db/queries/freezes.ts';
 import { changed } from '../change.ts';
 import { ApiError, badRequest } from '../errors.ts';
 import { route } from '../route.ts';
+import { manages, managesAny } from './bindings.ts';
 import { wellFormed } from './members.ts';
 
 /**
@@ -14,8 +17,15 @@ import { wellFormed } from './members.ts';
  * new sign-in. Each is one change of the vault's (`workload.freeze`,
  * `workload.unfreeze`), which decides who may, and no statement. A target
  * comes in any spelling `freezeTarget` takes, `service:api` for
- * `token:api` included, and is answered in its one spelling.
+ * `token:api` included, and is answered in its one spelling. Listing the
+ * freezes standing is `caller` and one statement.
  */
+
+/** The most freezes a listing answers, and the most grants it weighs them by: past either, it is refused 409 `too_many_to_list`, never cut short. */
+export const LISTED_MOST = 1000;
+
+/** A freeze standing: its target in its one spelling, the service account it is of (null for the instance's), and since when. */
+export type FreezeView = { target: string; service: string | null; frozenAt: string };
 
 /** A target in its one spelling, or a bad request; an upstream credential's freeze is its environment's, not served here yet. */
 function targetOf(raw: string): string {
@@ -26,6 +36,35 @@ function targetOf(raw: string): string {
 }
 
 export const freezeRoutes = {
+  /**
+   * The freezes standing that the caller may know of: every workload's,
+   * which stops everyone's, for anyone; a service account's, one of its
+   * bindings' or one of its workloads' sessions', for whoever manages it
+   * (`manages`, as its bindings' page weighs it). The instance's first,
+   * then by service account and target. Of what is still there to stop: a
+   * freeze kept on a removed service account, a revoked binding or an ended
+   * session is not listed. A listing; it decides nothing.
+   *
+   *   → { "freezes": [{ "target": "token:api-prod", "service": "token:api-prod", "frozenAt": "2026-11-14T09:12:03.000Z" }] }
+   */
+  ...route('GET /freezes', {
+    run: async (ctx): Promise<{ freezes: FreezeView[] }> => {
+      const who = await ctx.caller();
+      const runs = runsInstance(who.holds);
+      // Whoever runs the instance sees every one, unweighed; whoever may manage no service account, the instance's alone.
+      const found = await freezes(ctx.db, { weighed: !runs && managesAny(who), most: LISTED_MOST, now: new Date() });
+      if (found.freezes.length > LISTED_MOST || found.held > LISTED_MOST) {
+        const what = found.held > LISTED_MOST ? 'grants of the service accounts frozen to weigh' : 'freezes stand';
+        throw new ApiError('conflict', `more than ${LISTED_MOST.toLocaleString('en-US')} ${what}: lift some freezes to list them`, 'too_many_to_list');
+      }
+      const seen = (service: string | null) => {
+        if (service === null || runs) return true;
+        const of = found.services[service];
+        return of !== undefined && manages(who, { ...of, setting: found.setting });
+      };
+      return { freezes: found.freezes.filter((freeze) => seen(freeze.service)) };
+    },
+  }),
   /**
    * Freeze a target, saying why, which the log keeps: an Owner of the whole
    * instance freezes `instance`, every workload's use; whoever manages a
