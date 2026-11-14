@@ -3,7 +3,7 @@ import { inclusionProof, leafHash, nodesFrom, tileKey, tilesFor, verifyInclusion
 import { personalOf } from '@coffre/core/schemas';
 import type { Called, SignedHead } from '@coffre/core/vault';
 
-import { logPlaces, logProofs, logStretch, type LogPlaces, type LogRow, type TileAt } from '../db/queries/audit.ts';
+import { logPlaces, logProofs, logStretch, MOST_OBJECTS, type LogPlaces, type LogRow, type TileAt } from '../db/queries/audit.ts';
 import { can, canAnywhere, placeOf, projectsReached } from './caller.ts';
 import type { ApiContext } from './context.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
@@ -162,7 +162,10 @@ const MOST_READ = 1000;
  * may show fewer than `limit` and go on (`more`): its stretch ends where
  * it stopped reading, `next`, and pages tile the log, each entry read by
  * one. Its statements: the places it is about (none for whoever reads the
- * whole log, with no path), the stretch, and the tiles and names.
+ * whole log, with no path), the stretch, and the tiles and names. The
+ * stretch is read from the index of what the page is about, a thousand
+ * places at most (`MOST_OBJECTS`): an Auditor of most of a large instance
+ * reads the log itself, and is shown what the index would have found.
  */
 export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<AuditPage> {
   const who = await ctx.caller({ head: true });
@@ -188,10 +191,15 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
   if (actors !== null && query.path === undefined) objects = actors.map((actor) => `principal:${actor}`);
   // Only a stretch of the whole log can say what it lacks: it reads the entry at `before` too, the page above's last.
   const unfiltered = objects === null;
+  const anchored = unfiltered && query.before !== undefined;
+  // A page about more places than the index is read by reads the log itself: the filters below, on each entry's body,
+  // keep what the index would have found, in a stretch that shows fewer of them.
+  const indexed = objects !== null && objects.length > MOST_OBJECTS ? null : objects;
   const reading = Math.min(query.limit * READ_PER_SHOWN, MOST_READ);
-  const read = await logStretch(ctx.db, { objects, before: query.before ?? null, rows: reading + (unfiltered && query.before !== undefined ? 1 : 0) });
-  const anchor = unfiltered && query.before !== undefined && read[0]?.seq === query.before ? read.shift()! : null;
-  if (anchor === null && unfiltered && read.length > reading) read.pop();
+  const below = query.before === undefined ? null : anchored ? query.before : query.before - 1;
+  const { rows: read, more: beyond } = await logStretch(ctx.db, { objects: indexed, below, rows: reading + (anchored ? 1 : 0) });
+  const anchor = anchored && read[0]?.seq === query.before ? read.shift()! : null;
+  if (anchor === null && anchored && read.length > reading) read.pop();
 
   const shown: { row: LogRow; body: Body }[] = [];
   const hidden = new Map<string, number>();
@@ -212,7 +220,7 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
   }
   const stretch = read.slice(0, taken);
   // Nothing is numbered below 0: a stretch that reached it is the log's end.
-  const more = (taken < read.length || read.length >= reading) && stretch.at(-1)?.seq !== 0;
+  const more = (taken < read.length || beyond) && stretch.at(-1)?.seq !== 0;
   const next = more && stretch.length > 0 ? stretch.at(-1)!.seq : null;
 
   const ids = { projects: new Set<string>(), environments: new Set<string>(), secrets: new Set<string>(), credentials: new Set<string>() };

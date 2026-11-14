@@ -3,6 +3,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
 
 import type { PlaceRow } from './places.ts';
+import { SCOPE_ID, type TokenRow } from './tokens.ts';
 
 /**
  * A member as the members' pages list them: their row, and the grants of
@@ -269,12 +270,28 @@ export type ReportRow = Omit<MemberRow, 'grants' | 'roleHolds' | 'roleDefinition
   keys: SeenKey[];
   /** Their personal configs: each one's project, the environment it is a config of, and its own slug. */
   personal: { project: string; of: string; slug: string }[];
+  /** The service tokens they issued that still work, by service account, oldest first: whoever made them, of an account still there. */
+  issued: IssuedRow[];
+  /** A person's own live tokens, personal tokens and handles, newest first: what `live.tokens` counts. None for a service account. */
+  tokens: TokenRow[];
+  /** The slug of each project and environment the two lists' scopes name, by id, those still there. */
+  slugs: Record<string, string>;
 };
+
+/** A service token someone issued, its row as stored: `service` is its account, `token:ci`; `scope` its JSON, by place id. */
+export type IssuedRow = { id: string; service: string; label: string | null; hint: string | null; scope: string | null; expiresAt: string; lastUsedAt: string | null };
+
+/** A credential's row as the report's lists read it, its times as JSON writes them. */
+type ListedCredential = { id: string; kind: string; principal: string; label: string | null; hint: string | null; scope: string | null; created_at: string; created_by: string; expires_at: string; last_used_at: string | null; last_used_ip: string | null };
 
 /**
  * What one member holds and has seen: their row, what still lets them in,
- * the live keys they read or wrote (`seenBy`), and their personal configs.
- * One statement, driven from their own rows; null for no such member.
+ * the live keys they read or wrote (`seenBy`), their personal configs, the
+ * service tokens they issued and a person's own tokens. One statement,
+ * driven from their own rows; null for no such member. The tokens they
+ * issued are found by account: `credentials_issued_by_idx` leads with the
+ * account, so one probe for each service account still there, however many
+ * credentials the instance keeps.
  */
 export async function reportOf(db: Queryable, principal: string, now: Date): Promise<ReportRow | null> {
   const at = now.toISOString();
@@ -284,6 +301,9 @@ export async function reportOf(db: Queryable, principal: string, now: Date): Pro
     grants: number | string; sessions: number | string; tokens: number | string; apps: number | string; identities: number | string;
     keys: (SeenKey & { principal: string })[] | null;
     personal: { project: string; of: string; slug: string }[] | null;
+    issued: ListedCredential[] | null;
+    own: ListedCredential[] | null;
+    slugs: Record<string, string> | null;
   }>(
     db,
     sql`
@@ -301,7 +321,8 @@ export async function reportOf(db: Queryable, principal: string, now: Date): Pro
           FROM environments pe
           JOIN projects pp ON pp.id = pe.project_id
           JOIN environments parent ON parent.id = pe.parent_id
-          WHERE pe.owner = m.id AND strpos(pe.slug, '~') = 0 AND strpos(pp.slug, '~') = 0) AS personal
+          WHERE pe.owner = m.id AND strpos(pe.slug, '~') = 0 AND strpos(pp.slug, '~') = 0) AS personal,
+        issued.list AS issued, mine.list AS own, named.slugs
       FROM principals m
       LEFT JOIN LATERAL (
         SELECT count(*) FILTER (WHERE c.kind IN ('browser', 'cli')) AS sessions,
@@ -314,6 +335,31 @@ export async function reportOf(db: Queryable, principal: string, now: Date): Pro
         SELECT json_object_agg(sp.id, sp.slug) AS slugs FROM projects sp
         WHERE m.scope IS NOT NULL AND strpos(sp.slug, '~') = 0 AND strpos(m.scope, sp.id::text) > 0
       ) scoped ON true
+      -- The service tokens they made that still work: of an account still there, at its generation, whatever became of them.
+      LEFT JOIN LATERAL (
+        SELECT json_agg(json_build_object('id', c.id, 'kind', c.kind, 'principal', c.principal, 'label', c.label, 'hint', c.token_hint, 'scope', c.scope,
+            'created_at', c.created_at, 'created_by', c.created_by, 'expires_at', c.expires_at, 'last_used_at', c.last_used_at, 'last_used_ip', c.last_used_ip) ORDER BY c.principal, c.created_at, c.id) AS list, array_agg(c.scope) AS scopes
+        FROM principals sa
+        JOIN credentials c ON c.principal = sa.id AND c.created_by = m.id AND c.generation = sa.generation
+        WHERE sa.id LIKE 'token:%' AND sa.status = 'active' AND c.kind = 'service' AND c.revoked_at IS NULL AND c.expires_at > ${at}::timestamptz
+      ) issued ON true
+      -- A person's own: what removing them revokes, as the count above has it.
+      LEFT JOIN LATERAL (
+        SELECT json_agg(json_build_object('id', c.id, 'kind', c.kind, 'principal', c.principal, 'label', c.label, 'hint', c.token_hint, 'scope', c.scope,
+            'created_at', c.created_at, 'created_by', c.created_by, 'expires_at', c.expires_at, 'last_used_at', c.last_used_at, 'last_used_ip', c.last_used_ip) ORDER BY c.created_at DESC, c.id) AS list, array_agg(c.scope) AS scopes
+        FROM credentials c
+        WHERE m.id LIKE 'user:%' AND c.principal = m.id AND c.generation = m.generation AND c.kind IN ('personal', 'handle')
+          AND c.revoked_at IS NULL AND c.expires_at > ${at}::timestamptz
+      ) mine ON true
+      LEFT JOIN LATERAL (
+        SELECT json_object_agg(place.id, place.slug) AS slugs FROM (
+          SELECT DISTINCT (regexp_matches(scope, ${SCOPE_ID}, 'g'))[1]::uuid AS id FROM unnest(issued.scopes || mine.scopes) scope WHERE scope IS NOT NULL
+        ) ids
+        JOIN LATERAL (
+          SELECT p.id, p.slug FROM projects p WHERE p.id = ids.id AND strpos(p.slug, '~') = 0
+          UNION ALL SELECT e.id, e.slug FROM environments e WHERE e.id = ids.id AND strpos(e.slug, '~') = 0
+        ) place ON true
+      ) named ON true
       WHERE m.id = ${principal}`,
   );
   if (row === undefined) return null;
@@ -328,5 +374,27 @@ export async function reportOf(db: Queryable, principal: string, now: Date): Pro
     live: { grants: Number(row.grants), sessions: Number(row.sessions), tokens: Number(row.tokens), identities: Number(row.identities), apps: Number(row.apps) },
     keys: (row.keys ?? []).map(({ principal: _, ...key }) => ({ ...key, at: key.at === null ? null : iso(key.at) })),
     personal: row.personal ?? [],
+    issued: (row.issued ?? []).map((token) => ({
+      id: token.id,
+      service: token.principal,
+      label: token.label,
+      hint: token.hint,
+      scope: token.scope,
+      expiresAt: iso(token.expires_at),
+      lastUsedAt: token.last_used_at === null ? null : iso(token.last_used_at),
+    })),
+    tokens: (row.own ?? []).map((token) => ({
+      id: token.id,
+      kind: token.kind,
+      label: token.label,
+      hint: token.hint,
+      scope: token.scope,
+      createdAt: iso(token.created_at),
+      createdBy: token.created_by,
+      expiresAt: iso(token.expires_at),
+      lastUsedAt: token.last_used_at === null ? null : iso(token.last_used_at),
+      lastUsedIp: token.last_used_ip,
+    })),
+    slugs: row.slugs ?? {},
   };
 }

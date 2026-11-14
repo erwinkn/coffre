@@ -48,7 +48,7 @@ export type MemberTokens = {
 };
 
 /** A place's id in a scope's JSON, as `JSON.stringify` writes it: one only a UUID matches, so the cast never fails, whatever a row holds. */
-const SCOPE_ID = '"(?:projectId|environmentId)":"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"';
+export const SCOPE_ID = '"(?:projectId|environmentId)":"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"';
 
 /**
  * A member's live tokens, one statement on the credentials' live index: a
