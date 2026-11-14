@@ -67,10 +67,11 @@ export function cloudflareSourceIp(request: Request): string | null {
 
 /**
  * What a request showed, which every call to the vault starts with: its
- * token by its SHA-256, an id for the log, and the address the platform
- * vouches for. No proof yet: a workload's session, which is its key's
- * alone, is refused until the app holds its proof to the request again.
+ * token by its SHA-256, an id for the log, the address the platform
+ * vouches for, and for a workload's session, the thumbprint of the key
+ * whose proof the app held to the request and its gate took
+ * (`provenSession`): without it, the vault refuses the session.
  */
-export function presented(token: string, sourceIp: string | null): Presented {
-  return { token: hashToken(token).toString('hex'), proof: null, request: crypto.randomUUID(), ip: sourceIp };
+export function presented(token: string, sourceIp: string | null, proof: string | null = null): Presented {
+  return { token: hashToken(token).toString('hex'), proof, request: crypto.randomUUID(), ip: sourceIp };
 }
