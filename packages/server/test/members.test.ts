@@ -416,7 +416,7 @@ test("a member's report: the keys whose current value they read or wrote, a rest
   });
   // Al's scope, by slug. Cy's token is a token, an app connected through MCP an app; he has no personal config.
   assert.deepEqual((await report(al))[0].scope, { projects: { only: ['market'] }, environments: 'all' });
-  await write(world, ...rows('credentials', credential('cy-app', cy, { kind: 'mcp', client: 'https://claude.ai/client.json' })));
+  await write(world, ...rows('credentials', credential('cy-app', cy, { kind: 'mcp', client: JSON.stringify({ id: 'https://claude.ai/client.json', host: 'claude.ai', registration: 'cimd', redirectUri: 'https://claude.ai/callback', scopes: ['read'] }) })));
   const [cys] = await report(cy);
   assert.deepEqual([cys.live, cys.personal], [{ grants: 0, sessions: 1, tokens: 1, identities: 0, apps: 1 }, []]);
 
