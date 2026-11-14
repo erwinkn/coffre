@@ -151,6 +151,19 @@ test('in a fork, a value replaces the version it inherits while it holds none of
   assert.deepEqual(await written(regenerate('staging')), { TOKEN: { version: 2, nature: 'secret' } });
 });
 
+test('a fork whose parent was archived since its key was listed reads nothing through it, and regenerates nothing', async () => {
+  // Archived with a fork below it, as 0.14 let a database hold; the vault itself refuses that archiving (`inherited`).
+  const gone = environment({ id: places.prod!.projectId }, 'gone', { archivedAt: new Date('2026-01-01T00:00:00Z') });
+  const below = environment({ id: places.prod!.projectId }, 'below', { parentId: gone.id });
+  Object.assign(places, { gone, below });
+  await write(world, ...rows('environments', gone, below), ...rows('secrets', value(world, secret(gone, 'TOKEN'), 'tok-gone')));
+  const before = await versions();
+  const answer = await vault.change(writing([{ key: 'TOKEN', value: 'below-next', generated: made('bytes:32:hex'), replaces: await listed('gone', 'TOKEN') }], { environment: 'below' }));
+  assert.deepEqual(answer, { refused: 'stale' });
+  assert.equal(await versions(), before);
+  assert.equal(await said('below', 'TOKEN'), undefined);
+});
+
 test('two regenerates of one version at once: one writes, and the other, decided again on what the first left, is stale', async () => {
   const replaces = await listed('prod', 'TOKEN');
   const both = await Promise.all(['a', 'b'].map((text) => vault.change(writing([{ key: 'TOKEN', value: text, generated: made('bytes:32:hex'), replaces }]))));

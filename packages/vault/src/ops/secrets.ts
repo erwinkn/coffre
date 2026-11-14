@@ -375,16 +375,16 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       const blind = unsealed.parent + unsealed.inherited + unsealed.dismissed > 0;
       /**
        * The key a key the environment does not hold reads, as a use finds it: null for none, undefined for one the vault
-       * cannot tell. A personal config's chain is one longer. For a reset (`reset`), what a parent passes down whatever this
-       * environment dismissed, which its reset ends, and nothing past a parent archived, as a use reads nothing through one.
+       * cannot tell. A personal config's chain is one longer. Read (`read`), nothing past a parent archived, as a use reads
+       * nothing through one; for a reset (`reset`), the same, whatever this environment dismissed, which its reset ends.
        */
-      const passedDown = (key: string, reset = false): Row<typeof secrets> | null | undefined => {
+      const passedDown = (key: string, as?: 'read' | 'reset'): Row<typeof secrets> | null | undefined => {
         if (blind) return undefined;
         const deepest = MAX_PARENTS + (environment.owner === null ? 0 : 1);
-        for (let layer = environment, depth = 0; !(dismissed.has(`${layer.id} ${key}`) && !(reset && layer === environment)) && layer.parentId !== null; depth += 1) {
+        for (let layer = environment, depth = 0; !(dismissed.has(`${layer.id} ${key}`) && !(as === 'reset' && layer === environment)) && layer.parentId !== null; depth += 1) {
           const parent = parents.get(layer.parentId);
           if (parent === undefined || parent.projectId !== place.id || depth >= deepest) return undefined;
-          if (reset && !live(parent)) return null;
+          if (as !== undefined && !live(parent)) return null;
           const row = inherited.get(`${parent.id} ${key}`);
           if (row !== undefined) return row;
           layer = parent;
@@ -405,7 +405,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         // Only a value or a reference makes a key: there is nothing else to archive, file, restore or reset.
         if (was === null && value === undefined && ref === undefined) return { refused: 'unknown_key' };
         // A reset, or its undoing, is of a key a parent passes down: anything else is an archiving, which takes more.
-        const down = inherit === undefined && !(was?.archivedAt != null && (value !== undefined || restore !== undefined || ref !== undefined) && archived !== false) ? null : passedDown(key, true);
+        const down = inherit === undefined && !(was?.archivedAt != null && (value !== undefined || restore !== undefined || ref !== undefined) && archived !== false) ? null : passedDown(key, 'reset');
         if (down === undefined) return { refused: 'unreadable' };
         if (inherit !== undefined && down === null) return { refused: 'not_inherited' };
         // An archived key keeps its name: it is brought back, not written over. In a fork, one reset to what a parent passes
@@ -423,8 +423,9 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           if (restore !== undefined && restore > kept.versions) return { refused: 'unknown_version' };
           if (restore !== undefined && (from === undefined || newest === undefined)) return { refused: 'unreadable' };
           if (replaces !== undefined) {
-            // What the key reads now, as a listing found it: its own live value, or where it holds none live, what it inherits.
-            const now = was !== null && was.archivedAt === null ? was : passedDown(key);
+            // What the key reads now, as a listing found it: its own live value, or where it holds none live, what it inherits,
+            // which nothing past a parent archived is.
+            const now = was !== null && was.archivedAt === null ? was : passedDown(key, 'read');
             if (now === undefined) return { refused: 'unreadable' };
             const listed = seen.replaced.find((row) => row.id === replaces);
             // A reference, holding no version of its own, holds none listed.
