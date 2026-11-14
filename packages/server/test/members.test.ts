@@ -332,8 +332,11 @@ test("the Owner the deployment names stays one: removing or demoting them is 409
   // Nor do they step down themselves; and Boss, an Admin of the whole instance, may not touch an Owner at all, named or not.
   assert.deepEqual(refused(await call('root-cli', 'PUT', `/members/${root}`, { role: 'admin' })), [409, 'conflict', 'configured_owner']);
   assert.deepEqual(refused(await call('root-cli', 'DELETE', `/members/${root}`)), [409, 'conflict', 'configured_owner']);
-  assert.deepEqual(refused(await call('boss-cli', 'PUT', `/members/${root}`, { role: 'admin' })), NO_ACCESS);
-  assert.deepEqual(refused(await call('boss-cli', 'DELETE', `/members/${root}`)), NO_ACCESS);
+  // R1 (instance-roles.md, "Only Owners make Owners"), in 0.14.7's words, which the UI shows as they are.
+  const said = ([status, body]: [number, Body]) => [status, body.error, body.reason, body.message];
+  const OWNERS_ONLY = [403, 'vault_refused', 'not_allowed', `${root}: only an Owner of the whole instance makes someone an Owner, or changes or removes one`];
+  assert.deepEqual(said(await call('boss-cli', 'PUT', `/members/${root}`, { role: 'admin' })), OWNERS_ONLY);
+  assert.deepEqual(said(await call('boss-cli', 'DELETE', `/members/${root}`)), OWNERS_ONLY);
   // Still the Owner of everything; asked to stay one, nothing moves.
   const everywhere = { projects: 'all', environments: 'all' };
   assert.deepEqual(await call('cy-cli', 'PUT', `/members/${root}`, { role: 'owner' }), [200, { member: root, instanceRole: 'owner', scope: everywhere, created: false }]);
@@ -431,7 +434,7 @@ test('a member put: admitted, brought back or given a role, as their row calls f
   assert.deepEqual(refused((await put('bo-cli', 'user:other@acme.example', {}))[0]), NO_ACCESS);
   assert.deepEqual(refused((await put('al-cli', gus, { role: 'developer', scope: { projects: { only: ['market'] } } }))[0]), NO_ACCESS);
   assert.deepEqual((await put('cy-cli', dee, { role: 'admin' }))[0][0], 200);
-  assert.deepEqual(refused((await put('dee-cli', gus, { role: 'owner' }))[0]), NO_ACCESS);
+  assert.deepEqual(refused((await put('dee-cli', gus, { role: 'owner' }))[0]), [403, 'vault_refused', 'not_allowed']);
   assert.deepEqual(refused((await put('dee-cli', dee, { role: 'developer' }))[0]), NO_ACCESS);
   assert.deepEqual((await put('dee-cli', gus, { role: 'developer', scope: { projects: { only: ['market'] } } }))[0][1], { member: gus, instanceRole: 'developer', scope: { projects: { only: ['market'] }, environments: 'all' }, created: false });
   assert.deepEqual(refused((await put('cy-cli', gus, { role: 'admin', scope: { projects: { only: ['nope'] } } }))[0]), NO_ACCESS);

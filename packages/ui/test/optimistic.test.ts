@@ -5,6 +5,7 @@ import { CoffreError, type CoffreClient } from '@coffre/client';
 import { MutationObserver, QueryObserver, type QueryClient } from '@tanstack/react-query';
 
 import { announcements } from '../src/lib/announce.ts';
+import { failureMessage } from '../src/lib/coffre.ts';
 import { grantAccess, grantId, invite, revokeGrant, type GrantVars } from '../src/lib/changes.ts';
 import { changeKey, changeOptions, failedAdds, itemStatus, type ChangeContext } from '../src/lib/optimistic.ts';
 import { createQueryClient, keys, queries } from '../src/lib/queries.ts';
@@ -148,7 +149,7 @@ test('a grant to a new service account makes it in the same call, and its refusa
   const done = add.mutate(fresh).catch(() => {});
   await settle();
   assert.deepEqual(sent, [['token:ci-new', { access: { 'market/prod': { role: 'viewer', until: '2999-12-31T23:59:59.000Z' } } }]], 'one call: no access.set');
-  asked.reject(new CoffreError(403, 'vault_refused', 'the vault refused: user:admin@acme.example removed this service account: only they, or someone who runs the whole instance, may bring it back', 'not_allowed'));
+  asked.reject(new CoffreError(403, 'vault_refused', 'user:admin@acme.example removed this service account: only they, or someone who runs the whole instance, may bring it back', 'not_allowed'));
   await done;
   await settle();
   assert.deepEqual(listed(queryClient).map(grantId), [grantId(lead)]);
@@ -156,6 +157,12 @@ test('a grant to a new service account makes it in the same call, and its refusa
   assert.equal(status.state === 'failed' && status.error, 'user:admin@acme.example removed this service account: only they, or someone who runs the whole instance, may bring it back', 'in the vault\'s words');
   assert.deepEqual(failedAdds<GrantVars>(changes(queryClient), listed(queryClient).map(grantId)).map((entry) => entry.vars), [fresh]);
   stop();
+});
+
+test("an Admin's refused Owner change says the rule, not that a grant is missing", () => {
+  const sentence = 'user:ada@acme.example: only an Owner of the whole instance makes someone an Owner, or changes or removes one';
+  assert.equal(failureMessage(new CoffreError(403, 'vault_refused', sentence, 'not_allowed')), sentence);
+  assert.match(failureMessage(new CoffreError(403, 'vault_refused', 'no such place, or nothing you may do this in', 'no_access')), /^You hold no grant/, 'any other 403 stays generic');
 });
 
 test('a refused add rolls back and says why, in the API’s words, on a row of its own', async () => {
