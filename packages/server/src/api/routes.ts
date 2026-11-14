@@ -7,10 +7,11 @@ import { roleRoutes } from './routes/roles.ts';
 import { secretRoutes } from './routes/secrets.ts';
 import { settingsRoutes } from './routes/settings.ts';
 import { signinRoutes } from './routes/signin.ts';
+import { tokenRoutes } from './routes/tokens.ts';
 import { unservedRoutes } from './routes/unserved.ts';
 
 /**
  * The API, as `METHOD /route`: every area's routes. An area adds its list here, and nothing else of the router.
  * Those not served yet come first, so that an area serving one replaces it.
  */
-export const routes = { ...unservedRoutes, ...meRoutes, ...placeRoutes, ...secretRoutes, ...keyRoutes, ...memberRoutes, ...roleRoutes, ...settingsRoutes, ...freezeRoutes, ...signinRoutes };
+export const routes = { ...unservedRoutes, ...meRoutes, ...placeRoutes, ...secretRoutes, ...keyRoutes, ...memberRoutes, ...roleRoutes, ...settingsRoutes, ...freezeRoutes, ...signinRoutes, ...tokenRoutes };

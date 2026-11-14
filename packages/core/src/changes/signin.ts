@@ -124,8 +124,9 @@ export type AccountUnlink = { op: 'account.unlink'; identity: string };
  * scope never makes one, but a personal token a handle; a workload's
  * session makes none (`workload_cannot_issue`).
  *
- * - `personal`: a person, on a session, for themselves; a label, a week at
- *   most, and a scope by path (`{ "market/dev": "viewer" }`), each role one
+ * - `personal`: a person, on a session, for themselves (`member`, the route's
+ *   `user:<email>`: anyone else's is `no_access`, as 0.14.7 refused a person
+ *   making another's); a label, a week at most, and a scope by path (`{ "market/dev": "viewer" }`), each role one
  *   that manages no access and that they hold all of at its place now, in
  *   a project's protected environments too (0.14.7's `personalScope`).
  * - `handle`: a person, on a session or a personal token of theirs, for
@@ -146,7 +147,7 @@ export type AccountUnlink = { op: 'account.unlink'; identity: string };
  * `invalid`; a service's token with nothing to reach, `no_grants`.
  */
 export type TokenCreate = { op: 'token.create'; credential: NewCredential; hint: string } & (
-  | { kind: 'personal'; scope: Record<string, string> }
+  | { kind: 'personal'; member: string; scope: Record<string, string> }
   | { kind: 'handle'; paths: string[] }
   | { kind: 'service'; member: string; scope: Record<string, string> | null }
 );

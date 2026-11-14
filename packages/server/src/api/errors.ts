@@ -131,6 +131,10 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   // Sign-in (signin.ts, routes/signin.ts): as 0.14 answered.
   unknown_identity: ['not_found', 'unknown sign-in account'],
   unknown_code: ['not_found', 'that code is unknown or has expired'],
+  // Tokens, handles and sessions (routes/tokens.ts): one answer for a credential that is not there, ended, or not the caller's to end.
+  unknown_credential: ['not_found', 'unknown credential'],
+  unknown_principal: ['not_found', 'no such service account'],
+  no_grants: ['bad_request', 'a credential reaches only what its account holds when it is made: give the account a grant first'],
 };
 
 /** Refusals about the instance, not what was asked for: their words are the same whatever the request named. */
