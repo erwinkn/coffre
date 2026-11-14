@@ -1,6 +1,7 @@
 import { allows, EVERYWHERE, isCredentialScope, isInstanceRole, isScope, scopeWithReads, type CredentialScope, type Holdings, type Permission, type Policy, type RoleDefinition } from '@coffre/core/access';
 import { addressWithin, checkConstraints, type BindingPolicy, type Constraints } from '@coffre/core/identity';
 import { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
+import type { Called } from '@coffre/core/vault';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { keep, part, readParts, type Denied, type Refusal, type Running, type Seen } from './change.ts';
@@ -336,9 +337,6 @@ export async function touch(vault: Pick<Running, 'db'> & { memory: Memory }, cre
 /** A caller's rows as one read found them, and when: what `caller` remembers, under the token's hash. */
 export type CallerRead = { at: number; seen: Seen<ReturnType<typeof callerParts>> };
 
-/** Who a request is, as the contract answers it (`Called` in @coffre/core/vault). */
-export type Who = { principal: string; credential: { id: string; kind: string; expiresAt: string }; holds: Asking['holds'] };
-
 /**
  * `caller` (docs/design/0.16.md, "Who a request is"): who a request's
  * credential is and all it holds, for the app to scope a page's queries
@@ -346,7 +344,7 @@ export type Who = { principal: string; credential: { id: string; kind: string; e
  * decided on again at each call. It opens and changes nothing, and logs
  * nothing: a use and a change read their caller themselves.
  */
-export async function caller(vault: Pick<Running, 'db' | 'keys' | 'now'> & { memory: Memory; workloads: Workloads }, shown: Shown & { token: Buffer }): Promise<Who | Refusal> {
+export async function caller(vault: Pick<Running, 'db' | 'keys' | 'now'> & { memory: Memory; workloads: Workloads }, shown: Shown & { token: Buffer }): Promise<Called | Refusal> {
   const { memory } = vault;
   const key = shown.token.toString('hex');
   const now = vault.now();

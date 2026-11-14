@@ -8,7 +8,9 @@ import { allows, runsInstance } from '@coffre/core/access';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
-import { caller, type Who } from '../src/caller.ts';
+import type { Called } from '@coffre/core/vault';
+
+import { caller } from '../src/caller.ts';
 import { memoryOf } from '../src/use.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
 import { amend, binding, credential, environment, grant, instance, principal, project, role, rows, session, tokenOf, user, write } from './world.ts';
@@ -43,15 +45,16 @@ async function world() {
     vault,
     ...rows('projects', market, billing),
     ...rows('environments', prod, staging, guarded, billed, gone),
-    ...rows('roles', role(false, 'viewer', ['secret.read'], []), role(false, 'unused', ['secret.write']), role(true, 'owner', ['secret.read', 'member.manage']), role(true, 'member', [])),
+    ...rows('roles', role(false, 'viewer', ['secret.read'], []), role(false, 'unused', ['secret.write']), role(true, 'owner', ['secret.read', 'grant.manage']), role(true, 'member', [])),
     ...rows('principals', principal(ada), principal(bo), principal(cy, { role: 'owner' }), principal(dee, { status: 'removed', generation: 1 })),
-    ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'viewer', { environment: staging }), grant(bo, 'viewer', { project: billing }, { expiresAt: new Date(vault.now() - 1) })),
+    ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'viewer', { environment: staging }), grant(bo, 'viewer', { project: billing }, { expiresAt: new Date(vault.now() - 1) }), grant(bo, 'unused', { environment: prod })),
     ...rows(
       'credentials',
       credential('ada', ada, used), credential('bo', bo, used), credential('cy', cy, used), credential('dee', dee, used),
       credential('cy-token', cy, { ...used, kind: 'personal', scope: capped }),
       credential('ada-handle', ada, { ...used, kind: 'handle', scope: capped }),
       credential('revoked', ada, { ...used, revokedAt: new Date(0) }),
+      credential('expired', ada, { ...used, expiresAt: new Date(vault.now()) }),
       credential('soon', ada, used),
     ),
   );
@@ -67,7 +70,7 @@ beforeEach(async () => {
 });
 
 const shown = (label: string, more: { proof?: string | null; ip?: string | null } = {}) => ({ token: tokenOf(label), proof: null, ip: '192.0.2.7', ...more });
-const who = async (label: string): Promise<Who> => {
+const who = async (label: string): Promise<Called> => {
   const answer = await caller(vault, shown(label));
   assert.ok(!('refused' in answer), `${label}: ${JSON.stringify(answer)}`);
   return answer;
@@ -85,7 +88,7 @@ test('who a request is, in one statement: its principal, its credential, and wha
   assert.deepEqual({ ...answer.credential, id: 'x' }, { id: 'x', kind: 'cli', expiresAt: far.toISOString() });
   assert.deepEqual([answer.holds.role, answer.holds.service, answer.holds.kind, answer.holds.credentialScope], ['member', false, 'person', null]);
   assert.deepEqual(answer.holds.grants, [{ projectId: w.market.id, environmentId: null, role: 'viewer' }]);
-  // Only the roles her rows name: her grants', and her own in the instance.
+  // Only the roles her rows name, her grants' and her own in the instance: not `unused`, which only Bo holds.
   assert.deepEqual([Object.keys(answer.holds.policy.roles), Object.keys(answer.holds.policy.instanceRoles)], [['viewer'], ['member']]);
   // What the app asks of the answer is what the vault asks of its rows.
   assert.equal(allows(answer.holds, 'secret.read', at(w.prod)), true);
@@ -95,8 +98,10 @@ test('who a request is, in one statement: its principal, its credential, and wha
 
   // A grant on an environment says its project, from the environment's row; one that lapsed is none.
   const bos = await who('bo');
-  assert.deepEqual(bos.holds.grants, [{ projectId: w.market.id, environmentId: w.staging.id, role: 'viewer' }]);
-  assert.deepEqual([allows(bos.holds, 'secret.read', at(w.staging)), allows(bos.holds, 'secret.read', at(w.prod))], [true, false]);
+  const byPlace = (a: { environmentId?: string | null }, b: { environmentId?: string | null }) => String(a.environmentId).localeCompare(String(b.environmentId));
+  assert.deepEqual([...bos.holds.grants].sort(byPlace), [{ projectId: w.market.id, environmentId: w.staging.id, role: 'viewer' }, { projectId: w.market.id, environmentId: w.prod.id, role: 'unused' }].sort(byPlace));
+  assert.deepEqual(Object.keys(bos.holds.policy.roles).sort(), ['unused', 'viewer']);
+  assert.deepEqual([allows(bos.holds, 'secret.read', at(w.staging)), allows(bos.holds, 'secret.read', at(w.prod)), allows(bos.holds, 'secret.write', at(w.prod))], [true, false, true]);
 });
 
 test('every environment the instance protects is in the answer, in a project the caller holds nothing in too; a deleted one protects nothing', async () => {
@@ -115,12 +120,12 @@ test('a token holds no more than its scope, and nothing of the instance: an Owne
   const { holds, credential: on } = await who('cy-token');
   assert.equal(on.kind, 'personal');
   assert.deepEqual(holds.credentialScope, [{ projectId: w.market.id, environmentId: w.prod.id, role: 'viewer' }]);
-  assert.deepEqual([allows(holds, 'secret.read', at(w.prod)), allows(holds, 'secret.read', at(w.staging)), allows(holds, 'member.manage', { projectId: w.market.id })], [true, false, false]);
+  assert.deepEqual([allows(holds, 'secret.read', at(w.prod)), allows(holds, 'secret.read', at(w.staging)), allows(holds, 'grant.manage', { projectId: w.market.id })], [true, false, false]);
   assert.equal(runsInstance(holds), false);
 });
 
 test('one answer for a token that is unknown, revoked, expired, a removed member\'s, or a handle; none is remembered', async () => {
-  for (const label of ['nobody', 'revoked', 'dee', 'ada-handle']) assert.equal(await refused(label), 'unauthenticated', label);
+  for (const label of ['nobody', 'revoked', 'expired', 'dee', 'ada-handle']) assert.equal(await refused(label), 'unauthenticated', label);
   assert.equal(vault.memory.callers.size, 0);
   // Each asked again reads again: what has changed since is what it is given.
   statements = 0;

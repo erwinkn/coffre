@@ -219,6 +219,7 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
  */
 export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'keys'>, read: P): Promise<{ seen: Seen<P>; named: Map<object, string>; tokens: string[] }> {
   const parts = Object.entries(read);
+  if (parts.length === 0) throw new Error('a read names at least one part');
   // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts).
   const found = await rowsOf<{ part: string; row: Wire }>(
     vault.db,
@@ -242,7 +243,6 @@ export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'ke
 /** A change's read and its decision. */
 export async function prepare<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<Prepared<A> | (Refusal & { said?: Denied | null })> {
   const parts = Object.entries(operation.read);
-  if (parts.length === 0) throw new Error('a change reads at least its caller');
   const { seen, named: read, tokens } = await readParts(vault, operation.read);
   // After the read: the entry's date is the decision's, and the write is sent next.
   const at = vault.now();

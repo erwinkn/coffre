@@ -87,7 +87,10 @@ test('a use that is not what the contract says is a fault, before any read', asy
 test('who a request is crosses as JSON: what it holds, as the app decides on it, and a refusal as an answer', async () => {
   const answer = await vault.caller({ token: tokenOf('ada-cli').toString('hex'), proof: null, request: 'req-1', ip: '192.0.2.7' });
   assert.ok(!('refused' in answer), JSON.stringify(answer));
-  assert.deepEqual(JSON.parse(JSON.stringify(answer)), answer, 'nothing in it that JSON does not carry');
+  // With no transport between, the engine's own answer is what JSON carries of it: no Date, no undefined, no class.
+  const direct = await openVault(world.db, prepared, { wake: world.wake, now: world.now }).caller({ token: tokenOf('ada-cli').toString('hex'), proof: null, request: 'req-1', ip: '192.0.2.7' });
+  assert.deepEqual(direct, JSON.parse(JSON.stringify(direct)));
+  assert.deepEqual(direct, answer);
   assert.equal(answer.principal, ada);
   assert.equal(answer.credential.expiresAt, '2027-01-01T00:00:00.000Z');
   const [held] = answer.holds.grants;

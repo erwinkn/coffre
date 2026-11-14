@@ -107,8 +107,10 @@ export type Used = {
  * Who a request is: its principal, `user:<email>` or `token:<name>`, the
  * credential it came in on, and what it holds, as `allows` in
  * `@coffre/core/access` decides on it: its role in the instance and that
- * role's scope, its live grants, a token's own scope, each role's
- * definition, and every environment the instance protects.
+ * role's scope, its live grants, a token's own scope, the definitions of
+ * the roles it holds and of no other (a role absent from `policy` is one
+ * the caller does not hold, not one that grants nothing to anyone), and
+ * every environment the instance protects.
  */
 export type Called = {
   principal: string;
