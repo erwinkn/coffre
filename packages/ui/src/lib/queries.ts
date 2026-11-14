@@ -321,7 +321,7 @@ export const queries = {
   roles: (client: CoffreClient) =>
     queryOptions({ queryKey: keys.roles, queryFn: () => uiResult(() => client.roles.list()) }),
 
-  /** A page of the log, as filtered: always read fresh. */
+  /** A page of the log, as filtered, its entries proven against the head it names: always read fresh. */
   auditEntries: (client: CoffreClient, search: AuditSearch) =>
     queryOptions({
       queryKey: [...keys.audit, 'entries', search],
@@ -338,16 +338,6 @@ export const queries = {
         ),
     }),
 
-  /**
-   * Whether the log holds: verified with each visit, and rendered with the
-   * page, the loader's read to carry to the browser: it is not asked again on
-   * mount, and not for a filter change or a hover, which `FRESH_MS` covers.
-   * It reads what was written since the newest checkpoint, so it takes as
-   * long as five minutes of the log, however long the log. It never rejects:
-   * a check that could not run is its verdict (`unknown`).
-   */
-  auditChain: (client: CoffreClient) =>
-    queryOptions({ queryKey: [...keys.audit, 'chain'], refetchOnMount: false, queryFn: () => verifyChain(client) }),
   /** What deleting `market` or `market/prod` would take, asked afresh each time it is shown. */
   deletion: (client: CoffreClient, path: string) =>
     queryOptions({
@@ -363,76 +353,6 @@ export const queries = {
         }),
     }),
 };
-
-/**
- * Whether the log holds, or why that is not known. Verifying is for those
- * who read the whole log (an Auditor, Admin or Owner whose scope narrows
- * nothing): anyone else reads their projects' part of it, and a part cannot be
- * checked as a chain, so for them it is a fact about the page, not a fault.
- */
-async function verifyChain(client: CoffreClient) {
-  try {
-    return chainResult(await client.audit.verify(), false);
-  } catch (error) {
-    return chainUnknown(error);
-  }
-}
-
-/**
- * A verdict as the page shows it: `whole` when it comes from the walk
- * from the first entry, which someone asked for, not from the newest
- * checkpoint's.
- */
-export function chainResult(result: Awaited<ReturnType<CoffreClient['audit']['verify']>>, whole: boolean) {
-  return result.ok
-    ? {
-        integrity: 'intact' as const,
-        whole,
-        through: result.through,
-        entries: result.entries,
-        // A server older than 0.10.1 checked from the first entry, and reached the head.
-        from: result.from ?? 0,
-        remaining: result.remaining ?? 0,
-        checkpoint: result.checkpoint,
-        pending: result.pending ?? 0,
-      }
-    : {
-        integrity: 'broken' as const,
-        through: result.through,
-        failedAtSeq: result.failedAtSeq,
-        author: result.author,
-        reason: result.reason,
-      };
-}
-
-/**
- * What the page shows, of the check from the newest checkpoint (`quick`)
- * and the walk from the first entry, once someone ran it (`whole`). A break
- * the walk found stands; otherwise the newer check says how the log is now,
- * broken, partly checked or not checked at all; and only while it found the
- * log whole too does the walk's verdict, which read further back, stand
- * over it.
- *
- *   whole broken                                  → whole
- *   whole intact, quick intact with 0 remaining   → whole
- *   whole intact, quick anything else             → quick
- */
-export function shownChain(quick: ChainResult, whole: ChainResult | null): ChainResult {
-  if (whole === null || whole.integrity === 'broken') return whole ?? quick;
-  return quick.integrity === 'intact' && quick.remaining === 0 && whole.integrity === 'intact' ? whole : quick;
-}
-
-/** Why the log's verdict is not known: closed to the caller, or no answer. */
-export function chainUnknown(error: unknown) {
-  const status = statusOf(error);
-  if (status === 403) return { integrity: 'owners-only' as const };
-  return {
-    integrity: 'unknown' as const,
-    problem: status === undefined ? 'the request never got an answer' : `the request failed with HTTP ${status}`,
-  };
-}
-
-export type ChainResult = Awaited<ReturnType<typeof verifyChain>>;
 
 /**
  * Who is looking, how this instance signs people in, and the projects they
@@ -549,17 +469,11 @@ export async function loadEnvironment(queryClient: QueryClient, client: CoffreCl
 }
 
 /**
- * What the audit page reads: a page of the log and the verification from
- * the newest checkpoint, asked together and rendered together, so the badge
- * arrives with the page. The verification never fails the load: a check that
- * could not run is its verdict.
+ * What the audit page reads: a page of the log, each entry with its proof
+ * against the head the vault signed, which the same answer carries.
  */
 export async function loadAudit(queryClient: QueryClient, client: CoffreClient, search: AuditSearch) {
-  const [entries] = await Promise.all([
-    queryClient.fetchQuery(queries.auditEntries(client, search)),
-    queryClient.fetchQuery(queries.auditChain(client)),
-  ]);
-  return entries;
+  return queryClient.fetchQuery(queries.auditEntries(client, search));
 }
 
 /** The directory pages' read: the directory, for owners. */

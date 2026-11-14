@@ -184,7 +184,8 @@ proven and only those past it not (it waits for a head that numbers an
 entry on the page: a batch signed between the head's read and the log's can
 leave the whole page past it), and `audit page proofs` that the page is sent
 with them rendered, each row's proof in `data-proof`, at least one proven
-and none failed, which waits for the page's port. `coffre verify
+and none failed (it asks again while every row is past the head, for the
+same race). `coffre verify
 --full` reads the log, and conformance does not hold either to a tampered
 log yet.
 
