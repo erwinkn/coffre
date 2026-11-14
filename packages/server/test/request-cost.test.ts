@@ -12,7 +12,7 @@
 // What the vault runs for each call is held by its own tests
 // (packages/vault/test/caller.test.ts, use.test.ts, change.test.ts).
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { after, before, test } from 'node:test';
 
 import * as hegel from '@hegeldev/hegel';
@@ -62,7 +62,9 @@ const transport: WorkloadTransport = {
 };
 // Admission wide enough for every round's exchange: what is counted here is a request's cost, not its limit.
 const workloads = { limits: processLimits({ perSource: 100_000, total: 100_000 }) };
-const app = await openApp({ auth: signin({ providers: [acme], workloads }), transport, workloads: {} });
+// And for MCP's OAuth endpoints, which anyone may call.
+const mcp = { limits: processLimits({ perSource: 100_000, perConnection: 100_000, total: 100_000 }) };
+const app = await openApp({ auth: signin({ providers: [acme], workloads, mcp }), transport, workloads: {} });
 const { world } = app;
 
 const [ada, bo, cy, dee, eve] = [user('ada'), user('bo'), user('cy'), user('dee'), user('eve')];
@@ -143,6 +145,15 @@ let personal = '';
 let serviceToken = '';
 let handle = '';
 let bound = '';
+/** The round's MCP client, as it registered, its PKCE verifier, and what it holds. */
+let oauth = { client: '', verifier: '', code: '', access: '', refresh: '', connection: '' };
+const MCP_REDIRECT = 'http://127.0.0.1/callback';
+const consent = () => {
+  const challenge = createHash('sha256').update(oauth.verifier).digest('base64url');
+  return { client_id: oauth.client, redirect_uri: MCP_REDIRECT, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', state: 's', scope: 'read' };
+};
+const oauthForm = (path: string, fields: Record<string, string>) =>
+  app.request(path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields).toString() });
 /** The key a binding's re-keying carries, a new one each round. */
 let cluster = generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const b64 = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -269,6 +280,46 @@ const requests: Record<string, Entry> = {
   // The accounts the round's sign-in bound and linked, found as the test's owner, which no request's count sees.
   'DELETE /identities/:id': { request: () => unlink(`acme-eve-${round}`), calls: ['change'], statements: 0 },
   'DELETE /identities/:id, the linked one': { request: () => unlink(`acme-eve-work-${round}`), calls: ['change'], statements: 0 },
+
+  // MCP's OAuth: the metadata asks nothing; the endpoints a client calls are one change each, and no statement. The consent
+  // page reads its request with `caller` and one statement, a registration's row and the person's connections of it; its
+  // Approve asks `caller`, reads the registration again, then makes the connection. Connected apps lists in one statement.
+  'GET /.well-known/oauth-authorization-server': { request: () => app.request('/.well-known/oauth-authorization-server'), calls: [], statements: 0 },
+  'POST /api/oauth/register': {
+    request: () => take<{ client_id: string }>(app.request('/api/oauth/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: `Zed ${round}`, redirect_uris: [MCP_REDIRECT] }) }), (body) => {
+      oauth = { client: body.client_id, verifier: randomBytes(32).toString('base64url'), code: '', access: '', refresh: '', connection: '' };
+    }),
+    calls: ['change'], statements: 0,
+  },
+  'GET /oauth/authorizations': { request: () => app.request(`/api/oauth/authorizations?${new URLSearchParams(consent())}`, { headers: asCy }), calls: ['caller'], statements: 1, fixed: true },
+  'POST /oauth/authorizations': {
+    request: () => take<{ redirect: string }>(app.request('/api/oauth/authorizations', { method: 'POST', headers: asCy, body: JSON.stringify({ request: consent(), approve: true, scopes: ['read'] }) }), (body) => (oauth.code = new URL(body.redirect).searchParams.get('code')!)),
+    calls: ['caller', 'change'], statements: 1,
+  },
+  'POST /api/oauth/token': {
+    request: () => take<{ access_token: string; refresh_token: string }>(oauthForm('/api/oauth/token', { grant_type: 'authorization_code', code: oauth.code, code_verifier: oauth.verifier, redirect_uri: MCP_REDIRECT, client_id: oauth.client }), (body) => {
+      oauth.access = body.access_token;
+      oauth.refresh = body.refresh_token;
+    }),
+    calls: ['change'], statements: 0,
+  },
+  'POST /api/oauth/token, a refresh': {
+    request: () => take<{ refresh_token: string }>(oauthForm('/api/oauth/token', { grant_type: 'refresh_token', refresh_token: oauth.refresh, client_id: oauth.client }), (body) => (oauth.refresh = body.refresh_token)),
+    calls: ['change'], statements: 0,
+  },
+  'GET /apps': { request: () => take<{ apps: { id: string }[] }>(app.request('/api/apps', { headers: asCy }), (body) => (oauth.connection = body.apps[0]!.id)), calls: ['caller'], statements: 1, fixed: true },
+  'POST /api/oauth/revoke': { request: () => oauthForm('/api/oauth/revoke', { token: oauth.access, client_id: oauth.client }), calls: ['change'], statements: 0 },
+  // The round's connection ended by its client just now: its person's Disconnect needs another, made as above.
+  'POST /oauth/authorizations, again': {
+    request: () => take<{ redirect: string }>(app.request('/api/oauth/authorizations', { method: 'POST', headers: asCy, body: JSON.stringify({ request: consent(), approve: true, scopes: ['read'] }) }), (body) => (oauth.code = new URL(body.redirect).searchParams.get('code')!)),
+    calls: ['caller', 'change'], statements: 1,
+  },
+  'POST /api/oauth/token, again': {
+    request: () => oauthForm('/api/oauth/token', { grant_type: 'authorization_code', code: oauth.code, code_verifier: oauth.verifier, redirect_uri: MCP_REDIRECT, client_id: oauth.client }),
+    calls: ['change'], statements: 0,
+  },
+  'GET /apps, again': { request: () => take<{ apps: { id: string }[] }>(app.request('/api/apps', { headers: asCy }), (body) => (oauth.connection = body.apps[0]!.id)), calls: ['caller'], statements: 1, fixed: true },
+  'DELETE /apps/:id': { request: () => app.request(`/api/apps/${oauth.connection}`, { method: 'DELETE', headers: asCy }), calls: ['change'], statements: 0 },
 
   // Every change: one call to the vault, `change`, and no statement.
   'PATCH /secrets/:project/:environment': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy', { KEY: `fake-${round}` }), calls: ['change'], statements: 0 },

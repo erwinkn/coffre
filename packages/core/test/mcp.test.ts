@@ -74,6 +74,9 @@ test("a client's document names itself, a public client, and redirects on its ow
   for (const document of refused) assert.throws(() => clientFromDocument(id, document), ClientInvalid, JSON.stringify(document));
   assert.equal(clientName('  Cla‮ude\u0007 ', 'host'), 'Claude', 'no control or bidirectional characters');
   assert.equal(clientName(undefined, 'vscode.dev'), 'vscode.dev');
+  // Cut to 100, then trimmed, and never through a character: the name the vault keeps is the name as shown.
+  assert.equal(clientName(`${'a'.repeat(99)} b`, 'host'), 'a'.repeat(99));
+  assert.equal(clientName(`${'a'.repeat(99)}😀`, 'host'), 'a'.repeat(99));
 });
 
 test('a registration keeps what coffre accepts and drops the rest, unless nothing is left', () => {

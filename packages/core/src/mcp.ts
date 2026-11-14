@@ -235,7 +235,8 @@ export function registrationRedirects(value: unknown): { kept: string[]; dropped
 export function clientName(value: unknown, fallback: string): string {
   // Control and bidirectional characters could make one name look like another.
   const name = typeof value === 'string' ? value.replace(/[\p{Cc}\p{Cf}]/gu, '').trim() : '';
-  return name === '' ? fallback : name.slice(0, MAX_NAME);
+  // Cut on a whole character, and trimmed again: what the vault keeps is the name as shown (`named` in its ops/mcp.ts).
+  return name === '' ? fallback : name.slice(0, MAX_NAME).replace(/[\uD800-\uDBFF]$/, '').trim();
 }
 
 function redirectList(value: unknown): string[] {

@@ -5,7 +5,7 @@ import type { Answers, Asked, McpChanges, McpClient, Presented } from '@coffre/c
 import { credentials, oauthClients, principals } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
-import { callerParts, mcpClientOf, refusedTo } from '../caller.ts';
+import { callerParts, ID, mcpClientOf, refusedTo } from '../caller.ts';
 import { amended, part, put, WRITE_MS, type Operation, type Parts, type Seen, type Unsealed, type Write } from '../change.ts';
 import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
@@ -303,6 +303,58 @@ function mcpToken(input: Asked<'mcp.token'>): Operation<Parts, Answers['mcp.toke
 }
 
 /**
+ * A client gives back a token it holds (`McpRevoke`, RFC 7009): its
+ * connection's row written ended, one write, and every access token under
+ * it ends with it, by that row alone. The token is the connection's refresh
+ * token, its own token once its code is redeemed, or one of its access
+ * tokens, found with the connection its `ancestors` names. Kept, as every
+ * connection's end is.
+ *
+ * Its decision rests on the row the token finds and its connection's:
+ * either written behind the vault refuses it, `tampered`.
+ */
+function mcpRevoke(input: Asked<'mcp.revoke'>): Operation<Parts, Answers['mcp.revoke']> {
+  const from = traced(input);
+  const { token, client } = input;
+  if (!text(token) || !HASH.test(token) || !(client === null || (text(client) && client !== ''))) {
+    throw new TypeError("a client gives back a token by its SHA-256, with its client's id or none");
+  }
+  const hash = sql`decode(${token}, 'hex')`;
+  const read = {
+    // By the unique index on its hash; and for an access token, the connection above it, by its id.
+    presented: part(credentials, sql`${credentials.tokenHash} = ${hash}`),
+    connection: part(credentials, sql`${credentials.id} = (SELECT (c.ancestors::jsonb ->> 0)::uuid FROM credentials c WHERE c.token_hash = ${hash} AND c.kind = 'mcp' AND c.ancestors ~ '^[[]"${ID}"[]]$')`),
+    instance: instancePart(),
+  };
+  return {
+    read,
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+      const before = adopted(seen.instance, unsealed.instance);
+      if (before !== undefined) return before;
+      if (unsealed.presented + unsealed.connection > 0) return { refused: 'tampered' };
+      const live = (row: Row<typeof credentials>) => row.kind === 'mcp' && row.revokedAt === null && row.expiresAt.getTime() > at;
+      const [shown] = seen.presented;
+      // Its refresh token, once its code is redeemed; or an access token that stands, of the connection's person.
+      const row = shown === undefined || !live(shown) ? undefined
+        : shown.ancestors === null ? shown
+          : seen.connection.find((above) => isConnection(above) && above.principal === shown.principal);
+      const stored = row && mcpClientOf(row.client);
+      if (row === undefined || stored === undefined || !live(row) || row.challenge !== null || (client !== null && client !== stored.id)) return { refused: 'unknown_grant' };
+      return {
+        writes: [amended(credentials, row, { revokedAt: new Date(at), revokedBy: row.principal })],
+        entry: {
+          kept: true,
+          action: 'mcp.disconnect', actor: row.principal, credential: shown!.id, request: from.request, ip: from.ip,
+          objects: [`principal:${row.principal}`, `credential:${row.id}`, ...(shown!.id === row.id ? [] : [`credential:${shown!.id}`])],
+          detail: { connection: row.id, ...logged(stored), reason: 'revoked' },
+        },
+        answer: { connection: row.id },
+      };
+    },
+  };
+}
+
+/**
  * Anyone registers a client (`OauthRegister`, RFC 7591): one row written.
  * What bounds it: the app's limiter, per source and in total, before it
  * asks; then the table's ceiling, `MAX_CLIENTS` rows, which the read finds
@@ -355,5 +407,6 @@ function oauthRegister(input: Asked<'oauth.register'>): Operation<Parts, Answers
 export const mcpOperations: Operations<McpChanges> = {
   'mcp.connect': mcpConnect,
   'mcp.token': mcpToken,
+  'mcp.revoke': mcpRevoke,
   'oauth.register': oauthRegister,
 };

@@ -21,8 +21,13 @@ import { createHash, randomBytes } from 'node:crypto';
  */
 export type CredentialKind = 'browser' | 'cli' | 'service' | 'personal' | 'handle' | 'workload';
 
-/** What a token's prefix says it is: a credential, or an enrollment code. */
-export type TokenKind = CredentialKind | 'enrollment';
+/**
+ * What a token's prefix says it is: a credential, an enrollment code, or
+ * an MCP client's tokens: an access token, good at `/mcp` alone, and the
+ * refresh token it gets the next one with, good at the token endpoint alone
+ * (docs/design/0.16.md, "MCP connections").
+ */
+export type TokenKind = CredentialKind | 'enrollment' | 'mcp' | 'mcp-refresh';
 
 const PREFIX: Record<TokenKind, string> = {
   browser: 'coffre_web_',
@@ -32,9 +37,11 @@ const PREFIX: Record<TokenKind, string> = {
   handle: 'coffre_use_',
   workload: 'coffre_wl_',
   enrollment: 'coffre_enr_',
+  mcp: 'coffre_mcp_',
+  'mcp-refresh': 'coffre_mcr_',
 };
 
-const TOKEN = /^coffre_(web|cli|svc|pat|use|wl|enr)_[A-Za-z0-9_-]{43}$/;
+const TOKEN = /^coffre_(web|cli|svc|pat|use|wl|enr|mcp|mcr)_[A-Za-z0-9_-]{43}$/;
 
 export function generateToken(kind: TokenKind): string {
   return PREFIX[kind] + randomBytes(32).toString('base64url');

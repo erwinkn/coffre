@@ -45,7 +45,7 @@ import { setAccess, type AccessChange, type AccessValue } from './access.ts';
 import { canAnywhere, placeOf } from './caller.ts';
 import { type ApiContext, audited, denied, Refusal, requireInstance, through, vaultCredential, withRefusals } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
-import type { ConnectedApp } from '../mcp/service.ts';
+import type { ConnectedApp } from '../db/queries/mcp.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
 import { referencesBy, type ReferenceView } from './references.ts';
 import { tokenRows, type TokenRow } from './signin.ts';

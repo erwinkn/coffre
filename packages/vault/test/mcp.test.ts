@@ -96,6 +96,8 @@ const byCode = (code: string, access: string, refresh: string, more: { client?: 
 /** The client refreshes `held` for `access` and `next`. */
 const byRefresh = (held: string, access: string, next: string, scopes: McpScope[] | null = null, client = CLAUDE.id): Asked<'mcp.token'> =>
   ({ ...from, op: 'mcp.token', client, tokens: { access: hex(access), refresh: hex(next) }, grant: 'refresh_token', refresh: hex(held), scopes });
+/** The client gives back `token`, naming itself `client` or not. */
+const revoke = (token: string, client: string | null = CLAUDE.id): Asked<'mcp.revoke'> => ({ ...from, op: 'mcp.revoke', token: hex(token), client });
 const register = (name = 'Zed', redirectUris = ['http://127.0.0.1/callback']): Asked<'oauth.register'> => ({ ...from, ip: '198.51.100.9', op: 'oauth.register', name, redirectUris });
 
 /** Who a token is, as the vault answers any request that shows it. */
@@ -114,7 +116,7 @@ async function checked() {
   return (await signer.take()).map((finding) => finding.found);
 }
 /** A change's answer, which the test needs made. */
-async function made<O extends 'mcp.connect' | 'mcp.token' | 'oauth.register' | 'credential.end'>(input: Asked<O>) {
+async function made<O extends 'mcp.connect' | 'mcp.token' | 'mcp.revoke' | 'oauth.register' | 'credential.end'>(input: Asked<O>) {
   const done = await vault.change(input);
   assert.ok(!('refused' in done), JSON.stringify(done));
   return done.answer;
@@ -527,4 +529,50 @@ test('a step-up leaves an earlier connection that lapsed as it was', async () =>
   assert.equal((await stored(lapsed.connection)).revoked_at, null);
   const [, stepUp] = (await entries()).filter((one) => one.action === 'mcp.token');
   assert.deepEqual([stepUp!.kept, stepUp!.detail.superseded ?? null], [false, null]);
+});
+
+test('a client gives back its refresh token or an access token: the connection ends, and every access token under it; anything else ends nothing', async () => {
+  const { connection } = await made(connect('ada-web', 'code-1', ['read', 'reveal']));
+  // A code waiting is no token to give back, nor another client's, nor one the vault never made.
+  for (const [token, client] of [['code-1', CLAUDE.id], ['nobody', null]] as const) assert.deepEqual(await vault.change(revoke(token, client)), { refused: 'unknown_grant' });
+  await redeemed(byCode('code-1', 'acc-1', 'ref-1'));
+  const second = await redeemed(byRefresh('ref-1', 'acc-2', 'ref-2'));
+  for (const [token, client] of [['ref-2', OTHER.id], ['acc-2', OTHER.id], ['ref-1', null], ['ada-cli', null]] as const) {
+    assert.deepEqual(await vault.change(revoke(token, client)), { refused: 'unknown_grant' }, token);
+  }
+  assert.equal(await who('acc-2'), `${ada} mcp`);
+  // An access token, its client named or not: its connection ends.
+  assert.deepEqual(await made(revoke('acc-2', null)), { connection });
+  for (const token of ['acc-1', 'acc-2']) assert.equal(await who(token), 'unauthenticated');
+  assert.equal((await stored(second.credential)).revoked_at, null, 'its access tokens end with it, with no write of their own');
+  assert.deepEqual(await vault.change(byRefresh('ref-2', 'acc-3', 'ref-3')), { refused: 'unknown_grant' });
+  assert.deepEqual(await vault.change(revoke('ref-2')), { refused: 'unknown_grant' }, 'ended once');
+  assert.deepEqual(await vault.change(revoke('acc-1')), { refused: 'unknown_grant' }, 'by any token under it');
+  const ended = await stored(connection);
+  assert.deepEqual([ended.revoked_by, ended.revoked_at], [ada, world.now()]);
+  const [entry] = (await entries()).filter((one) => one.action === 'mcp.disconnect');
+  assert.deepEqual([entry!.actor, entry!.credential, entry!.kept, entry!.detail], [ada, second.credential, true, { connection, registration: 'cimd', client: null, host: 'claude.ai', reason: 'revoked' }]);
+
+  // Its refresh token: the connection itself.
+  const other = await made(connect('ada-web', 'code-2'));
+  await redeemed(byCode('code-2', 'acc-4', 'ref-4'));
+  assert.deepEqual(await made(revoke('ref-4')), { connection: other.connection });
+  assert.equal(await who('acc-4'), 'unauthenticated');
+  // An access token that lapsed gives back nothing; its connection stands.
+  const third = await made(connect('ada-web', 'code-3'));
+  await redeemed(byCode('code-3', 'acc-5', 'ref-5'));
+  world.tick(HOUR + 1);
+  assert.deepEqual(await vault.change(revoke('acc-5')), { refused: 'unknown_grant' });
+  assert.equal((await stored(third.connection)).revoked_at, null);
+  assert.deepEqual(await checked(), []);
+});
+
+test('a token given back whose row, or whose connection\'s, was written behind the vault ends nothing', async () => {
+  const { connection } = await made(connect('ada-web', 'code-1'));
+  const tokens = await redeemed(byCode('code-1', 'acc-1', 'ref-1'));
+  await world.owner.execute(sql`UPDATE credentials SET expires_at = expires_at + interval '1 day' WHERE id = ${tokens.credential}::uuid`);
+  assert.deepEqual(await vault.change(revoke('acc-1')), { refused: 'tampered' });
+  await world.owner.execute(sql`UPDATE credentials SET label = 'Claudia' WHERE id = ${connection}::uuid`);
+  assert.deepEqual(await vault.change(revoke('ref-1')), { refused: 'tampered' });
+  assert.equal((await stored(connection)).revoked_at, null);
 });
