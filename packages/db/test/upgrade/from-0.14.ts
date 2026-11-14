@@ -124,6 +124,8 @@ const CY_SERVICE = 'token:cy@acme.example';
 const BINDING_SERVICE = `token:binding:${id(301)}`;
 const COFFRE = 'token:coffre';
 const SIGNIN_SERVICE = 'token:system:signin';
+// And one named as Ada's principal, which must not take the revocation her `token.unbind` gives binding 302.
+const ADA_SERVICE = `token:${ADA}`;
 // Projects 1 and 2; environments 11 (market/prod), 12 (market/dev), 21 (billing/prod); secrets 101 and 102 in market/prod, 103 to 110 in billing/prod.
 const SEED = `
   INSERT INTO vault_members (principal, status, owner, role, scope, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES
@@ -136,7 +138,8 @@ const SEED = `
     ('${CY_SERVICE}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 7, ${h(9)}),
     ('${BINDING_SERVICE}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 8, ${h(9)}),
     ('${COFFRE}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 9, ${h(9)}),
-    ('${SIGNIN_SERVICE}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 10, ${h(9)});
+    ('${SIGNIN_SERVICE}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 10, ${h(9)}),
+    ('${ADA_SERVICE}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 11, ${h(9)});
   INSERT INTO projects (id, slug, name) VALUES (${u(1)}, 'market', 'Market'), (${u(2)}, 'billing', 'Billing');
   INSERT INTO environments (id, project_id, slug, name) VALUES (${u(11)}, ${u(1)}, 'prod', 'Production'), (${u(12)}, ${u(1)}, 'dev', 'Development'), (${u(21)}, ${u(2)}, 'prod', 'Production');
   INSERT INTO secrets (id, project_id, environment_id, key, current_version) VALUES
@@ -296,7 +299,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
 
   // Online, it changes nothing: the migration is one transaction.
   await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /still online.*Set coffre_runtime, coffre_vault_runtime NOLOGIN/.test(String((error as { cause?: unknown }).cause ?? error)));
-  assert.equal(await count('vault_members'), 10);
+  assert.equal(await count('vault_members'), 11);
 
   // A session a runtime login still holds refuses it too.
   const held = await session(urlOf(UPGRADED, { name: 'coffre_runtime', password: 'local-runtime-only' }));
@@ -319,7 +322,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
   await db.query(`INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES ${entry(70, 'vault', 'system:vault', 'vault.tampered', { decision: 'deny', code: 'mac', subject: BO })}`);
   await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /that report stands/.test(String((error as { cause?: unknown }).cause ?? error)) && String((error as { cause?: unknown }).cause).includes(BO));
   await db.query(`INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES ${entry(71, 'vault', ADA, 'member.remove', { subject: BO })}`);
-  assert.equal(await count('vault_members'), 10);
+  assert.equal(await count('vault_members'), 11);
   const archived = await count('audit_log');
 
   await migrateDatabase(urlOf(UPGRADED));
@@ -337,6 +340,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
         { id: COFFRE, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
         { id: CY_SERVICE, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
         { id: SIGNIN_SERVICE, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
+        { id: ADA_SERVICE, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
         { id: ADA, status: 'active', role: 'admin', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
         { id: BO, status: 'removed', role: 'member', generation: 1, status_changed_at: T0 + 5 * day + 123, frozen: false, mac: 0 },
         { id: CY, status: 'active', role: 'member', generation: 2, status_changed_at: T0 + 9, frozen: false, mac: 0 },
@@ -422,7 +426,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
       { subject: '1003', created_by: CY, revoked_by: 'system:signin' },
       { subject: '1004', created_by: CY, revoked_by: null },
     ]);
-    // A binding's tombstone names its revoker as the log does, whole.
+    // A binding's tombstone names its revoker as the log does, whole, though a service is named as Ada's principal.
     assert.deepEqual(await rows(`SELECT id, created_by, revoked_by FROM bindings ORDER BY id`), [
       { id: id(301), created_by: ADA, revoked_by: null },
       { id: id(302), created_by: ADA, revoked_by: ADA },

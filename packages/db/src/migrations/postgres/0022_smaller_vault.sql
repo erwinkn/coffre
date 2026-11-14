@@ -459,15 +459,17 @@ DELETE FROM credentials WHERE expires_at < now() - interval '1 day';
 -- Who a row names, as 0.16 names a member. 0.14.7's app wrote the caller's bare id in every column of its own:
 -- `ada@acme.example` for a person, `ci-deploy` for a service account; its vault, and 0.16, write the principal,
 -- `user:ada@acme.example` or `token:ci-deploy`, which every reader of these columns compares with. Resolved by
--- membership alone, removed members included: `user:` and the lowercase id if that is a member, else `token:` and
--- the id if that is one, else the id as it is, which keeps a principal an older release wrote whole. A service
--- named exactly as a member's email is taken for the member: the member report then over-asks for the person and
--- under-asks for the service. A column's literals are no member and are never resolved: a service account named
+-- membership alone, removed members included: the id as it is if that is a member, which keeps a principal an
+-- older release or a binding's tombstone above wrote whole, though a service be named `user:ada@acme.example`;
+-- else `user:` and the lowercase id if that is one, else `token:` and the id if that is one, else the id as it is.
+-- A service named exactly as a member's email, or as a member's principal, is taken for the member: the member
+-- report then over-asks for the person and under-asks for the service. A column's literals are no member and are never resolved: a service account named
 -- `binding:<id>` must not turn a binding's credential into one that stands without it (`created_by`, which the
 -- vault reads to tell), and one named `coffre` must not claim the key rotation's revocations. Only rows that change
 -- are written. After the expired credentials go, and after a binding's tombstone set who revoked it.
 CREATE FUNCTION pg_temp.member_014(id text) RETURNS text LANGUAGE sql STABLE AS $$
   SELECT CASE
+    WHEN EXISTS (SELECT 1 FROM principals WHERE principals.id = member_014.id) THEN member_014.id
     WHEN EXISTS (SELECT 1 FROM principals WHERE principals.id = 'user:' || lower(member_014.id)) THEN 'user:' || lower(member_014.id)
     WHEN EXISTS (SELECT 1 FROM principals WHERE principals.id = 'token:' || member_014.id) THEN 'token:' || member_014.id
     ELSE member_014.id
