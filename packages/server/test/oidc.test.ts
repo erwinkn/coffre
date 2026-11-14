@@ -236,7 +236,7 @@ test("an unknown key's alert names the service in full, quoted as the shell read
   const logged = mock.method(console, 'error', () => {});
   const answer = await exchange(idToken({ iss: KUBE, sub: 'system:serviceaccount:ci:runner' }, { key: pair().privateKey, kid: 'rotated' }), odd);
   logged.mock.restore();
-  assert.deepEqual(refused(answer), [401, 'unauthenticated', 'unknown_signer']);
+  assert.deepEqual(refused(answer), [401, 'unauthenticated', 'unknown_key']);
   assert.match(alerts.at(-1)!.text, named);
   }
 });
@@ -254,6 +254,21 @@ test("an issuer whose keys cannot be fetched is the app's 503, with when to come
   assert.deepEqual([refused(answer), answer.retryAfter, calls], [[503, 'unavailable', 'issuer_unavailable'], '60', []]);
 });
 
+test("a binding removed ends the credentials it issued once the vault's memory of their caller lapses, and the next run is refused at once", async () => {
+  const ROOT = 'user:root@acme.example';
+  await write(world, ...rows('principals', principal(ROOT, { role: 'owner' })), ...rows('credentials', credential('root-cli', ROOT)));
+  const run = await exchange(idToken());
+  assert.equal(run.status, 200, JSON.stringify(run.body));
+  const me = async () => (await app.request('/api/me', { headers: { authorization: `Bearer ${run.body.token}` } })).status;
+  assert.equal(await me(), 200);
+  const removed = await app.request(`/api/members/${DEPLOY}/bindings/${main.id}`, { method: 'DELETE', headers: { authorization: 'Bearer root-cli' } });
+  assert.equal(removed.status, 200, await removed.text());
+  // The vault remembers who a credential is for its memory's length, 2 seconds (docs/design/0.16.md, D218): then it reads the binding gone.
+  world.memory.callers.clear();
+  assert.equal(await me(), 401);
+  assert.deepEqual(refused(await exchange(idToken())), [401, 'unauthenticated', 'no_match']);
+});
+
 test("a binding that carries its keys: the app fetches nothing, the vault verifies; an unknown key alerts once an hour, waited on 2 s at most, and logs once a minute", async () => {
   const logged = mock.method(console, 'error', () => {});
   const refusals = () => logged.mock.calls.filter((call) => (call.arguments[0] as { event?: string } | undefined)?.event === 'workload_exchange_refused').length;
@@ -267,7 +282,7 @@ test("a binding that carries its keys: the app fetches nothing, the vault verifi
   const started = performance.now();
   const [unknown] = await cost(() => exchange(kube(stranger.privateKey, 'rotated')));
   const waited = performance.now() - started;
-  assert.deepEqual(refused(unknown), [401, 'unauthenticated', 'unknown_signer']);
+  assert.deepEqual(refused(unknown), [401, 'unauthenticated', 'unknown_key']);
   assert.ok(waited >= 1_900 && waited < 4_000, `answered after ${Math.round(waited)} ms`);
   // The hook, still unanswered, is work the platform keeps the request alive for: on Workers, the response's end would cancel it.
   assert.equal((await settledOf(app.tracked.slice(before))).filter((settled) => !settled).length, 1);
@@ -277,7 +292,7 @@ test("a binding that carries its keys: the app fetches nothing, the vault verifi
   assert.deepEqual({ kind: alerts[0]!.kind, service: alerts[0]!.service, binding: alerts[0]!.binding }, { kind: 'unknown_key', service: DEPLOY, binding: carried.id });
   assert.match(alerts[0]!.text, /names key "rotated", not one uploaded for https:\/\/kubernetes\.acme\.example/);
   // Within the hour, once: the next is refused the same, and says nothing more.
-  assert.deepEqual(refused(await exchange(kube(stranger.privateKey, 'rotated'))), [401, 'unauthenticated', 'unknown_signer']);
+  assert.deepEqual(refused(await exchange(kube(stranger.privateKey, 'rotated'))), [401, 'unauthenticated', 'unknown_key']);
   assert.equal(alerts.length, 1);
   assert.equal(refusals(), 1);
   logged.mock.restore();

@@ -232,17 +232,21 @@ export async function keysUploaded(deployment: Deployment, admin: Person, canari
   return `${POD} trusts ${CLUSTER} by its uploaded keys: a pod's token taken by its account's UID; another UID, and a token living past the hour, refused; the RS256 key replaced away, its tokens refused and ES256's taken`;
 }
 
-/** Removing the binding ends the credentials it issued at once, and the next run gets none. */
+/**
+ * Removing the binding ends the credentials it issued within the vault's
+ * memory of who they are, 2 seconds (docs/design/0.16.md, D218), and the
+ * next run gets none at once.
+ */
 export async function runUnbound(deployment: Deployment, admin: Person, bindingId: string, credential: string): Promise<string> {
   const me = (token: string) => fetch(`${deployment.origin}/api/me`, { headers: { authorization: `Bearer ${token}` } }).then((response) => response.status);
   expect((await me(credential)) === 200, 'the credential did not work before its binding was removed');
   await admin.api.bindings.remove(RUNNER, bindingId);
-  expect((await me(credential)) === 401, 'the credential still worked once its binding was removed');
+  await until('the credential refused once its binding was removed', async () => (await me(credential)) === 401, 5);
   const next = await exchange(deployment, await mint(deployment));
   expect(next.status === 401 && next.reason === 'no_match', 'a run was let in once its binding was removed', shown(next));
   const { bindings } = await admin.api.bindings.list(RUNNER);
   expect(bindings.length === 0, 'the removed binding is still listed', bindings);
-  return 'its credential refused at once, and the next run refused as no binding matching';
+  return 'its credential refused within the vault\'s memory, and the next run refused as no binding matching';
 }
 
 /**

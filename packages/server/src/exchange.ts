@@ -112,6 +112,8 @@ const WORDS: Record<string, string> = {
   replayed: 'this token was exchanged already: ask your CI for a fresh one',
   unknown_signer: "the token is signed by a key the binding's keys lack: if its issuer rotated them, upload them again",
 };
+/** The vault's words a run is told in 0.14.7's: `unknown_key` is a secret's key in the vault's, a signing key's on the wire. */
+const SAID: Record<string, string> = { unknown_signer: 'unknown_key' };
 
 async function exchanged(request: Request, runtime: CoffreRuntime, workloads: WorkloadsConfig, sourceIp: string | null, track: (work: Promise<unknown>) => void): Promise<Response> {
   const body = exchangeBody.parse(await readLimitedJson(request, EXCHANGE_BODY_BYTES));
@@ -176,7 +178,7 @@ async function exchanged(request: Request, runtime: CoffreRuntime, workloads: Wo
     const differ = claims === null ? null : closest(taking.filter((binding) => binding.jwksUri === newest.jwksUri), claims);
     return refuse('no_match', differ === null || differ.length === 0 ? `no binding of ${shownMember(service)} trusts this token` : `no binding of ${shownMember(service)} trusts these claims: ${differ.join(', ')} differ`);
   }
-  if (Object.hasOwn(WORDS, reason)) return refuse(reason, WORDS[reason]!);
+  if (Object.hasOwn(WORDS, reason)) return refuse(SAID[reason] ?? reason, WORDS[reason]!);
   // A fault, `tampered` or `adopting`: answered as the API answers it.
   const error = refusal(reason);
   noteTampered(error, 'POST /api/auth/oidc', requestId);

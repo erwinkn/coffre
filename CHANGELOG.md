@@ -41,7 +41,9 @@
   exchange's `seq` and the issuer's claims), as 0.14.7's page did, read
   from the log alone, so it outlives the credential. A token out of its
   time is refused as `too_old`, where 0.14.7 also said `too_long` and
-  `not_yet_valid`, and its message now names all three cases.
+  `not_yet_valid`, and its message now names all three cases. A
+  binding removed ends the credentials its runs hold within the vault's
+  memory, 2 seconds, where 0.14.7 ended them at once.
 
 - **A key marked in place, as one change.** `coffre mark` (`{ "KEY": {
   "sensitivity" } }` alone in a write) is served again: the value is kept
