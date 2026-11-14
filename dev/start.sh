@@ -4,7 +4,9 @@
 # people in with its own page, the dev IdP standing in for GitHub and for an
 # OpenID Connect provider.
 #
-# A second stack can run beside the first, on its own ports and database:
+# A second stack can run beside the first, on its own ports, database and
+# Workers storage: each start drops the database it names and empties that
+# storage, so two stacks sharing either would reset each other.
 #
 #   COFFRE_DEV_PORT=3080 COFFRE_DEV_IDP_PORT=3081 COFFRE_DEV_DATABASE=coffre_two \
 #   COFFRE_STATE_DIR=/tmp/coffre-two pnpm dev
@@ -103,7 +105,6 @@ cleanup() {
     while IFS= read -r job_pid; do
         job_pids+=("$job_pid")
     done < <(jobs -p)
-    if [ -n "${reset_pid:-}" ]; then job_pids+=("$reset_pid"); fi
     if ((${#job_pids[@]} > 0)); then
         kill "${job_pids[@]}" 2>/dev/null || true
     fi
@@ -115,12 +116,9 @@ log 'starting Postgres'
 
 # Each run starts over: a fresh database, and fresh local storage for every
 # Worker, the vault's signer included, which keeps the log's head beside the
-# database. The seed then fills it through the API. The reset holds a lock on
-# the database's name until this stack stops, so no other stack resets it.
+# database. The seed then fills it through the API.
 log "starting $database over"
-exec 3< <(DATABASE_URL="$owner_url" exec node --conditions=coffre:source dev/reset.mjs)
-reset_pid=$!
-if ! read -r -u 3 _; then exit 1; fi
+DATABASE_URL="$owner_url" node --conditions=coffre:source dev/reset.mjs
 rm -rf "$state_dir/v3"
 
 log "applying migrations to $database"
