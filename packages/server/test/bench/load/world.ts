@@ -36,7 +36,9 @@ async function setup(): Promise<void> {
   await emptyDatabase(world.owner);
   const bench = project('bench');
   const prod = environment(bench, 'prod');
-  const secrets = KEYS.map((key) => value(world, secret(prod, key), `value of ${key}, ${'x'.repeat(40)}`));
+  // BENCH_KEYS widens bench/prod past the load's 100 keys, for plan-check.ts's widest ask.
+  const all = Array.from({ length: Math.max(KEYS.length, Number(process.env.BENCH_KEYS ?? 0)) }, (_, i) => `KEY_${i}`);
+  const secrets = all.map((key) => value(world, secret(prod, key), `value of ${key}, ${'x'.repeat(40)}`));
   await write(
     world,
     ...rows('projects', bench),

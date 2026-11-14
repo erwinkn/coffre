@@ -51,6 +51,8 @@ const { values } = parseArgs({
     // 0.14.7's credential proxy: its cacheSeconds (the bench build's PROXY_CACHE_SECONDS; its own default, 60, unless set).
     'proxy-cache': { type: 'string' },
     label: { type: 'string', default: '' },
+    // After each size's growth: plan-check.ts, <n> of each read, under auto_explain; its stats and the plans Postgres logged, in <dir>/plans.
+    plans: { type: 'string', default: '0' },
     // The generator's keep-alive pool (load.ts --connections): a request due while it is full is shed by the client.
     connections: { type: 'string', default: '256' },
     database: { type: 'string', default: 'coffre_bench' },
@@ -288,6 +290,23 @@ async function world(...args: string[]): Promise<void> {
   const code = await new Promise<number | null>((resolve) => child.on('exit', resolve));
   if (code !== 0) throw new Error(`world.ts ${args.join(' ')} exited ${code}`);
 }
+async function plans(size: number): Promise<void> {
+  const out = join(dir, 'plans');
+  mkdirSync(out, { recursive: true });
+  const settings = ["session_preload_libraries = 'auto_explain'", 'auto_explain.log_min_duration = 0', 'auto_explain.log_analyze = on', 'auto_explain.log_buffers = on'];
+  for (const setting of settings) await pg.unsafe(`ALTER DATABASE ${database} SET ${setting}`);
+  const since = new Date().toISOString();
+  const child = spawn(process.execPath, ['--conditions=coffre:source', join(here, 'plan-check.ts'), values.plans!], { env: worldEnv, stdio: ['ignore', 'pipe', 'inherit'] });
+  let text = '';
+  child.stdout.on('data', (chunk) => (text += chunk));
+  const code = await new Promise<number | null>((resolve) => child.on('exit', resolve));
+  for (const setting of ['session_preload_libraries', 'auto_explain.log_min_duration', 'auto_explain.log_analyze', 'auto_explain.log_buffers']) await pg.unsafe(`ALTER DATABASE ${database} RESET ${setting}`);
+  if (code !== 0) throw new Error(`plan-check.ts exited ${code}`);
+  writeFileSync(join(out, `log${size}.json`), text);
+  const { stderr } = await execFile('docker', ['logs', '--since', since, `${project}-postgres-1`], { maxBuffer: 1 << 28 });
+  writeFileSync(join(out, `log${size}.plans.txt`), stderr);
+  console.error(`plans at ${size}: ${text.length} bytes of stats, ${stderr.length} of plans`);
+}
 async function settle(): Promise<void> {
   const until = Date.now() + 120_000;
   for (let quiet = 0; quiet < 3; ) {
@@ -428,6 +447,7 @@ try {
   for (const size of list(values.sizes!)) {
     await world('grow', String(size));
     await settle();
+    if (Number(values.plans) > 0) await plans(size);
     for (const memory of memories) {
       if (memory !== booted) {
         await boot(memory);

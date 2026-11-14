@@ -40,8 +40,9 @@ for _ in $(seq 60); do
   sleep 1
 done
 (cd "$root" && node --conditions=coffre:source scripts/ensure-database.mjs "$database")
-(cd "$root" && docker compose exec -T postgres psql -U coffre_owner -d "$database" -qc 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements')
 (cd "$root" && DATABASE_URL="postgresql://coffre_owner:local-dev-only@127.0.0.1:$BENCH_PG_PORT/$database" node --conditions=coffre:source packages/db/src/migrate-main.ts)
+# After the migrations, which alter every relation of the schema they find, an extension's views too.
+(cd "$root" && docker compose exec -T postgres psql -U coffre_owner -d "$database" -qc 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements')
 
 cat > "$BENCH_DIR/pgbouncer/pgbouncer.ini" <<INI
 [databases]
