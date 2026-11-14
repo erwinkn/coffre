@@ -145,7 +145,7 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
       return scope.respond(request, (page) => page.coffre.route(request));
     },
     socket(path, init) {
-      return admitSocket(new Request(`${PUBLIC_URL}${path}`, init), runtime, '192.0.2.7');
+      return admitSocket(new Request(`${PUBLIC_URL}${path}`, init), runtime, '192.0.2.7', { track: (work) => tracked.push(work) });
     },
     render(init, page) {
       return scope.respond(new Request(`${PUBLIC_URL}/projects`, init), async (context) => Response.json(await page(context)));

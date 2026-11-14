@@ -9,7 +9,7 @@
  * does not hold. Their code stays in backup.ts and restore.ts, to be moved,
  * and loads for none of them.
  */
-export const NOT_IN_016 = "not in 0.16 yet: it reads 0.14's audit log and envelopes, which a 0.16 database does not hold";
+export const NOT_IN_016 = "not in 0.16 yet: it reads 0.14's audit log and envelopes, which a 0.16 database does not hold. pg_dump and pg_restore back up and restore one (docs/restore.md)";
 const UNAVAILABLE = `Not in 0.16 yet: it reads 0.14's audit log and envelopes, which a 0.16
 database does not hold, and exits 1. What follows is what it did in 0.14.`;
 

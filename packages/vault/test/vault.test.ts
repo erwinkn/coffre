@@ -69,7 +69,9 @@ test('a use that is not what the contract says is a fault, before any read', asy
   const bad: Partial<Record<keyof UseInput, unknown>>[] = [
     { token: 'ada-cli' }, { token: tokenOf('ada-cli').toString('hex').toUpperCase() }, { project: 7 }, { environment: 'x'.repeat(257) }, { mine: 'yes' },
     { keys: ['A', 7] }, { keys: sparse }, { keys: 'A' }, { keys: Array.from({ length: 1001 }, (_, i) => `K${i}`) }, { keys: ['A\0'] },
-    { purpose: 'copy' }, { purpose: 7 }, { ip: 7 }, { request: {} }, { proof: 7 }, { upstream: 'x'.repeat(257) },
+    { purpose: 'copy' }, { purpose: 7 }, { ip: 7 }, { request: {} }, { proof: 7 }, { upstream: 'stripe' }, { upstream: { credential: 'x'.repeat(257) } },
+    { upstream: { credential: 'stripe', egress: false } }, { upstream: { credential: 'stripe', path: '/v1' } },
+    ...['API.stripe.com', `${'a'.repeat(250)}.com`, 'api.stripe.com:443', '[not:ipv6]', ':', '', 'xn--bcher-kva.de/x', 'bücher.de', 'a%41.example', '2001:db8::1'].map((host) => ({ upstream: { credential: 'stripe', host } })),
   ];
   for (const more of bad) {
     await assert.rejects(vault.use(reveal('ada-cli', ['DATABASE_URL'], more as Partial<UseInput>)), TypeError, JSON.stringify(more).slice(0, 60));
@@ -82,6 +84,11 @@ test('a use that is not what the contract says is a fault, before any read', asy
   assert.ok(!('refused' in every) && every.values.map(({ key }) => key).join() === 'DATABASE_URL,EMPTY', JSON.stringify(every));
   const thousand = await vault.use(reveal('ada-cli', Array.from({ length: 1000 }, (_, i) => `K${i}`)));
   assert.ok(!('refused' in thousand) && thousand.values.length === 1000);
+  // A host as a URL names it, whatever the deployment's upstream is.
+  for (const host of ['api.stripe.com', 'api_internal.example', 'xn--bcher-kva.de', '192.0.2.10', '[2001:db8::1]', `${'a'.repeat(249)}.com`]) {
+    const used = await vault.use(reveal('ada-cli', ['DATABASE_URL'], { upstream: { credential: 'stripe', host, egress: true } }));
+    assert.ok(!('refused' in used), host);
+  }
 });
 
 test('who a request is crosses as JSON: what it holds, as the app decides on it, and a refusal as an answer', async () => {

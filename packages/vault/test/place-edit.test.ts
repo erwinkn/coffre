@@ -416,7 +416,7 @@ test("a workload's session neither protects nor unprotects, whatever its service
 });
 
 test('an upstream credential frozen in an environment by whoever writes there, used by nobody, and thawed by an Owner of the project', async () => {
-  const using = (label: string, upstream: string | null) => given(reveal(label, 'market/prod', { upstream }));
+  const using = (label: string, upstream: string | null) => given(reveal(label, 'market/prod', { upstream: upstream === null ? null : { credential: upstream } }));
   assert.deepEqual(await using('ada-cli', 'stripe'), ['postgres://prod']);
   await answered(edit('ada-cli', 'upstream.freeze', 'market/prod', { upstream: 'stripe' }));
   await answered(edit('ada-cli', 'upstream.freeze', 'market/prod', { upstream: 'github' }));

@@ -4,6 +4,71 @@
 
 /** Every route, by `METHOD /path`: what a caller sends (the body, or the query of a GET) and gets back. */
 export type Api = {
+  "GET /audit": {
+    input: {
+      path?: string;
+      actor?: string;
+      decision?: "allow" | "deny";
+      detail?: "1" | "true";
+      before?: unknown;
+      limit?: unknown;
+    };
+    output: {
+      entries: {
+        seq: number;
+        author: "app" | "vault";
+        occurredAt: string;
+        actorType: "service" | "system" | "user";
+        actorId: string;
+        action: string;
+        decision: "allow" | "deny";
+        reason: string | null;
+        detail: boolean;
+        subject: string | null;
+        project: string | null;
+        environment: string | null;
+        key: string | null;
+        version: number | null;
+        secrets: null | {
+          key: string | null;
+          version: number | null;
+        }[];
+        operationId: string | null;
+        relatedSeq: number | null;
+        requestId: string | null;
+        run: null | {
+          exchangeSeq: number;
+          claims: {
+            [key: string]: string | number;
+          };
+        };
+        token: null | {
+          id: string;
+          label: string;
+        };
+        metadata: {
+          [key: string]: unknown;
+        };
+        proof: "failed" | "proven" | "unproven";
+      }[];
+      more: boolean;
+      next: number | null;
+      hidden?: {
+        action: string;
+        count: number;
+      }[];
+      head: null | {
+        size: number;
+        signedAt: string;
+      };
+      holes: null | {
+        above: number | null;
+        below: number | null;
+        kept: number;
+        aging: number;
+      }[];
+    };
+  };
   "POST /reveals": {
     input: {
       path: string;
@@ -803,71 +868,6 @@ export type Api = {
       changes: {
         [key: string]: "created" | "revoked" | "unchanged" | "updated";
       };
-    };
-  };
-  "GET /audit": {
-    input: {
-      path?: string;
-      actor?: string;
-      decision?: "allow" | "deny";
-      detail?: "1" | "true";
-      before?: unknown;
-      limit?: unknown;
-    };
-    output: {
-      entries: {
-        seq: number;
-        author: "app" | "vault";
-        occurredAt: string;
-        actorType: "service" | "system" | "user";
-        actorId: string;
-        action: string;
-        decision: "allow" | "deny";
-        reason: string | null;
-        detail: boolean;
-        subject: string | null;
-        project: string | null;
-        environment: string | null;
-        key: string | null;
-        version: number | null;
-        secrets: null | {
-          key: string | null;
-          version: number | null;
-        }[];
-        operationId: string | null;
-        relatedSeq: number | null;
-        requestId: string | null;
-        run: null | {
-          exchangeSeq: number;
-          claims: {
-            [key: string]: string | number;
-          };
-        };
-        token: null | {
-          id: string;
-          label: string;
-        };
-        metadata: {
-          [key: string]: unknown;
-        };
-        proof: "failed" | "proven" | "unproven";
-      }[];
-      more: boolean;
-      next: number | null;
-      hidden?: {
-        action: string;
-        count: number;
-      }[];
-      head: null | {
-        size: number;
-        signedAt: string;
-      };
-      holes: null | {
-        above: number | null;
-        below: number | null;
-        kept: number;
-        aging: number;
-      }[];
     };
   };
   "GET /freezes": {
@@ -1950,6 +1950,18 @@ export type InheritResult = {
   archived?: boolean;
   operationId: string | null;
   key: string;
+};
+
+export type KeysPlan = {
+  issuer: string;
+  jwksUri: string;
+  keys: {
+    kid: string | null;
+    alg: "ES256" | "RS256";
+    thumbprint: string;
+  }[];
+  replaces: string[];
+  withheld: string[];
 };
 
 export type ListedReference = {
