@@ -18,7 +18,7 @@ and restore come back. What to keep, below, holds now.
 | What | Where | Without it |
 |---|---|---|
 | The database | PlanetScale's backups, or `pg_dump` files you keep off the server | nothing to restore |
-| The vault key, `VAULT_KEY`, with its vault ID, `VAULT_KEY_ID`, and every earlier vault key in `previousKeks` | your password manager, never beside the backups | no value can be read, ever: the backup holds only wrapped data keys. The vault's signing key comes from the vault key too, so every member's row and every log entry fails its MAC |
+| The vault key, `VAULT_KEY`, with its vault ID, `VAULT_KEY_ID`, and every earlier vault key in `previousKeks` | your password manager, never beside the backups | no value can be read, ever: the backup holds only wrapped data keys. The vault's signing key comes from the vault key too, so every member's row fails its MAC, and neither the log's signed head nor the entries waiting for the signer verify |
 | The app key, `APP_KEY` | your password manager | little: it seals only the cookies of sign-ins under way and, behind Cloudflare Access, the one that ties a browser to its session. Those sign in again; sessions, tokens and the log are untouched. |
 | The OAuth client secret and the deployment's settings | your password manager and the deployment's repository | nobody can sign in |
 

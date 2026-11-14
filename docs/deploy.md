@@ -98,11 +98,13 @@ The migrations create three group roles, and grant the first two to their logins
 | Login | Group | Rights |
 |---|---|---|
 | `coffre_runtime` | `coffre_app` | read coffre's tables; write none |
-| `coffre_vault_runtime` | `coffre_vault` | read and write coffre's tables, the log's included: every row and every entry |
+| `coffre_vault_runtime` | `coffre_vault` | read and write coffre's tables, the log's included: every row and every entry; read 0.14's `audit_archive`, which no runtime login writes |
 | `coffre_backup_login`, or yours | `coffre_backup` | read every row, the log's included, for `coffre backup` ([restore.md](restore.md#backing-up)); write nothing |
 
-Neither runtime login owns tables. The vault writes every entry, each with
-a MAC under its key, so a row someone else wrote or changed fails to verify;
+Neither runtime login owns tables. The vault writes every entry: it waits
+for the signer under a MAC of the vault's key, and once published, the
+signed head vouches for it, so an entry someone else wrote or changed fails
+to verify;
 its login may also delete, which the signer does to uses past
 `log.keepUsesDays`. Do not run either component as the owner or give the
 runtime logins additional roles.

@@ -497,10 +497,11 @@ verifies, and `market` is free for a new project. Backups taken before still
 hold the encrypted values ([Deleting for good](docs/architecture.md#deleting-for-good)).
 
 **Tamper-evident by key, not by grant.** The app's login only reads; the
-vault's writes every row and every entry. Each entry carries the vault's
-MAC, which even the database's owner cannot forge without its key, and the
-signer signs the log's head, so an entry changed, added or removed fails to
-verify.
+vault's writes every row and every entry. An entry waits for the signer
+under the vault's MAC, which even the database's owner cannot forge without
+its key; the signer checks that MAC, adds the entry to the log's Merkle tree
+and signs the tree's head, which vouches for every published entry from then
+on. So an entry changed, added or removed fails to verify.
 
 **`/api` is the one front door.** Every call, a page's own server render
 included, goes through it. The pages call the same typed client as the CLI,
