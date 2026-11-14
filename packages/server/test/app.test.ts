@@ -30,6 +30,7 @@ const PERSONAL = `coffre_pat_${'c'.repeat(43)}`;
 /**
  * market: prod, Ada's personal config of it, and staging, protected.
  * billing: prod. Ada views market, Bo develops it, Cy owns the instance.
+ * Bo's instance role, which holds nothing, reaches every project but billing.
  * A viewer holds nothing in a protected environment.
  */
 beforeEach(async () => {
@@ -60,7 +61,7 @@ beforeEach(async () => {
     ...rows('environments', prod, adas, staging, stagings, fork, billed, deleted),
     ...rows('secrets', url, stripe, flag, own, old, inherited, fine, secret(fork, 'A_LINK', { sourceId: old.id }), secret(prod, 'EMPTY')),
     ...rows('roles', role(false, 'viewer', ['secret.read'], []), role(false, 'developer', ['secret.read', 'secret.write']), role(true, 'owner', ['secret.read', 'secret.write', 'audit.read']), role(true, 'member', [])),
-    ...rows('principals', principal(ada), principal(bo), principal(cy, { role: 'owner' })),
+    ...rows('principals', principal(ada), principal(bo, { scope: JSON.stringify({ projects: { except: [billing.id] }, environments: 'all' }) }), principal(cy, { role: 'owner' })),
     ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market })),
     ...rows('identities', github),
     ...rows('credentials', credential('ada-cli', ada, used), credential('bo-cli', bo, used), credential('cy-cli', cy, used), credential(HANDLE, ada, { ...used, kind: 'handle' }), credential(BROWSER, bo, { ...used, kind: 'browser', identityId: github.id }), credential(PERSONAL, bo, { ...used, kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) })),
@@ -270,6 +271,8 @@ test('who is asking, and where they hold something: one call to the vault, one s
   // On a token scoped to market as a viewer, Bo is a viewer of market, and runs nothing.
   const [, scoped] = await me(PERSONAL);
   assert.deepEqual([(scoped.environments as { environment: string; permissions: string[] }[]).find((at) => at.environment === 'prod')?.permissions, scoped.runsInstance], [['secret.read'], false]);
+  // His own scope is told as it is, on the token as on his session: billing, which the token does not reach, by its name.
+  assert.deepEqual([scoped.scope, bos.scope], [{ projects: { except: ['billing'] }, environments: 'all' }, { projects: { except: ['billing'] }, environments: 'all' }]);
   assert.deepEqual(await me('nobody'), [401, { error: 'unauthenticated', message: 'that credential is unknown, expired or revoked', reason: 'unauthenticated' }]);
 });
 
@@ -366,6 +369,8 @@ test('the projects a page reads are those its caller reaches: every one for whoe
   assert.equal(projectsReached(holds({ role: 'owner' })), null);
   // An Owner on a token reaches what the token does, and a role scoped to some projects, those.
   assert.deepEqual(projectsReached(holds({ role: 'owner', credentialScope: [{ projectId: 'p3', environmentId: null, role: 'viewer' }] })), ['p3']);
+  // With what their own scope lists, which `GET /me` names: a token narrows what they do, not who they are.
+  assert.deepEqual(projectsReached(holds({ role: 'auditor', scope: { projects: { except: ['p4'] }, environments: 'all' }, credentialScope: [{ projectId: 'p3', environmentId: null, role: 'viewer' }] })), ['p3', 'p4']);
   assert.deepEqual(projectsReached(holds({ role: 'auditor', scope: { projects: { only: ['p4'] }, environments: 'all' } })), ['p4']);
   assert.equal(projectsReached(holds({ role: 'auditor', scope: { projects: { except: ['p4'] }, environments: 'all' } })), null);
   assert.equal(projectsReached(holds({ role: 'auditor' })), null);

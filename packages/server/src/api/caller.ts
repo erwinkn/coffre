@@ -25,7 +25,8 @@ type Row = { id: string; slug: string; protected: boolean };
 export function placeOf(project: { id: string }, environment: (Row & { owner: string | null; parent: Row | null }) | null): Place {
   if (environment === null) return { projectId: project.id };
   const { parent } = environment;
-  const place = { projectId: project.id, environmentId: environment.id, environmentSlug: environment.slug, protected: [environment, parent].flatMap((row) => (row?.protected === true ? [row.id] : [])) };
+  // A personal config holds what its parent does; a fork is protected by its own row alone.
+  const place = { projectId: project.id, environmentId: environment.id, environmentSlug: environment.slug, protected: [environment, ...(environment.owner === null ? [] : [parent])].flatMap((row) => (row?.protected === true ? [row.id] : [])) };
   if (environment.owner === null) return place;
   // A parent unknown here matches no grant: the owner's read of it is not assumed.
   return { ...place, personal: { owner: environment.owner, parent: { environmentId: parent?.id ?? '', environmentSlug: parent?.slug ?? null } } };
@@ -65,22 +66,24 @@ export function permissionsAt(who: Called, place: Place): Permission[] {
 }
 
 /**
- * The projects the caller may reach or name, by id, or null for any. On a
- * scoped credential, its scope's: it does nothing anywhere else, whoever
- * holds it. Otherwise every one for whoever runs the instance; else those
- * of their grants and their scope's lists, and, when their instance role
+ * The projects the caller may reach or name, by id, or null for any: those
+ * their scope lists, which `GET /me` names by slug, with those they may do
+ * something in. On a scoped credential, its scope's: it does nothing
+ * anywhere else, whoever holds it. Otherwise every one for whoever runs
+ * the instance; else those of their grants, and, when their instance role
  * holds anything, every project its scope does not list alone. What a
  * project the caller can do nothing in holds, they need not read.
  */
 export function projectsReached({ holds }: Called): string[] | null {
-  if (holds.credentialScope != null) return [...new Set(holds.credentialScope.flatMap((grant) => grant.projectId ?? []))];
-  if (runsInstance(holds)) return null;
   const { projects } = holds.scope;
+  const listed = projects === 'all' ? [] : 'only' in projects ? projects.only : projects.except;
+  const among = (grants: readonly { projectId?: string | null }[]) => [...new Set([...grants.flatMap((grant) => grant.projectId ?? []), ...listed])];
+  if (holds.credentialScope != null) return among(holds.credentialScope);
+  if (runsInstance(holds)) return null;
   const role = holds.policy.instanceRoles[holds.role];
   const holdsAnything = role !== undefined && (role.permissions.length > 0 || role.protected.length > 0);
   if (holdsAnything && (projects === 'all' || 'except' in projects)) return null;
-  const listed = projects === 'all' ? [] : 'only' in projects ? projects.only : projects.except;
-  return [...new Set([...holds.grants.flatMap((grant) => grant.projectId ?? []), ...listed])];
+  return among(holds.grants);
 }
 
 /** Whether the caller holds `permission` anywhere at all: by a grant, or by their instance role; within their credential's scope. */
