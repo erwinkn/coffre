@@ -1,4 +1,5 @@
 import { freezeTarget } from '@coffre/core/identity';
+import type { Frozen } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { changed } from '../change.ts';
@@ -36,14 +37,14 @@ export const freezeRoutes = {
    */
   ...route('POST /freezes', {
     input: z.object({ target: z.string().max(400), reason: z.string().trim().min(1).max(400).refine((reason) => !reason.includes('\0') && wellFormed(reason), 'a reason is well-formed text, with no NUL') }).strict(),
-    run: async (ctx, { input }) => {
+    run: async (ctx, { input }): Promise<Frozen> => {
       const target = targetOf(input.target);
       return changed(ctx, { op: 'workload.freeze', target, reason: input.reason }, target);
     },
   }),
   /** Lift a freeze, by whoever may make it: `frozenAt` null. A target not frozen stays so. */
   ...route('DELETE /freezes/:target', {
-    run: async (ctx, { params }) => {
+    run: async (ctx, { params }): Promise<Frozen> => {
       if (params.target.length > 400) throw badRequest('a freeze names its target in 400 characters at most');
       const target = targetOf(params.target);
       return changed(ctx, { op: 'workload.unfreeze', target }, target);

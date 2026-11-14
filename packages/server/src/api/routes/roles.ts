@@ -53,9 +53,15 @@ export type RoleView = RoleDefinition & {
   default: RoleDefinition | null;
   /** Whether a grant on an environment may name it: it holds nothing project-wide. Instance roles: false. */
   assignableToEnvironment: boolean;
-  /** Grants that name it, lapsed ones too; for an instance role, the people who hold it. Null in a change's answer, which reads no row. */
-  grants: number | null;
+  /** Grants that name it, lapsed ones too; for an instance role, the people who hold it. */
+  grants: number;
 };
+
+/** A role as a change answers it: as `GET /roles` lists it, but its grants null, uncounted, since a change reads no row. */
+export type ChangedRole = Omit<RoleView, 'grants'> & { grants: number | null };
+
+/** Every role, as `GET /roles` lists them: project roles, instance roles, and whether the caller edits them. */
+export type RolesView = { roles: RoleView[]; instanceRoles: RoleView[]; editable: boolean };
 
 /** What a change to a role would do to one permission, one way, where it is protected or not (`impactOf`). */
 export type ImpactLine = {
@@ -105,7 +111,7 @@ function shippedAs(kind: Kind, id: string): RoleDefinition | null {
 const fixedRole = (kind: Kind, id: string) => (kind === 'role' ? FIXED_ROLES.roles : (FIXED_ROLES.instanceRoles as readonly string[])).includes(id);
 const definitionIn = (row: RoleRow): RoleDefinition => ({ name: row.name, description: row.description, permissions: row.permissions as Permission[], protected: row.protected as Permission[] });
 
-function view(kind: Kind, id: string, definition: RoleDefinition, grants: number | null): RoleView {
+function view<Grants extends number | null>(kind: Kind, id: string, definition: RoleDefinition, grants: Grants): Omit<RoleView, 'grants'> & { grants: Grants } {
   const shipped = shippedAs(kind, id);
   const current = normalDefinition(definition);
   return {
@@ -156,7 +162,7 @@ function asked(kind: Kind, id: string, definition: RoleDefinition | null): RoleD
  *   PUT /api/roles/release-manager?revision=9c41e07b5d2a8f13
  *     { "name": "Release manager", "description": "…", "permissions": ["secret.use", "secret.write"], "protected": ["secret.use"] }
  */
-async function changeRole(ctx: ApiContext, kind: Kind, id: string, definition: RoleDefinition | null, query: z.infer<typeof roleChange>): Promise<RoleImpact | { role: RoleView | null }> {
+async function changeRole(ctx: ApiContext, kind: Kind, id: string, definition: RoleDefinition | null, query: z.infer<typeof roleChange>): Promise<RoleImpact | { role: ChangedRole | null }> {
   const next = asked(kind, id, definition);
   if (query.dryRun !== undefined) return weigh(ctx, kind, id, next);
   const instance = kind === 'instance-role';
@@ -326,7 +332,7 @@ function sentenceOf(weighed: readonly { impact: ImpactLine; only: string | null 
 export const roleRoutes = {
   /** Every role, as the instance defines it, for any member: what a grant names, and what it holds. `caller` and one statement. */
   ...route('GET /roles', {
-    run: async (ctx) => {
+    run: async (ctx): Promise<RolesView> => {
       const who = await ctx.caller();
       const { roles, granted, people } = await roleRows(ctx.db);
       return { roles: listed('role', roles, granted), instanceRoles: listed('instance-role', roles, people), editable: editsRoles(who) };
