@@ -292,6 +292,67 @@ test('a change leaves what only says when a row was last used, and nothing else:
   assert.deepEqual(await seenOf(identities), []);
 });
 
+test('a change that spends a proof is made once: a second is refused `replayed` and writes nothing, and one that starts over does not find its own', async () => {
+  await done(writing(put(principals, member(ada, 'owner'))));
+  const proof = randomBytes(32);
+  const read = { who: part(principals, eq(principals.id, ada)) };
+  const promote = (to: string, once: Buffer): Operation<typeof read, string> => ({
+    read,
+    decide: ({ who: [found] }) => ({ writes: [put(principals, member(ada, to), found!)], once, entry: said(`role.${to}`, ada), answer: to }),
+  });
+  const spent = async () => (await rowsOf<{ hash: Buffer }>(vault.owner, sql`SELECT hash FROM spent_id_tokens`)).map((row) => row.hash.toString('hex'));
+  const entries = async () => (await rowsOf<{ n: number }>(vault.owner, sql`SELECT count(*)::int AS n FROM log_pending`))[0]!.n;
+
+  // Decided, then a row it read moves before it writes: nothing is written, the proof not spent.
+  const first = await prepare(vault, promote('admin', proof));
+  await done({ read, decide: ({ who: [found] }) => ({ writes: [put(principals, member(ada, 'auditor'), found!)], entry: said('role.auditor', ada), answer: null }) });
+  const before = await entries();
+  vault.woken.length = 0;
+  assert.equal(await commit(vault, first as never), false);
+  assert.deepEqual([await spent(), await entries(), vault.woken.length], [[], before, 0]);
+  // Started over, it is made, and its proof spent with it, dated by the vault.
+  assert.deepEqual(await change(vault, promote('admin', proof)), { answer: 'admin' });
+  assert.deepEqual([await spent(), await entries(), vault.woken.length, (await seenOf(principals))[0]!.role], [[proof.toString('hex')], before + 1, 1, 'admin']);
+  const [{ at: dated }] = await rowsOf<{ at: Date }>(vault.owner, sql`SELECT spent_at AS at FROM spent_id_tokens`) as [{ at: Date }];
+  assert.equal(new Date(dated).getTime(), vault.now());
+  // The same proof again: refused, with no row moved, no entry and no word to the signer. Another proof is another change.
+  assert.deepEqual(await change(vault, promote('member', proof)), { refused: 'replayed' });
+  assert.deepEqual([await entries(), vault.woken.length, (await seenOf(principals))[0]!.role], [before + 1, 1, 'admin']);
+  assert.deepEqual(await change(vault, promote('member', randomBytes(32))), { answer: 'member' });
+  // Two at once on one proof: one is made.
+  const twin = randomBytes(32);
+  const [left, right] = await Promise.all([prepare(vault, promote('admin', twin)), prepare(vault, promote('auditor', twin))]);
+  assert.deepEqual([await commit(vault, left as never), await commit(vault, right as never)], [true, false]);
+  assert.deepEqual(await change(vault, promote('auditor', twin)), { refused: 'replayed' });
+  await assert.rejects(change(vault, promote('admin', randomBytes(16))), /32 bytes/);
+});
+
+test('a check runs between a change\'s read and its decision, on the rows read, and again each time the change starts over', async () => {
+  await done(writing(put(principals, member(ada, 'owner'))));
+  const read = { who: part(principals, eq(principals.id, ada)) };
+  const checks: string[] = [];
+  let moved = false;
+  const operation: Operation<typeof read, string, string> = {
+    read,
+    async check({ who: [found] }, unsealed) {
+      checks.push(`${found!.role} ${unsealed.who}`);
+      // Another change lands after the first check, before the write.
+      if (!moved) {
+        moved = true;
+        await done({ read, decide: ({ who: [row] }) => ({ writes: [put(principals, member(ada, 'admin'), row!)], entry: said('role.admin', ada), answer: null }) });
+      }
+      return `checked as ${found!.role}`;
+    },
+    decide: ({ who: [found] }, _at, _unsealed, checked) => ({ writes: [put(principals, member(ada, 'member'), found!)], entry: said('role.member', ada), answer: checked }),
+  };
+  // The decision is handed what the check of the same rows found: the second one's, once the change started over.
+  assert.deepEqual(await change(vault, operation), { answer: 'checked as admin' });
+  assert.deepEqual(checks, ['owner 0', 'admin 0']);
+  // A check that fails, fails the change, which writes nothing.
+  await assert.rejects(change(vault, { ...operation, check: () => Promise.reject(new Error('no such key')) }), /no such key/);
+  assert.equal((await seenOf(principals))[0]!.role, 'member');
+});
+
 test('a row is dropped only as it was read', async () => {
   await done(writing(put(principals, member(ada, 'owner')), put(roles, { instance: false, id: 'deployer', name: 'Deployer', description: '', permissions: ['secret.use'], protected: [] })));
   const read = { role: part(roles, and(not(roles.instance), eq(roles.id, 'deployer'))) };

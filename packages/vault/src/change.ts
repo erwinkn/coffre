@@ -122,12 +122,26 @@ export type Refusal = { refused: string };
  */
 export type Denied = Omit<Said, 'kept' | 'actor'> & { actor: string };
 
-export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; entry: Said; answer: A };
+/**
+ * What a decision writes. `once` is a proof the change spends, by the
+ * SHA-256 of what was signed (`spent_id_tokens`, the one table a change
+ * writes that carries no MAC and no decision reads): the change is made
+ * only if that hash was never spent, and is refused `replayed` otherwise.
+ */
+export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; once?: Buffer; entry: Said; answer: A };
 
-export type Operation<P extends Parts, A> = {
+export type Operation<P extends Parts, A, C = undefined> = {
   read: P;
-  /** From the rows read and the time, and nothing else. `unsealed` counts, by part, the rows found that are not the vault's. */
-  decide(seen: Seen<P>, at: number, unsealed: Unsealed<P>): Plan<A> | Refusal;
+  /**
+   * What a decision needs that is neither a row nor the time, and cannot
+   * be had in it: a signature held to keys the read found, which is
+   * asynchronous where the vault runs. Between the read and the decision,
+   * on the rows read, with no transaction open, and again each time the
+   * change starts over. It reads nothing and writes nothing.
+   */
+  check?(seen: Seen<P>, unsealed: Unsealed<P>): Promise<C>;
+  /** From the rows read, the time and what `check` found, and nothing else. `unsealed` counts, by part, the rows found that are not the vault's. */
+  decide(seen: Seen<P>, at: number, unsealed: Unsealed<P>, checked: C): Plan<A> | Refusal;
   /**
    * What the log says of a refusal, from the same rows: who was refused
    * what, and why. Null for a caller who does not stand, who is told one
@@ -138,6 +152,9 @@ export type Operation<P extends Parts, A> = {
 
 /** A change read and decided, not yet written. */
 export type Prepared<A> = { answer: A; statement: SQL; hash: Buffer };
+
+/** A proof spent already: the one refusal a write makes, since no read sees the table of them. */
+const REPLAYED: Refusal = { refused: 'replayed' };
 
 /**
  * Only changes take it, each for its one write. Under it a write reads
@@ -261,12 +278,13 @@ export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'ke
 }
 
 /** A change's read and its decision. */
-export async function prepare<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<Prepared<A> | (Refusal & { said?: Denied | null })> {
+export async function prepare<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>): Promise<Prepared<A> | (Refusal & { said?: Denied | null })> {
   const parts = Object.entries(operation.read);
   const { seen, unsealed, named: read, tokens } = await readParts(vault, operation.read);
-  // After the read: the entry's date is the decision's, and the write is sent next.
+  const checked = (operation.check === undefined ? undefined : await operation.check(seen, unsealed)) as C;
+  // After the read, and the check: the entry's date is the decision's, and the write is sent next.
   const at = vault.now();
-  const plan = operation.decide(seen, at, unsealed);
+  const plan = operation.decide(seen, at, unsealed, checked);
   if ('refused' in plan) {
     // What the log says of it is the operation's to say, and never costs the refusal: one that cannot be said is not logged.
     let said: Denied | null | undefined;
@@ -326,7 +344,13 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
   // The same rows, read again by the same conditions: one that changed, went or came since makes the lists differ.
   const again = sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || encode(${table}.mac, 'hex') FROM ${table} WHERE ${where}`), sql` UNION ALL `);
   const statements: SQL[] = [sql`same AS (SELECT (SELECT coalesce(array_agg(x ORDER BY x COLLATE "C"), '{}') FROM (${again}) seen (x)) = ${sql.param(tokens.sort())}::text[] AS ok)`];
-  const fromRows = (table: PgTable, wires: Wire[]) => sql`jsonb_populate_recordset(null::${table}, ${JSON.stringify(wires)}::jsonb) j, same WHERE same.ok`;
+  const { once } = plan;
+  if (once !== undefined && once.length !== 32) throw new Error('a change spends a proof by the 32 bytes of its SHA-256');
+  // Spent only if the rows have not moved, so that a change that starts over does not find its own; and then everything
+  // else is written only if it was not spent before: each write below selects from it, and so writes nothing without it.
+  if (once !== undefined) statements.push(sql`spent AS (INSERT INTO spent_id_tokens (hash, spent_at) SELECT decode(${once.toString('hex')}, 'hex'), ${new Date(vault.now()).toISOString()}::timestamptz FROM same WHERE same.ok ON CONFLICT DO NOTHING RETURNING hash)`);
+  const made = once === undefined ? sql`same WHERE same.ok` : sql`same, spent WHERE same.ok`;
+  const fromRows = (table: PgTable, wires: Wire[]) => sql`jsonb_populate_recordset(null::${table}, ${JSON.stringify(wires)}::jsonb) j, ${made}`;
   for (const { table, inserts, updates, deletes } of written.values()) {
     const shape = shapeOf(table);
     const from = (wires: Wire[]) => fromRows(table, wires);
@@ -343,8 +367,10 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     const stored = shapeOf(secretVersions).columns.filter((column) => !column.generated);
     statements.push(sql`versions AS (INSERT INTO ${secretVersions} (${list(stored)}) SELECT ${list(stored, 'j')} FROM ${fromRows(secretVersions, versions)})`);
   }
-  statements.push(sql`entry AS (INSERT INTO log_pending (kept, body, mac) SELECT ${entry.kept}, ${entry.body}, decode(${entry.mac.toString('hex')}, 'hex') FROM same WHERE same.ok)`);
-  return { answer: plan.answer, statement: sql`WITH ${sql.join(statements, sql`, `)} SELECT ok FROM same`, hash: entry.hash };
+  statements.push(sql`entry AS (INSERT INTO log_pending (kept, body, mac) SELECT ${entry.kept}, ${entry.body}, decode(${entry.mac.toString('hex')}, 'hex') FROM ${made})`);
+  // `fresh`: whether the proof was this change's to spend. Null for a change that spends none.
+  const fresh = once === undefined ? sql`NULL::boolean` : sql`EXISTS (SELECT 1 FROM spent)`;
+  return { answer: plan.answer, statement: sql`WITH ${sql.join(statements, sql`, `)} SELECT ok, ${fresh} AS fresh FROM same`, hash: entry.hash };
 }
 
 /** A part's name goes into the statement as written, so it is a plain word. */
@@ -361,10 +387,17 @@ function label(name: string): string {
  * it waited (`bounded`).
  */
 export async function commit<A>(vault: Running, prepared: Prepared<A>): Promise<boolean> {
+  return (await written(vault, prepared)) === 'made';
+}
+
+/** A prepared change's write: made; `moved`, a row it read has changed since; or `spent`, its proof was spent before. Only the first writes anything. */
+async function written<A>(vault: Running, prepared: Prepared<A>): Promise<'made' | 'moved' | 'spent'> {
   // Were the write's answer lost on its way back, this throws for a write that landed, and the signer finds its entry unannounced, as after a vault that died.
-  const [same] = await bounded<{ ok: boolean }>(vault.db, prepared.statement, { first: sql`pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})` });
-  if (same!.ok) vault.wake(prepared.hash);
-  return same!.ok;
+  const [same] = await bounded<{ ok: boolean; fresh: boolean | null }>(vault.db, prepared.statement, { first: sql`pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})` });
+  if (!same!.ok) return 'moved';
+  if (same!.fresh === false) return 'spent';
+  vault.wake(prepared.hash);
+  return 'made';
 }
 
 /** A refusal is logged once a minute for whoever asked and what they asked: a loop of them does not fill the log. */
@@ -404,14 +437,16 @@ async function deny(vault: Running, said: Denied): Promise<void> {
 }
 
 /** Make a change: its answer, once committed, or why it is refused. */
-export async function change<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<{ answer: A } | Refusal> {
+export async function change<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>): Promise<{ answer: A } | Refusal> {
   for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
     const prepared = await prepare(vault, operation);
     if ('refused' in prepared) {
       if (prepared.said != null) await deny(vault, prepared.said);
       return { refused: prepared.refused };
     }
-    if (await commit(vault, prepared)) return { answer: prepared.answer };
+    const outcome = await written(vault, prepared);
+    if (outcome === 'made') return { answer: prepared.answer };
+    if (outcome === 'spent') return REPLAYED;
   }
   throw new Busy(`a change started ${ATTEMPTS} times over, each time behind another change to the rows it read`);
 }
