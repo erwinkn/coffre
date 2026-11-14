@@ -53,7 +53,7 @@ type AskCaller = (shown: Presented) => Promise<Called>;
  * needs no such check, since another site's page cannot make the browser
  * send it. And a handle reaches the credential proxy alone.
  */
-export async function fetchApi(request: Request, runtime: CoffreRuntime, options: { sourceIp: string | null; caller?: AskCaller }): Promise<Response> {
+export async function fetchApi(request: Request, runtime: CoffreRuntime, options: { sourceIp: string | null; caller?: AskCaller; page?: Request }): Promise<Response> {
   try {
     // Behind Access a request carries Access's assertion, which is no credential of the vault's (docs/design/0.16.md, "Still to design").
     if (runtime.auth.mode === 'cloudflare') throw new ApiError('not_implemented', 'coffre behind Cloudflare Access is not served yet');
@@ -62,10 +62,13 @@ export async function fetchApi(request: Request, runtime: CoffreRuntime, options
     if (credential.ambient && !SAFE_METHODS.has(request.method) && !isSameOrigin(request, runtime.publicUrl)) {
       throw new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself');
     }
+    const kind = tokenKind(credential.token);
     // A handle is a placeholder for secrets in a person's app: the vault would open values for one, so the API turns it away.
-    if (tokenKind(credential.token) === 'handle') {
+    if (kind === 'handle') {
       throw new ApiError('forbidden', "a handle stands in for secrets, and only coffre's credential proxy takes one: sign in to use the API", 'handle');
     }
+    // An MCP client's tokens are good at `/mcp` and its token endpoint alone, as 0.14.7 held them.
+    if (kind === 'mcp' || kind === 'mcp-refresh') throw new ApiError('unauthenticated', "an MCP client's token is good at /mcp alone");
     const shown = presented(credential.token, options.sourceIp);
     const ask = options.caller ?? ((from) => callerOf(runtime.vault, from));
     // Asked once a request, by the handler that needs it. The promise is this request's alone.
@@ -75,6 +78,7 @@ export async function fetchApi(request: Request, runtime: CoffreRuntime, options
       vault: runtime.vault,
       shown,
       caller: () => (asked ??= ask(shown)),
+      crossSite: credential.ambient && !(options.page === undefined ? isSameOrigin(request, runtime.publicUrl) : topLevel(options.page)),
       auth: runtime.auth,
       rotateAfterDays: runtime.rotateAfterDays,
       transport: runtime.transport,
@@ -82,6 +86,16 @@ export async function fetchApi(request: Request, runtime: CoffreRuntime, options
   } catch (error) {
     return errorResponse(error);
   }
+}
+
+/**
+ * Whether a page's request is the browser opening it, as a tab or a window:
+ * a page another site embeds, as a frame or an image, is that site's doing,
+ * not the person's. A browser that sends no `Sec-Fetch-Dest` says neither.
+ */
+function topLevel(page: Request): boolean {
+  const dest = page.headers.get('sec-fetch-dest');
+  return dest === null || dest === 'document';
 }
 
 /** The page's credential, and nothing else of its request: the session cookie. Every other cookie and header stays behind. */
@@ -107,6 +121,6 @@ export function pageClient(page: Request, runtime: CoffreRuntime, sourceIp: stri
   return createClient({
     url: new URL(page.url).origin,
     headers: () => credential,
-    transport: (request) => fetchApi(request, runtime, { sourceIp, caller }),
+    transport: (request) => fetchApi(request, runtime, { sourceIp, caller, page }),
   });
 }

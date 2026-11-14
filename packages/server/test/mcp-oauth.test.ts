@@ -1,36 +1,43 @@
-// coffre as MCP clients' OAuth authorization server (docs/design/mcp.md,
-// section 4): its metadata, consent, codes, tokens, refresh and
-// revocation, each over HTTP as a client and the consent page send them.
-import test, { after, before, beforeEach } from 'node:test';
+// coffre as MCP clients' OAuth authorization server on the 0.16 contract
+// (docs/design/0.16.md, "MCP connections"): its metadata, the consent page's
+// two routes, codes, tokens, refresh, revocation, registration and
+// Connected apps, each over HTTP as a client and the consent page send
+// them, with the real vault. What each costs, request-cost.test.ts holds.
+// Cases from 0.14.7's tests where they still hold; `/mcp` itself is
+// another's.
 import assert from 'node:assert/strict';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { after, beforeEach, test } from 'node:test';
 
 import { github, signin, type RateLimiter } from '@coffre/core/identity';
-import { eq, inArray } from 'drizzle-orm';
+import { rowsOf } from '@coffre/db/dialect';
+import { credential, emptyDatabase, identity, instance, principal, role, rows, user, write } from '@coffre/vault/testing';
+import { sql } from 'drizzle-orm';
 
-import { SigninService } from '../src/api/signin.ts';
-import { coffreRoute } from '../src/app.ts';
-import { pageClient } from '../src/fetch-api.ts';
-import { updateAuth } from '../src/db/queries.ts';
 import { forgetDocuments } from '../src/mcp/clients.ts';
-import { McpService } from '../src/mcp/service.ts';
-import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, mcpConnections, oauthClients } from './db/tables.ts';
+import { openApp, PUBLIC_URL, SESSION } from './app-fixture.ts';
 
-const ORIGIN = 'https://secrets.acme.example';
-const RESOURCE = `${ORIGIN}/mcp`;
-const ROOT = 'admin@acme.example';
-const DEV = 'dev@acme.example';
-const OTHER = 'other@acme.example';
+const RESOURCE = `${PUBLIC_URL}/mcp`;
 const CLAUDE_CODE = 'https://claude.ai/oauth/claude-code-client-metadata';
 const CLAUDE = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
+/** Documents the vault could not keep a connection of: a URL longer than it keeps, and a redirect longer than it keeps. */
+const LONG_ID = `https://long.example/${'x'.repeat(250)}`;
+const LONG_REDIRECT = `https://long.example/${'x'.repeat(400)}`;
+const LONG_REDIRECTS = 'https://long.example/client.json';
+/** A host of 119 characters, longer than a name the vault keeps; its documents give no name, or an empty one. */
+const LONG_HOST = `${'a'.repeat(60)}.${'b'.repeat(50)}.example`;
+const UNNAMED = `https://${LONG_HOST}/unnamed.json`;
+const EMPTY_NAME = `https://${LONG_HOST}/empty.json`;
 
 /** The documents the fake internet serves, by URL. */
 const documents = new Map<string, unknown>([
   [CLAUDE_CODE, { client_id: CLAUDE_CODE, client_name: 'Claude Code', redirect_uris: ['http://localhost/callback', 'http://127.0.0.1/callback'], token_endpoint_auth_method: 'none' }],
   [CLAUDE, { client_id: CLAUDE, client_name: 'Claude', redirect_uris: ['https://claude.ai/api/mcp/auth_callback'], token_endpoint_auth_method: 'none' }],
+  [LONG_ID, { client_id: LONG_ID, client_name: 'Long', redirect_uris: ['https://long.example/cb'] }],
+  [LONG_REDIRECTS, { client_id: LONG_REDIRECTS, client_name: 'Long', redirect_uris: [LONG_REDIRECT] }],
+  [UNNAMED, { client_id: UNNAMED, redirect_uris: [`https://${LONG_HOST}/cb`] }],
+  [EMPTY_NAME, { client_id: EMPTY_NAME, client_name: ' ', redirect_uris: [`https://${LONG_HOST}/cb`] }],
 ]);
 let fetched: string[] = [];
 const transport: WorkloadTransport = {
@@ -43,59 +50,47 @@ const transport: WorkloadTransport = {
 
 /** Limiters that let everything through, until a test closes one. */
 const open = { source: true, total: true };
-const limiter = (which: 'source' | 'total' | 'connection'): RateLimiter => ({
-  limit: async () => ({ success: which === 'connection' ? true : open[which] }),
-});
-const auth = signin({
-  providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })],
-  mcp: { limits: { perSource: limiter('source'), perConnection: limiter('connection'), total: limiter('total') } },
-}).resolve(ORIGIN);
+const limiter = (which: 'source' | 'total' | 'connection'): RateLimiter => ({ limit: async () => ({ success: which === 'connection' ? true : open[which] }) });
+const mcp = { limits: { perSource: limiter('source'), perConnection: limiter('connection'), total: limiter('total') } };
+const app = await openApp({ auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], mcp }), transport });
+const { world } = app;
+after(() => app.close());
 
-let db: Awaited<ReturnType<typeof openTestDatabase>>;
-let deps: FixtureDeps;
-let runtime: CoffreRuntime;
-let off: CoffreRuntime;
+const [root, ada, bo] = [user('root'), user('ada'), user('bo')];
+const ci = 'token:ci';
 
-before(async () => {
-  db = await openTestDatabase();
-  deps = testDeps(db.runtime, [ROOT]);
-  if (auth.mode !== 'signin') throw new Error('unreachable');
-  const service = new SigninService({ ...deps, signin: auth.signin });
-  const mcp = new McpService({ ...deps, config: auth.signin.mcp!, signin: auth.signin, publicUrl: ORIGIN, transport });
-  runtime = { db: deps.db, vault: deps.vault, chainKey: deps.chainKey, previousChainKeys: [], signin: service, workloads: null, mcp, auth, publicUrl: ORIGIN, verifier: service, waitUntil, schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [] };
-  off = { ...runtime, mcp: null };
-});
-
-after(async () => {
-  await resetDatabase(db.owner);
-  await db.close();
-});
-
+/** Root runs the instance. Ada and Bo are members, each on a browser session and a CLI's; Ada has a personal token. `ci` is a service account. */
 beforeEach(async () => {
-  await resetDatabase(db.owner);
+  await emptyDatabase(world.owner);
+  for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
   forgetDocuments();
   fetched = [];
   open.source = true;
   open.total = true;
-  const root = clientFor(deps, ROOT);
-  for (const email of [DEV, OTHER]) await root.members.add(`user:${email}`);
-  await root.projects.create('market', { name: 'Market' });
-  await root.environments.create('market/dev', { name: 'Development' });
-  await root.access.set(`user:${DEV}`, { market: 'developer' });
+  const adas = identity(ada);
+  const bos = identity(bo);
+  await write(
+    world,
+    ...rows('policy', instance()),
+    ...rows('roles', role(true, 'owner', ['secret.read']), role(true, 'member', [])),
+    ...rows('principals', principal(root, { role: 'owner' }), principal(ada), principal(bo), principal(ci)),
+    ...rows('identities', adas, bos),
+    ...rows('credentials',
+      credential('root-cli', root), credential('ada-web', ada, { kind: 'browser', identityId: adas.id }), credential('ada-cli', ada),
+      credential('ada-pat', ada, { kind: 'personal', scope: '[]' }), credential('bo-web', bo, { kind: 'browser', identityId: bos.id }), credential('bo-cli', bo),
+      credential('ci-token', ci, { scope: '[]' })),
+  );
+  // The schema's question, asked once of a fresh app.
+  await app.request('/api/auth');
+  app.calls.length = 0;
 });
 
-function route(path: string, init: RequestInit = {}, on = runtime): Promise<Response> {
-  return coffreRoute(new Request(`${ORIGIN}${path}`, init), on, '203.0.113.7').then((response) => response!);
-}
-
-/** A CLI session for `email`: how these tests stand in for the consent page's browser. */
-async function session(email: string): Promise<string> {
-  const service = runtime.signin!;
-  const started = await service.startDevice({ clientLabel: 'laptop', sourceIp: null });
-  await service.decideDevice(await contextFor(deps, email), started.userCode, true);
-  const polled = await service.pollDevice(started.deviceCode, { requestId: randomUUID(), sourceIp: null });
-  if (polled.status !== 'approved') throw new Error('the device login was not approved');
-  return polled.credential.token;
+/** What a request cost: the vault's calls and the app's statements. */
+async function cost<T>(request: () => Promise<T>): Promise<[T, string[], number]> {
+  app.calls.length = 0;
+  const before = app.statements;
+  const answer = await request();
+  return [answer, [...app.calls], app.statements - before];
 }
 
 function pkce() {
@@ -109,520 +104,410 @@ function request(client: string, redirect: string, challenge: string, extra: Par
   return { client_id: client, redirect_uri: redirect, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', state: 'st-1', resource: RESOURCE, ...extra };
 }
 
-async function describe(token: string, ask: Ask) {
-  const response = await route(`/api/oauth/authorizations?${new URLSearchParams(ask)}`, { headers: { authorization: `Bearer ${token}` } });
+/** Ada's browser, on coffre's own consent page, or another credential by its label. */
+const as = (label: string): Record<string, string> => (label.endsWith('-web') ? { cookie: `${SESSION}=${label}`, 'sec-fetch-site': 'same-origin' } : { authorization: `Bearer ${label}` });
+
+async function describeAs(label: string, ask: Partial<Ask>): Promise<Response> {
+  return app.request(`/api/oauth/authorizations?${new URLSearchParams(ask)}`, { headers: as(label) });
+}
+
+async function describe(ask: Partial<Ask>, label = 'ada-web') {
+  const response = await describeAs(label, ask);
   assert.equal(response.status, 200, await response.clone().text());
   return response.json() as Promise<Record<string, unknown>>;
 }
 
-async function decide(token: string, ask: Ask, answer: { approve: boolean; scopes?: string[] }): Promise<URL> {
-  const response = await route('/api/oauth/authorizations', {
+function decideAs(label: string, ask: Partial<Ask>, answer: { approve: boolean; scopes?: string[] }): Promise<Response> {
+  return app.request('/api/oauth/authorizations', {
     method: 'POST',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    headers: { ...as(label), 'content-type': 'application/json' },
     body: JSON.stringify({ request: ask, approve: answer.approve, scopes: answer.scopes ?? [] }),
   });
+}
+
+async function decide(ask: Partial<Ask>, answer: { approve: boolean; scopes?: string[] }, label = 'ada-web'): Promise<URL> {
+  const response = await decideAs(label, ask, answer);
   assert.equal(response.status, 200, await response.clone().text());
   return new URL(((await response.json()) as { redirect: string }).redirect);
 }
 
-function tokenRequest(fields: Record<string, string>): RequestInit {
-  return { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields).toString() };
+function form(path: string, fields: Record<string, string>): Promise<Response> {
+  return app.request(path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields).toString() });
 }
+
+/** What the token endpoint answered: its status and body. */
+async function token(fields: Record<string, string>): Promise<[number, Record<string, unknown>]> {
+  const response = await form('/api/oauth/token', fields);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  return [response.status, (await response.json()) as Record<string, unknown>];
+}
+
+type Tokens = { access_token: string; refresh_token: string; expires_in: number; scope: string; token_type: string };
 
 /** Consent, then the code exchanged: what a client holds once its person approved. */
-async function connect(email = DEV, client = CLAUDE_CODE, redirect = 'http://localhost:51234/callback', scope = 'read', ticked = scope.split(' ')) {
+async function connect({ label = 'ada-web', client = CLAUDE_CODE, redirect = 'http://localhost:51234/callback', scope = 'read', ticked }: { label?: string; client?: string; redirect?: string; scope?: string; ticked?: string[] } = {}) {
   const { verifier, challenge } = pkce();
-  const ask = request(client, redirect, challenge, { scope });
-  const back = await decide(await session(email), ask, { approve: true, scopes: ticked });
+  const back = await decide(request(client, redirect, challenge, { scope }), { approve: true, scopes: ticked ?? scope.split(' ') }, label);
   const code = back.searchParams.get('code')!;
-  const response = await route('/api/oauth/token', tokenRequest({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: redirect, client_id: client, resource: RESOURCE }));
-  assert.equal(response.status, 200, await response.clone().text());
-  return { ...((await response.json()) as { access_token: string; refresh_token: string; expires_in: number; scope: string }), code, verifier, redirect, client };
+  const [status, body] = await token({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: redirect, client_id: client, resource: RESOURCE });
+  assert.equal(status, 200, JSON.stringify(body));
+  return { ...(body as Tokens), code, verifier, redirect, client };
 }
 
-function discover(token: string | null, headers: Record<string, string> = {}): Promise<Response> {
-  return route('/mcp', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'mcp-protocol-version': '2026-07-28',
-      'mcp-method': 'server/discover',
-      ...(token === null ? {} : { authorization: `Bearer ${token}` }),
-      ...headers,
-    },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'server/discover', params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} } } }),
-  });
+/** Who a token is at the API: their principal, or the error. */
+async function whoIs(label: string): Promise<string> {
+  const response = await app.request('/api/me', { headers: { authorization: `Bearer ${label}` } });
+  const body = (await response.json()) as { principal?: { id: string }; error?: string };
+  return body.principal?.id ?? `${response.status} ${body.error}`;
 }
 
-async function entries(action: string) {
-  return (await db.owner.select().from(auditLog).where(eq(auditLog.action, action)).orderBy(auditLog.seq)).map((row) => ({ ...row, metadata: JSON.parse(row.metadata) as Record<string, unknown> }));
-}
+/** The MCP connections of a person, as stored: those standing. */
+const standing = async (who: string) =>
+  (await rowsOf<{ id: string }>(world.owner, sql`SELECT id::text FROM credentials WHERE principal = ${who} AND kind = 'mcp' AND ancestors IS NULL AND revoked_at IS NULL ORDER BY created_at`)).map((row) => row.id);
+
+const refresh = (held: Tokens & { client: string }, more: Record<string, string> = {}) => token({ grant_type: 'refresh_token', refresh_token: held.refresh_token, client_id: held.client, ...more });
 
 test('the metadata documents say where the authorization server is, and what it takes', async () => {
-  const resource = await (await route('/.well-known/oauth-protected-resource/mcp')).json();
-  assert.deepEqual(resource, {
-    resource: RESOURCE,
-    authorization_servers: [ORIGIN],
-    scopes_supported: ['read'],
-    bearer_methods_supported: ['header'],
-    resource_name: 'coffre at secrets.acme.example',
-  });
-  assert.deepEqual(await (await route('/.well-known/oauth-protected-resource')).json(), resource, 'at the root as well');
-  const server = (await (await route('/.well-known/oauth-authorization-server')).json()) as Record<string, unknown>;
-  assert.equal(server.issuer, ORIGIN);
-  assert.equal(server.token_endpoint, `${ORIGIN}/api/oauth/token`);
-  assert.equal(server.authorization_endpoint, `${ORIGIN}/oauth/authorize`);
-  // What Claude reads before it uses a metadata document rather than registering.
-  assert.equal(server.client_id_metadata_document_supported, true);
-  assert.deepEqual(server.token_endpoint_auth_methods_supported, ['none']);
+  for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
+    const [response, calls, statements] = await cost(() => app.request(path));
+    assert.deepEqual([response.status, calls, statements], [200, [], 0]);
+    assert.deepEqual(await response.json(), { resource: RESOURCE, authorization_servers: [PUBLIC_URL], scopes_supported: ['read'], bearer_methods_supported: ['header'], resource_name: 'coffre at secrets.acme.example' });
+  }
+  const server = (await (await app.request('/.well-known/oauth-authorization-server')).json()) as Record<string, unknown>;
+  assert.deepEqual([server.issuer, server.authorization_endpoint, server.token_endpoint, server.registration_endpoint, server.revocation_endpoint], [
+    PUBLIC_URL, `${PUBLIC_URL}/oauth/authorize`, `${PUBLIC_URL}/api/oauth/token`, `${PUBLIC_URL}/api/oauth/register`, `${PUBLIC_URL}/api/oauth/revoke`]);
   assert.deepEqual(server.code_challenge_methods_supported, ['S256']);
-  assert.deepEqual(server.scopes_supported, ['read', 'write', 'reveal', 'manage-access', 'offline_access']);
-  assert.equal(server.authorization_response_iss_parameter_supported, true);
-
-  for (const path of ['/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource/mcp', '/mcp']) {
-    const response = await route(path, path === '/mcp' ? { method: 'POST' } : {}, off);
-    assert.equal(response.status, 404, `${path} without signin({ mcp })`);
-  }
+  assert.equal(server.client_id_metadata_document_supported, true);
+  assert.equal((await app.request('/.well-known/oauth-authorization-server', { method: 'POST' })).status, 405);
 });
 
-test('/mcp answers 401, and where to sign in, without a good token; a request from another site, 403', async () => {
-  const bare = await discover(null);
-  assert.equal(bare.status, 401);
-  assert.equal(bare.headers.get('www-authenticate'), `Bearer resource_metadata="${ORIGIN}/.well-known/oauth-protected-resource/mcp", scope="read"`);
-  const wrong = await discover('coffre_mcp_nonsense');
-  assert.equal(wrong.status, 401);
-  assert.match(wrong.headers.get('www-authenticate')!, /^Bearer error="invalid_token"/);
-  assert.equal((await route('/mcp')).status, 405, 'GET: no stream to open');
-
-  const { access_token } = await connect();
-  assert.equal((await discover(access_token)).status, 200);
-  assert.equal((await discover(access_token, { origin: 'https://evil.example' })).status, 403);
-});
-
-test('Claude Code connects: its document fetched, any loopback port, consent, the code once, then /mcp', async () => {
-  const token = await session(DEV);
+test('Claude Code connects: its document fetched, any loopback port, consent, the code once; its tokens are good nowhere in the API', async () => {
   const { verifier, challenge } = pkce();
-  const ask = request(CLAUDE_CODE, 'http://127.0.0.1:61001/callback', challenge);
-  const view = await describe(token, ask);
+  const ask = request(CLAUDE_CODE, 'http://localhost:51234/callback', challenge);
+  const [view, calls, statements] = await cost(() => describe(ask));
   assert.deepEqual(view, {
-    status: 'ready',
-    client: { id: CLAUDE_CODE, name: 'Claude Code', host: 'claude.ai', registration: 'cimd' },
-    redirectHost: 'localhost',
-    loopbackOnly: true,
-    scopes: ['read'],
-    connections: [],
-    days: 30,
+    status: 'ready', client: { id: CLAUDE_CODE, name: 'Claude Code', host: 'claude.ai', registration: 'cimd' }, redirectHost: 'localhost',
+    loopbackOnly: true, scopes: ['read'], connections: [], days: 30,
   });
-  assert.deepEqual(fetched, [CLAUDE_CODE]);
-
-  const back = await decide(token, ask, { approve: true });
-  assert.equal(`${back.origin}${back.pathname}`, 'http://127.0.0.1:61001/callback');
-  assert.equal(back.searchParams.get('state'), 'st-1');
-  assert.equal(back.searchParams.get('iss'), ORIGIN, 'RFC 9207: the issuer, against mix-ups');
+  assert.deepEqual([calls, statements], [['caller'], 1]);
+  const back = await decide(ask, { approve: true, scopes: ['read'] });
+  assert.equal(`${back.origin}${back.pathname}`, 'http://localhost:51234/callback');
+  assert.deepEqual([back.searchParams.get('state'), back.searchParams.get('iss')], ['st-1', PUBLIC_URL]);
   const code = back.searchParams.get('code')!;
-  const [connected] = await entries('mcp.connect');
-  assert.equal(connected?.actor, `user:${DEV}`);
-  assert.deepEqual([connected?.decision, connected?.metadata.clientId, connected?.metadata.scopes, connected?.metadata.redirectHost], ['allow', CLAUDE_CODE, 'read', 'localhost']);
+  assert.match(code, /^[A-Za-z0-9_-]{43}$/);
+  assert.deepEqual(fetched, [CLAUDE_CODE], 'fetched once, then kept');
 
-  const exchange = (fields: Record<string, string>) =>
-    route('/api/oauth/token', tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: 'http://127.0.0.1:61001/callback', client_id: CLAUDE_CODE, ...fields }));
-  assert.equal((await (await exchange({ code_verifier: pkce().verifier })).json() as { error: string }).error, 'invalid_grant', 'another verifier');
-  const answered = await exchange({ code_verifier: verifier, resource: RESOURCE });
-  assert.equal(answered.status, 200);
-  assert.equal(answered.headers.get('cache-control'), 'no-store');
-  const tokens = (await answered.json()) as { access_token: string; refresh_token: string; expires_in: number; scope: string; token_type: string };
-  assert.match(tokens.access_token, /^coffre_mcp_/);
-  assert.match(tokens.refresh_token, /^coffre_mcr_/);
-  assert.deepEqual([tokens.token_type, tokens.expires_in, tokens.scope], ['Bearer', 3600, 'read']);
+  const redeem = { grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: 'http://localhost:51234/callback', client_id: CLAUDE_CODE, resource: RESOURCE };
+  const [status, body] = await token(redeem);
+  assert.equal(status, 200, JSON.stringify(body));
+  const tokens = body as Tokens;
+  assert.match(tokens.access_token, /^coffre_mcp_[A-Za-z0-9_-]{43}$/);
+  assert.match(tokens.refresh_token, /^coffre_mcr_[A-Za-z0-9_-]{43}$/);
+  assert.deepEqual([tokens.token_type, tokens.scope], ['Bearer', 'read']);
+  assert.ok(tokens.expires_in > 3590 && tokens.expires_in <= 3600, String(tokens.expires_in));
+  // An MCP client's tokens are good at /mcp and the token endpoint alone, as in 0.14.7.
+  assert.equal(await whoIs(tokens.access_token), '401 unauthenticated');
+  assert.equal(await whoIs(tokens.refresh_token), '401 unauthenticated');
+  assert.equal((await app.vault.caller({ token: createHash('sha256').update(tokens.access_token).digest('hex'), proof: null, request: null, ip: null }) as { principal: string }).principal, ada);
 
-  const discovered = (await (await discover(tokens.access_token)).json()) as { result: { supportedVersions: string[] } };
-  assert.deepEqual(discovered.result.supportedVersions, ['2026-07-28']);
-
-  // The code again: whoever holds it is not who it was for, so the connection ends.
-  const again = await exchange({ code_verifier: verifier });
-  assert.equal(((await again.json()) as { error: string }).error, 'invalid_grant');
-  assert.equal((await discover(tokens.access_token)).status, 401, 'its tokens die with it');
-  const [ended] = await entries('mcp.disconnect');
-  assert.deepEqual([ended?.actor, ended?.metadata.reason], [`user:${DEV}`, 'code_reused']);
+  // The code again: whoever holds it now is not who it was for. The connection ends.
+  const [again, replayed] = await token(redeem);
+  assert.deepEqual([again, replayed.error], [400, 'invalid_grant']);
+  assert.match(String(replayed.error_description), /used already; the connection it made is ended/);
+  assert.deepEqual(await standing(ada), []);
+  assert.deepEqual((await refresh({ ...tokens, client: CLAUDE_CODE }))[1].error, 'invalid_grant');
 });
 
-test("Claude's hosted apps connect with their callback on claude.ai; a redirect elsewhere is never sent anything", async () => {
-  const token = await session(DEV);
+test("Claude's hosted app connects with its callback on claude.ai; a redirect elsewhere is never sent anything", async () => {
   const { challenge } = pkce();
-  const view = await describe(token, request(CLAUDE, 'https://claude.ai/api/mcp/auth_callback', challenge));
+  const view = await describe(request(CLAUDE, 'https://claude.ai/api/mcp/auth_callback', challenge));
   assert.deepEqual([view.status, view.redirectHost, view.loopbackOnly], ['ready', 'claude.ai', false]);
-
-  for (const [redirect, why] of [
-    ['https://evil.example/cb', /not one of its redirects/],
-    ['https://claude.ai/api/mcp/other', /not one of its redirects/],
-    ['cursor://anysphere.cursor-mcp/oauth/callback', /not one of its redirects/],
-  ] as const) {
-    const refused = await describe(token, request(CLAUDE, redirect, challenge));
-    assert.equal(refused.status, 'invalid', redirect);
-    assert.match(String(refused.message), why);
-    assert.equal('redirect' in refused, false, 'shown on the page, never redirected to');
+  for (const redirect of ['https://evil.example/callback', 'https://claude.ai/api/mcp/other', `https://claude.ai/${'x'.repeat(400)}`]) {
+    const refused = await describe(request(CLAUDE, redirect, challenge));
+    assert.deepEqual(Object.keys(refused).sort(), ['message', 'status']);
+    assert.equal(refused.status, 'invalid');
+    const decided = await decideAs('ada-web', request(CLAUDE, redirect, challenge), { approve: true });
+    assert.equal(decided.status, 400);
   }
+  for (const client of ['', 'https://unknown.example/client.json', 'not-a-client', '00000000-0000-4000-8000-000000000000', `https://claude.ai/${'x'.repeat(300)}`]) {
+    assert.equal((await describe(request(client, 'https://claude.ai/api/mcp/auth_callback', challenge))).status, 'invalid', client);
+  }
+  // A client the vault could not keep is refused on the page, its document unfetched for an id longer than the vault keeps.
+  assert.equal((await describe(request(LONG_ID, 'https://long.example/cb', challenge))).status, 'invalid');
+  assert.equal((await describe(request(LONG_REDIRECTS, LONG_REDIRECT, challenge))).status, 'invalid');
+  assert.deepEqual(fetched.filter((url) => url.startsWith('https://long.example/')), [LONG_REDIRECTS]);
+  // An id Postgres would not take is no client's: said on the page, and refused on Approve, with nothing read.
+  // Half of a surrogate pair reaches only Approve: a URL's query carries it as U+FFFD.
+  for (const client of ['\0', 'https://claude.ai/oauth/x\0']) {
+    const [view, , statements] = await cost(() => describe(request(client, 'https://claude.ai/api/mcp/auth_callback', challenge)));
+    assert.deepEqual([view.status, statements], ['invalid', 0], JSON.stringify(client));
+  }
+  for (const client of ['\0', 'https://claude.ai/oauth/x\0', '\ud800', 'https://claude.ai/oauth/x\udc00']) {
+    const [decided, , statements] = await cost(() => decideAs('ada-web', request(client, 'https://claude.ai/api/mcp/auth_callback', challenge), { approve: true }));
+    assert.deepEqual([decided.status, statements], [400, 0], JSON.stringify(client));
+  }
+  assert.deepEqual(await standing(ada), []);
+});
 
-  documents.set('https://evil.example/claude.json', {
-    client_id: 'https://evil.example/claude.json', client_name: 'Claude', redirect_uris: ['https://claude.ai/api/mcp/auth_callback'],
-  });
-  const lookalike = await describe(token, request('https://evil.example/claude.json', 'https://claude.ai/api/mcp/auth_callback', challenge));
-  assert.equal(lookalike.status, 'invalid');
-  assert.match(String(lookalike.message), /not on evil\.example/, "a document can't send codes to another host");
-
-  const missing = await describe(token, request('https://nowhere.example/client.json', 'https://nowhere.example/cb', challenge));
-  assert.equal(missing.status, 'invalid');
-  assert.match(String(missing.message), /answered 404/);
+test("a client that names itself nothing is shown by its host, cut to the name the vault keeps, and connects", async () => {
+  const { challenge } = pkce();
+  const name = LONG_HOST.slice(0, 100);
+  for (const client of [UNNAMED, EMPTY_NAME]) {
+    const ask = request(client, `https://${LONG_HOST}/cb`, challenge);
+    const view = await describe(ask);
+    assert.deepEqual([view.status, (view.client as { name: string }).name], ['ready', name], client);
+    assert.equal((await decide(ask, { approve: true })).searchParams.has('code'), true, client);
+  }
+  assert.equal((await standing(ada)).length, 2);
 });
 
 test('what is wrong past the client and its redirect goes back to the client, as OAuth says', async () => {
-  const token = await session(DEV);
   const { challenge } = pkce();
-  const redirect = 'http://localhost:5000/callback';
-  for (const [extra, error] of [
+  const redirect = 'http://127.0.0.1:4000/callback';
+  const cases: [Partial<Ask>, string][] = [
     [{ response_type: 'token' }, 'unsupported_response_type'],
     [{ code_challenge_method: 'plain' }, 'invalid_request'],
-    [{ code_challenge: undefined }, 'invalid_request'],
-    [{ resource: 'https://other.example/mcp' }, 'invalid_target'],
+    [{ code_challenge: 'short' }, 'invalid_request'],
+    [{ state: 'x'.repeat(1025) }, 'invalid_request'],
+    [{ resource: 'https://elsewhere.example/mcp' }, 'invalid_target'],
     [{ scope: 'read admin' }, 'invalid_scope'],
-  ] as const) {
-    const view = await describe(token, request(CLAUDE_CODE, redirect, challenge, extra as Partial<Ask>));
-    assert.equal(view.status, 'refused', JSON.stringify(extra));
-    const back = new URL(String(view.redirect));
-    assert.deepEqual([back.searchParams.get('error'), back.searchParams.get('state'), back.searchParams.get('iss')], [error, 'st-1', ORIGIN]);
+  ];
+  for (const [wrong, error] of cases) {
+    const ask = request(CLAUDE_CODE, redirect, challenge, wrong);
+    const view = await describe(ask);
+    assert.equal(view.status, 'refused', error);
+    const back = new URL(view.redirect as string);
+    assert.deepEqual([`${back.origin}${back.pathname}`, back.searchParams.get('error'), back.searchParams.get('iss')], [redirect, error, PUBLIC_URL]);
+    // Approve on a request that cannot be approved sends the same, and makes nothing.
+    assert.equal((await decide(ask, { approve: true })).searchParams.get('error'), error);
   }
-  // A resource with a trailing slash is the same resource.
-  assert.equal((await describe(token, request(CLAUDE_CODE, redirect, challenge, { resource: `${RESOURCE}/` }))).status, 'ready');
+  // A resource with a trailing slash is the MCP endpoint all the same.
+  assert.equal((await describe(request(CLAUDE_CODE, redirect, challenge, { resource: `${RESOURCE}/` }))).status, 'ready');
+  assert.deepEqual(await standing(ada), []);
 });
 
-test('a person who denies sends the client access_denied, and the refusal is logged', async () => {
-  const back = await decide(await session(DEV), request(CLAUDE_CODE, 'http://localhost:5000/callback', pkce().challenge), { approve: false });
-  assert.deepEqual([back.searchParams.get('error'), back.searchParams.get('code')], ['access_denied', null]);
-  const [refused] = await entries('mcp.connect');
-  assert.deepEqual([refused?.decision, refused?.metadata.reason], ['deny', 'person_denied']);
-  assert.equal((await db.owner.select().from(mcpConnections)).length, 0);
-});
-
-test('scopes: Read always; the rest as the person ticked, asked for or not; the token says which', async () => {
-  const token = await session(DEV);
+test('a person who denies sends the client access_denied, and nothing is written', async () => {
   const { challenge } = pkce();
-  const ask = request(CLAUDE_CODE, 'http://localhost:5000/callback', challenge, { scope: 'write reveal offline_access' });
-  assert.deepEqual((await describe(token, ask)).scopes, ['read', 'write', 'reveal'], 'what starts ticked; offline_access is every connection');
-  await decide(token, ask, { approve: true, scopes: ['write', 'manage-access'] });
-  const [row] = await db.owner.select().from(mcpConnections);
-  assert.equal(row?.scopes, 'read write manage-access', 'unticked Reveal values stays out; Manage access, never asked for, is in');
-  const [connected] = await entries('mcp.connect');
-  assert.deepEqual([connected?.metadata.asked, connected?.metadata.scopes], ['read write reveal', 'read write manage-access']);
-
-  // Claude asks for what the resource metadata names, Read; its person ticks Write.
-  const claude = await connect(DEV, CLAUDE, 'https://claude.ai/api/mcp/auth_callback', 'read', ['write']);
-  assert.equal(claude.scope, 'read write', 'RFC 6749, section 3.3: the scope granted, which is not the one asked for');
-  const refreshed = (await (await route('/api/oauth/token', tokenRequest({ grant_type: 'refresh_token', refresh_token: claude.refresh_token, client_id: CLAUDE }))).json()) as { scope: string };
-  assert.equal(refreshed.scope, 'read write');
+  const [back, calls, statements] = await cost(() => decide(request(CLAUDE_CODE, 'http://localhost/callback', challenge), { approve: false }));
+  assert.deepEqual([back.searchParams.get('error'), back.searchParams.get('state'), back.searchParams.get('code')], ['access_denied', 'st-1', null]);
+  assert.deepEqual([calls, statements], [['caller'], 0]);
+  assert.deepEqual(await rowsOf(world.owner, sql`SELECT id FROM credentials WHERE kind = 'mcp'`), []);
 });
 
-test('refresh tokens rotate, may narrow the scopes, and a replaced one presented again ends the connection', async () => {
-  const first = await connect(DEV, CLAUDE_CODE, 'http://localhost:5000/callback', 'read write');
-  const refresh = (refresh_token: string, extra: Record<string, string> = {}) =>
-    route('/api/oauth/token', tokenRequest({ grant_type: 'refresh_token', refresh_token, client_id: CLAUDE_CODE, ...extra }));
+test('only a person, on a session of theirs, connects an app: a personal token or a service account is refused before anything is fetched', async () => {
+  const { challenge } = pkce();
+  const ask = request(CLAUDE_CODE, 'http://localhost/callback', challenge);
+  for (const label of ['ada-pat', 'ci-token']) {
+    for (const response of [await describeAs(label, ask), await decideAs(label, ask, { approve: true })]) {
+      assert.equal(response.status, 403, label);
+      assert.equal(((await response.json()) as { reason: string }).reason, 'no_access');
+    }
+  }
+  assert.deepEqual(fetched, []);
+  // A CLI session is a session of theirs.
+  assert.equal((await describe(ask, 'ada-cli')).status, 'ready');
+});
 
-  const wider = await refresh(first.refresh_token, { scope: 'read write manage-access' });
-  assert.equal(((await wider.json()) as { error: string }).error, 'invalid_scope');
-  const other = await refresh(first.refresh_token, { client_id: CLAUDE });
-  assert.equal(((await other.json()) as { error: string }).error, 'invalid_grant');
+test('scopes: read always; the rest as the person ticked, asked for or not; the token says which', async () => {
+  const tokens = await connect({ scope: 'read', ticked: ['reveal', 'write', 'nonsense'] });
+  assert.equal(tokens.scope, 'read write reveal');
+  const narrow = await connect({ scope: 'read write', ticked: [] });
+  assert.equal(narrow.scope, 'read');
+});
 
-  const second = (await (await refresh(first.refresh_token, { scope: 'read' })).json()) as { refresh_token: string; access_token: string; scope: string };
+test('refresh tokens rotate, may narrow the scopes, never widen them, and a replaced one presented again ends the connection', async () => {
+  const first = await connect({ scope: 'read reveal' });
+  const [status, body] = await refresh(first, { scope: 'read' });
+  assert.equal(status, 200, JSON.stringify(body));
+  const second = { ...(body as Tokens), client: first.client };
   assert.equal(second.scope, 'read');
   assert.notEqual(second.refresh_token, first.refresh_token);
-  assert.equal((await discover(second.access_token)).status, 200);
-  assert.equal((await discover(first.access_token)).status, 200, 'an earlier access token lives out its hour');
+  // Narrowed to reveal, `read` comes with it, as with every connection.
+  assert.equal((await refresh(second, { scope: 'reveal' }))[1].scope, 'read reveal');
+  // The refresh token before the one replaced last is unknown, and ends nothing (0.14.7); the one replaced last is a copy someone else holds.
+  assert.deepEqual((await refresh(first))[1].error, 'invalid_grant');
+  assert.equal((await standing(ada)).length, 1);
+  const [reused, again] = await refresh(second);
+  assert.deepEqual([reused, again.error], [400, 'invalid_grant']);
+  assert.match(String(again.error_description), /used already; the connection it made is ended/);
+  assert.deepEqual(await standing(ada), [], 'and so the connection ended');
 
-  // The first refresh token, replaced, comes back: one of its holders is not the client.
-  const reused = await refresh(first.refresh_token);
-  assert.equal(((await reused.json()) as { error: string }).error, 'invalid_grant');
-  assert.equal((await discover(second.access_token)).status, 401);
-  assert.equal(((await (await refresh(second.refresh_token)).json()) as { error: string }).error, 'invalid_grant', 'the current one is dead too');
-  const ended = await entries('mcp.disconnect');
-  assert.deepEqual(ended.map((entry) => entry.metadata.reason), ['refresh_reused']);
-  const tokens = await entries('mcp.token');
-  assert.deepEqual(tokens.map((entry) => entry.metadata.grant), ['authorization_code', 'refresh_token']);
+  const other = await connect({ scope: 'read' });
+  const [widened, wide] = await refresh(other, { scope: 'read write' });
+  assert.deepEqual([widened, wide.error], [400, 'invalid_scope']);
+  assert.deepEqual([(await refresh(other, { scope: 'read bogus' }))[1].error, (await refresh(other, { client_id: CLAUDE }))[1].error, (await refresh(other, { client_id: '\0' }))[1].error], ['invalid_scope', 'invalid_grant', 'invalid_grant']);
+  assert.equal((await standing(ada)).length, 1, 'a refused refresh ends nothing');
 });
 
-test('revocation, by either token, ends the connection; and so does removing its person', async () => {
-  const one = await connect();
-  const revoke = await route('/api/oauth/revoke', tokenRequest({ token: one.refresh_token, client_id: CLAUDE_CODE }));
-  assert.equal(revoke.status, 200);
-  assert.equal((await discover(one.access_token)).status, 401);
-  assert.equal((await route('/api/oauth/revoke', tokenRequest({ token: 'coffre_mcr_unknown' }))).status, 200, 'an unknown token: a quiet no-op');
-
-  const two = await connect();
-  assert.equal((await route('/api/oauth/revoke', tokenRequest({ token: two.access_token }))).status, 200);
-  assert.equal((await discover(two.access_token)).status, 401);
-
-  const three = await connect();
-  await clientFor(deps, ROOT).members.remove(`user:${DEV}`);
-  assert.equal((await discover(three.access_token)).status, 401, 'a removed member, whatever tokens are out');
-});
-
-test('an MCP token is good at /mcp only, and nothing else is good there', async () => {
-  const { access_token } = await connect();
-  const api = await route('/api/me', { headers: { authorization: `Bearer ${access_token}` } });
-  assert.equal(api.status, 401, 'the API never takes one');
-  const cli = await session(DEV);
-  assert.equal((await discover(cli)).status, 401, 'nor /mcp a CLI session');
-  const forged = access_token.slice(0, -4) + (access_token.endsWith('AAAA') ? 'BBBB' : 'AAAA');
-  assert.equal((await discover(forged)).status, 401, 'a token whose MAC does not hold');
-});
-
-test('registration keeps the redirects coffre accepts and leaves out the rest, as Cursor needs', async () => {
-  const response = await route('/api/oauth/register', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_name: 'Cursor',
-      redirect_uris: ['http://localhost:8787/callback', 'cursor://anysphere.cursor-mcp/oauth/callback', 'https://www.cursor.com/agents/mcp/oauth/callback'],
-      token_endpoint_auth_method: 'none',
-    }),
-  });
-  assert.equal(response.status, 201);
-  const registered = (await response.json()) as { client_id: string; redirect_uris: string[] };
-  assert.deepEqual(registered.redirect_uris, ['http://localhost:8787/callback', 'https://www.cursor.com/agents/mcp/oauth/callback']);
-
-  const token = await session(DEV);
-  const { challenge } = pkce();
-  const view = await describe(token, request(registered.client_id, 'http://localhost:8787/callback', challenge));
-  assert.deepEqual(view.client, { id: registered.client_id, name: 'Cursor', host: null, registration: 'dcr' }, 'no host to vouch for it');
-  assert.equal(view.loopbackOnly, false);
-  assert.equal((await describe(token, request(registered.client_id, 'cursor://anysphere.cursor-mcp/oauth/callback', challenge))).status, 'invalid');
-  const { access_token } = await connect(DEV, registered.client_id, 'https://www.cursor.com/agents/mcp/oauth/callback');
-  assert.equal((await discover(access_token)).status, 200);
-
-  for (const body of [
-    { redirect_uris: ['cursor://only'] },
-    { redirect_uris: ['https://app.example/cb'], token_endpoint_auth_method: 'client_secret_basic' },
-    { redirect_uris: [] },
-  ]) {
-    const refused = await route('/api/oauth/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-    assert.equal(refused.status, 400, JSON.stringify(body));
+test('a code is for its client, its redirect and its verifier only (its minute, the vault holds: packages/vault/test/mcp.test.ts)', async () => {
+  const { verifier, challenge } = pkce();
+  const redirect = 'http://localhost:7000/callback';
+  const code = (await decide(request(CLAUDE_CODE, redirect, challenge), { approve: true })).searchParams.get('code')!;
+  const redeem = { grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: redirect, client_id: CLAUDE_CODE };
+  for (const [wrong, words] of [
+    [{ client_id: CLAUDE }, 'another client'], [{ redirect_uri: 'http://localhost:7001/callback' }, 'not the one the code was sent to'],
+    [{ redirect_uri: 'ftp://localhost/callback' }, 'not the one the code was sent to'], [{ code_verifier: pkce().verifier }, 'does not match'],
+    [{ code_verifier: 'short' }, 'does not match'], [{ resource: 'https://elsewhere.example/mcp' }, 'issues tokens for'], [{ code: 'unknown' }, 'unknown code'],
+    // Text the vault cannot take is refused here, not left to fault there.
+    [{ client_id: '\0' }, 'another client'], [{ redirect_uri: `${redirect}\0` }, 'not the one the code was sent to'],
+  ] as const) {
+    const [status, body] = await token({ ...redeem, ...wrong });
+    assert.equal(status, 400, JSON.stringify(wrong));
+    assert.match(String(body.error_description), new RegExp(words), JSON.stringify(wrong));
   }
+  assert.deepEqual((await token({ ...redeem, grant_type: 'password' }))[1].error, 'unsupported_grant_type');
+  assert.deepEqual((await token({ grant_type: 'authorization_code', code })).slice(0, 1), [400]);
+  // Refused, each wrote nothing: the code is good still.
+  assert.equal((await token(redeem))[0], 200);
 });
 
-test('the unauthenticated endpoints pass their limits first, and a JSON token request is refused', async () => {
+test('revocation, by either token, ends the connection; anything else is answered the same, and a stranger\'s string asks the vault nothing', async () => {
+  const first = await connect();
+  // Another client's token, or one that is not coffre's, ends nothing.
+  for (const fields of [{ token: first.refresh_token, client_id: CLAUDE }, { token: first.refresh_token, client_id: '\0' }, { token: 'coffre_mcp_nonsense' }, { token: 'whatever' }] as Record<string, string>[]) {
+    const [response, calls] = await cost(() => form('/api/oauth/revoke', fields));
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, fields.client_id === CLAUDE ? ['change'] : [], JSON.stringify(fields));
+  }
+  assert.equal((await standing(ada)).length, 1);
+  const [revoked, calls, statements] = await cost(() => form('/api/oauth/revoke', { token: first.access_token, client_id: CLAUDE_CODE }));
+  assert.deepEqual([revoked.status, revoked.headers.get('cache-control'), calls, statements], [200, 'no-store', ['change'], 0]);
+  assert.deepEqual(await standing(ada), []);
+  assert.deepEqual((await refresh(first))[1].error, 'invalid_grant');
+
+  const second = await connect();
+  assert.equal((await form('/api/oauth/revoke', { token: second.refresh_token })).status, 200);
+  assert.deepEqual(await standing(ada), []);
+  assert.equal((await form('/api/oauth/revoke', { token: second.refresh_token })).status, 200, 'ended once, answered the same');
+  assert.equal((await form('/api/oauth/revoke', {})).status, 400);
+});
+
+test('registration keeps the redirects coffre accepts and leaves out the rest, as Cursor needs; its app connects by its row', async () => {
+  const register = (body: unknown) => app.request('/api/oauth/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const [response, calls, statements] = await cost(() => register({ client_name: 'Cursor', redirect_uris: ['cursor://anysphere.cursor-retrieval/oauth/callback', 'http://127.0.0.1/callback', 'https://cursor.example/cb'], token_endpoint_auth_method: 'none' }));
+  assert.deepEqual([response.status, calls, statements], [201, ['change'], 0]);
+  const registered = (await response.json()) as Record<string, unknown>;
+  assert.match(String(registered.client_id), /^[0-9a-f-]{36}$/);
+  assert.deepEqual([registered.client_name, registered.redirect_uris, registered.token_endpoint_auth_method], ['Cursor', ['http://127.0.0.1/callback', 'https://cursor.example/cb'], 'none']);
+  assert.equal(typeof registered.client_id_issued_at, 'number');
+
+  const client = String(registered.client_id);
+  const { challenge } = pkce();
+  const view = await describe(request(client, 'http://127.0.0.1:9999/callback', challenge));
+  assert.deepEqual([view.status, view.client, view.loopbackOnly], ['ready', { id: client, name: 'Cursor', host: null, registration: 'dcr' }, false]);
+  assert.equal((await describe(request(client, 'https://cursor.example/other', challenge))).status, 'invalid');
+  const tokens = await connect({ client, redirect: 'http://127.0.0.1:9999/callback' });
+  assert.equal(tokens.scope, 'read');
+  assert.deepEqual(fetched, [], 'a registration is its row, never fetched');
+
+  for (const [body, error] of [
+    [{ client_name: 'Secretive', redirect_uris: ['https://x.example/cb'], token_endpoint_auth_method: 'client_secret_basic' }, 'invalid_client_metadata'],
+    [{ client_name: 'Nowhere', redirect_uris: ['cursor://only'] }, 'invalid_redirect_uri'],
+    [{ client_name: 'Nul', redirect_uris: ['https://x.example/cb\0'] }, 'invalid_redirect_uri'],
+    [{ client_name: 'Half', redirect_uris: ['https://x.example/\udc00'] }, 'invalid_redirect_uri'],
+    [{ client_name: 'Many', redirect_uris: Array.from({ length: 11 }, (_, i) => `https://x.example/${i}`) }, 'invalid_redirect_uri'],
+    [['not', 'an', 'object'], 'invalid_client_metadata'],
+  ] as const) {
+    const refused = await register(body);
+    assert.deepEqual([refused.status, ((await refused.json()) as { error: string }).error], [400, error]);
+  }
+  // A name that is all control characters, or none: called what it is.
+  const unnamed = (await (await register({ client_name: '\u0007​', redirect_uris: ['https://x.example/cb'] })).json()) as Record<string, unknown>;
+  assert.equal(unnamed.client_name, 'Unnamed app');
+  const half = (await (await register({ client_name: '\udc00', redirect_uris: ['https://x.example/cb'] })).json()) as Record<string, unknown>;
+  assert.equal(half.client_name, 'Unnamed app', 'half of a surrogate pair is no text');
+  const long = (await (await register({ client_name: `${'a'.repeat(99)} b`, redirect_uris: ['https://x.example/cb'] })).json()) as Record<string, unknown>;
+  assert.equal(long.client_name, 'a'.repeat(99), 'cut, then trimmed');
+});
+
+test('the endpoints anyone may call pass their limits first, and a JSON token request is refused', async () => {
   open.source = false;
-  const limited = await route('/api/oauth/token', tokenRequest({ grant_type: 'refresh_token', refresh_token: 'x', client_id: CLAUDE_CODE }));
-  assert.equal(limited.status, 429);
-  assert.equal(limited.headers.get('retry-after'), '60');
+  for (const path of ['/api/oauth/token', '/api/oauth/register', '/api/oauth/revoke']) {
+    const [response, calls] = await cost(() => app.request(path, { method: 'POST', body: '{}' }));
+    assert.deepEqual([response.status, response.headers.get('retry-after'), ((await response.json()) as { error: string }).error, calls], [429, '60', 'slow_down', []], path);
+  }
   open.source = true;
   open.total = false;
-  assert.equal((await route('/api/oauth/register', { method: 'POST', body: '{}' })).status, 429);
+  assert.equal((await form('/api/oauth/token', { grant_type: 'refresh_token' })).status, 429);
   open.total = true;
-  const json = await route('/api/oauth/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-  assert.equal(((await json.json()) as { error: string }).error, 'invalid_request');
-  const twice = await route('/api/oauth/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'grant_type=a&grant_type=b' });
-  assert.equal(((await twice.json()) as { error: string }).error, 'invalid_request');
-});
-
-test('a code lasts a minute, and is for its client and redirect only', async () => {
-  const token = await session(DEV);
-  const { verifier, challenge } = pkce();
-  const redirect = 'http://localhost:5000/callback';
-  const code = (await decide(token, request(CLAUDE_CODE, redirect, challenge), { approve: true })).searchParams.get('code')!;
-  const exchange = (fields: Record<string, string>) =>
-    route('/api/oauth/token', tokenRequest({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: redirect, client_id: CLAUDE_CODE, ...fields }));
-  assert.equal(((await (await exchange({ client_id: CLAUDE })).json()) as { error: string }).error, 'invalid_grant');
-  assert.equal(((await (await exchange({ redirect_uri: 'http://localhost:5001/callback' })).json()) as { error: string }).error, 'invalid_grant');
-  assert.equal(((await (await exchange({ resource: 'https://other.example/mcp' })).json()) as { error: string }).error, 'invalid_target');
-  await db.owner.update(mcpConnections).set({ codeExpiresAt: new Date(Date.now() - 1000) });
-  assert.equal(((await (await exchange({})).json()) as { error: string }).error, 'invalid_grant', 'expired; and the MAC would refuse it anyway');
+  const json = await app.request('/api/oauth/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ grant_type: 'refresh_token' }) });
+  assert.deepEqual([json.status, ((await json.json()) as { error: string }).error], [400, 'invalid_request']);
+  const twice = await app.request('/api/oauth/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'client_id=a&client_id=b' });
+  assert.equal(twice.status, 400);
+  // The consent page fetches a document within the same limits.
+  open.total = false;
+  const { challenge } = pkce();
+  assert.deepEqual([(await describe(request(CLAUDE, 'https://claude.ai/api/mcp/auth_callback', challenge))).status, fetched], ['invalid', []]);
 });
 
 test("Connected apps lists a person's redeemed connections, and Disconnect ends one; an owner may end anyone's, no one else", async () => {
-  const one = await connect();
-  const two = await connect(DEV, CLAUDE, 'https://claude.ai/api/mcp/auth_callback');
-  // A consent whose code was never redeemed is no connected app.
-  const dev = await session(DEV);
-  await decide(dev, request(CLAUDE_CODE, 'http://localhost:5000/callback', pkce().challenge), { approve: true });
-  const as = (token: string, method = 'GET', path = '/api/apps') => route(path, { method, headers: { authorization: `Bearer ${token}` } });
-  const listed = (await (await as(dev)).json()) as { apps: { id: string; name: string; host: string; registration: string; scopes: string[] }[] };
-  assert.deepEqual(listed.apps.map((app) => [app.name, app.host, app.registration, app.scopes]), [
-    ['Claude', 'claude.ai', 'cimd', ['read']],
-    ['Claude Code', 'claude.ai', 'cimd', ['read']],
-  ], 'newest first');
-  const [claude, claudeCode] = listed.apps as [(typeof listed.apps)[0], (typeof listed.apps)[0]];
+  const first = await connect({ scope: 'read reveal' });
+  await connect({ client: CLAUDE, redirect: 'https://claude.ai/api/mcp/auth_callback' });
+  // A consent whose code waits is no app yet.
+  await decide(request(CLAUDE_CODE, 'http://localhost/callback', pkce().challenge), { approve: true });
+  const list = async (label: string) => {
+    const response = await app.request('/api/apps', { headers: as(label) });
+    assert.equal(response.status, 200);
+    return ((await response.json()) as { apps: Record<string, unknown>[] }).apps;
+  };
+  const [apps, calls, statements] = await cost(() => list('ada-web'));
+  assert.deepEqual([calls, statements], [['caller'], 1]);
+  assert.deepEqual(apps.map((one) => [one.name, one.host, one.registration, one.scopes]), [['Claude', 'claude.ai', 'cimd', ['read']], ['Claude Code', 'claude.ai', 'cimd', ['read', 'reveal']]]);
+  for (const one of apps) assert.deepEqual(Object.keys(one).sort(), ['createdAt', 'expiresAt', 'host', 'id', 'lastUsedAt', 'lastUsedIp', 'name', 'registration', 'scopes']);
+  assert.deepEqual(await list('bo-web'), []);
 
-  assert.equal((await as(dev, 'DELETE', `/api/apps/${claudeCode.id}`)).status, 200);
-  assert.equal((await discover(one.access_token)).status, 401, 'disconnected: its token stops at the next request');
-  assert.equal((await discover(two.access_token)).status, 200, 'the other connection is untouched');
-
-  const other = await session(OTHER);
-  assert.deepEqual(((await (await as(other)).json()) as { apps: unknown[] }).apps, [], "someone else's apps are not listed");
-  assert.equal((await as(other, 'DELETE', `/api/apps/${claude.id}`)).status, 403, "nor theirs to disconnect");
-  assert.equal((await as(await session(ROOT), 'DELETE', `/api/apps/${claude.id}`)).status, 200, 'an owner may');
-  assert.equal((await discover(two.access_token)).status, 401);
-  assert.equal((await as(dev, 'DELETE', `/api/apps/${claude.id}`)).status, 404, 'ended already');
-  assert.equal((await as(dev, 'DELETE', '/api/apps/not-a-connection')).status, 400, 'the router takes an ID only');
-
-  const ended = await entries('mcp.disconnect');
-  assert.deepEqual(ended.map((entry) => [entry.decision, entry.actor, entry.metadata.reason ?? entry.code, entry.metadata.principalId ?? null]), [
-    ['allow', `user:${DEV}`, 'person', null],
-    ['deny', `user:${OTHER}`, 'requires_instance_admin', null],
-    ['allow', `user:${ROOT}`, 'owner', DEV],
-    ['deny', `user:${DEV}`, 'unknown_connection', null],
-  ]);
-});
-
-test("an owner reads a person's connected apps in their report; removal disconnects them, says how many, and re-admission brings none back", async () => {
-  const app = await connect();
-  // A consent whose code was never redeemed is no connected app, but removal ends it too.
-  await decide(await session(DEV), request(CLAUDE_CODE, 'http://localhost:5000/callback', pkce().challenge), { approve: true });
-  const root = await session(ROOT);
-  const as = (method: string, path: string, token = root) => route(path, { method, headers: { authorization: `Bearer ${token}` } });
-  type Report = { live: { apps: number }; apps: { name: string; host: string; scopes: string[] }[] };
-  const before = (await (await as('GET', `/api/members/user:${DEV}`)).json()) as Report;
-  assert.equal(before.live.apps, 1);
-  assert.deepEqual(before.apps.map((listed) => [listed.name, listed.host, listed.scopes]), [['Claude Code', 'claude.ai', ['read']]]);
-  assert.equal((await as('GET', `/api/members/user:${DEV}`, await session(OTHER))).status, 403, "only owners read someone's report");
-
-  const removal = await as('DELETE', `/api/members/user:${DEV}`);
-  assert.equal(removal.status, 200, await removal.clone().text());
-  const { revoked, report } = (await removal.json()) as { revoked: { apps: number }; report: Report };
-  assert.equal(revoked.apps, 1, 'the code never redeemed is no app, and is not counted');
-  assert.deepEqual([report.live.apps, report.apps], [0, []]);
-  assert.equal((await discover(app.access_token)).status, 401);
-  const rows = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${DEV}`));
-  assert.deepEqual(rows.map((row) => [row.revokedAt !== null, row.revokedBy]), [[true, ROOT], [true, ROOT]], 'revoked, not only dead by the generation');
-
-  // As a removal before this release left them, dead by the generation alone: re-admission revokes them.
-  await updateAuth(db.owner, deps.chainKey, mcpConnections, { principal: `user:${DEV}` }, { revokedAt: null, revokedBy: null });
-  assert.equal((await as('PUT', `/api/members/user:${DEV}`)).status, 200);
-  const readmitted = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${DEV}`));
-  assert.deepEqual(readmitted.map((row) => row.revokedBy), [ROOT, ROOT]);
-  const back = (await (await as('GET', `/api/members/user:${DEV}`)).json()) as Report;
-  assert.deepEqual([back.live.apps, back.apps], [0, []], 'a fresh start');
-  assert.equal((await route('/api/oauth/token', tokenRequest({ grant_type: 'refresh_token', refresh_token: app.refresh_token, client_id: CLAUDE_CODE }))).status, 400);
-});
-
-test("an instance that serves no MCP lists no one's apps", async () => {
-  await connect();
-  const response = await route(`/api/members/user:${DEV}`, { headers: { authorization: `Bearer ${await session(ROOT)}` } }, off);
-  const report = (await response.json()) as { live: { apps: number }; apps: unknown[] };
-  assert.deepEqual([report.live.apps, report.apps], [0, []]);
-});
-
-test('a consent abandoned before its code was redeemed does not count against the twenty', async () => {
-  const dev = await session(DEV);
-  const consent = () => decide(dev, request(CLAUDE_CODE, 'http://localhost:5000/callback', pkce().challenge), { approve: true });
-  for (let i = 0; i < 20; i++) await consent();
-  const refused = await route('/api/oauth/authorizations', {
-    method: 'POST',
-    headers: { authorization: `Bearer ${dev}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ request: request(CLAUDE_CODE, 'http://localhost:5000/callback', pkce().challenge), approve: true }),
-  });
-  assert.equal(refused.status, 409, 'twenty codes waiting count, as twenty connections would');
-  // Their minute passes, each row signed again as coffre would sign it.
-  for (const row of await db.owner.select().from(mcpConnections)) {
-    await updateAuth(db.owner, deps.chainKey, mcpConnections, { id: row.id }, { codeExpiresAt: new Date(Date.now() - 1000) });
-  }
-  await consent();
+  const [newest, oldest] = apps.map((one) => String(one.id));
+  // Bo may not end Ada's; told it is not there, as for any credential.
+  const refused = await app.request(`/api/apps/${newest}`, { method: 'DELETE', headers: as('bo-web') });
+  assert.deepEqual([refused.status, ((await refused.json()) as { error: string }).error], [404, 'not_found']);
+  const [ended, endCalls, endStatements] = await cost(() => app.request(`/api/apps/${newest!.toUpperCase()}`, { method: 'DELETE', headers: as('ada-web') }));
+  assert.deepEqual([ended.status, await ended.json(), endCalls, endStatements], [200, { disconnected: true }, ['change'], 0]);
+  assert.equal((await app.request(`/api/apps/${oldest}`, { method: 'DELETE', headers: as('root-cli') })).status, 200, 'an owner ends anyone\'s');
+  assert.deepEqual(await list('ada-web'), []);
+  assert.deepEqual((await refresh(first))[1].error, 'invalid_grant');
 });
 
 test("the consent page's describe, asked with a cookie from another site, is refused before any client's document is fetched; the page's own render reads it", async () => {
-  const token = await session(DEV);
   const { challenge } = pkce();
   const ask = request(CLAUDE_CODE, 'http://localhost:5000/callback', challenge);
-  // The path as the router reads it: a trailing slash, a doubled one, a letter percent-encoded.
-  for (const path of ['/api/oauth/authorizations', '/api/oauth/authorizations/', '/api//oauth/authorizations', '/api/%6Fauth/authorizations']) {
-    const crossSite = await route(`${path}?${new URLSearchParams(ask)}`, {
-      headers: { cookie: `__Host-coffre_session=${token}`, 'sec-fetch-site': 'cross-site' },
-    });
-    assert.equal(crossSite.status, 403, path);
-    assert.equal(((await crossSite.json()) as { error: string }).error, 'cross_origin', path);
+  for (const headers of [{ cookie: `${SESSION}=ada-web`, 'sec-fetch-site': 'cross-site' }, { cookie: `${SESSION}=ada-web` }] as Record<string, string>[]) {
+    const [response, calls] = await cost(() => app.request(`/api/oauth/authorizations?${new URLSearchParams(ask)}`, { headers }));
+    assert.deepEqual([response.status, ((await response.json()) as { error: string }).error, calls], [403, 'cross_origin', []]);
   }
   assert.deepEqual(fetched, [], "another site's page made coffre fetch nothing");
-  // The consent page embedded in another site, as an iframe or an image, renders without describing.
+  // The consent page embedded in another site, as a frame or an image, renders without describing.
   for (const dest of ['iframe', 'image']) {
-    const embedded = pageClient(new Request(`${ORIGIN}/oauth/authorize`, { headers: { cookie: `__Host-coffre_session=${token}`, 'sec-fetch-dest': dest } }), runtime, null);
-    await assert.rejects(embedded.oauth.describe(ask), (error: Error & { code?: string }) => error.code === 'cross_origin', dest);
+    const embedded = await app.render({ headers: { cookie: `${SESSION}=ada-web`, 'sec-fetch-dest': dest } }, ({ client }) => client.oauth.describe(ask).catch((error: Error & { code?: string }) => error.code));
+    assert.equal(await embedded.json(), 'cross_origin', dest);
   }
   assert.deepEqual(fetched, []);
   // The consent page's render, a top-level navigation in process with the cookie the browser sent it, is coffre itself.
   for (const headers of [{}, { 'sec-fetch-dest': 'document' }] as Record<string, string>[]) {
-    const page = pageClient(new Request(`${ORIGIN}/oauth/authorize`, { headers: { cookie: `__Host-coffre_session=${token}`, ...headers } }), runtime, null);
-    assert.equal((await page.oauth.describe(ask)).status, 'ready');
+    const page = await app.render({ headers: { cookie: `${SESSION}=ada-web`, ...headers } }, ({ client }) => client.oauth.describe(ask));
+    assert.equal(((await page.json()) as { status: string }).status, 'ready');
   }
-  assert.deepEqual(fetched, [CLAUDE_CODE], 'fetched once, then kept');
+  // A bearer token is no browser's, from any site.
+  assert.equal((await describe(ask, 'ada-cli')).status, 'ready');
+  assert.deepEqual(fetched, [CLAUDE_CODE]);
 });
 
-test("a client's name, host and kind are under their rows' MACs: edited in the database, the row is refused", async () => {
-  for (const [column, value] of [['client_name', 'Claude'], ['client_host', 'claude.ai'], ['registration', 'cimd']] as const) {
-    await resetDatabase(db.owner);
-    const root = clientFor(deps, ROOT);
-    await root.members.add(`user:${DEV}`);
-    const { access_token } = await connect();
-    assert.equal((await discover(access_token)).status, 200);
-    await db.owner.update(mcpConnections).set({ [column === 'client_name' ? 'clientName' : column === 'client_host' ? 'clientHost' : 'registration']: value === 'cimd' ? 'dcr' : `${value}-forged` });
-    assert.equal((await discover(access_token)).status, 401, `${column} edited: the connection is refused`);
-    const listed = await route('/api/apps', { headers: { authorization: `Bearer ${await session(DEV)}` } });
-    assert.deepEqual(((await listed.json()) as { apps: unknown[] }).apps, [], `${column} edited: Connected apps does not show it`);
-  }
-  // A registration's name too.
-  const registered = (await (await route('/api/oauth/register', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_name: 'Cursor', redirect_uris: ['http://localhost:4000/cb'] }),
-  })).json()) as { client_id: string };
-  const ask = request(registered.client_id, 'http://localhost:4000/cb', pkce().challenge);
-  const token = await session(DEV);
-  assert.equal((await describe(token, ask)).status, 'ready');
-  await db.owner.update(oauthClients).set({ name: 'Claude' });
-  assert.equal((await describe(token, ask)).status, 'invalid', 'a registration renamed in the database is no client');
+test('a step-up says which connections it ends: the client\'s narrower ones, once its code is redeemed', async () => {
+  await connect({ scope: 'read' });
+  await connect({ scope: 'read reveal' });
+  const view = await describe(request(CLAUDE_CODE, 'http://localhost/callback', pkce().challenge, { scope: 'read reveal write' }));
+  assert.deepEqual(view.connections, [['read', 'reveal']], 'the narrower one ended when the wider one was redeemed');
+  await connect({ scope: 'read reveal write' });
+  assert.equal((await standing(ada)).length, 1);
 });
 
-test('GET /me says what the deployment turns on, read from its configuration, not from a route answering 404: MCP as its endpoint', async () => {
-  const token = await session(DEV);
-  const me = (on: CoffreRuntime) => route('/api/me', { headers: { authorization: `Bearer ${token}` } }, on).then((response) => response.json() as Promise<{ features: unknown }>);
-  assert.deepEqual((await me(runtime)).features, { mcp: `${ORIGIN}/mcp`, workloads: false });
-  assert.deepEqual((await me(off)).features, { mcp: null, workloads: false });
-});
-
-test("a step-up supersedes the client's narrower connection once its code is redeemed; one with the same scopes stays", async () => {
-  const laptop = await connect(DEV, CLAUDE_CODE, 'http://localhost:51234/callback', 'read');
-  const other = await connect(DEV, CLAUDE_CODE, 'http://localhost:51235/callback', 'read');
-  assert.equal((await discover(laptop.access_token)).status, 200, 'a second laptop signs the first out of nothing');
-  const claude = await connect(DEV, CLAUDE, 'https://claude.ai/api/mcp/auth_callback', 'read');
-
-  // The consent page says what a step-up replaces: the two Read connections of Claude Code.
-  const { challenge } = pkce();
-  const shown = await describe(await session(DEV), request(CLAUDE_CODE, 'http://localhost:51236/callback', challenge, { scope: 'read write' }));
-  assert.deepEqual(shown.connections, [['read'], ['read']]);
-
-  const stepped = await connect(DEV, CLAUDE_CODE, 'http://localhost:51236/callback', 'read write');
-  assert.equal((await discover(laptop.access_token)).status, 401, 'superseded');
-  assert.equal((await discover(other.access_token)).status, 401, 'superseded');
-  assert.equal((await discover(stepped.access_token)).status, 200);
-  assert.equal((await discover(claude.access_token)).status, 200, "another client's connection is its own");
-  const ended = (await entries('mcp.disconnect')).map((entry) => [entry.metadata.reason, entry.metadata.supersededBy !== undefined]);
-  assert.deepEqual(ended, [['superseded', true], ['superseded', true]]);
-});
-
-test('a registration no connection names is revoked after a week, by a later registration; a used one stays', async () => {
-  const register = async (name: string) => {
-    const response = await route('/api/oauth/register', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ client_name: name, redirect_uris: ['http://localhost:8787/callback'] }),
-    });
-    return ((await response.json()) as { client_id: string }).client_id;
-  };
-  const unused = await register('Never connected');
-  const used = await register('Connected once');
-  await connect(DEV, used, 'http://localhost:8787/callback');
-  const recent = await register('Registered today');
-  await db.owner.update(oauthClients).set({ createdAt: new Date(Date.now() - 8 * 86_400_000) }).where(inArray(oauthClients.id, [unused, used]));
-
-  await register('A newcomer');
-  const revoked = new Map((await db.owner.select().from(oauthClients)).map((row) => [row.id, row.revokedAt !== null]));
-  assert.deepEqual([revoked.get(unused), revoked.get(used), revoked.get(recent)], [true, false, false], 'the unused week-old one revoked; a used one, and a recent one, stay');
-  const { challenge } = pkce();
-  assert.equal((await describe(await session(DEV), request(unused, 'http://localhost:8787/callback', challenge))).status, 'invalid', 'a revoked registration connects no more');
+test("a registration written behind the vault connects nothing, and the person is told what any request is told of such a row", async () => {
+  const response = await app.request('/api/oauth/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: 'Zed', redirect_uris: ['http://127.0.0.1/callback'] }) });
+  const { client_id: client } = (await response.json()) as { client_id: string };
+  await world.owner.execute(sql`UPDATE oauth_clients SET redirect_uris = '["https://evil.example/cb"]' WHERE id = ${client}::uuid`);
+  // The page reads the row as it is; the vault, approving it, finds it is not its own.
+  const ask = request(client, 'https://evil.example/cb', pkce().challenge);
+  assert.equal((await describe(ask)).status, 'ready');
+  const refused = await decideAs('ada-web', ask, { approve: true });
+  assert.deepEqual([refused.status, ((await refused.json()) as { error: string }).error], [500, 'tampered']);
+  assert.deepEqual(await standing(ada), []);
 });

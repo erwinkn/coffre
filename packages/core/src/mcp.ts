@@ -103,6 +103,8 @@ export type RedirectKind = 'https' | 'loopback';
  * scheme, no fragment, no user or password.
  */
 export function redirectKind(value: string): RedirectKind {
+  // The URL parser drops a trailing NUL, but the vault keeps the text as given, and Postgres stores no NUL nor half of a surrogate pair.
+  if (/[\0\p{Cs}]/u.test(value)) throw new ClientInvalid('a redirect holds a NUL or half of a surrogate pair');
   let url: URL;
   try {
     url = new URL(value);
@@ -160,6 +162,15 @@ export type ClientMetadata = {
 
 const MAX_REDIRECTS = 10;
 const MAX_NAME = 100;
+/** The longest client id the vault keeps (`text` in its ops). */
+export const MAX_CLIENT_ID = 256;
+
+/**
+ * Whether a client_id is one the vault and Postgres keep: 256 characters at
+ * most, with no NUL and no half of a surrogate pair. Any other is no
+ * client's, and is answered as such before it is read or sent anywhere.
+ */
+export const clientIdKept = (value: string): boolean => value.length <= MAX_CLIENT_ID && !/[\0\p{Cs}]/u.test(value);
 
 /**
  * Whether `value` is a Client ID Metadata Document's URL: HTTPS, with a
@@ -231,11 +242,14 @@ export function registrationRedirects(value: unknown): { kept: string[]; dropped
   return { kept, dropped };
 }
 
-/** A client's name as shown: its own, cut short, or its host when it gives none. */
+/** A client's name as shown: its own, or its host when it gives none, cut short. */
 export function clientName(value: unknown, fallback: string): string {
   // Control and bidirectional characters could make one name look like another.
-  const name = typeof value === 'string' ? value.replace(/[\p{Cc}\p{Cf}]/gu, '').trim() : '';
-  return name === '' ? fallback : name.slice(0, MAX_NAME);
+  // Half of a surrogate pair goes too: it is no text Postgres stores.
+  const own = typeof value === 'string' ? value.replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, '').trim() : '';
+  // Cut on a whole character, and trimmed again: what the vault keeps is the name as shown (`named` in its ops/mcp.ts).
+  // A host is cut too: a document's may be 200 characters, and the vault keeps 100.
+  return (own === '' ? fallback : own).slice(0, MAX_NAME).replace(/[\uD800-\uDBFF]$/, '').trim();
 }
 
 function redirectList(value: unknown): string[] {

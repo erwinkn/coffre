@@ -1,7 +1,6 @@
 import { ClientInvalid, clientFromDocument, isClientIdUrl, type ClientMetadata } from '@coffre/core/mcp';
-import type { Database } from '@coffre/db';
 
-import { findOauthClient } from '../db/queries.ts';
+import { REGISTERED, type RegisteredClient } from '../db/queries/mcp.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 
 /** How long a process keeps a client's metadata document. */
@@ -16,9 +15,8 @@ const MAX_DOCUMENTS = 200;
  */
 const documents = new Map<string, { at: number; client: ClientMetadata }>();
 
-const REGISTERED = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-export type ClientDeps = { db: Database; chainKey: Buffer; transport: WorkloadTransport; allowLoopback: boolean };
+/** How the app fetches a client's metadata document: through the transport trust bindings use, loopback documents only where the deployment allows them. */
+export type Fetching = { transport: WorkloadTransport; allowLoopback: boolean };
 
 /** Whether resolving `clientId` would fetch: what the consent page's limiter counts. */
 export function wouldFetch(clientId: string, allowLoopback: boolean, now = Date.now()): boolean {
@@ -30,10 +28,10 @@ export function wouldFetch(clientId: string, allowLoopback: boolean, now = Date.
 /**
  * Who a `client_id` is: a Client ID Metadata Document, fetched through the
  * transport trust bindings use (no redirect, 5 seconds, 64 KiB, public
- * addresses only on Node), or a client that registered. Throws
- * `ClientInvalid`, saying why, for anything else.
+ * addresses only on Node), or a client that registered, as the app read its
+ * row (`registered`). Throws `ClientInvalid`, saying why, for anything else.
  */
-export async function resolveClient(deps: ClientDeps, clientId: string): Promise<ClientMetadata> {
+export async function resolveClient(deps: Fetching, clientId: string, registered: RegisteredClient | null): Promise<ClientMetadata> {
   if (isClientIdUrl(clientId, { allowLoopback: deps.allowLoopback })) {
     const now = Date.now();
     const kept = documents.get(clientId);
@@ -51,11 +49,8 @@ export async function resolveClient(deps: ClientDeps, clientId: string): Promise
     while (documents.size > MAX_DOCUMENTS) documents.delete(documents.keys().next().value!);
     return client;
   }
-  if (REGISTERED.test(clientId)) {
-    const row = await findOauthClient(deps.db, deps.chainKey, clientId);
-    if (row !== null) {
-      return { clientId, name: row.name, host: null, redirectUris: JSON.parse(row.redirectUris) as string[], registration: 'dcr' };
-    }
+  if (REGISTERED.test(clientId) && registered !== null) {
+    return { clientId, name: registered.name, host: null, redirectUris: registered.redirectUris, registration: 'dcr' };
   }
   throw new ClientInvalid('the client_id is neither the HTTPS URL of a client metadata document nor a client registered here');
 }

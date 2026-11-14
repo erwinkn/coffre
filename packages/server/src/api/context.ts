@@ -19,6 +19,13 @@ export type ApiContext = {
    * itself.
    */
   caller(): Promise<Called>;
+  /**
+   * Whether the request rides on the browser's cookie from another site's
+   * page, or from a page of coffre's that another site embeds: a read that
+   * makes coffre fetch something (an MCP client's metadata document) is
+   * refused it, so that no site makes coffre fetch for it in a visitor's name.
+   */
+  crossSite: boolean;
   /** How the deployment signs people in: what a sign-in route says of it (`cliSessionDays`). */
   auth: AuthConfig;
   /** Days a value may go unchanged before the pages flag it for rotation, as the deployment says (`rotateAfterDays`); null for no flag. */

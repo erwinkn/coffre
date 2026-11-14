@@ -31,11 +31,7 @@ export const unservedRoutes = {
   // A person's own sessions and sign-in accounts, listed: ending one is served (routes/tokens.ts, routes/signin.ts).
   ...unserved('GET /sessions', 'the sessions listed'),
   ...unserved('GET /identities', 'the sign-in accounts listed'),
-  // MCP: connecting an app and its consent page, the apps connected, and a change an app asked for, on the page where its person decides it.
-  ...unserved('GET /oauth/authorizations', "an app's authorization request"),
-  ...unserved('POST /oauth/authorizations', 'authorizing an app'),
-  ...unserved('GET /apps', 'the connected apps'),
-  ...unserved('DELETE /apps/:id', 'disconnecting an app'),
+  // MCP: a change an app asked for, on the page where its person decides it. Connecting an app and the apps connected are served (routes/oauth.ts).
   ...unserved('GET /approvals/:id', "an app's change to approve"),
   ...unserved('POST /approvals/:id', "deciding an app's change"),
   // The log, a page of it proved by its tiles; and what `coffre verify keys` checks an escrowed key against.

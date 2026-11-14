@@ -9,7 +9,7 @@ import type { McpScope } from '../mcp.ts';
  * hour, under it (`ancestors`): it stands while its connection does, so
  * ending the connection ends them all, with no write of theirs.
  */
-export type McpChanges = McpConnect | McpToken | OauthRegister;
+export type McpChanges = McpConnect | McpToken | McpRevoke | OauthRegister;
 
 export type McpAnswers = {
   /** The connection, and when its code stops being good, ISO 8601. */
@@ -21,15 +21,18 @@ export type McpAnswers = {
    * app answers `invalid_grant`.
    */
   'mcp.token': { ended: false; principal: string; connection: string; credential: string; expiresAt: string; scopes: McpScope[] } | { ended: true; connection: string };
+  /** The connection ended. */
+  'mcp.revoke': { connection: string };
   /** The client registered, and when, ISO 8601. */
   'oauth.register': { client: string; createdAt: string };
 };
 
 /**
- * The changes nobody asks: a client redeems what it holds (a code with its
- * PKCE verifier, a refresh token), and anyone may register a client.
+ * The changes nobody asks: a client redeems or gives back what it holds (a
+ * code with its PKCE verifier, a refresh token, an access token), and anyone
+ * may register a client.
  */
-export type McpUnasked = 'mcp.token' | 'oauth.register';
+export type McpUnasked = 'mcp.token' | 'mcp.revoke' | 'oauth.register';
 
 /**
  * A client as the person approved it: its id (a metadata document's URL,
@@ -86,6 +89,21 @@ export type McpToken = { op: 'mcp.token'; client: string; tokens: { access: stri
   | { grant: 'authorization_code'; code: string; verifier: string; redirectUri: string; minutes: number }
   | { grant: 'refresh_token'; refresh: string; scopes: McpScope[] | null }
 );
+
+/**
+ * A client gives back a token it holds (RFC 7009, `POST /api/oauth/revoke`):
+ * its refresh token or one of its access tokens, by its SHA-256 (`token`),
+ * and its `client_id` when it sent one (`client`). Its connection ends, and
+ * every access token under it, as a disconnect does. Nobody asks it but
+ * whoever holds the token.
+ *
+ * Refused, writing nothing, which the endpoint answers as a success, as
+ * RFC 7009 has it: `unknown_grant` for a token that is no connection's
+ * refresh token nor an access token that stands, whose connection ended
+ * already, or that is another client's; `tampered` for a row written
+ * behind the vault; `adopting` before the vault adopted the database.
+ */
+export type McpRevoke = { op: 'mcp.revoke'; token: string; client: string | null };
 
 /**
  * Anyone registers a client (RFC 7591, `POST /api/oauth/register`): a
