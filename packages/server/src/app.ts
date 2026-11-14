@@ -93,7 +93,7 @@ export async function coffreRoute(request: Request, runtime: CoffreRuntime, sour
     return step === 'signin' ? startSignin(request, runtime, id) : finishSignin(request, runtime, sourceIp, id);
   }
   // A plugin's paths, the credential proxy's `/use` among them.
-  return pluginRoute(request, runtime, sourceIp);
+  return pluginRoute(request, runtime, sourceIp, track);
 }
 
 /** What a page renders with: this response's nonce, the API as the visitor, and how they have the pages drawn. */

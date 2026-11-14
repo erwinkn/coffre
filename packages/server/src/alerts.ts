@@ -1,150 +1,122 @@
-// A workload's alerts (docs/design/workload-access.md, section 8.3): one
-// `workload.alert` entry of the app's in the log, which is the record that
-// counts and the audit page filters, then the deployment's own `alert`,
-// called in the background after the response (`waitUntil` on Workers):
+// A workload's alerts the app raises (docs/design/0.16.md, "What the app
+// reads of a workload, and decides nothing on"), handed to the function the
+// deployment's configuration names, never logged as entries:
 //
 //   auth: signin({ workloads: { limits, alert: (alert) => fetch(env.SLACK_WEBHOOK, { method: 'POST', body: JSON.stringify({ text: alert.text }) }) } })
 //
-// Whoever learns of the event raises it: the gate's first refusal of a
-// count in its window (`limit`, here), an enrollment's session (`enrolled`)
-// and its tripwire (`contention`), a code near its end (`expiring`), each
-// freeze and lift (`frozen`), and a sign-in's token signed by a key its
-// service's uploaded keys lack (`unknown_key`, here).
-import type { WorkloadAlert } from '@coffre/core/identity';
+// Each is capped in its service's gate, a Durable Object on Workers, so once
+// for the whole deployment, whichever isolate learns of it:
+//
+// - `limit`: a credential's limit, at its window's first refusal (the gate's
+//   `first`), so once per workload, credential and window;
+// - `unknown_key`: an exchange's token signed by a key its binding's keys
+//   lack, once an hour per service, since anyone who knows the service and
+//   its issuer can send one.
+import type { GateCount, WorkloadAlert, WorkloadsConfig } from '@coffre/core/identity';
 
-import type { UnknownKey } from './api/workloads.ts';
-import { appendAudit } from './db/audit.ts';
-import { claimAlert } from './db/workloads.ts';
+import type { Gates } from './gate.ts';
 import { logged } from './logged.ts';
-import type { CoffreRuntime } from './runtime.ts';
+
+/** How long a refusal waits on the deployment's alert: past it, it answers, and the alert goes on without it. */
+const ALERT_WAIT_MS = 2_000;
 
 /**
- * The audit's own alerts, on a workload's alerts' channel: the deployment's
- * `alert` (`signin({ workloads: { alert } })`), after the response, in the
- * name of `by`, the scheduler's unless an Owner's request says; with no
- * channel, the process's log. The entry in the log is the caller's own,
- * `audit.reanchor` or `audit.loss_accepted`. Never throws.
+ * Hand `alert` to the deployment's function, if it names one, waited on
+ * `ALERT_WAIT_MS` at most; a slower one still finishes, the platform
+ * keeping the request alive for it (`track`). Never throws.
  */
-export function auditAlerter(runtime: Pick<CoffreRuntime, 'auth' | 'waitUntil'>): (text: string, by?: string) => void {
-  const deliver = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads?.alert ?? null : null;
-  return (text, by = 'system:coffre-scheduler') => {
-    if (deliver === null) {
-      console.warn(`audit alert, with no alert channel to send it on (signin({ workloads: { alert } })): ${text}`);
-      return;
-    }
-    const alert: WorkloadAlert = { kind: 'audit', service: by, binding: null, session: null, ip: null, text };
-    runtime.waitUntil(
-      Promise.resolve()
-        .then(() => deliver(alert))
-        .then(() => undefined, (error: unknown) => console.error(`delivering an audit alert failed: ${text}`, logged(error))),
-    );
-  };
-}
-
-/** How often a service's `unknown_key` alerts at most, whatever key its tokens name: anyone may send one. */
-export const UNKNOWN_KEY_ALERT_MS = 60 * 60 * 1000;
-
-/**
- * Log `alert`, in a transaction of its own, then hand it to the
- * deployment's `alert` after the response. Never throws: an alert never
- * turns the answer it rides on into another. A log that refuses it, or a
- * delivery that fails, is said once in the process's log.
- *
- * `details` go in the entry beside the alert's own fields: a limit's count,
- * the credential it was for. `environmentId` is the place it concerns.
- */
-export async function raiseAlert(
-  runtime: Pick<CoffreRuntime, 'db' | 'chainKey' | 'auth' | 'waitUntil'>,
-  alert: WorkloadAlert,
-  details: Record<string, unknown> = {},
-  environmentId: string | null = null,
-): Promise<void> {
-  try {
-    await runtime.db.transaction((tx) =>
-      appendAudit(tx, runtime.chainKey, [{
-        actorType: 'service',
-        actorId: alert.service.slice('token:'.length),
-        action: 'workload.alert',
-        decision: 'allow',
-        environmentId,
-        sourceIp: alert.ip,
-        metadata: { ...details, kind: alert.kind, service: alert.service, binding: alert.binding, session: alert.session, ip: alert.ip, text: alert.text },
-      }]),
-    );
-  } catch (error) {
-    console.error('logging a workload alert failed', logged(error));
-  }
-  const deliver = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads?.alert ?? null : null;
+export async function sendAlert(workloads: WorkloadsConfig, alert: WorkloadAlert, track: (work: Promise<unknown>) => void): Promise<void> {
+  const deliver = workloads.alert;
   if (deliver === null) return;
-  runtime.waitUntil(
-    Promise.resolve()
-      .then(() => deliver(alert))
-      .then(() => undefined, (error: unknown) => console.error(`delivering a workload alert failed: ${alert.text}`, logged(error))),
-  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const sent = (async () => deliver(alert))().catch((error: unknown) => console.error("the deployment's workload alert failed", logged(error)));
+  track(sent);
+  await Promise.race([sent, new Promise<void>((resolve) => (timer = setTimeout(resolve, ALERT_WAIT_MS)))]);
+  clearTimeout(timer);
 }
 
 /**
- * A count's first refusal in its window (section 8.1), as one line for a
- * person: `api-prod is past its limit for stripe per minute, from
- * 203.0.113.9: refused for 42 s`.
+ * A count's first refusal in its window, as one line for a person:
+ * `api-prod is past its limit for stripe per minute, from 203.0.113.9:
+ * refused for 42 s`. The app's row of a session names no binding.
  */
-export function limitAlert(
-  caller: { principal: string; bindingId: string; session: string | null; sourceIp: string | null },
-  count: { key: string; retryAfterMs: number },
-): WorkloadAlert {
-  const name = caller.principal.slice('token:'.length);
+export function limitAlert(caller: { principal: string; session: string; sourceIp: string | null }, count: { key: string; retryAfterMs: number }): WorkloadAlert {
   const from = caller.sourceIp === null ? '' : `, from ${caller.sourceIp}`;
   return {
     kind: 'limit',
     service: caller.principal,
-    binding: caller.bindingId,
+    binding: null,
     session: caller.session,
     ip: caller.sourceIp,
-    text: `${name} is past its limit for ${count.key}${from}: refused for ${Math.ceil(count.retryAfterMs / 1000)} s`,
+    text: `${caller.principal.slice('token:'.length)} is past its limit for ${count.key}${from}: refused for ${Math.ceil(count.retryAfterMs / 1000)} s`,
   };
 }
 
+/** How often a service's unknown key alerts at most, whatever key its tokens name. */
+const UNKNOWN_KEY_ALERT_MS = 60 * 60 * 1000;
+/** That cap as its service's gate counts it: an hour's window, which a Durable Object keeps through an eviction (`DURABLE_WINDOW_MS`). */
+const UNKNOWN_KEY_COUNT: GateCount = { key: 'unknown_key alert', windowMs: UNKNOWN_KEY_ALERT_MS, most: 1 };
+/** Per configuration, so per isolate or process: until when each service's unknown key is not said again. Settled values only. */
+const quiet = new WeakMap<WorkloadsConfig, Map<string, number>>();
+const MAX_QUIET = 1_000;
+
 /**
- * A sign-in refused for a key its service's uploaded keys lack
- * (`UnknownKey`): its issuer most likely rotated them, and none of the
- * service's workloads signs in until an Owner uploads them again. Raised
- * once an hour per service at most, whatever the token's `kid`, since
- * anyone who knows a service and its issuer can send one: a conditional
- * write outside any transaction decides (`claimAlert`), so a refusal capped
- * out never takes the log's head, whichever isolate it reaches. Never
- * throws.
+ * Whether `service`'s unknown key is said now: its gate's count decides,
+ * once in each hour of the clock (two may come a moment apart, either side
+ * of the hour's turn). The isolate then keeps quiet until that window ends,
+ * so a flood asks the gate once an hour. With no gate, or one that failed,
+ * the isolate's own hour caps it. A gate past its ceiling says nothing, and
+ * the next refusal asks again.
  */
-export async function unknownKeyAlert(runtime: Pick<CoffreRuntime, 'db' | 'chainKey' | 'auth' | 'waitUntil'>, refusal: UnknownKey, sourceIp: string | null): Promise<void> {
-  try {
-    if (!(await claimAlert(runtime.db, refusal.service, 'unknown_key', new Date(), UNKNOWN_KEY_ALERT_MS))) return;
-  } catch (error) {
-    console.error('capping a workload alert failed', logged(error));
-    return;
+async function unknownKeyDue(workloads: WorkloadsConfig, gates: Gates | null, service: string): Promise<boolean> {
+  let until = quiet.get(workloads);
+  if (until === undefined) quiet.set(workloads, (until = new Map()));
+  const now = Date.now();
+  if (now < (until.get(service) ?? -Infinity)) return false;
+  let due = true;
+  let ends = now + UNKNOWN_KEY_ALERT_MS;
+  if (gates !== null) {
+    try {
+      const admitted = await gates(service).admit({ counts: [UNKNOWN_KEY_COUNT] });
+      if (!admitted.ok && admitted.reason !== 'limit') return false;
+      if (!admitted.ok) [due, ends] = [false, now + admitted.retryAfterMs];
+    } catch (error) {
+      console.error("the workload gate failed: an unknown key's alert is capped in this isolate alone", logged(error));
+    }
   }
-  await raiseAlert(runtime, keyAlert(refusal, sourceIp), { issuer: refusal.issuer, kid: refusal.kid });
+  until.delete(service);
+  until.set(service, ends);
+  while (until.size > MAX_QUIET) until.delete(until.keys().next().value!);
+  return due;
 }
 
 /**
- * An unknown key's alert, as one line for a person, which says how to
- * upload the issuer's keys again: `api-prod's sign-in from 203.0.113.9 was
- * refused: its token names key "Ab3…", not one uploaded for https://….`
+ * A token signed by a key its binding's own keys lack: its issuer most
+ * likely rotated them, and none of the service's runs signs in until a
+ * manager uploads them again. The deployment's alert, once an hour per
+ * service at most (`unknownKeyDue`), said as `sendAlert` says. `kid`: the
+ * key the token names, as an alert may show it, or null. Never throws.
  */
-export function keyAlert(refusal: UnknownKey, sourceIp: string | null): WorkloadAlert {
+export async function unknownKeyAlert(
+  workloads: WorkloadsConfig,
+  gates: Gates | null,
+  refusal: { service: string; binding: { id: string; profile: string }; issuer: string; kid: string | null },
+  sourceIp: string | null,
+  track: (work: Promise<unknown>) => void,
+): Promise<void> {
   const { service, binding, issuer, kid } = refusal;
+  if (workloads.alert === null || !(await unknownKeyDue(workloads, gates, service))) return;
   const name = service.slice('token:'.length);
-  const from = sourceIp === null ? '' : ` from ${sourceIp}`;
-  const named = kid === null ? 'names no key' : `names key "${kid}"`;
   const fetch = binding.profile === 'kubernetes' ? 'kubectl get --raw /openid/v1/jwks > keys.json' : 'save its JWKS as keys.json';
-  return {
+  await sendAlert(workloads, {
     kind: 'unknown_key',
     service,
     binding: binding.id,
     session: null,
     ip: sourceIp,
-    text: `${name}'s sign-in${from} was refused: its token ${named}, not one uploaded for ${issuer}. `
-      + `If that issuer rotated its keys, upload them again: ${fetch}, then coffre trust ${name} --issuer ${shellWord(issuer)} --replace-keys --jwks-file keys.json --apply. `
-      + 'Said once an hour at most.',
-  };
+    text: `${name}'s sign-in${sourceIp === null ? '' : ` from ${sourceIp}`} was refused: its token ${kid === null ? 'names no key' : `names key "${kid}"`}, not one uploaded for ${issuer}. `
+      + `If that issuer rotated its keys, upload them again: ${fetch}, then coffre trust ${shellWord(`service:${name}`)} --issuer ${shellWord(issuer)} --replace-keys --jwks-file keys.json --apply. Said once an hour at most.`,
+  }, track);
 }
 
 /** `word` as one shell word: as it is when it needs no quoting, as an issuer URL does not. */

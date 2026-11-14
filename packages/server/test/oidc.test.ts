@@ -14,6 +14,7 @@ import { credentials, log, logIndex } from '@coffre/db/schema';
 import { binding, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, signerOf, write } from '@coffre/vault/testing';
 import { eq } from 'drizzle-orm';
 
+import { processGates } from '../src/gate.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
@@ -51,7 +52,10 @@ const alerted = (alert: WorkloadAlert) => {
   return new Promise<void>(() => {});
 };
 const providers = [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })];
-const app = await openApp({ auth: signin({ providers, workloads: { limits: { perSource: limiter, total: processLimits().total }, alert: alerted } }), transport, workloads: {} });
+/** The services' gates, which a second app, another isolate, shares. */
+const gates = processGates();
+const configured = () => signin({ providers, workloads: { limits: { perSource: limiter, total: processLimits().total }, alert: alerted } });
+const app = await openApp({ auth: configured(), transport, workloads: {}, gates });
 const { world } = app;
 after(() => app.close());
 
@@ -380,6 +384,14 @@ test("a binding that carries its keys: the app fetches nothing, the vault verifi
   assert.deepEqual(refused(await exchange(kube(stranger.privateKey, 'rotated'))), [401, 'unauthenticated', 'unknown_key']);
   assert.equal(alerts.length, 1);
   assert.equal(refusals(), 1);
+  // Nor does another isolate, which remembers nothing of it: the service's gate counted the hour's alert for the deployment.
+  const other = await openApp({ auth: configured(), transport, workloads: {}, gates });
+  try {
+    assert.deepEqual(refused(await exchange(kube(stranger.privateKey, 'rotated'), DEPLOY, other)), [401, 'unauthenticated', 'unknown_key']);
+    assert.equal(alerts.length, 1);
+  } finally {
+    await other.close();
+  }
   logged.mock.restore();
 });
 

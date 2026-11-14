@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
 import { bodyDigest, createProof, generateProofKey, thumbprint, UNSIGNED_BODY, type ProofKey } from '@coffre/client/dpop';
-import { generateToken, github, hashToken, signin } from '@coffre/core/identity';
+import { generateToken, github, hashToken, signin, type WorkloadAlert } from '@coffre/core/identity';
 import { amend, binding, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, session, value, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 
@@ -54,7 +54,9 @@ const gates: Gates = (service) => {
   return held(service);
 };
 
-const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits() } });
+/** The deployment's alerts, as its function was handed them. */
+const alerts: WorkloadAlert[] = [];
+const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits(), alert: (alert) => alerts.push(alert) } });
 const app = await openApp({ auth, workloads: {}, gates, plugins: [proxy] });
 const { world } = app;
 after(() => app.close());
@@ -203,6 +205,11 @@ test("a session's request: one statement finds its gate, key and place; the gate
   assert.equal((await asDeploy('/use/stripe/charges')).status, 200);
   const [limited, limitedCalls] = await cost(() => asDeploy('/use/stripe/charges'));
   assert.deepEqual([...(await failed(limited)), limitedCalls], [429, 'limit', []]);
+  // Its window's first refusal is the deployment's alert; the next is refused as quietly.
+  assert.deepEqual(alerts.map(({ kind, service, binding, session, ip }) => ({ kind, service, binding, session, ip })), [{ kind: 'limit', service: DEPLOY, binding: null, session: deploy.id, ip: '192.0.2.7' }]);
+  assert.match(alerts[0]!.text, /^deploy is past its limit for stripe per minute, from 192\.0\.2\.7: refused for \d+ s$/);
+  assert.deepEqual(await failed(await asDeploy('/use/stripe/charges')), [429, 'limit']);
+  assert.equal(alerts.length, 1);
 });
 
 test("a row that is not what its token's shape says routes nothing: a handle-shaped token on a session's row, a session's token on a handle's; neither asks the vault", async () => {
