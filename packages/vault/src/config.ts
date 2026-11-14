@@ -100,8 +100,8 @@ export type VaultConfig = {
    * reached, in seconds, from the rows the vault last answered it from:
    * never unless set, an hour at most. Only then: while the database
    * answers, `memorySeconds` alone says how long a revocation waits. In an
-   * outage, a revocation made since that use was last answered, or through
-   * an instance that still reaches the database, is not seen for as long.
+   * outage, a revocation made since those rows were read, or through an
+   * instance that still reaches the database, is not seen for as long.
    * The values opened for a proxied use stay in memory that long too
    * (docs/design/0.16.md, "Through an outage of the database"). 0.14's
    * `cacheSeconds`, for outages alone.

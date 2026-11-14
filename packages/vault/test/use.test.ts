@@ -6,12 +6,16 @@ import { sql } from 'drizzle-orm';
 
 import { entryOf, type Entry } from '../src/entry.ts';
 import { Busy } from '../src/change.ts';
+import { KekUnavailableError } from '@coffre/core/kek';
+
 import { memoryOf, peek, recall, read, answer, use, type Ask, type Value } from '../src/use.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
 import { amend, ask, binding, credential, dismissed, environment, grant, identity, instance, principal, project, rewrite, role, rows, secret, session, user, value, write } from './world.ts';
 
 const vault = await openTestVault();
 after(() => vault.close());
+/** The vault's own database and key service, which a test may take away (`unreachable`). */
+const { db, keks } = vault;
 
 const [ada, bo, cy, dee, ci] = [user('ada'), user('bo'), user('cy'), user('dee'), 'token:ci'];
 const READS = ['secret.read', 'secret.use'];
@@ -61,7 +65,7 @@ let w: Awaited<ReturnType<typeof world>>;
 beforeEach(async () => {
   await emptyDatabase(vault.owner);
   vault.woken.length = 0;
-  Object.assign(vault, { memory: memoryOf(2), cap: { count: 1000, windowMs: 15 * 60_000 }, workloads: { noReads: false, useOnly: false } });
+  Object.assign(vault, { db, keks, memory: memoryOf(2), cap: { count: 1000, windowMs: 15 * 60_000 }, workloads: { noReads: false, useOnly: false } });
   w = await world();
   await vault.owner.execute(sql`DELETE FROM log_pending`);
   vault.woken.length = 0;
@@ -340,21 +344,20 @@ test('a memory decides again as of now: a credential that expires within it stop
  * read still answers, and its one write does not.
  */
 function unreachable({ writes = false, failure = { code: 'ECONNREFUSED' }, during = () => {} }: { writes?: boolean; failure?: object; during?: () => void } = {}) {
-  const real = vault.db;
-  const state = { tried: 0, back: () => void Object.assign(vault, { db: real }) };
+  const state = { tried: 0, back: () => void Object.assign(vault, { db }) };
   const refuse = () => {
     state.tried += 1;
     during();
     return Promise.reject(Object.assign(new Error('the database is not there'), failure));
   };
-  const db = new Proxy(real, {
+  const gone = new Proxy(db, {
     get(target, name) {
       if (name === 'transaction' || (name === 'execute' && !writes)) return refuse;
       const value: unknown = Reflect.get(target, name, target);
       return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
     },
   });
-  Object.assign(vault, { db });
+  Object.assign(vault, { db: gone });
   return state;
 }
 const REFUSED = { code: 'ECONNREFUSED' };
@@ -405,7 +408,8 @@ test('while the database cannot be reached, a proxied use is answered from the r
   vault.tick(1);
   await assert.rejects(use(vault, proxied), REFUSED);
   assert.equal(recall(vault, proxied), undefined);
-  assert.equal(vault.memory.reads.size, 0);
+  // Nothing is left but the date of the refusal, which answers nothing.
+  assert.deepEqual([...vault.memory.reads.values()].map((kept) => [kept.refused, kept.opened.size]), [[true, 0]]);
 
   // The database back, Ada's next proxied use reads and is logged: its entry says her two that were due one and had
   // none, and since when. The one after says nothing of them, nor does Bo's, who had none.
@@ -414,7 +418,8 @@ test('while the database cannot be reached, a proxied use is answered from the r
   assert.deepEqual(await got({ ...revealed, purpose: 'use' }), { DATABASE_URL: 'postgres://staging' });
   assert.deepEqual(await got({ ...proxied, purpose: 'reveal' }), values);
   assert.equal((await logged()).at(-1)!.detail.unlogged, undefined);
-  // One more counted while that entry is being written, by a use that found no database, is the next entry's.
+  // One more counted while that entry is being written, by a use that found no database: the count stays, and the next
+  // entry says them all, the two again.
   const { wake } = vault;
   const adas = (await rowsOf<{ id: string }>(vault.owner, sql`SELECT id FROM credentials WHERE label = 'ada'`))[0]!.id;
   // The credential that expired in the outage has its count too, which nothing will say.
@@ -425,63 +430,82 @@ test('while the database cannot be reached, a proxied use is answered from the r
   assert.deepEqual(await unlogged(), [undefined, undefined, undefined, { since: new Date(start + 100_000).toISOString(), uses: 2 }]);
   vault.tick(60_000);
   assert.deepEqual(await got(proxied), values);
-  assert.deepEqual((await unlogged()).slice(4), [{ since: new Date(vault.now() - 60_000).toISOString(), uses: 1 }]);
+  assert.deepEqual((await unlogged()).slice(4), [{ since: new Date(start + 100_000).toISOString(), uses: 3 }]);
   vault.tick(60_000);
   assert.deepEqual(await got(proxied), values);
   assert.deepEqual([(await unlogged()).slice(5), vault.memory.unlogged.size], [[undefined], 1]);
 });
 
-test('an outage hides a change only while it lasts, and gives nothing a use was not given before: a write that fails alone leaves a newer value unused', async () => {
+test('an outage hides a change only while it lasts; a read that answers stands, whatever becomes of its use', async () => {
   Object.assign(vault, { memory: memoryOf(2, 300) });
   const proxied = ask('ada', 'market/prod', ['FLAG'], { purpose: 'use' });
   assert.deepEqual(await got(proxied), { FLAG: 'on' });
   // Revoked through somewhere that still reaches the database, while this vault does not: it answers on.
-  const down = unreachable();
+  let down = unreachable();
   await vault.owner.execute(sql`DELETE FROM credentials WHERE label = 'ada'`);
   vault.tick(2000);
   assert.deepEqual(await got(proxied), { FLAG: 'on' });
   // The database back, and not known to be: no use has asked it since the failure. The first read that answers,
-  // anyone's, ends the outage, and the revocation stands.
+  // anyone's, ends the outage, and the revocation stands: through the next outage too.
   down.back();
   assert.deepEqual([await got(proxied), down.tried], [{ FLAG: 'on' }, 1]);
   const every = ask('cy', 'market/prod', null, { purpose: 'use' });
   const all = { DATABASE_URL: 'postgres://prod', FLAG: 'on', HOLLOW: 'refused: no_value', LINK: 'billing-token', STRIPE_KEY: 'sk_live' };
   assert.deepEqual(await got(every), all);
   assert.equal(await got(proxied), 'unauthenticated');
-  assert.equal(vault.memory.reads.size, 1);
-
-  // The read answers and the write does not. A value written since, and a key made since, were never logged as given:
-  // the use is answered what it was before, from the rows it was answered from, and counted.
-  await rewrite(vault, w.database, 'postgres://newer');
-  await write(vault, ...rows('secrets', await value(vault, secret(w.prod, 'LATER'), 'later')));
-  vault.tick(60_000);
-  const writes = unreachable({ writes: true });
-  assert.deepEqual([await got(every), writes.tried], [all, 1]);
-  const cys = (await rowsOf<{ id: string }>(vault.owner, sql`SELECT id FROM credentials WHERE label = 'cy'`))[0]!.id;
-  assert.deepEqual([...vault.memory.unlogged], [[cys, { at: vault.now(), uses: 1 }]]);
-  // Past the bulk cap as it now stands, the same: nothing new is given, so nothing is counted against it.
-  Object.assign(vault, { cap: { count: 1, windowMs: 15 * 60_000 } });
+  down = unreachable();
   vault.tick(2000);
+  await assert.rejects(use(vault, proxied), REFUSED);
   assert.deepEqual(await got(every), all);
-  // The database back, the newer value and the new key are given, logged and held to the cap.
-  writes.back();
-  vault.tick(2000);
-  assert.equal(await got(every), 'bulk_limit');
-  Object.assign(vault, { cap: { count: 1000, windowMs: 15 * 60_000 } });
-  assert.deepEqual(await got(every), { ...all, DATABASE_URL: 'postgres://newer', LATER: 'later' });
-  assert.deepEqual((await unlogged()).at(-1), { since: new Date(vault.now() - 4000).toISOString(), uses: 2 });
+  down.back();
 
-  // A write due within the memory, where nothing is read, is answered too: a longer memory, a minute into it.
+  // The read answers and the write does not: a value written since was never logged as given, so the use fails as the
+  // database did. And what it read stands: the older rows answer nothing after, the database gone or not.
+  await rewrite(vault, w.database, 'postgres://newer');
+  vault.tick(60_000);
+  down = unreachable({ writes: true });
+  await assert.rejects(use(vault, every), REFUSED);
+  assert.equal(down.tried, 1);
+  down.back();
+  down = unreachable();
+  await assert.rejects(use(vault, every), REFUSED);
+  vault.tick(2000);
+  await assert.rejects(use(vault, every), REFUSED);
+  down.back();
+  assert.deepEqual(await got(every), { ...all, DATABASE_URL: 'postgres://newer' });
+  assert.deepEqual((await unlogged()).at(-1), undefined);
+
+  // A write due within the memory, where nothing is read, is answered from the rows it would have been written for,
+  // and counted: a longer memory, a minute into it.
   Object.assign(vault, { memory: memoryOf(120, 300) });
   const other = ask('cy', 'market/prod', ['FLAG'], { purpose: 'use' });
   assert.deepEqual(await got(other), { FLAG: 'on' });
   vault.tick(60_000);
-  const again = unreachable({ writes: true });
-  assert.deepEqual([await got(other), again.tried], [{ FLAG: 'on' }, 1]);
-  again.back();
+  down = unreachable({ writes: true });
+  assert.deepEqual([await got(other), down.tried], [{ FLAG: 'on' }, 1]);
+  const cys = (await rowsOf<{ id: string }>(vault.owner, sql`SELECT id FROM credentials WHERE label = 'cy'`))[0]!.id;
+  assert.deepEqual([...vault.memory.unlogged], [[cys, { at: vault.now(), uses: 1 }]]);
+  down.back();
+  vault.tick(120_000);
+  assert.deepEqual(await got(other), { FLAG: 'on' });
+  assert.deepEqual((await unlogged()).at(-1), { since: new Date(vault.now() - 120_000).toISOString(), uses: 1 });
+
+  // With no memory at all, a read that answers still takes the place of the rows kept for an outage.
+  Object.assign(vault, { memory: memoryOf(0, 300) });
+  assert.deepEqual(await got(other), { FLAG: 'on' });
+  down = unreachable();
+  assert.deepEqual(await got(other), { FLAG: 'on' });
+  down.back();
+  vault.tick(60_000);
+  down = unreachable({ writes: true });
+  await assert.rejects(use(vault, other), REFUSED);
+  down.back();
+  down = unreachable();
+  await assert.rejects(use(vault, other), REFUSED);
+  down.back();
 });
 
-test('what answers an outage is looked for when the database fails: rows that aged out meanwhile, or that a refusal forgot, answer nothing', async () => {
+test('what answers an outage is looked for when the database fails: rows that aged out meanwhile, or that a refusal took the place of, answer nothing', async () => {
   Object.assign(vault, { memory: memoryOf(2, 300) });
   const proxied = ask('ada', 'market/prod', ['FLAG'], { purpose: 'use' });
   assert.deepEqual(await got(proxied), { FLAG: 'on' });
@@ -490,7 +514,7 @@ test('what answers an outage is looked for when the database fails: rows that ag
   let down = unreachable({ during: () => vault.tick(10) });
   await assert.rejects(use(vault, proxied), REFUSED);
   down.back();
-  // Another use of the same ask, refused while this one waited, forgot the rows: they answer nothing.
+  // Rows gone while this use waited answer nothing.
   assert.deepEqual(await got(proxied), { FLAG: 'on' });
   vault.tick(2000);
   down = unreachable({ during: () => vault.memory.reads.clear() });
@@ -505,6 +529,27 @@ test('what answers an outage is looked for when the database fails: rows that ag
   await assert.rejects(use(vault, proxied), REFUSED);
   assert.equal(down.tried, 2);
   down.back();
+
+  // A use reads, the credential is revoked, another use reads and is refused, and the first is answered, from its
+  // rows, as it would be were it alone. Its rows are not put back over the refusal: no outage is answered from them.
+  for (const seconds of [2, 0]) {
+    Object.assign(vault, { memory: memoryOf(seconds, 300) });
+    await write(vault, ...rows('credentials', credential(`late-${seconds}`, ada)));
+    const late = ask(`late-${seconds}`, 'market/prod', ['FLAG'], { purpose: 'use' });
+    assert.deepEqual(await got(late), { FLAG: 'on' });
+    vault.tick(2000);
+    const early = await read(vault, late);
+    await vault.owner.execute(sql`DELETE FROM credentials WHERE label = ${`late-${seconds}`}`);
+    vault.tick(500);
+    assert.equal(await got(late), 'unauthenticated');
+    assert.ok('values' in (await answer(vault, late, early)));
+    down = unreachable();
+    await assert.rejects(use(vault, late), REFUSED);
+    vault.tick(2000);
+    await assert.rejects(use(vault, late), REFUSED);
+    down.back();
+    assert.equal(await got(late), 'unauthenticated');
+  }
 });
 
 test('with no outage length set, and for a failure that is no outage, a use fails with the database', async () => {
@@ -539,9 +584,25 @@ test('with no outage length set, and for a failure that is no outage, a use fail
     down.back();
   }
   vault.tick(60_000);
-  down = unreachable({ writes: true, failure: { code: '55P03' } });
-  await assert.rejects(use(vault, proxied), Busy);
+  for (const code of ['55P03', '57014']) {
+    down = unreachable({ writes: true, failure: { code } });
+    await assert.rejects(use(vault, proxied), Busy);
+    assert.equal(vault.memory.downAt, -Infinity);
+    down.back();
+  }
+
+  // Nor is a key service out of reach, whatever its error says of the network: the database answered, and what it
+  // said stands.
+  const sealed = ask('ada', 'market/prod', ['DATABASE_URL'], { purpose: 'use' });
+  assert.deepEqual(await got(sealed), { DATABASE_URL: 'postgres://prod' });
+  vault.tick(2000);
+  Object.assign(vault, { keks: { ...keks, unwrap: () => Promise.reject(new KekUnavailableError('KMS Decrypt failed 3 times: Network connection lost.')) } });
+  await assert.rejects(use(vault, sealed), KekUnavailableError);
   assert.equal(vault.memory.downAt, -Infinity);
+  Object.assign(vault, { keks });
+  vault.tick(2000);
+  down = unreachable();
+  await assert.rejects(use(vault, sealed), REFUSED);
   down.back();
 });
 
