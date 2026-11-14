@@ -6,13 +6,11 @@ import type { AccessChange } from '../vault.ts';
  * (`packages/vault/src/ops/access.ts`). A workload's session makes none of
  * them, whatever its scope holds (`workload_cannot_issue`), as 0.14 refused.
  */
-export type AccessChanges = MemberAdd | MemberRestore | MemberRole | MemberRemove | AccessGrant | RoleEdit | SettingsEdit;
+export type AccessChanges = MemberPut | MemberRemove | AccessGrant | RoleEdit | SettingsEdit;
 
 export type AccessAnswers = {
-  /** The role and scope written, the scope's projects by id as the row holds them: null is everywhere. */
-  'member.add': Standing;
-  'member.restore': Standing;
-  'member.role': Standing;
+  /** The role and scope they hold now, the scope's projects by id as the row holds them (null is everywhere), and whether they were admitted or brought back. */
+  'member.put': Standing & { created: boolean };
   /** How many grants went with them. */
   'member.remove': { revoked: number };
   /** What became of each place, in the order asked. */
@@ -34,23 +32,29 @@ export type Standing = { role: InstanceRole; scope: Scope | null };
 export type ScopeInput = { projects: Filter; environments: Filter };
 
 /**
+ * A member admitted, brought back or given an instance role
+ * (`member.put`), whichever their row calls for, as 0.14.7's `admit` did:
+ * the app cannot know which without reading the row, and only the vault's
+ * read can. Its entry is the action that happened:
+ *
+ *   no row        `member.add`, as `role`, or `member` when null
+ *   removed       `member.restore`, the same, in the generation their removal moved on to, with no grant
+ *   active        `member.role`, `unchanged` when nothing moves; a null role keeps their role and scope
+ *
+ * Whoever runs the instance puts a member; only an Owner of the whole
+ * instance makes an Owner, changes one, or changes their own role; the last
+ * Owner of the whole instance stays one (`last_owner`), and one the
+ * deployment names comes in and stays as one (`configured_owner`). A
+ * service account holds no instance role but `member`: asked one, refused
+ * `invalid`. A refused put is logged as `member.add`, as 0.14.7 logged it.
+ *
  * A member, by principal: a person, `user:<email>` in lowercase, or a
- * service account, `token:<name>`, 256 characters at most. A service
- * account is admitted as a `member` with no scope, and holds what its
- * grants give: never an instance role. A `member` holds nothing by its
- * role, so it has no scope either. Past any of these the call is a fault,
- * not a refusal: the app checks them first.
+ * service account, `token:<name>`, 256 characters at most. `scope` is where
+ * the role applies, given only with a role but `member`, which holds
+ * nothing. Past these the call is a fault, not a refusal: the app checks
+ * them first.
  */
-type Membership = { principal: string; role: InstanceRole; scope: ScopeInput | null };
-
-/** Admit someone the instance has never had. */
-export type MemberAdd = Membership & { op: 'member.add' };
-
-/** Bring back a member who was removed: with no grant, and in the generation their removal moved on to. */
-export type MemberRestore = Membership & { op: 'member.restore' };
-
-/** Set a person's instance role and its scope: a service account has none. */
-export type MemberRole = Membership & { op: 'member.role' };
+export type MemberPut = { op: 'member.put'; principal: string; role: InstanceRole | null; scope: ScopeInput | null };
 
 /**
  * Remove a member: their grants go, their sign-in accounts are revoked, and
