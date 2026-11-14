@@ -384,12 +384,17 @@ test("a protected environment's row taken away while a token is made widens noth
   assert.deepEqual(await vault.change(serviceToken('dee-cli', wide, { shop: 'developer' })), { refused: 'no_access' });
   await putBack();
   assert.equal((await minted()).row, undefined);
-  // A personal token made then is no refusal, but its grant keeps the protected column Dee holds on all of shop: safe
-  // back, it uses and never reads there, as Dee.
+  // A personal token for a role that reads where shop protects is refused Dee, who only uses there; made while safe's
+  // row is hidden, its grant still keeps the protected column Dee holds on all of shop: safe back, it uses and never
+  // reads there, as Dee.
+  const both = ['secret.read', 'secret.use'];
+  await write(world, ...rows('roles', role(false, 'looker', both, both)));
+  assert.deepEqual(await vault.change(personal('dee-cli', { shop: 'looker' })), { refused: 'no_access' });
   putBack = await hidden('environments', sql`id = ${safe.id}::uuid`);
-  assert.ok(!('refused' in await vault.change(personal('dee-cli', { shop: 'developer' }))));
+  const issued = await vault.change(personal('dee-cli', { shop: 'looker' }));
+  assert.ok(!('refused' in issued), JSON.stringify(issued));
   await putBack();
-  assert.deepEqual((await minted()).scope, [{ projectId: shop.id, environmentId: null, role: 'developer', permissions: DEVELOPER }]);
+  assert.deepEqual((await minted()).scope, [{ projectId: shop.id, environmentId: null, role: 'looker', permissions: { normal: both, protected: ['secret.use'] } }]);
   await write(world, ...rows('secrets', value(world, secret(safe, 'DATABASE_URL'), 'postgres://safe')));
   const at = async (label: string, purpose: 'reveal' | 'use') => {
     const answer = await vault.use({ ...shown(label), project: 'shop', environment: 'safe', mine: false, keys: ['DATABASE_URL'], purpose, upstream: null });
