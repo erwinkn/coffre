@@ -33,6 +33,23 @@ export function placeAt(project: { id: string }, environment: EnvironmentRow, en
 }
 
 /**
+ * What an environment inherits from, nearest first, as a use follows it:
+ * three parents at most above an environment, four above a personal config.
+ * Null for a chain a use refuses as broken: a parent not there, archived,
+ * in another project, or one too many. b4 → b3 → b2 → b1 → prod inherits
+ * nothing, and neither does a fork of an archived environment.
+ */
+export function parentsOf(first: EnvironmentRow, environments: ReadonlyMap<string, EnvironmentRow>): EnvironmentRow[] | null {
+  const parents: EnvironmentRow[] = [];
+  for (let id = first.parentId; id !== null; id = parents.at(-1)!.parentId) {
+    const parent = environments.get(id);
+    if (parent === undefined || !live(parent) || parent.projectId !== first.projectId || parents.length >= MAX_PARENTS + (first.owner === null ? 0 : 1)) return null;
+    parents.push(parent);
+  }
+  return parents;
+}
+
+/**
  * The use of `read` by `who`, as the vault would decide it for a reveal of
  * the whole environment: refused as a whole for where, `no_access` when
  * there is no such place or the caller may not read it, `broken_chain`
@@ -56,12 +73,9 @@ export function decideRead(who: Called, read: ChainRead, mine: boolean): Decided
   if (!may(first)) return { refused: 'no_access' };
 
   // The environment, then what it inherits from, nearest first: a key is the nearest one's.
-  const layers = [first];
-  for (let last = first; last.parentId !== null; layers.push(last)) {
-    const parent = environments.get(last.parentId);
-    if (parent === undefined || !live(parent) || parent.projectId !== project.id || layers.length > MAX_PARENTS + (first === base ? 0 : 1)) return { refused: 'broken_chain' };
-    last = parent;
-  }
+  const parents = parentsOf(first, environments);
+  if (parents === null) return { refused: 'broken_chain' };
+  const layers = [first, ...parents];
 
   const rows = [...read.secrets.values()];
   const keyed = new Map(rows.filter((row) => !row.archived).map((row) => [`${row.environmentId} ${row.key}`, row]));

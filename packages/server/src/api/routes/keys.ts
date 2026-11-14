@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { chainOf, historyOf, keyNamesOf, referencesOf, type EnvironmentRow, type Nature, type ProjectRow, type SecretRow } from '../../db/queries/secrets.ts';
 import { can, permissionsAt, type Place } from '../caller.ts';
 import { badRequest, refusal } from '../errors.ts';
-import { decideRead, live, MAX_PARENTS, placeAt, stopOf, type Given } from '../given.ts';
+import { decideRead, live, MAX_PARENTS, parentsOf, placeAt, stopOf, type Given } from '../given.ts';
 import { parsePath } from '../paths.ts';
 import { route } from '../route.ts';
 import { environmentOf, versionOf } from './secrets.ts';
@@ -159,31 +159,28 @@ function referenceView(places: Parameters<typeof stateOf>[0], holder: SecretRow,
  * Each environment's keys, its own live ones and those it inherits, by
  * name, with the folder where it is held: the nearest environment of the
  * chain that holds it live or dismissed it settles it, as a use does. A
- * chain is followed no further than a use follows it, and not past a
- * parent that is not there.
+ * chain a use refuses as broken (`parentsOf`) passes nothing down.
  */
 function resolveKeys(
   environments: readonly EnvironmentRow[],
   keys: readonly { environmentId: string; key: string; folder: string | null; archived: boolean }[],
   dismissed: readonly { environmentId: string; key: string }[],
 ): Map<string, Map<string, string | null>> {
-  const parentOf = new Map(environments.map((environment) => [environment.id, environment.parentId]));
-  // An archived or deleted parent passes nothing down: a use of a fork of one is refused.
-  const standing = new Set(environments.filter(live).map((environment) => environment.id));
+  const byId = new Map(environments.map((environment) => [environment.id, environment]));
   const own = new Map<string, Map<string, string | null>>(environments.map((environment) => [environment.id, new Map()]));
   for (const row of keys) if (!row.archived) own.get(row.environmentId)?.set(row.key, row.folder);
   const removed = new Map<string, Set<string>>();
   for (const row of dismissed) removed.set(row.environmentId, (removed.get(row.environmentId) ?? new Set()).add(row.key));
-  const resolve = (id: string, depth: number): Map<string, string | null> => {
-    const found = new Map(own.get(id));
-    const parentId = parentOf.get(id) ?? null;
-    if (parentId !== null && standing.has(parentId) && depth < MAX_PARENTS + 1) {
-      const without = removed.get(id) ?? new Set();
-      for (const [key, folder] of resolve(parentId, depth + 1)) if (!found.has(key) && !without.has(key)) found.set(key, folder);
+  const resolve = (environment: EnvironmentRow): Map<string, string | null> => {
+    const found = new Map(own.get(environment.id));
+    const without = new Set(removed.get(environment.id));
+    for (const parent of parentsOf(environment, byId) ?? []) {
+      for (const [key, folder] of own.get(parent.id) ?? []) if (!found.has(key) && !without.has(key)) found.set(key, folder);
+      for (const key of removed.get(parent.id) ?? []) without.add(key);
     }
     return found;
   };
-  return new Map(environments.map((environment) => [environment.id, resolve(environment.id, 0)]));
+  return new Map(environments.map((environment) => [environment.id, resolve(environment)]));
 }
 
 /** The environments below one, forks of its forks too. */
@@ -388,8 +385,10 @@ export const keyRoutes = {
   /**
    * The references into and out of a place, `market`, `market/prod` or
    * `market/prod/KEY`: those it lends and those it holds. Each is listed to
-   * whoever lists, or manages the access of, either end. Who reads through
-   * one, `readers`, is the members area's to say, and null until then.
+   * whoever lists, or manages the access of, either end. A place the caller
+   * holds nothing in, and shown none of, answers as one that is not there.
+   * Who reads through one, `readers`, is the members area's to say, and
+   * null until then.
    */
   ...route('GET /references', {
     input: z.object({ path: z.string().max(400) }).strict(),
@@ -402,10 +401,12 @@ export const keyRoutes = {
       const found = await referencesOf(ctx.db, path.project);
       const { project, environments, secrets } = found;
       const team = [...environments.values()].filter((row) => project !== null && row.projectId === project.id && !row.deleted && (row.owner === null || row.owner === who.principal));
-      // The place named, to one who may see its project: its name is no secret within it.
-      const sees = project !== null && !project.deleted && (permissionsAt(who, { projectId: project.id }).length > 0 || team.some((row) => permissionsAt(who, placeAt(project, row, environments)).length > 0));
       const named = path.environment === undefined ? null : team.find((row) => row.slug === path.environment && row.owner === null);
-      if (!sees || named === undefined) throw refusal('no_access', input.path);
+      if (project === null || project.deleted || named === undefined) throw refusal('no_access', input.path);
+      // Whether the caller holds anything at the place named: in the project, anywhere in it; in an environment, there.
+      const holds = named === null
+        ? permissionsAt(who, { projectId: project.id }).length > 0 || team.some((row) => permissionsAt(who, placeAt(project, row, environments)).length > 0)
+        : permissionsAt(who, placeAt(project, named, environments)).length > 0;
       const at = (end: SecretRow) => end.projectId === project.id && (named === null || end.environmentId === named.id) && (path.key === undefined || end.key === path.key);
       const placeOfEnd = (end: SecretRow) => placeAt({ id: end.projectId }, environments.get(end.environmentId)!, environments);
       const reaches = (end: SecretRow) => environments.has(end.environmentId) && (lists(who, placeOfEnd(end)) || can(who, 'grant.manage', { projectId: end.projectId }));
@@ -423,6 +424,8 @@ export const keyRoutes = {
           holderArchived: holder.archived || where === undefined || where.archived || whose === undefined || whose.archived,
         }];
       });
+      // A place the caller holds nothing in answers as one not there, unless a reference they reach by its other end names it: that end shows it already.
+      if (!holds && references.length === 0) throw refusal('no_access', input.path);
       references.sort((a, b) => (a.holder < b.holder ? -1 : a.holder > b.holder ? 1 : 0));
       return { references };
     },
@@ -482,7 +485,9 @@ export const keyRoutes = {
    * Worked out from the app's rows by the rules of a use, opening nothing
    * and logging nothing; refused as that read would be. Where a row is not
    * what its MAC says, the vault's read refuses, and the watch keeps what
-   * it has.
+   * it has. The bulk cap is not asked, as 0.14 did not: it bounds the
+   * values a principal is handed, and a version hands none. A caller past
+   * it sees the version move, and its read is refused `bulk_limit`.
    */
   ...route('GET /projects/:project/:environment/version', {
     run: async (ctx, { params }) => {

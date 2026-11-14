@@ -251,9 +251,16 @@ test('references into and out of a place, to whoever lists or manages either end
   assert.deepEqual(await references('ada-cli', 'market/prod/NOPE'), []);
   // Cy runs the instance: billing's own, and may break any.
   assert.deepEqual((await references('cy-cli', 'billing')).map(([holder, , , , , canBreak]) => [holder, canBreak]), [['billing/prod/LINK', true], ['billing/stale/DEAD', true]]);
-  // A place Ada holds nothing in, and one that is not there.
-  for (const path of ['billing', 'billing/prod', 'market/nope', 'nope']) assert.deepEqual(refused(await call('ada-cli', 'GET', `/references?path=${path}`)), NO_ACCESS, path);
-  assert.deepEqual(refused(await call('gus-cli', 'GET', '/references?path=market')), NO_ACCESS);
+  // Billing is a place Ada holds nothing in, but the references she is shown by their end in market name it.
+  assert.deepEqual((await references('ada-cli', 'billing')).map(([holder]) => holder), ['billing/prod/LINK', 'billing/stale/DEAD']);
+  assert.deepEqual((await references('ada-cli', 'billing/prod')).map(([holder]) => holder), ['billing/prod/LINK']);
+  // Ed views market/dev alone: a place he holds nothing in and is shown nothing of answers as one that is not there.
+  assert.deepEqual([await references('ed-cli', 'market/dev'), await references('ed-cli', 'market/dev/NOPE')], [[], []]);
+  const hidden = [['ed-cli', 'market/prod'], ['ed-cli', 'market/staging'], ['ed-cli', 'market/prod/A'], ['ed-cli', 'billing'], ['ed-cli', 'market/nope'], ['ed-cli', 'nope'], ['ada-cli', 'market/nope'], ['ada-cli', 'nope'], ['gus-cli', 'market']];
+  for (const [label, path] of hidden) {
+    const [answer, calls, statements] = await cost(() => call(label!, 'GET', `/references?path=${encodeURIComponent(path!)}`));
+    assert.deepEqual([refused(answer), calls, statements], [NO_ACCESS, ['caller'], 1], `${label} ${path}`);
+  }
   for (const path of ['', 'a/b/c/d', 'Market', 'market/prod/1X']) assert.equal((await call('ada-cli', 'GET', `/references?path=${encodeURIComponent(path)}`))[0], 400, path);
 });
 
@@ -396,6 +403,11 @@ test('the rules of a use, edge by edge: a chain too long or cut, references that
     ['billing/stale/DEAD', 'source_archived', false],
   ]);
   assert.deepEqual(((await call('ed-cli', 'GET', '/references?path=market'))[1].references as { holder: string }[]).map(({ holder }) => holder), ['billing/b-ed/AREF', 'market/dev2/AREF']);
+
+  // Missing keys follow a chain as a use does: b4 has one parent too many and inherits nothing, b3 and Cy's config of it, four deep, inherit prod's G.
+  const missingAt = async (path: string) => ((await call('cy-cli', 'GET', `/projects/${path}/missing`))[1].missing as { key: string; in: string[] }[]).map(({ key, in: where }) => [key, where.join(' ')]);
+  assert.deepEqual((await missingAt('billing/b4')).filter(([key]) => key === 'G' || key === 'LINK'), [['G', 'b-ed b1 b2 b3 prod'], ['LINK', 'b-ed b1 b2 b3 prod']]);
+  for (const path of ['billing/b3', 'billing/b3@me']) assert.deepEqual((await missingAt(path)).filter(([key]) => key === 'G' || key === 'LINK'), [], path);
 
   // C is archived in prod: not missing there, though staging holds it; dev lacks it.
   const [, prodMissing] = await call('bo-cli', 'GET', '/projects/market/prod/missing');
