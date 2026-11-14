@@ -1,5 +1,5 @@
 import type { Nature, Peeked, Upstream } from '@coffre/core/vault';
-import { allows, readsSensitive, useOnly, withinCredential, type Place } from '@coffre/core/access';
+import { allows, readsSensitive, useOnly, withinCredential, type Permission, type Place } from '@coffre/core/access';
 import { open } from '@coffre/core/envelope';
 import { KekUnavailableError } from '@coffre/core/kek';
 import { isUnreachable, rowsOf } from '@coffre/db/dialect';
@@ -282,7 +282,9 @@ export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): 
   // A narrowed session uses values, within the places and credentials it was narrowed to, and is handed none.
   const within = (list: readonly string[] | undefined, name: string | null) => list === undefined || (name !== null && list.includes(name));
   if (workload?.narrowed === true && (handed || !within(workload.constraints?.places, `${ask.project}/${ask.environment}${ask.mine ? '@me' : ''}`) || !within(workload.constraints?.credentials, ask.upstream?.credential ?? null))) return { refused: 'narrowed' };
-  const permission = handed ? 'secret.read' : 'secret.use';
+  // A use needs `secret.use`, and a value handed back `secret.read`. But `expose`, values for the caller's own app, whoever
+  // uses the place may ask: a key they do not read where it lives is refused it (`given`), so all it adds is a plain value.
+  const admits: readonly Permission[] = !handed ? ['secret.use'] : ask.purpose === 'expose' ? ['secret.use', 'secret.read'] : ['secret.read'];
   const environment = new Map(seen.environment.map((row) => [row.id, row]));
   const place = (row: Row<typeof environments>): Place => ({ projectId: row.projectId, environmentId: row.id, environmentSlug: row.slug });
   /**
@@ -291,8 +293,8 @@ export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): 
    * while they read or use the environment it is a config of, within their
    * credential's scope (docs/design/forking.md, section 4).
    */
-  const may = (row: Row<typeof environments>): boolean => {
-    if (row.owner === null) return allows(caller.holds, permission, place(row));
+  const may = (row: Row<typeof environments>, permissions = admits): boolean => {
+    if (row.owner === null) return permissions.some((permission) => allows(caller.holds, permission, place(row)));
     const parent = row.parentId === null ? undefined : environment.get(row.parentId);
     if (row.owner !== caller.principal || parent === undefined || !live(parent)) return false;
     const there = place(parent);
@@ -339,10 +341,12 @@ export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): 
     const version = versions.get(`${held.id} ${held.currentVersion}`);
     // A version labelled other than its secret's row says is no value of it: it may open as its label says, but is not given.
     if (version === undefined || natureOf(version) !== held.nature) return { key, refused: 'unreadable' };
-    // A workload is handed only what its credential lists where the value is held, and a person no sensitive value, ever;
-    // a service account one, on a credential an Owner of the value's project issued.
+    // A value no plain one is handed only to who reads it where its key lives: their role there (an inherited key's
+    // parent, a reference's own environment), and for a workload, its credential's listing where the value is held.
+    // A person is handed no sensitive value, ever; a service account one, on a credential an Owner of the value's project issued.
     // A plain value is no secret, use-only to nobody: and it opens as plain, or not at all (`answer`).
-    if (handed && version.plaintext === null && useOnly(caller.holds, { projectId: held.projectId, environmentId: held.environmentId, secretId: held.id })) return { key, refused: 'use_only' };
+    const reads = () => may(layer, ['secret.read']) && !useOnly(caller.holds, { projectId: held.projectId, environmentId: held.environmentId, secretId: held.id });
+    if (handed && version.plaintext === null && !reads()) return { key, refused: 'use_only' };
     if (handed && version.sensitive && caller.holds.service !== true) return { key, refused: 'sensitive' };
     if (handed && version.sensitive && !readsSensitive(caller.holds, held.projectId)) return { key, refused: 'not_owner_issued' };
     // A value held in a personal config is read there alone: a reference's source is in none.

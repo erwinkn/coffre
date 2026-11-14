@@ -315,7 +315,7 @@ async function contributor(): Promise<{ mine: string; onDev: string }> {
   return { mine, onDev };
 }
 
-test("a Contributor's dev@me plan: their own values, and placeholders for every key a credential, signer or tunnel covers, never a value of dev's", async () => {
+test("a Contributor's dev@me plan: their own values, and placeholders for every key a credential, signer or tunnel covers, never a secret of dev's", async () => {
   const { mine, onDev } = await contributor();
   const { plan, response } = await planOf('market/dev@me', mine);
   assert.equal(response.status, 200, await response.clone().text());
@@ -330,11 +330,21 @@ test("a Contributor's dev@me plan: their own values, and placeholders for every 
   assert.ok(dev.plan.left.includes('WEBHOOK_SECRET'));
 });
 
-test("a Contributor's dev@me plan carries dev's plain values, with nothing left but what a reader also goes without", { todo: "0.14.7 handed a Contributor dev's plain values; 0.16 leaves them, as for anyone who only uses the place (docs/design/0.16.md, `coffre run`'s plan): APP_NAME in `left`, TWILIO_SID the handle" }, async () => {
-  const { mine } = await contributor();
-  const { plan } = await planOf('market/dev@me', mine);
+test("a Contributor's plan carries dev's plain values, as 0.14.7's did, with nothing left but what a reader also goes without; the use opens and logs those alone, as a reader's plan does", async () => {
+  const { mine, onDev } = await contributor();
+  const { plan, calls } = await planOf('market/dev@me', mine);
   assert.deepEqual([plan.env.APP_NAME, plan.env.TWILIO_SID], [APP_NAME, SID]);
   assert.deepEqual(plan.left, ['EMPTY', 'U_PASS']);
+  // The JWT placeholder's use, as for a reader.
+  assert.deepEqual(calls, ['peek', 'use', 'use']);
+  const exposes = async () => (await logged()).filter((entry) => entry.purpose === 'expose');
+  assert.deepEqual(await exposes(), [{ purpose: 'expose', keys: ['APP_NAME', 'TWILIO_SID', 'WEBHOOK_SECRET'] }], 'her own WEBHOOK_SECRET, and the plain values');
+  // On dev itself: the plain values, and dev's secret no credential covers left, never opened.
+  const onTheEnvironment = await planOf('market/dev', onDev);
+  assert.deepEqual([onTheEnvironment.plan.env.APP_NAME, onTheEnvironment.plan.env.TWILIO_SID, onTheEnvironment.plan.env.WEBHOOK_SECRET], [APP_NAME, SID, undefined]);
+  assert.deepEqual(onTheEnvironment.plan.left, ['EMPTY', 'U_PASS', 'WEBHOOK_SECRET']);
+  assert.deepEqual((await exposes()).at(-1), { purpose: 'expose', keys: ['APP_NAME', 'TWILIO_SID'] });
+  assert.equal((await exposedKeys()).includes('WEBHOOK_SECRET'), false);
 });
 
 test("a handle reads a protected prod as its person does: a Maintainer's is handed its secrets, a Developer's only uses them, and its plan says so", async () => {
@@ -342,9 +352,36 @@ test("a handle reads a protected prod as its person does: a Maintainer's is hand
   assert.equal(olga.plan.env.WEBHOOK_SECRET, 'whsec_prod_0123456789');
   const ada = await planOf('market/prod', handleOf(ADA, prod));
   assert.equal(ada.response.status, 200, await ada.response.clone().text());
-  assert.deepEqual(ada.plan.env, { TWILIO_SID: handleOf(ADA, prod), TWILIO_TOKEN: handleOf(ADA, prod) }, 'the placeholders of what she uses, its plain key too, and no value');
+  assert.deepEqual(ada.plan.env, { TWILIO_SID: SID, TWILIO_TOKEN: handleOf(ADA, prod) }, 'the placeholders of what she uses, and its plain value, as 0.14.7 gave it');
   assert.deepEqual(ada.plan.left, ['WEBHOOK_SECRET']);
-  assert.deepEqual(ada.calls, ['peek', 'use']);
+  assert.deepEqual([ada.calls, ada.statements, ada.vault], [['peek', 'use'], 0, ['read', 'read', 'write', 'last use']]);
+  assert.deepEqual((await logged()).at(-1), { purpose: 'expose', keys: ['TWILIO_SID'] }, 'the secret she only uses was never opened');
+  // Her own read of prod is refused as it was: a reveal, a plain value's too, and a run's.
+  const cli = generateToken('cli');
+  await write(world, ...rows('credentials', credential(cli, ADA)));
+  for (const path of ['market/prod/TWILIO_SID', 'market/prod']) {
+    const reveal = await app.request('/api/reveals', { method: 'POST', headers: { authorization: `Bearer ${cli}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }) });
+    assert.deepEqual([reveal.status, ((await reveal.json()) as { reason?: string }).reason], [403, 'no_access'], path);
+  }
+});
+
+test("a Developer's plan of protected prod: a key the peek saw plain that is a secret by the use is not handed, nor opened, and stays its placeholder", async () => {
+  const handle = handleOf(ADA, prod);
+  const [sid] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM secrets WHERE environment_id = ${prod.id} AND key = 'TWILIO_SID'`);
+  const peek = app.vault.peek.bind(app.vault);
+  app.vault.peek = async (input) => {
+    const answer = await peek(input);
+    await rewrite(world, { id: sid!.id }, 'AC-now-a-secret');
+    return answer;
+  };
+  try {
+    const { plan } = await planOf('market/prod', handle);
+    assert.equal(plan.env.TWILIO_SID, handle);
+    assert.equal(JSON.stringify(plan).includes('AC-now-a-secret'), false);
+    assert.deepEqual(await logged(), [], 'nothing opened, so nothing logged');
+  } finally {
+    app.vault.peek = peek;
+  }
 });
 
 test('a plan is a handle\'s alone, and refused as the vault refuses the handle', async () => {
