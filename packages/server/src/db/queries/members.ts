@@ -170,3 +170,9 @@ export async function projectNamed(db: Queryable, slug: string): Promise<PlaceRo
     }])),
   };
 }
+
+/** The slugs of projects by id, those still there: what a scope the vault answered with names. One statement. */
+export async function projectSlugs(db: Queryable, ids: readonly string[]): Promise<Record<string, string>> {
+  const rows = await rowsOf<{ id: string; slug: string }>(db, sql`SELECT id, slug FROM projects WHERE id = ANY(${sql.param([...ids])}::uuid[]) AND strpos(slug, '~') = 0`);
+  return Object.fromEntries(rows.map((row) => [row.id, row.slug]));
+}

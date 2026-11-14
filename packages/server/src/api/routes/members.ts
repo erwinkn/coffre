@@ -1,9 +1,9 @@
-import { administers, EVERYWHERE, inScope, isScope, runsInstance, type Filter, type InstanceRole, type Permission, type Role, type Scope } from '@coffre/core/access';
-import { roleId, slug } from '@coffre/core/schemas';
+import { administers, EVERYWHERE, inScope, isScope, normalScope, runsInstance, type Filter, type InstanceRole, type Permission, type Role, type Scope } from '@coffre/core/access';
+import { instanceRole, roleId, scopeInput, slug } from '@coffre/core/schemas';
 import type { AccessChange, Called } from '@coffre/core/vault';
 import { z } from 'zod';
 
-import { members, projectNamed, type GrantRow, type MemberRow } from '../../db/queries/members.ts';
+import { members, projectNamed, projectSlugs, type GrantRow, type MemberRow } from '../../db/queries/members.ts';
 import type { PlaceRow } from '../../db/queries/places.ts';
 import { can, canAnywhere, permissionsAt, placeOf, projectsReached, type Place } from '../caller.ts';
 import { changed } from '../change.ts';
@@ -267,9 +267,45 @@ export const memberRoutes = {
     },
   }),
 
+  /**
+   * Admit a member, bring one back, or set their instance role, as their
+   * row calls for: one change of the vault's (`member.put`), which reads the
+   * row and does whichever it calls for, all under its head, and says which
+   * (`created`). No role keeps an active member's, and admits anyone else as
+   * `member`; a scope comes with a role but `member`, and either filter left
+   * out is `all`. A service account holds no role but `member`, and is made
+   * with its grants (`access`) once who manages one is settled (D239).
+   *
+   *   { "role": "admin", "scope": { "projects": { "only": ["market"] } } }
+   *
+   * No statement, but one, after the change, when the answer keeps a scope
+   * that names projects the body did not: their slugs.
+   */
   ...route('PUT /members/:member', {
-    run: async () => {
-      throw notServed('adding a member or setting their role');
+    input: z.object({ role: instanceRole.optional(), scope: scopeInput.optional(), access: accessPatch.refine((access) => Object.keys(access).length > 0, 'name a place to grant').optional() }).strict(),
+    run: async (ctx, { params, input }) => {
+      const principal = memberOf(params.member);
+      const service = typeOf(principal) === 'service';
+      if (input.access !== undefined) {
+        if (!service || input.role !== undefined || input.scope !== undefined) throw badRequest('access comes with a service account, and no role: a person is given grants once a member');
+        throw notServed('a service account made with its grants');
+      }
+      if (input.scope !== undefined && input.role === undefined) throw badRequest('a scope goes with a role: name the role too');
+      if (input.scope !== undefined && input.role === 'member') throw badRequest('a member holds nothing by their role: it takes no scope');
+      const asked = input.scope === undefined ? null : normalScope({ projects: input.scope.projects ?? 'all', environments: input.scope.environments ?? 'all' });
+      let answer;
+      try {
+        answer = await changed(ctx, { op: 'member.put', principal, role: input.role ?? null, scope: asked }, principal);
+      } catch (error) {
+        // A service account asked a role the vault refuses as it refuses any shape it does not take: said as 0.14.7 said it.
+        if (service && error instanceof ApiError && error.reason === 'invalid') throw new ApiError('conflict', `${principal}: a service account holds project grants only, never an instance role`, 'invalid');
+        throw error;
+      }
+      const { role, scope, created } = answer;
+      // The scope as asked, by slug, when the body named it; the one kept otherwise, whose projects only their ids name.
+      const listed = scope === null || scope.projects === 'all' ? [] : 'only' in scope.projects ? scope.projects.only : scope.projects.except;
+      const shown = role === 'member' || scope === null ? EVERYWHERE : input.role !== undefined ? (asked ?? EVERYWHERE) : scopeView(scope, listed.length === 0 ? {} : await projectSlugs(ctx.db, listed));
+      return { member: principal, instanceRole: role, scope: shown, created };
     },
   }),
 
