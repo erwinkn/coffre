@@ -1,4 +1,4 @@
-import { PURPOSES, type Answers, type Change, type Presented, type UseInput, type Vault } from '@coffre/core/vault';
+import { PURPOSES, type Answers, type Asked, type Change, type UseInput, type Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
 import type { ResolvedVaultConfig } from './config.ts';
@@ -20,10 +20,10 @@ import { memoryOf, use, type Ask, type Serving } from './use.ts';
  * vault's short memory. Settled values only, never work under way, which on
  * Workers would belong to the call that started it.
  */
-export type PreparedVault = Pick<Serving, 'keys' | 'keks' | 'cap' | 'workloads' | 'memory' | 'refused'>;
+export type PreparedVault = Pick<Serving, 'keys' | 'keks' | 'cap' | 'workloads' | 'memory' | 'refused'> & Pick<Deciding, 'owners'>;
 
 export function prepareVault(config: ResolvedVaultConfig): PreparedVault {
-  return { keys: config.signingKeys.map(keyOf), keks: config.keks, cap: config.bulkLimit, workloads: config.workloads, memory: memoryOf(config.memorySeconds), refused: new Map() };
+  return { keys: config.signingKeys.map(keyOf), keks: config.keks, cap: config.bulkLimit, workloads: config.workloads, memory: memoryOf(config.memorySeconds), refused: new Map(), owners: config.owners };
 }
 
 /** What one call runs on: its database, and the signer's wake-up, which never holds the reply nor fails the call. */
@@ -46,8 +46,12 @@ function asked(input: UseInput): Ask {
   return { ...presented(input), project, environment, mine, keys: keys as string[] | null, purpose, upstream };
 }
 
-/** What every operation is given of the vault's configuration, past its input. */
-export type Deciding = Pick<Serving, 'workloads'>;
+/**
+ * What every operation is given of the vault's configuration, past its
+ * input: what it takes of workloads, and the people it names Owners
+ * (`owners`), by email, whom no change demotes or removes while named.
+ */
+export type Deciding = Pick<Serving, 'workloads'> & { owners: readonly string[] };
 
 export function openVault(db: Database, prepared: PreparedVault, { wake, now = Date.now }: VaultOptions): Vault {
   // A wake-up that throws, or whose promise rejects, fails nothing: the write it tells of has committed, and its answer is owed.
@@ -69,11 +73,11 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
     async caller(input) {
       return caller(serving, presented(input));
     },
-    async change<O extends Change['op']>(input: Presented & Extract<Change, { op: O }>) {
+    async change<O extends Change['op']>(input: Asked<O>) {
       if (!Object.hasOwn(OPERATIONS, input.op)) throw new TypeError('a change names an operation the contract has');
       // The registry holds each operation under its own name: what it answers is that name's.
-      const operation = OPERATIONS[input.op] as unknown as (input: Presented & Extract<Change, { op: O }>, vault: Deciding) => Operation<Parts, Answers[O]>;
-      return change(serving, operation(input, { workloads: serving.workloads }));
+      const operation = OPERATIONS[input.op] as unknown as (input: Asked<O>, vault: Deciding) => Operation<Parts, Answers[O]>;
+      return change(serving, operation(input, { workloads: serving.workloads, owners: prepared.owners }));
     },
   };
 }

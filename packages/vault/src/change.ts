@@ -85,6 +85,12 @@ export function put<T extends Sealed>(table: T, row: Fresh<T>, was: Row<T> | nul
   return { table, row, was };
 }
 
+/** A row read, put back with what a change says of it: every other column as it was. */
+export function amended<T extends Sealed>(table: T, was: Row<T>, changes: Partial<Fresh<T>>): Write {
+  const { mac: _, ...kept } = was as Row<T> & { mac: unknown };
+  return put(table, { ...kept, ...changes } as Fresh<T>, was);
+}
+
 export function drop<T extends Sealed>(table: T, was: Row<T>): Write {
   return { table, row: null, was };
 }

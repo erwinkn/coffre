@@ -22,6 +22,8 @@ const name = process.env.COFFRE_TEST_DATABASE ?? 'coffre_test';
 const url = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/${name}`;
 
 export type TestVault = Serving & {
+  /** The Owners the deployment names, by email: none, unless told. */
+  owners: readonly string[];
   owner: Database;
   /** The hashes the signer was woken with, oldest first. */
   woken: Buffer[];
@@ -36,7 +38,7 @@ export const VAULT_URL = url('coffre_vault_runtime:local-vault-only');
 export const APP_URL = url('coffre_runtime:local-runtime-only');
 
 /** `more` replaces what it names: the keys a deployment's configuration makes, or the clock, where another process reads what this one writes. */
-export async function openTestVault(more: Partial<Serving> = {}): Promise<TestVault> {
+export async function openTestVault(more: Partial<Serving & { owners: readonly string[] }> = {}): Promise<TestVault> {
   const [owner, vault] = await Promise.all([openDatabase(url('coffre_owner:local-dev-only')), openDatabase(VAULT_URL)]);
   const woken: Buffer[] = [];
   let now = Date.UTC(2026, 10, 13, 12);
@@ -49,6 +51,7 @@ export async function openTestVault(more: Partial<Serving> = {}): Promise<TestVa
     workloads: { noReads: false, useOnly: false },
     memory: memoryOf(2),
     refused: new Map(),
+    owners: [],
     now: () => now,
     tick: (ms) => void (now += ms),
     wake: (hash) => void woken.push(hash),

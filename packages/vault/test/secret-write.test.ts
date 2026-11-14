@@ -183,7 +183,7 @@ test('a reference written over holds its own value from then on, and its entry s
 });
 
 test('two writes of one key decided on the same rows are two versions, one after the other: the second starts over, and leaves nothing of its first try', async () => {
-  const deciding = { workloads: world.workloads };
+  const deciding = { workloads: world.workloads, owners: world.owners };
   // Both read and decided before either writes, as two requests side by side.
   const [first, second] = await Promise.all(['ada-cli', 'cy-cli'].map((label) => prepare(world, OPERATIONS['secret.write'](writing(label, { DATABASE_URL: `by ${label}`, NEW: `new by ${label}` }), deciding))));
   assert.ok(!('refused' in first!) && !('refused' in second!));

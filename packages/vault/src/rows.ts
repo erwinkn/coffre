@@ -36,10 +36,11 @@ type Computed<T extends PgTable> = { [K in keyof T['_']['columns']]: T['_']['col
 export type Wire = Record<string, unknown>;
 
 /**
- * Columns that only say when a row was last seen. A use moves them on with
- * no change, so no MAC covers them, and no change writes them over.
+ * Columns that only say when a row was last used. A use moves them on with
+ * no change, so no MAC covers them, and no change writes them over. An
+ * identity's last sign-in is not one: a sign-in is a change, and writes it.
  */
-const LAST_SEEN: ReadonlySet<string> = new Set(['last_used_at', 'last_used_ip', 'last_sign_in_at']);
+const LAST_SEEN: ReadonlySet<string> = new Set(['last_used_at', 'last_used_ip']);
 
 /** A UUID as Postgres writes one. It reads others too, capitals and braces, and gives this back. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

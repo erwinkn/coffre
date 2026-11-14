@@ -28,8 +28,8 @@ import { ACTIVE_SUBJECT, relationsOf } from './relations.ts';
  * A row that turns into access carries the vault's MAC, `mac`: four bytes
  * that name the key, then an HMAC-SHA256 over the table's name, the row's
  * key and every other column but the ones that only say when a row was
- * last seen (`last_used_at`, `last_used_ip`, `last_sign_in_at`), which a use
- * moves without a change. An empty MAC verifies under no key: it is what
+ * last used (`last_used_at`, `last_used_ip`), which a use moves without a
+ * change. An empty MAC verifies under no key: it is what
  * the upgrade from 0.14 leaves until the vault adopts the rows.
  *
  * Every time is a `timestamptz(3)`, milliseconds, so that a row reads back
