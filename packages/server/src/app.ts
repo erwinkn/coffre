@@ -13,7 +13,7 @@ import { authorizationServer, oauthRegister, oauthRevoke, oauthToken, protectedR
 import { pluginRoute } from './plugins.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
-import { describeSignin, finishSignin, logout, pollDevice, PROVIDER_PATH, signOut, startDevice, startSignin } from './signin.ts';
+import { finishSignin, logout, pollDevice, PROVIDER_PATH, signOut, startDevice, startSignin } from './signin.ts';
 
 /**
  * `track`: work the response must not cut short, which the platform keeps the request alive for (`requestScope`).
@@ -36,8 +36,8 @@ const PATHS: Record<string, { method: 'GET' | 'POST'; handler: Handler; browserF
       return jsonResponse(readiness, readiness.ok ? 200 : 503);
     },
   },
-  // Sign-in (signin.ts): what the sign-in page reads first, the device login's two calls, and signing out.
-  '/api/auth': { method: 'GET', handler: describeSignin },
+  // Sign-in (signin.ts): the device login's two calls, and signing out. What the sign-in page reads first, GET /api/auth,
+  // is the API's (`fetchApi`), where a page's render reaches it too.
   '/api/auth/device': { method: 'POST', handler: startDevice },
   '/api/auth/device/token': { method: 'POST', handler: pollDevice },
   '/api/auth/logout': { method: 'POST', handler: logout },

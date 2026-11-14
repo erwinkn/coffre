@@ -682,6 +682,16 @@ test("a page's render asks the vault who its visitor is once, for all its calls,
   assert.deepEqual([await anonymous[0].json(), anonymous[1]], ['unauthenticated', []]);
 });
 
+test("a page's render reads how the instance signs in, as every page's shell does, with no session and nothing asked of the vault", async () => {
+  // The sign-in page's render: nobody signed in yet.
+  const [out, outCalls, outStatements] = await cost(() => app.render({}, async ({ client }) => client.auth()));
+  assert.deepEqual([out.status, ((await out.json()) as { access: unknown }).access, outCalls, outStatements], [200, null, [], 0]);
+  // A signed-in page's shell: how to sign in and who is asking, side by side, as `loadShell` reads them.
+  const session = { headers: { cookie: `${SESSION}=${BROWSER}` } };
+  const [shell, calls] = await cost(() => app.render(session, async ({ client }) => Promise.all([client.auth(), client.me()]).then(([auth, me]) => [auth.signin?.providers.map((provider) => provider.id), me.principal.id])));
+  assert.deepEqual([await shell.json(), calls], [[['github'], 'bo@acme.example'], ['caller']]);
+});
+
 test('below its migrations the app serves nothing but its health, and asks the vault nothing', async () => {
   // A database with no ledger: never migrated.
   const below = await openApp({ database: 'postgres' });
