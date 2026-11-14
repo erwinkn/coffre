@@ -58,12 +58,7 @@
     // MCP and sign-in (W421).
     "src/mcp/approvals.ts",
     "src/mcp/changes.ts",
-    "src/mcp/endpoint.ts",
-    "src/mcp/scopes.ts",
-    "src/mcp/tools.ts",
-    "test/mcp-fixture.ts",
     "test/mcp-approvals.test.ts",
-    "test/mcp-endpoint.test.ts",
     "test/mcp-values.test.ts",
     "test/auth-boundary.test.ts",
 

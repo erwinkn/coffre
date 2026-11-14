@@ -1,30 +1,24 @@
-// `POST /mcp`: the MCP endpoint (docs/design/mcp.md, section 2). One JSON
-// answer per request, never a stream, and no session: the 2026-07-28
-// revision, whose requests each carry their version and the client's
-// capabilities in `_meta`, and the 2025 era's `initialize` beside it, which
-// coffre answers without minting a session either. Both serve the same
-// tools, with the same checks. The token is checked first (`mcpCaller`):
-// nothing here runs for a request without a good one.
-import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
-import { isMcpScope, MCP_SCOPE_INFO, scopeString, type McpScope } from '@coffre/core/mcp';
+// `POST /mcp`: the MCP endpoint (docs/design/mcp.md, section 2; docs/design/0.16.md,
+// "`/mcp`"). One JSON answer per request, never a stream, and no session: the
+// 2026-07-28 revision, whose requests each carry their version and the
+// client's capabilities in `_meta`, and the 2025 era's `initialize` beside
+// it, which coffre answers without minting a session either. Both serve the
+// same tools, with the same checks. The vault is asked who the access token
+// is first (`caller`): nothing here runs for a request without a good one.
+import { MCP_SCOPE_INFO, scopeString, type McpScope } from '@coffre/core/mcp';
+import { tokenKind } from '@coffre/core/identity';
 import { z } from 'zod';
 
-import { allowed, audited, denied, type McpVia } from '../api/context.ts';
-import type { AuditEntry } from '../db/audit.ts';
-import type { AuthenticatedIdentity } from '../auth.ts';
-import { ApiError } from '../api/errors.ts';
-import { fetchApi } from '../fetch-api.ts';
-import { readLimitedJson } from '../http.ts';
+import type { ApiContext } from '../api/context.ts';
+import { ApiError, toErrorBody } from '../api/errors.ts';
+import { bearerToken, presented } from '../auth.ts';
+import { errorResponse, jsonResponse, readLimitedJson } from '../http.ts';
 import { logged } from '../logged.ts';
 import type { CoffreRuntime } from '../runtime.ts';
 import { COFFRE_VERSION } from '../version.ts';
-import { mcpCaller, resourceMetadataUrl } from './http.ts';
-import { challengeScopes } from './scopes.ts';
-import type { ApprovalRow } from '../db/queries.ts';
-import { callDigest, MAX_PENDING, OUTCOME_SECONDS, outcomeOf, statusOf, UNKNOWN_OUTCOME, type Outcome } from './approvals.ts';
-import type { McpConnection } from './service.ts';
-import { openState, sealState } from './tokens.ts';
-import { INSTRUCTIONS, listed, TOOL_BY_NAME, TOOLS, type Tool, usable } from './tools.ts';
+import { resourceMetadataUrl } from './http.ts';
+import { mcpOf } from './oauth.ts';
+import { INSTRUCTIONS, listed, TOOL_BY_NAME, TOOLS, type Connection, type Tool, usable } from './tools.ts';
 
 /** The revision coffre speaks, stateless. */
 export const PROTOCOL_VERSION = '2026-07-28';
@@ -96,7 +90,7 @@ function parseMessage(body: unknown): Message | RpcError {
 const errorOf = (value: Message | RpcError): value is RpcError => !('method' in value);
 
 export async function mcpEndpoint(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response> {
-  const caller = await mcpCaller(request, runtime, sourceIp);
+  const caller = await connectionOf(request, runtime, sourceIp);
   if (caller instanceof Response) return caller;
   let body: unknown;
   try {
@@ -132,7 +126,7 @@ async function modern(
   request: Request,
   runtime: CoffreRuntime,
   sourceIp: string | null,
-  caller: McpConnection,
+  caller: Connection,
   message: Message,
   id: JsonRpcId,
   claimed: unknown,
@@ -180,7 +174,7 @@ async function modern(
     case 'tools/list':
       return complete({ tools: toolsFor(caller), ttlMs: LIST_TTL_MS, cacheScope: 'private' });
     case 'tools/call':
-      return call(request, runtime, sourceIp, caller, message, id, (result) => complete(result), { era: 'modern', elicitsUrl: elicitsUrl(capabilities as Record<string, unknown>) });
+      return call(runtime, caller, message, id, (result) => complete(result));
     default:
       return failure(id, 404, { code: CODE.methodNotFound, message: `Method not found: ${message.method}` });
   }
@@ -192,7 +186,7 @@ async function legacy(
   request: Request,
   runtime: CoffreRuntime,
   sourceIp: string | null,
-  caller: McpConnection,
+  caller: Connection,
   message: Message,
   id: JsonRpcId,
   header: string | null,
@@ -218,7 +212,7 @@ async function legacy(
     case 'tools/list':
       return rpc(id, { result: { tools: toolsFor(caller) } });
     case 'tools/call':
-      return call(request, runtime, sourceIp, caller, message, id, (result) => rpc(id, { result }), { era: 'legacy', elicitsUrl: false });
+      return call(runtime, caller, message, id, (result) => rpc(id, { result }));
     default:
       return rpc(id, { error: { code: CODE.methodNotFound, message: `Method not found: ${message.method}` } });
   }
@@ -226,53 +220,87 @@ async function legacy(
 
 /**
  * The tools a person's roles let them use somewhere, as they are on this
- * request: the vault's answer the token check already read, so listing
- * costs no read of its own. A tool only the connection's scopes withhold
+ * request: the vault's answer about the token, so listing costs no read of
+ * its own. A tool only the connection's scopes withhold
  * stays listed: calling it asks for the scope.
  */
-function toolsFor(connection: McpConnection): Record<string, unknown>[] {
-  return TOOLS.filter((tool) => usable(connection.caller, tool)).map(listed);
+function toolsFor(connection: Connection): Record<string, unknown>[] {
+  return TOOLS.filter((tool) => usable(connection.called, tool)).map(listed);
+}
+
+// --- the access token ---------------------------------------------------------
+
+/** No token, or one that does not stand: where to get one (RFC 9728, section 5.1), and the minimum to ask for. */
+function unauthorized(runtime: CoffreRuntime, presented: boolean): Response {
+  const challenge = [
+    ...(presented ? ['error="invalid_token"', 'error_description="the token is unknown, expired or revoked"'] : []),
+    `resource_metadata="${resourceMetadataUrl(runtime)}"`,
+    'scope="read"',
+  ];
+  return jsonResponse(
+    { error: presented ? 'invalid_token' : 'unauthorized', error_description: presented ? 'the token is unknown, expired or revoked' : 'connect with OAuth first' },
+    401,
+    { 'www-authenticate': `Bearer ${challenge.join(', ')}` },
+  );
+}
+
+/**
+ * The connection a request to `/mcp` comes on, or what to answer it: a
+ * request from another site's page is refused before anything, and one
+ * whose bearer is no access token's shape asks the vault nothing. Else the
+ * vault's `caller` decides, on the token's hash: its connection must stand,
+ * of the same person and generation (docs/design/0.16.md, "An MCP
+ * connection"). It remembers its answer two seconds, as for any credential.
+ */
+async function connectionOf(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Connection | Response> {
+  if (mcpOf(runtime.auth) === null) return errorResponse(new ApiError('not_found', "this instance serves no MCP: the deployment's signin({ mcp }) turns it on"));
+  const origin = request.headers.get('origin');
+  if (origin !== null && origin !== runtime.publicUrl) {
+    return errorResponse(new ApiError('cross_origin', 'MCP clients are not web pages: a request from another site is refused'));
+  }
+  const token = bearerToken(request);
+  if (token === null) return unauthorized(runtime, false);
+  if (tokenKind(token) !== 'mcp') return unauthorized(runtime, true);
+  const shown = presented(token, sourceIp);
+  let answer: Awaited<ReturnType<CoffreRuntime['vault']['caller']>>;
+  try {
+    answer = await runtime.vault.caller(shown);
+  } catch (error) {
+    return errorResponse(error);
+  }
+  // An access token's refusal is one: unknown, ended, expired, its connection's or its person's, or a row the vault did not write.
+  if ('refused' in answer) return unauthorized(runtime, true);
+  const { connection, scopes } = answer.credential;
+  // Only an access token has both: the vault answers them for kind `mcp` alone.
+  if (connection === undefined || scopes === undefined) return unauthorized(runtime, true);
+  return { called: answer, id: connection, scopes, shown };
 }
 
 // --- tools/call ---------------------------------------------------------------
 
-const CallParams = z
-  .object({ name: z.string().max(64), arguments: z.record(z.string(), z.unknown()).optional(), requestState: z.string().max(512).optional(), inputResponses: z.record(z.string(), z.unknown()).optional() })
-  .passthrough();
+const CallParams = z.object({ name: z.string().max(64), arguments: z.record(z.string(), z.unknown()).optional() }).passthrough();
 
-/** What coffre knows of a client from its request: its era, and whether it can open a URL for its person. */
-type ClientSays = { era: 'modern' | 'legacy'; elicitsUrl: boolean };
-
-/** Whether a 2026-07-28 client declared URL-mode elicitation, which opens coffre's approval page for its person. */
-function elicitsUrl(capabilities: Record<string, unknown>): boolean {
-  const elicitation = capabilities.elicitation;
-  return typeof elicitation === 'object' && elicitation !== null && typeof (elicitation as Record<string, unknown>).url === 'object';
+/** A connection's calls, against its own limit; a limiter that fails refuses, and is logged. */
+async function admitCall(runtime: CoffreRuntime, connection: Connection): Promise<boolean> {
+  try {
+    return (await mcpOf(runtime.auth)!.mcp.limits.perConnection.limit({ key: `connection:${connection.id}` })).success;
+  } catch (error) {
+    console.error('mcp limiter failed', { request: connection.shown.request, connection: connection.id, error: logged(error) });
+    return false;
+  }
 }
-
-/** How long a retry waits on its approval before answering that it still waits: well inside every client's timeout. */
-const WAIT_MS = 25_000;
 
 /**
  * One tool's call: admitted against its connection's limit, held to its
- * scopes, run as API calls in its person's name, and logged with the client.
- * A refusal the API gives is the tool's result, an error the model reads; a
- * scope the connection lacks is a 403 that starts the client's step-up,
- * whose body is such a result too, for a client that does not. A
- * change goes through its approval instead (`change`).
+ * scopes, and run as the API's handlers in process, as the connection, on
+ * the vault's answer about it. A refusal the API gives is the tool's
+ * result, an error the model reads; a scope the connection lacks is a 403
+ * that starts the client's step-up, whose body is such a result too, for a
+ * client that does not. No entry of its own: the vault's `use` logs a
+ * reveal, under the access token, as it logs any read of a value.
  */
-async function call(
-  request: Request,
-  runtime: CoffreRuntime,
-  sourceIp: string | null,
-  connection: McpConnection,
-  message: Message,
-  id: JsonRpcId,
-  answer: (result: Record<string, unknown>) => Response,
-  client: ClientSays,
-): Promise<Response> {
-  const mcp = runtime.mcp!;
-  const requestId = crypto.randomUUID();
-  if (!(await mcp.admitCall(connection.id, requestId))) {
+async function call(runtime: CoffreRuntime, connection: Connection, message: Message, id: JsonRpcId, answer: (result: Record<string, unknown>) => Response): Promise<Response> {
+  if (!(await admitCall(runtime, connection))) {
     return failure(id, 429, { code: CODE.internal, message: 'Too many calls: try again in a minute' }, { 'retry-after': '60' });
   }
   const params = CallParams.safeParse(message.params ?? {});
@@ -283,54 +311,21 @@ async function call(
   if (!args.success) {
     return answer(toolError(`The arguments do not fit ${tool.name}: ${args.error.issues.map((issue) => `${issue.path.join('.') || 'arguments'}: ${issue.message}`).join('; ')}`));
   }
+  if (!connection.scopes.includes(tool.scope)) return insufficientScope(runtime, connection, tool, id, tool.scope);
 
-  const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes: connection.scopes };
-  const writer = { caller: connection.caller, requestId, sourceIp, provenance: connection.id, via };
-  const names = tool.names(args.data as never);
-  const log = (entry: AuditEntry) =>
-    audited(runtime, async (_tx, entries) => {
-      entries.push(entry);
-    });
-  const metadata = { tool: tool.name, names };
-  const entry = (action: string, more: Record<string, unknown>) => allowed(writer, action, { metadata: { ...metadata, ...more } });
-  // A read-only tool's call that went through is detail, as a sign-in is; everything else shows.
-  const done = (decision: 'allow' | 'deny', reason?: string, more: Record<string, unknown> = {}) =>
-    log(
-      decision === 'allow'
-        ? entry(tool.readOnly ? 'mcp.read' : 'mcp.call', more)
-        : denied(writer, 'mcp.call', reason ?? 'refused', { metadata: { ...metadata, ...more } }),
-    );
-
-  if (!connection.scopes.includes(tool.scope)) {
-    await done('deny', 'insufficient_scope');
-    return insufficientScope(runtime, connection, tool, id, tool.scope);
-  }
-
-  const identity: AuthenticatedIdentity = {
-    principal: { type: 'user', id: connection.principal.id, email: connection.principal.id, subject: connection.principal.id },
-    registered: connection.caller.registered,
-    caller: connection.caller,
-    requestId,
-    sourceIp,
-    credentialId: null,
-    credentialExpiresAt: null,
-    provenance: connection.id,
-    personalToken: null,
-    handlePlaces: null,
-    via,
+  // The API's context as the connection: its token's hash for every vault call, and the vault's answer about it, already asked.
+  const ctx: ApiContext = {
+    db: runtime.db,
+    vault: runtime.vault,
+    shown: connection.shown,
+    caller: async () => connection.called,
+    crossSite: false,
+    auth: runtime.auth,
+    rotateAfterDays: runtime.rotateAfterDays,
+    transport: runtime.transport,
   };
-  // The API in process, as the connection's person: one token check for the whole call, the one already made.
-  const api = createClient({
-    url: runtime.publicUrl,
-    headers: () => ({ authorization: 'Bearer mcp-connection' }),
-    transport: (inner) => fetchApi(inner, runtime, { sourceIp, authenticate: async () => identity }),
-  });
   try {
-    if (tool.change !== undefined) {
-      return await change(runtime, connection, tool, args.data, params.data, { api, answer, client, done, entry, id });
-    }
-    const result = await tool.run({ api, connection, publicUrl: runtime.publicUrl }, args.data as never);
-    await done('allow');
+    const result = await tool.run({ ctx, connection }, args.data as never);
     return answer({
       content: [{ type: 'text', text: result.text ?? JSON.stringify(result.structured, null, 2) }],
       structuredContent: result.structured,
@@ -338,129 +333,18 @@ async function call(
   } catch (error) {
     const refused = refusalOf(error);
     if (refused === null) throw error;
-    await done('deny', refused.code);
-    // The API's own table refused: the challenge names the scope its route needs, which its reason says.
-    if (refused.code === 'insufficient_scope') return insufficientScope(runtime, connection, tool, id, refused.reason !== undefined && isMcpScope(refused.reason) ? refused.reason : tool.scope);
+    // The vault holds a value to `reveal` too: a connection whose scopes changed under the call is asked for it as ever.
+    if (refused.reason === 'mcp_no_reveal') return insufficientScope(runtime, connection, tool, id, 'reveal');
     return answer(toolError(refused.message));
   }
 }
 
-type ChangeCall = {
-  api: CoffreClient;
-  answer: (result: Record<string, unknown>) => Response;
-  client: ClientSays;
-  done: (decision: 'allow' | 'deny', reason?: string, more?: Record<string, unknown>) => Promise<void>;
-  /** The call's entry, allowed, for what `approvals` writes with it. */
-  entry: (action: string, more: Record<string, unknown>) => AuditEntry;
-  id: JsonRpcId;
-};
-
-/**
- * A change's call (docs/design/mcp.md, section 7). Nothing changes here: the
- * first call opens an approval, or rejoins the one the same call opened, and
- * the person decides it on coffre's page, which makes the change. A client
- * that can open a URL is asked to, by an elicitation, and retries with the
- * `requestState` coffre gave it; any other gets the link in the result, to
- * show its person, and calls again with the same arguments. Either way the
- * retry only reads the outcome, waiting up to 25 seconds for it.
- */
-async function change(
-  runtime: CoffreRuntime,
-  connection: McpConnection,
-  tool: Tool,
-  args: unknown,
-  params: z.infer<typeof CallParams>,
-  { api, answer, client, done, entry, id }: ChangeCall,
-): Promise<Response> {
-  const { approvals } = runtime.mcp!;
-  const prompt = (row: ApprovalRow, ask: boolean) =>
-    answer({
-      resultType: 'input_required',
-      ...(ask
-        ? { inputRequests: { approve: { method: 'elicitation/create', params: { mode: 'url', url: approvals.url(row.id), message: `Approve on coffre: ${tool.change!.summary(args as never)}` } } } }
-        : {}),
-      requestState: sealState(runtime.chainKey, {
-        approvalId: row.id,
-        connectionId: connection.id,
-        digest: row.digest.toString('hex'),
-        expiresAt: new Date(row.createdAt.getTime() + OUTCOME_SECONDS * 1000),
-      }),
-    });
-
-  let row: ApprovalRow & { now?: Date };
-  if (params.requestState !== undefined) {
-    const state = client.era === 'modern' ? openState(runtime.chainKey, params.requestState) : null;
-    // The state names the approval, its connection and its call: another call, or another connection's, gets nothing from it.
-    if (state === null || state.connectionId !== connection.id || state.digest !== callDigest(tool.name, args)) {
-      await done('deny', 'request_state');
-      return rpc(id, { error: { code: CODE.invalidParams, message: 'Invalid params: this requestState is not for this call' } });
-    }
-    const found = state.expiresAt.getTime() > Date.now() ? await approvals.find(state.approvalId) : null;
-    if (found === null) return answer(toolError(`This approval has expired: call ${tool.name} again to ask the person anew.`));
-    const response = params.inputResponses?.approve as { action?: unknown } | undefined;
-    // Declined: the person said no to opening the page, and the approval ends. Cancelled: the prompt was
-    // dismissed, or a client that cannot ask anyone (Claude Code with -p) answered it, so the link goes to the model instead.
-    if (response?.action === 'decline') await approvals.cancel(found.id, entry('mcp.cancel', { approvalId: found.id }));
-    if (response?.action === 'cancel' && found.status === 'pending') return answer(pending(approvals.url(found.id), found, tool, 'asked'));
-    row = found;
-  } else {
-    await tool.change!.check?.({ api, connection, publicUrl: runtime.publicUrl }, args as never);
-    // A new approval's call is logged with it; a call that rejoins one is not logged again.
-    const asked = await approvals.ask(connection, tool, args, (approvalId) => entry('mcp.call', { approvalId }));
-    if ('full' in asked) {
-      await done('deny', 'too_many_approvals');
-      return answer(toolError(`${MAX_PENDING} changes are waiting for the person already: ask them to decide those on coffre first.`));
-    }
-    row = asked.row;
-    if (row.status === 'pending' && (!asked.joined || client.elicitsUrl)) {
-      return client.elicitsUrl ? prompt(row, true) : answer(pending(approvals.url(row.id), row, tool, 'asked'));
-    }
-  }
-
-  const settled = await approvals.settle(row.id, Date.now() + (runtime.mcp!.approvalWaitMs ?? WAIT_MS));
-  const status = statusOf(settled, settled.now);
-  if (status === 'pending' || (status === 'approved' && settled.outcome === null)) {
-    return client.elicitsUrl ? prompt(settled, false) : answer(pending(approvals.url(settled.id), settled, tool, status === 'pending' ? 'waiting' : 'making'));
-  }
-  const known = outcomeOf(settled, settled.now);
-  // An unknown outcome is no end the client heard: the same call rejoins it, and is told so again, while it may.
-  if (known !== UNKNOWN_OUTCOME) await approvals.reported(settled.id);
-  // Without an outcome, it ended before the person approved it: nothing changed.
-  const outcome: Outcome = known ?? { text: `This approval ${status === 'expired' ? 'expired before the person decided it' : `is ${status}`}: nothing changed.` };
-  const structured = {
-    status,
-    message: outcome.text,
-    approval: { id: settled.id, url: approvals.url(settled.id), expiresAt: settled.expiresAt.toISOString() },
-    ...(outcome.result === undefined ? {} : { result: outcome.result }),
-  };
-  return answer({ content: [{ type: 'text', text: outcome.text }], structuredContent: structured, ...(status === 'approved' ? {} : { isError: true }) });
-}
-
-/**
- * What a client that cannot open a URL is told while its change waits:
- * the link, for its person, once `asked`, and while it is `waiting` on
- * them. Once they approved it, while coffre is `making` it, only to call again.
- */
-function pending(url: string, row: ApprovalRow, tool: Tool, state: 'asked' | 'waiting' | 'making'): Record<string, unknown> {
-  const approval = { id: row.id, url, expiresAt: row.expiresAt.toISOString() };
-  if (state === 'making') {
-    const text = `The person approved this, and coffre is making the change. Call ${tool.name} again with the same arguments in a moment: it answers what became of it.`;
-    return { content: [{ type: 'text', text }], structuredContent: { status: 'pending', message: text, approval } };
-  }
-  const expires = row.expiresAt.toISOString().replace(/\.\d+Z$/, 'Z');
-  const lead = state === 'waiting' ? 'The person has not decided yet. Nothing has changed.' : 'Nothing has changed yet: coffre asks the person to approve this on its own page.';
-  const next = `Once they have approved or denied it, call ${tool.name} again with the same arguments: it answers what became of it.`;
-  return {
-    content: [{ type: 'text', text: [lead, `Show them this link, to open signed in to coffre (it expires at ${expires}):`, '', `  ${url}`, '', next].join('\n') }],
-    // Some clients give the model this rather than the text: it says the same.
-    structuredContent: { status: 'pending', message: `${lead} Show the person the approval's url, to open signed in to coffre. ${next}`, approval },
-  };
-}
-
-/** What the API answered a tool's call with, when it refused it, or could not answer; null for a bug. */
-function refusalOf(error: unknown): { code: string; message: string; reason: string | undefined } | null {
-  if (!(error instanceof CoffreError) || (error.status >= 500 && error.status !== 503)) return null;
-  return { code: error.code, message: error.message, reason: error.reason };
+/** What the API answered a tool's call with, when it refused it or could not answer; null for a bug, or a row the vault did not write. */
+function refusalOf(error: unknown): { message: string; reason: string | undefined } | null {
+  if (!(error instanceof ApiError) && !(error instanceof z.ZodError)) return null;
+  const { status, body } = toErrorBody(error);
+  if (status >= 500 && status !== 501 && status !== 503) return null;
+  return { message: body.message, reason: body.reason };
 }
 
 function toolError(text: string): Record<string, unknown> {
@@ -470,13 +354,14 @@ function toolError(text: string): Record<string, unknown> {
 /**
  * A tool beyond the connection's scopes: 403, with what to ask for, which
  * is everything it holds and what it lacks (RFC 6750, section 3.1), for a
- * client that steps up, as Claude Code does. Not every one does, Claude
- * Desktop among them: the body is the tool's result, an error that tells
- * the model, in plain words, what its person does to grant the scope
- * (docs/design/mcp.md, section 5).
+ * client that steps up, as Claude Code does; a client asks for exactly what
+ * the challenge says. Not every one does, Claude Desktop among them: the
+ * body is the tool's result, an error that tells the model, in plain
+ * words, what its person does to grant the scope (docs/design/mcp.md,
+ * section 5).
  */
-function insufficientScope(runtime: CoffreRuntime, connection: McpConnection, tool: Tool, id: JsonRpcId, needed: McpScope): Response {
-  const scope = scopeString(challengeScopes(connection.scopes, needed));
+function insufficientScope(runtime: CoffreRuntime, connection: Connection, tool: Tool, id: JsonRpcId, needed: McpScope): Response {
+  const scope = scopeString(connection.scopes.includes(needed) ? connection.scopes : [...connection.scopes, needed]);
   return rpc(id, { result: toolError(missingScope(tool, needed)) }, 403, {
     'www-authenticate': `Bearer error="insufficient_scope", scope="${scope}", resource_metadata="${resourceMetadataUrl(runtime)}", error_description="${tool.name} needs ${needed}"`,
   });

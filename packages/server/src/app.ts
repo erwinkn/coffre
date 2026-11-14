@@ -7,6 +7,7 @@ import { ApiError } from './api/errors.ts';
 import { exchangeToken } from './exchange.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
+import { mcpEndpoint } from './mcp/endpoint.ts';
 import { authorizationServer, oauthRegister, oauthRevoke, oauthToken, protectedResource } from './mcp/http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
@@ -38,13 +39,15 @@ const PATHS: Record<string, { method: 'GET' | 'POST'; handler: Handler; browserF
   '/auth/signout': { method: 'POST', handler: signOut, browserForm: true },
   // A CI run's exchange (exchange.ts): its platform's ID token, for a five-minute token of its service.
   '/api/auth/oidc': { method: 'POST', handler: exchangeToken },
-  // MCP's OAuth (mcp/http.ts): the metadata clients read first, then the token, registration and revocation endpoints.
+  // MCP's OAuth (mcp/http.ts): the metadata clients read first, then the token, registration and revocation endpoints;
+  // and the endpoint its access tokens are for (mcp/endpoint.ts).
   '/.well-known/oauth-protected-resource': { method: 'GET', handler: protectedResource },
   '/.well-known/oauth-protected-resource/mcp': { method: 'GET', handler: protectedResource },
   '/.well-known/oauth-authorization-server': { method: 'GET', handler: authorizationServer },
   '/api/oauth/token': { method: 'POST', handler: oauthToken },
   '/api/oauth/register': { method: 'POST', handler: oauthRegister },
   '/api/oauth/revoke': { method: 'POST', handler: oauthRevoke },
+  '/mcp': { method: 'POST', handler: mcpEndpoint },
 };
 
 /**

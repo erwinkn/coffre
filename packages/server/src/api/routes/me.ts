@@ -3,6 +3,7 @@ import { runsInstance, type Filter, type Scope } from '@coffre/core/access';
 
 import { places, type PlaceRow } from '../../db/queries/places.ts';
 import { canAnywhere, permissionsAt, placeOf, projectsReached } from '../caller.ts';
+import { mcpOf, resourceOf } from '../../mcp/oauth.ts';
 import { route } from '../route.ts';
 
 /** A scope as the API tells it: its projects by slug, those among `known`. */
@@ -22,7 +23,7 @@ export const meRoutes = {
    * Three of its fields are other areas' to answer, and say "none" until
    * they are served: `setsUpServices` past whoever runs the instance and
    * `serviceSetup` (the policy's row), `personalToken` (the token's label),
-   * `features` (what sign-in turns on).
+   * `features.workloads` (whether sign-in trusts workloads).
    */
   ...route('GET /me', {
     run: async (ctx): Promise<Me> => {
@@ -43,6 +44,8 @@ export const meRoutes = {
       }
       const service = who.principal.startsWith('token:');
       const runs = runsInstance(who.holds);
+      // Where MCP clients connect, when the deployment serves MCP.
+      const mcp = mcpOf(ctx.auth);
       return {
         principal: { type: service ? 'service' : 'user', id: who.principal.slice(who.principal.indexOf(':') + 1) },
         // Anyone else is refused before here: the vault has one answer for a credential that does not stand.
@@ -54,7 +57,7 @@ export const meRoutes = {
         canReadAudit: canAnywhere(who, 'audit.read'),
         setsUpServices: runs,
         serviceSetup: null,
-        features: { mcp: null, workloads: false },
+        features: { mcp: mcp === null ? null : resourceOf(mcp.publicUrl), workloads: false },
         personalToken: null,
         credentialExpiresAt: who.credential.expiresAt,
         environments,
