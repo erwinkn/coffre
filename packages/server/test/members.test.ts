@@ -7,7 +7,8 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
-import { credential, emptyDatabase, environment, grant, principal, project, role, rows, user, write } from '@coffre/vault/testing';
+import { credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, user, write } from '@coffre/vault/testing';
+import { sql } from 'drizzle-orm';
 
 import { openApp } from './app-fixture.ts';
 
@@ -59,6 +60,7 @@ beforeEach(async () => {
     ...rows('principals',
       principal(ada), principal(al, { role: 'admin', scope: JSON.stringify({ projects: { only: [market.id] }, environments: 'all' }) }), principal(bo), principal(cy, { role: 'owner' }),
       principal(dee, { role: 'developer' }), principal(aud, { role: 'auditor' }), principal(ed), principal(fin), principal(gus), principal(ivy, { generation: 1 }), principal(rex, { status: 'removed', role: 'admin', generation: 1 }), principal(ci)),
+    ...rows('policy', instance()),
     ...rows('grants',
       grant(ada, 'viewer', { project: market }), grant(ada, 'viewer', { environment: billed }), grant(bo, 'manager', { project: market }),
       grant(ed, 'viewer', { environment: dev }), grant(ed, 'viewer', { project: billing }, { expiresAt: new Date('2020-01-01T00:00:00Z') }),
@@ -269,8 +271,6 @@ test("a person's grants set in one change and no statement, each place by path, 
     assert.deepEqual(refused(await call('bo-cli', 'PATCH', `/access/${gus}`, bad)), [400, 'bad_request', undefined], JSON.stringify(bad));
   }
   assert.deepEqual([await call('bo-cli', 'PATCH', `/access/${gus}`, {}), app.calls.length], [[200, { changes: {} }], before]);
-  // A service account's grants wait on who manages one (D239).
-  assert.deepEqual(refused(await call('cy-cli', 'PATCH', `/access/${ci}`, { market: 'viewer' })), [501, 'not_implemented', undefined]);
 });
 
 test('a member put is one change and no statement: admitted, brought back or given a role, as their row calls for', async () => {
@@ -316,7 +316,7 @@ test('a member put is one change and no statement: admitted, brought back or giv
   assert.deepEqual(refused((await put('cy-cli', cy, { role: 'admin' }))[0]), [409, 'conflict', 'last_owner']);
   assert.deepEqual(refused((await put('cy-token', ed, { role: 'admin' }))[0]), NO_ACCESS);
 
-  // What the app tells before any call; a service account made with its grants waits on who manages one (D239).
+  // What the app tells before any call.
   const before = app.calls.length;
   const bads: [string, unknown][] = [
     [gus, { scope: { projects: 'all' } }], [gus, { role: 'member', scope: { projects: 'all' } }], [gus, { role: 'boss' }], [gus, { role: 'admin', scope: { projects: { only: ['Market'] } } }],
@@ -325,7 +325,40 @@ test('a member put is one change and no statement: admitted, brought back or giv
   for (const [member, bad] of bads) assert.deepEqual(refused(await call('cy-cli', 'PUT', `/members/${member}`, bad)), [400, 'bad_request', undefined], JSON.stringify(bad));
   assert.deepEqual(refused(await call('cy-cli', 'PUT', '/members/user:a%20b', {})), [400, 'bad_request', undefined]);
   assert.equal(app.calls.length, before);
-  assert.deepEqual(refused(await call('cy-cli', 'PUT', `/members/${ci}`, { access: { market: 'viewer' } })), [501, 'not_implemented', undefined]);
+});
+
+test("a service account made with its grants, and given more, each one change and no statement, by whoever may set it up or manages it", async () => {
+  const put = (label: string, member: string, body: unknown) => cost(() => call(label, 'PUT', `/members/${member}`, body));
+  const everywhere = { projects: 'all', environments: 'all' };
+  const deploy = 'token:deploy';
+  // Made with its grants by whoever runs the instance; asked again, it is there, and so are they.
+  assert.deepEqual(await put('cy-cli', deploy, { access: { 'market/dev': 'viewer', billing: { role: 'viewer', until: '2030-12-31' } } }),
+    [[200, { member: deploy, instanceRole: 'member', scope: everywhere, created: true, changes: { 'market/dev': 'created', billing: 'created' } }], ['change'], 0]);
+  assert.deepEqual((await put('cy-cli', deploy, { access: { 'market/dev': 'viewer' } }))[0][1], { member: deploy, instanceRole: 'member', scope: everywhere, created: false, changes: { 'market/dev': 'unchanged' } });
+  assert.deepEqual(((await call('cy-cli', 'GET', `/members/${deploy}/access`))[1].grants as Grant[]).map((held) => [held.id, held.expiresAt]), [[`${deploy}/billing`, '2030-12-31T23:59:59.999Z'], [`${deploy}/market/dev`, null]]);
+
+  // Bo manages market's access: he gives ci, which holds grants on market alone, more there, and takes them away; Ada, who views it, does not.
+  const [[status, body], calls, statements] = await cost(() => call('bo-cli', 'PATCH', `/access/${ci}`, { 'market/dev': 'viewer' }));
+  assert.deepEqual([status, body, calls, statements], [200, { changes: { 'market/dev': 'created' } }, ['change'], 0]);
+  assert.deepEqual((await call('bo-cli', 'PATCH', `/access/${ci}`, { 'market/dev': null }))[1], { changes: { 'market/dev': 'revoked' } });
+  assert.deepEqual(refused(await call('ada-cli', 'PATCH', `/access/${ci}`, { 'market/dev': 'viewer' })), NO_ACCESS);
+  // Where he manages access he grants any member, deploy too, which he does not manage: it holds a grant on billing.
+  assert.deepEqual((await call('bo-cli', 'PATCH', `/access/${deploy}`, { market: 'viewer' }))[1], { changes: { market: 'created' } });
+  assert.deepEqual((await call('bo-cli', 'PATCH', `/access/${deploy}`, { market: null }))[1], { changes: { market: 'revoked' } });
+  // A service account never set up is not given grants on their own; one removed is brought back with its new ones, and none of its old.
+  assert.deepEqual(refused(await call('cy-cli', 'PATCH', '/access/token:never', { market: 'viewer' })), [404, 'not_found', 'not_a_member']);
+  assert.deepEqual((await call('cy-cli', 'DELETE', `/members/${deploy}`))[0], 200);
+  assert.deepEqual((await put('cy-cli', deploy, { access: { market: 'viewer' } }))[0][1], { member: deploy, instanceRole: 'member', scope: everywhere, created: true, changes: { market: 'created' } });
+  assert.deepEqual(((await call('cy-cli', 'GET', `/members/${deploy}/access`))[1].grants as Grant[]).map((held) => held.id), [`${deploy}/market`]);
+
+  // Set up by someone who does not run the instance, of a role they hold all of where the instance lets them: Bo, viewer on market/dev.
+  assert.deepEqual((await put('bo-cli', 'token:bots', { access: { 'market/dev': 'viewer' } }))[0][1], { member: 'token:bots', instanceRole: 'member', scope: everywhere, created: true, changes: { 'market/dev': 'created' } });
+  // Not where it does not: billing is Fin's, whom the setting does not stop either, but Bo holds nothing there. One place refused refuses it all, the setting up included.
+  assert.deepEqual(refused(await call('bo-cli', 'PUT', '/members/token:more', { access: { 'market/dev': 'viewer', billing: 'viewer' } })), NO_ACCESS);
+  assert.equal((await call('cy-cli', 'GET', '/members/token:more/access'))[0], 404);
+  // A token, whatever its scope, sets up nothing; nor does anyone outside the setting.
+  await world.owner.execute(sql`UPDATE policy SET service_accounts = '{"projects":{"only":[]},"environments":"all"}'`);
+  assert.deepEqual(refused(await call('cy-token', 'PUT', '/members/token:pat', { access: { 'market/dev': 'viewer' } })), NO_ACCESS);
 });
 
 test('what is not served yet answers 501', async () => {

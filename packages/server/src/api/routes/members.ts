@@ -198,6 +198,28 @@ const accessPatch = z.record(z.string().max(200), z.union([roleId, z.object({ ro
 /** The most places one change of grants names, as the vault takes them. */
 const MOST_PLACES = 1000;
 
+type Wanted = { path: string; project: string; environment: string | null; role: string | null; expiresAt: string | null };
+
+/** The grants a body asks for, each place by its path, checked before any call: a place named once, by slug, an end to come. */
+function grantsAsked(input: z.output<typeof accessPatch>): Wanted[] {
+  const now = Date.now();
+  const wanted = Object.entries(input).map(([raw, value]) => {
+    const path = parsePath(raw, [1, 2]);
+    if (!slug.safeParse(path.project).success || (path.environment !== undefined && !slug.safeParse(path.environment).success)) {
+      throw badRequest(`${raw}: a grant names a project, or one of its environments, by slug`);
+    }
+    const role = value === null ? null : typeof value === 'string' ? value : value.role;
+    const until = value !== null && typeof value === 'object' ? value.until : null;
+    return { path: formatPath(path), project: path.project, environment: path.environment ?? null, role, expiresAt: until === null ? null : parseUntil(until, now) };
+  });
+  if (new Set(wanted.map((want) => want.path)).size !== wanted.length) throw badRequest('name each place once');
+  if (wanted.length > MOST_PLACES) throw badRequest(`a change of grants names at most ${MOST_PLACES} places`);
+  return wanted;
+}
+
+/** What became of each place, by its path, in the order asked. */
+const byPath = (wanted: readonly Wanted[], changes: readonly AccessChange[]) => Object.fromEntries(wanted.map((want, i) => [want.path, changes[i]!])) as Record<string, AccessChange>;
+
 export const memberRoutes = {
   /**
    * Members and their live grants. Admins and Owners see everyone, with the
@@ -309,9 +331,12 @@ export const memberRoutes = {
    * (`created`). No role keeps an active member's, and admits anyone else as
    * `member`; a scope comes with a role but `member`, and either filter left
    * out is `all`. A service account holds no role but `member`, and is made
-   * with its grants (`access`) once who manages one is settled (D239).
+   * with its grants (`access`, as `PATCH /access` takes them), admitted or
+   * brought back in the same change (`access.grant` with `admit`), by
+   * whoever may set it up there; it answers what became of each place.
    *
    *   { "role": "admin", "scope": { "projects": { "only": ["market"] } } }
+   *   { "access": { "market/dev": "developer" } }
    *
    * No statement, but one, after the change, when the answer keeps a scope
    * that names projects the body did not: their slugs.
@@ -323,7 +348,10 @@ export const memberRoutes = {
       const service = typeOf(principal) === 'service';
       if (input.access !== undefined) {
         if (!service || input.role !== undefined || input.scope !== undefined) throw badRequest('access comes with a service account, and no role: a person is given grants once a member');
-        throw notServed('a service account made with its grants');
+        // Admitted, or brought back, with its grants, in one change of the vault's: all of it or none.
+        const wanted = grantsAsked(input.access);
+        const { changes, created } = await changed(ctx, { op: 'access.grant', principal, changes: wanted.map(({ path: _, ...change }) => change), admit: true }, principal);
+        return { member: principal, instanceRole: 'member' as const, scope: EVERYWHERE, created: created ?? false, changes: byPath(wanted, changes) };
       }
       if (input.scope !== undefined && input.role === undefined) throw badRequest('a scope goes with a role: name the role too');
       if (input.scope !== undefined && input.role === 'member') throw badRequest('a member holds nothing by their role: it takes no scope');
@@ -360,35 +388,23 @@ export const memberRoutes = {
   }),
 
   /**
-   * Set what one person holds, declaratively: each path names a project or
+   * Set what one member holds, declaratively: each path names a project or
    * an environment, and the role they should have there, until a date, or
    * null for none. Places left out are left alone. One change of the
-   * vault's: all of it or none.
+   * vault's: all of it or none. A service account's grants are given by
+   * whoever manages it, or, of a role they hold all of, by whoever the
+   * instance lets set one up there (`givesService`).
    *
    *   { "api": "developer", "api/prod": { "role": "viewer", "until": "2026-12-31" }, "web": null }
-   *
-   * A service account's grants wait on who manages one (D239).
    */
   ...route('PATCH /access/:member', {
     input: accessPatch,
     run: async (ctx, { params, input }) => {
       const principal = memberOf(params.member);
-      if (typeOf(principal) === 'service') throw notServed("a service account's grants");
-      const now = Date.now();
-      const wanted = Object.entries(input).map(([raw, value]) => {
-        const path = parsePath(raw, [1, 2]);
-        if (!slug.safeParse(path.project).success || (path.environment !== undefined && !slug.safeParse(path.environment).success)) {
-          throw badRequest(`${raw}: a grant names a project, or one of its environments, by slug`);
-        }
-        const role = value === null ? null : typeof value === 'string' ? value : value.role;
-        const until = value !== null && typeof value === 'object' ? value.until : null;
-        return { path: formatPath(path), project: path.project, environment: path.environment ?? null, role, expiresAt: until === null ? null : parseUntil(until, now) };
-      });
-      if (new Set(wanted.map((want) => want.path)).size !== wanted.length) throw badRequest('name each place once');
-      if (wanted.length > MOST_PLACES) throw badRequest(`a change of grants names at most ${MOST_PLACES} places`);
+      const wanted = grantsAsked(input);
       if (wanted.length === 0) return { changes: {} };
       const { changes } = await changed(ctx, { op: 'access.grant', principal, changes: wanted.map(({ path: _, ...change }) => change) }, principal);
-      return { changes: Object.fromEntries(wanted.map((want, i) => [want.path, changes[i]!])) as Record<string, AccessChange> };
+      return { changes: byPath(wanted, changes) };
     },
   }),
 };
