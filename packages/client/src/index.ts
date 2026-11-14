@@ -341,6 +341,19 @@ export function createClient(options: ClientOptions) {
       repositories: () => call('GET /workloads/repositories', {}),
     },
 
+    /**
+     * Freezes: every use under a target refused from its next request, its
+     * sessions kept, until lifted. A target is `instance`, `service:<name>`,
+     * `binding:<id>` or `session:<id>`.
+     */
+    freezes: {
+      /** The freezes standing that you may know of: the instance's, and those of the service accounts you manage. */
+      list: () => call('GET /freezes', {}),
+      freeze: (target: string, reason: string) => call('POST /freezes', {}, { target, reason }),
+      /** Lifts it; a target that is not frozen stays so. */
+      unfreeze: (target: string) => call('DELETE /freezes/:target', { target }),
+    },
+
     access: {
       /** What they should hold at each place; the server applies the difference. `null` revokes. */
       set: (member: string, access: RouteInput<'PATCH /access/:member'>) =>

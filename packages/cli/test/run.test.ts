@@ -530,7 +530,7 @@ test("list says how old each value is, a reference's its source's, flags those p
       listed: [
         { key: 'FRESH', version: 2, updatedAt: ago(0), updatedBy: 'ada@acme.example' },
         { key: 'OLD', version: 1, updatedAt: ago(91), updatedBy: 'bo@acme.example' },
-        { key: 'SHARED', version: null, updatedAt: ago(400), reference: { state: 'live', source: 'auth/prod/SHARED', version: 4, createdBy: 'user:ada@acme.example' } },
+        { key: 'SHARED', version: null, updatedAt: ago(400), reference: { state: 'live', source: 'auth/prod/SHARED', version: 4 } },
         { key: 'GONE', version: 3, updatedAt: ago(500), updatedBy: 'bo@acme.example', archived: true },
         { key: 'EMPTY', version: null },
       ],
@@ -544,7 +544,7 @@ test("list says how old each value is, a reference's its source's, flags those p
   assert.equal(all.stdout, [
     'FRESH\tv2\tada@acme.example\ttoday',
     'OLD\tv1\tbo@acme.example\t91 days ago  (unchanged over 90 days: rotate it)',
-    'SHARED\t→ auth/prod/SHARED\tv4\tada@acme.example\t400 days ago  (unchanged over 90 days: rotate it)',
+    'SHARED\t→ auth/prod/SHARED\tv4\t400 days ago  (unchanged over 90 days: rotate it)',
     'GONE\tv3\tbo@acme.example\t500 days ago  (archived)',
     'EMPTY\tv-\t-\t-',
     '',

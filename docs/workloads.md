@@ -26,8 +26,9 @@ The design, its threat model and every rule behind this guide are in
 
 **What is built.** The SDK, `coffre serve` and key-bound `coffre run` are.
 The server side lands in its own changes: the exchange and sessions, the new
-`coffre trust` flags, enrollment codes (`coffre enroll`), freeze and
-`narrow`, the Workers binding and minting. `verify` is built (0.14.3,
+`coffre trust` flags, enrollment codes (no release has `coffre enroll` yet:
+the examples below show it as designed), `narrow`, the Workers binding and
+minting. `coffre freeze` is built (0.16), and `verify` (0.14.3,
 [below](#inbound-webhooks-verify)). Until an instance
 answers the workload exchange, `coffre --service … run` falls back to the
 bearer exchange [ci.md](ci.md) describes.

@@ -26,7 +26,6 @@ import { generatedLines, generatedPatch, recipeFlag, regeneratedPatch } from './
 import { help, lookup, usage, type Command } from './commands.ts';
 import { clash, environmentPaths, keyNamed, keyPatterns, listOf } from './environments.ts';
 import { listen, type Tunnel } from './tunnels.ts';
-import { approve, enroll } from './enroll.ts';
 import { freeze, unfreeze } from './freeze.ts';
 import * as manage from './manage.ts';
 import { serve } from './serve.ts';
@@ -1055,7 +1054,7 @@ async function list(args: string[]): Promise<void> {
       if (reference !== null) {
         // A reference reads its source's current version; one that cannot read says why.
         const state = reference.state === 'live' ? `v${reference.version}` : reference.state.replace('_', ' ');
-        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${shownMember(reference.createdBy).replace(/^user:/, '')}\t${written}${plain}${due}${archived}${standing}\n`);
+        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${written}${plain}${due}${archived}${standing}\n`);
         continue;
       }
       process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${made}${plain}${due}${archived}${standing}\n`);
@@ -1112,9 +1111,9 @@ async function set(args: string[]): Promise<void> {
   }
 
   // Plain, no secret: whoever lists the environment sees it, and its apps get it as it is, placeholders or not.
-  // Said as 0.9 says it, which an instance of 0.9 takes too.
+  // Said as `{ value, sensitivity }`: 0.16 takes no `plain: true`.
   const value = given ?? await readValue(key);
-  const written = sensitivity === undefined ? value : sensitivity === 'plain' ? { value, plain: true as const } : { value, sensitivity };
+  const written = sensitivity === undefined ? value : { value, sensitivity };
   const result = await client().secrets.set(`${project}/${environment}`, { [key]: written });
   const outcome = result.keys[key];
   // Who sees it, as the write answers (an instance before 0.10 says nothing): said, or the key's own, kept, in
@@ -1695,7 +1694,7 @@ async function whoHasAccess(args: string[]): Promise<void> {
   if (into.length === 0) return;
   process.stdout.write(`\nAlso readable through references\n`);
   for (const reference of into) {
-    process.stdout.write(`  ${reference.source} through ${reference.holder}, made by ${shownMember(reference.createdBy).replace(/^user:/, '')}\n`);
+    process.stdout.write(`  ${reference.source} through ${reference.holder}\n`);
     for (const reader of reference.readers!) process.stdout.write(`    ${shownMember(reader).replace(/^user:/, '')}\n`);
   }
 }
@@ -1751,17 +1750,19 @@ function plural(count: number, word: string): string {
 /** "2 grants, 1 session, 0 linked accounts, 1 connected app": what a removal ends. */
 function waysIn(
   principalType: 'user' | 'service',
-  counts: { grants: number; sessions: number; tokens: number; identities: number; apps: number },
+  // 0.16's removal counts its grants alone so far: the others are null, and not said.
+  counts: { grants: number; sessions: number | null; tokens: number | null; identities: number | null; apps: number | null },
 ): string {
+  const said = (count: number | null, what: string) => (count === null ? [] : [plural(count, what)]);
   return principalType === 'user'
     ? [
         plural(counts.grants, 'grant'),
-        plural(counts.sessions, 'session'),
-        ...(counts.tokens > 0 ? [plural(counts.tokens, 'personal token')] : []),
-        plural(counts.identities, 'linked account'),
-        plural(counts.apps, 'connected app'),
+        ...said(counts.sessions, 'session'),
+        ...(counts.tokens !== null && counts.tokens > 0 ? [plural(counts.tokens, 'personal token')] : []),
+        ...said(counts.identities, 'linked account'),
+        ...said(counts.apps, 'connected app'),
       ].join(', ')
-    : [plural(counts.grants, 'grant'), plural(counts.tokens, 'token')].join(', ');
+    : [plural(counts.grants, 'grant'), ...said(counts.tokens, 'token')].join(', ');
 }
 
 /**
@@ -2181,10 +2182,8 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   'tokens revoke': (args) => manage.tokensRevoke(connect, args),
   trust,
   untrust: (args) => manage.untrust(connect, args),
-  enroll,
-  approve,
-  freeze,
-  unfreeze,
+  freeze: (args) => freeze(connect, args),
+  unfreeze: (args) => unfreeze(connect, args),
   serve: (args) => serve(args, sessionFlags.url, fetching),
   audit,
   'audit accept-loss': acceptLoss,

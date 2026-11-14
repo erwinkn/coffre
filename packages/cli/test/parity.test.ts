@@ -48,12 +48,16 @@ async function each<T, R>(items: readonly T[], run: (item: T) => Promise<R>): Pr
   return results;
 }
 
-test('every route of the API is a command of the CLI, or a browser\'s, with why', () => {
+test('every route of the API is a command of the CLI, or a browser\'s, or never built, with why', () => {
   const routes = everyRoute('https://coffre.test').map(({ key }) => key).sort();
   assert.deepEqual(Object.keys(PARITY).sort(), routes, 'PARITY lists each route once, and only routes');
   for (const [route, reach] of Object.entries(PARITY)) {
     if ('browser' in reach) {
       assert.ok(reach.browser.length > 20, `${route} says why only a browser calls it`);
+      continue;
+    }
+    if ('unbuilt' in reach) {
+      assert.ok(reach.unbuilt.length > 20, `${route} says what was never built`);
       continue;
     }
     assert.ok(reach.commands.length > 0, `${route} names a command`);
@@ -111,17 +115,14 @@ test('coffre help names service accounts as people do, service:<name>, and offer
   assert.match(trust.stdout, /A service account, service:<name>, signs in by OIDC this way/);
 });
 
-test("each command of workload access is declared, takes its documented flags, and says which change brings it", async () => {
-  for (const [args, change] of [
-    [['enroll', 'api-prod', '--promote', '00000000-0000-4000-8000-000000000000', '--now'], 'PR 3'],
-    [['approve', 'api-prod', '00000000-0000-4000-8000-000000000000'], 'PR 3'],
-    [['freeze', 'service:api-prod', '--reason', 'leaked'], 'PR 4'],
-    [['unfreeze', 'service:api-prod'], 'PR 4'],
-  ] as const) {
-    const run = await coffre([...args]);
-    assert.equal(run.code, 1, `coffre ${args.join(' ')}: ${run.stderr}`);
-    assert.match(run.stderr, new RegExp(`coffre ${args[0]} is not built yet: docs/design/workload-access.md, ${change}`));
+test('coffre enroll and coffre approve are gone: no release built their routes', async () => {
+  for (const command of ['enroll', 'approve']) {
+    assert.ok(!(COMMANDS as string[]).includes(command), `coffre ${command} is still in coffre help`);
+    const run = await coffre([command, 'api-prod']);
+    assert.notEqual(run.code, 0, `coffre ${command} ran`);
   }
+  const unbuilt = Object.entries(PARITY).filter(([, reach]) => 'unbuilt' in reach).map(([route]) => route);
+  assert.deepEqual(unbuilt, ['GET /members/:member/bindings/:id/enrollments', 'POST /members/:member/bindings/:id/enrollments', 'POST /members/:member/bindings/:id/enrollments/:enrollment/promote', 'POST /members/:member/tokens/:id/approve']);
 });
 
 test('--version prints the version; help and --help the commands', async () => {

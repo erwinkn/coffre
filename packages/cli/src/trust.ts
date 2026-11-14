@@ -782,7 +782,7 @@ export function policyLines(profile: string, policy: PolicyView | null): string[
  * binding on the issuer a new one replaces, as the server planned it or, once
  * saved, as it answered, whatever changed between the two.
  */
-export function describeKeys(member: string, plan: KeysPlan, saved: { bindings: BindingView[]; replaced: string[] } | null): string {
+export function describeKeys(member: string, plan: KeysPlan, saved: { bindings: readonly { id: string }[]; replaced: string[] } | null): string {
   const replaced = saved?.replaced ?? plan.replaces;
   const count = replaced.length === 1 ? 'binding' : `${replaced.length} bindings`;
   const lines = [
@@ -799,7 +799,7 @@ export function describeKeys(member: string, plan: KeysPlan, saved: { bindings: 
   return `${lines.join('\n')}\n`;
 }
 
-export function describePlan(member: string, plan: BindingPlan & { policy?: PolicyView | null }, applied: BindingView | null): string {
+export function describePlan(member: string, plan: BindingPlan & { policy?: PolicyView | null }, applied: { id: string } | null): string {
   const [who, how] = plan.policy == null ? ['CI runs', 'by OIDC'] : [runsOf(plan), 'for key-bound sessions'];
   const lines = [applied === null ? `Would trust ${who} to sign in as ${shownMember(member)}, ${how}:` : `Trusted ${who} to sign in as ${shownMember(member)}, ${how}, binding ${applied.id}:`];
   lines.push(...describeBinding(plan));

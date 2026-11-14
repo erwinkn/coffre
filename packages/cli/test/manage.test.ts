@@ -340,13 +340,14 @@ test('fork makes the new environment from its sibling, and says how many keys it
 test('references lists what a place lends and holds, and who reads through each', async () => {
   const listed = {
     id: 'r1', holder: 'billing/prod/DATABASE_URL', source: 'market/prod/DATABASE_URL', state: 'live', version: 3,
-    createdBy: 'user:ada@acme.example', createdAt: '2026-10-05T09:00:00.000Z', endedBy: null, endedAt: null,
+    createdBy: null, createdAt: null, endedBy: null, endedAt: null,
     readers: ['user:bo@acme.example', 'token:deploy'], canBreak: true,
   };
   const { connect, calls, written, io } = fixture(() => ({ references: [listed] }));
   await manage.references(connect, ['market/prod'], io);
   assert.deepEqual(calls, [{ method: 'GET', path: '/references?path=market%2Fprod', body: undefined }]);
-  assert.equal(written.out, 'billing/prod/DATABASE_URL → market/prod/DATABASE_URL\n  made by ada@acme.example on 2026-10-05\n  read through by bo@acme.example, service:deploy\n');
+  // 0.16 keeps no record of who made a reference, or when.
+  assert.equal(written.out, 'billing/prod/DATABASE_URL → market/prod/DATABASE_URL\n  read through by bo@acme.example, service:deploy\n');
 
   // Breaking shows who stops reading, and breaks only with --apply.
   const breaking = fixture(({ method }) => (method === 'GET' ? { references: [listed] } : { reference: { ...listed, state: 'broken' } }));
@@ -393,15 +394,15 @@ test('fork --inherit copies nothing, says what its readers need, and is no fork 
 test("reset and remove, in a fork: back to the parent's value, or without its key, and --undo for each", async () => {
   const { connect, calls, written, io } = fixture(({ method, path, body }) => {
     if (method === 'GET') return { permissions: [], keys: [], parents: path.includes('prod-eu') ? ['prod'] : [], rotateAfterDays: null };
-    if (path.startsWith('/secrets/')) return { key: 'DATABASE_URL', archived: (body as { inherit: boolean }).inherit, folder: null, from: 'prod' };
+    if (path.startsWith('/secrets/')) return { operationId: 'op', key: 'DATABASE_URL', inherit: (body as { inherit: boolean }).inherit };
     return { operationId: 'op', keys: { SENTRY_DSN: (body as Record<string, unknown>).SENTRY_DSN === true ? 'dismissed' : 'restored' } };
   });
   await manage.resetSecret(connect, ['market/prod-eu/DATABASE_URL'], io);
   await manage.resetSecret(connect, ['market/prod-eu/DATABASE_URL', '--undo'], io);
   assert.deepEqual(calls.map((call) => call.body), [{ inherit: true }, { inherit: false }]);
   assert.equal(written.out, [
-    "market/prod-eu/DATABASE_URL reads market/prod's value again; its own is kept: `coffre reset market/prod-eu/DATABASE_URL --undo` serves it again",
-    'market/prod-eu/DATABASE_URL overrides market/prod again, with the value it had',
+    "market/prod-eu/DATABASE_URL reads its parent's value again; its own is kept: `coffre reset market/prod-eu/DATABASE_URL --undo` serves it again",
+    'market/prod-eu/DATABASE_URL overrides its parent again, with the value it had',
     '',
   ].join('\n'));
 
