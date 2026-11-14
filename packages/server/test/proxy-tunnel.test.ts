@@ -23,6 +23,8 @@ import { sql } from 'drizzle-orm';
 import { processGates, type Gates } from '../src/gate.ts';
 import type { CoffrePlugin, Connect, Pipe, PluginContext } from '../src/plugins.ts';
 import { credentialProxy, postgres, type CredentialProxyOptions, type Network } from '../src/plugins/credential-proxy.ts';
+import { database, saslprep } from '../src/plugins/postgres-tunnel.ts';
+import type { WorkersSocket } from '../src/workers-socket.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { openApp, PUBLIC_URL } from './app-fixture.ts';
 import { appClient, type AppClient } from './tunnel-listener.ts';
@@ -562,6 +564,370 @@ test("a workload's tunnels are grouped by session: a freeze of one session ends 
     await Promise.all([frozen.end(), kept.end()]);
   }
 });
+
+// --- 0.14.7's wire cases, on 0.16's tunnel ---
+
+test('LISTEN and NOTIFY across two tunnelled connections', async () => {
+  const listening = await rawSession();
+  let notifying: RawSession | undefined;
+  try {
+    notifying = await rawSession();
+    await listening.query('LISTEN coffre_tunnel');
+    await notifying.query("SELECT pg_notify('coffre_tunnel', 'through the tunnel')");
+    // NotificationResponse: the notifier's pid, the channel, the payload.
+    const heard = await listening.until('A');
+    const [channel, payload] = heard.body.subarray(4).toString().split('\0');
+    assert.deepEqual([channel, payload], ['coffre_tunnel', 'through the tunnel']);
+  } finally {
+    listening.close();
+    notifying?.close();
+  }
+});
+
+test('COPY both ways, on the wire as psql sends it', async () => {
+  // As the database's owner, who may make the temporary table to copy into: the app's login may not.
+  const owner = APP_URL.replace('coffre_runtime:local-runtime-only', 'coffre_owner:local-dev-only');
+  await write(world, ...rows('secrets', value(world, secret(prod, 'OWNER_URL'), `${owner}?sslmode=disable`)));
+  current.proxy = proxyOf({ tunnels: { db: postgres('OWNER_URL') } });
+  const raw = await rawSession();
+  try {
+    await raw.query('CREATE TEMP TABLE carried (n int)');
+    // COPY FROM STDIN: CopyInResponse, then the rows as CopyData, CopyDone.
+    assert.equal(await raw.send('Q', cstring('COPY carried FROM STDIN')), 'G');
+    await raw.write(message('d', Buffer.from('4\n5\n6\n')));
+    await raw.write(message('c', Buffer.alloc(0)));
+    await raw.until('Z');
+    assert.equal(await raw.copyOut('COPY (SELECT sum(n) FROM carried) TO STDOUT'), '15\n');
+  } finally {
+    raw.close();
+  }
+});
+
+test('a password message longer than a handle is refused before it is read, and the vault is not asked again', async () => {
+  const [, calls] = await cost(async () => {
+    const socket = tcp({ host: '127.0.0.1', port });
+    // Reset by the tunnel, with what it had not read: the reset is the close.
+    socket.on('error', () => undefined);
+    const closed = new Promise((resolve) => socket.once('close', () => resolve('closed')));
+    await once(socket, 'connect');
+    socket.write(startup());
+    await once(socket, 'data');
+    const head = Buffer.alloc(5);
+    head.write('p', 0);
+    head.writeInt32BE(0x7fffffff, 1);
+    socket.write(head);
+    socket.write(Buffer.alloc(64 * 1024));
+    // Read whole, it would wait on 2 GiB until the startup's 30 s deadline.
+    assert.equal(await Promise.race([closed, sleep(2_000)]), 'closed', 'closed at once');
+  });
+  assert.deepEqual(calls, ['use'], 'no peek: the login never began');
+});
+
+test('a startup asks for encryption once each, and no more', async () => {
+  const raw = tcp({ host: '127.0.0.1', port });
+  await once(raw, 'connect');
+  const ssl = Buffer.alloc(8);
+  ssl.writeInt32BE(8, 0);
+  ssl.writeInt32BE(80877103, 4);
+  let answered = '';
+  raw.on('data', (chunk: Buffer) => (answered += chunk.toString('latin1')));
+  raw.write(Buffer.concat(Array.from({ length: 1000 }, () => ssl)));
+  await once(raw, 'close');
+  assert.ok(answered.startsWith('NN') && !answered.startsWith('NNN'), JSON.stringify(answered.slice(0, 4)));
+});
+
+test('a database URL is read as it is dialled: loopback in any numeric form is loopback, a name in lower case', () => {
+  for (const host of ['127.1', '2130706433', '0x7f000001', '127.0.0.1']) assert.equal(database(`postgres://u:p@${host}:5432/d`).host, '127.0.0.1', host);
+  assert.equal(database('postgres://u:p@[::1]:5432/d').host, '::1');
+  assert.equal(database('postgres://u:p@DB.Acme.Example/d').host, 'db.acme.example');
+});
+
+test('SASLprep maps as Postgres does, and falls back to the password as it is', () => {
+  const soft = String.fromCharCode(0xad);
+  const space = String.fromCharCode(0xa0);
+  assert.equal(saslprep(`I${soft}X`), 'IX');
+  assert.equal(saslprep(`a${space}b`), 'a b');
+  assert.equal(saslprep(String.fromCharCode(0x2168)), 'IX', 'NFKC');
+  const control = `pass${String.fromCharCode(7)}word`;
+  assert.equal(saslprep(control), control, 'a prohibited character: the password as it is');
+  assert.equal(saslprep(`a${String.fromCharCode(0x200b)}b`), 'a b', 'a zero-width space is a space, as Postgres maps it');
+  assert.equal(saslprep(soft), soft, 'nothing left: the password as it is');
+  const arabicOne = String.fromCharCode(0x661);
+  assert.equal(saslprep(`${arabicOne}${soft}a`), `${arabicOne}a`, 'a digit has no direction of a letter');
+  const ideographic = `${String.fromCharCode(0x2ff0)}a${soft}`;
+  assert.equal(saslprep(ideographic), ideographic, 'an ideographic description character (C.7): the password as it is');
+  // Right-to-left as RFC 3454's table D.1 has it: Hebrew's maqaf (U+05BE) is no letter, and right-to-left all the same.
+  const maqaf = `${String.fromCharCode(0x5be)}${space}`;
+  assert.equal(saslprep(maqaf), maqaf, 'ending on a space, not right-to-left: the password as it is');
+  const tatweel = String.fromCharCode(0x627, 0x640, 0xa0, 0x627);
+  assert.equal(saslprep(tatweel), String.fromCharCode(0x627, 0x640, 0x20, 0x627), "Arabic's tatweel (U+0640) is right-to-left, no left-to-right letter");
+});
+
+/** A database of the test's own on loopback, which the tunnel `db` dials from now: `answer` gets each connection, and what it sent. */
+async function fakeDatabase(answer: (socket: Socket, chunk: Buffer, stage: number) => number, query = '?sslmode=disable'): Promise<{ sockets: Socket[]; close(): void }> {
+  const sockets: Socket[] = [];
+  const fake = createServer((socket) => {
+    sockets.push(socket);
+    let stage = 0;
+    socket.on('error', () => undefined);
+    socket.on('data', (chunk: Buffer) => void (stage = answer(socket, chunk, stage)));
+  });
+  fake.listen(0, '127.0.0.1');
+  await once(fake, 'listening');
+  await write(world, ...rows('secrets', value(world, secret(prod, 'FAKE_URL'), `postgres://u:p@127.0.0.1:${(fake.address() as AddressInfo).port}/d${query}`)));
+  current.proxy = proxyOf({ tunnels: { db: postgres('FAKE_URL') } });
+  return {
+    sockets,
+    close: () => {
+      for (const socket of sockets) socket.destroy();
+      fake.close();
+    },
+  };
+}
+
+/** A database that asks for SCRAM, and answers the client's first message with `iterations`; `then`, what it says to the client's last. */
+const scramFake = (iterations: number, then?: (socket: Socket) => void) => (socket: Socket, chunk: Buffer, stage: number) => {
+  if (stage === 0) socket.write(message('R', Buffer.concat([Buffer.from([0, 0, 0, 10]), cstring('SCRAM-SHA-256'), Buffer.from([0])])));
+  else if (stage === 1) {
+    const nonce = /r=([^,]+)/.exec(chunk.toString('latin1'))![1]!;
+    socket.write(message('R', Buffer.concat([Buffer.from([0, 0, 0, 11]), Buffer.from(`r=${nonce}server,s=${Buffer.from('salt').toString('base64')},i=${iterations}`)])));
+  } else if (stage === 2) then?.(socket);
+  return stage + 1;
+};
+
+test('a database that ends SCRAM without its signature is no database the URL names: refused', async () => {
+  // It takes the proof, then says AuthenticationOk with no server-final message.
+  const fake = await fakeDatabase(scramFake(4096, (socket) => socket.write(Buffer.concat([message('R', Buffer.from([0, 0, 0, 0])), message('Z', Buffer.from('I'))]))));
+  const client = appClientOf();
+  try {
+    // Let in, the query would go to a database that never answers it: bounded, so a login let through fails rather than hangs.
+    await assert.rejects(Promise.race([client.unsafe('SELECT 1'), sleep(3_000)]), /without proving it knows the password/);
+  } finally {
+    // The fake first: a query it holds would keep the client's end waiting.
+    fake.close();
+    await client.end();
+  }
+});
+
+test('a database that asks for more SCRAM iterations than any needs is refused before the work begins', async (t) => {
+  // One past the tunnel's most (100,000): computed, it costs milliseconds, so a broken limit fails here, and never hangs.
+  let proved = false;
+  const derived: number[] = [];
+  const deriveBits = crypto.subtle.deriveBits;
+  t.mock.method(crypto.subtle, 'deriveBits', (algorithm: Pbkdf2Params, key: CryptoKey, length: number) => {
+    derived.push(algorithm.iterations);
+    return deriveBits.call(crypto.subtle, algorithm, key, length);
+  });
+  const fake = await fakeDatabase(scramFake(100_001, () => void (proved = true)));
+  const client = appClientOf();
+  try {
+    await assert.rejects(Promise.race([client.unsafe('SELECT 1'), sleep(3_000).then(() => assert.fail('neither refused nor logged in within 3 s'))]), /SCRAM iterations/);
+    assert.deepEqual(derived, [], 'the tunnel ran PBKDF2 before refusing');
+    assert.equal(proved, false, 'the tunnel sent the database its proof: it did the work');
+  } finally {
+    // The fake first: a query it holds would keep the client's end waiting.
+    fake.close();
+    await client.end();
+  }
+});
+
+test('a connection the app drops while the database has not answered leaves no socket open to it', async () => {
+  // A database that reads what it is sent and never answers: the tunnel waits on its answer to SSLRequest.
+  const silent = await fakeDatabase((socket, _, stage) => stage, '');
+  try {
+    const raw = tcp({ host: '127.0.0.1', port });
+    await once(raw, 'connect');
+    raw.write(startup());
+    await once(raw, 'data');
+    raw.write(message('p', cstring(handle)));
+    for (let waited = 0; silent.sockets.length === 0 && waited < 2000; waited += 20) await sleep(20);
+    assert.equal(silent.sockets.length, 1, 'the tunnel reached the database');
+    const closed = once(silent.sockets[0]!, 'close');
+    raw.destroy();
+    assert.notEqual(await Promise.race([closed, sleep(2_000)]), undefined, "the database's socket closed with the app's");
+  } finally {
+    silent.close();
+  }
+});
+
+test('a cancel request through a network binding reaches the database, though its connector dials after the socket opens', async () => {
+  // A VPC Network binding as Cloudflare's is: open at once, its connector dialing the database only later; closed
+  // before that, it sends nothing (W150, measured live).
+  const late: Network = {
+    connect: () => {
+      let socket: Socket | null = null;
+      let given = false;
+      const waiting: Uint8Array[] = [];
+      let readable!: ReadableStreamDefaultController<Uint8Array>;
+      let ended!: () => void;
+      const closed = new Promise<void>((resolve) => (ended = resolve));
+      const end = () => {
+        try {
+          readable.close();
+        } catch {}
+        ended();
+      };
+      setTimeout(() => {
+        if (given) return;
+        socket = tcp({ host: '127.0.0.1', port: Number(new URL(APP_URL).port) });
+        socket.on('data', (chunk: Buffer) => readable.enqueue(new Uint8Array(chunk)));
+        socket.on('close', end);
+        for (const chunk of waiting.splice(0)) socket.write(chunk);
+      }, 300);
+      return {
+        readable: new ReadableStream<Uint8Array>({ start: (controller) => void (readable = controller) }),
+        writable: new WritableStream<Uint8Array>({ write: (chunk) => void (socket === null ? waiting.push(chunk) : socket.write(chunk)) }),
+        opened: Promise.resolve(),
+        closed,
+        close: async () => {
+          given = true;
+          if (socket === null) end();
+          else socket.destroy();
+        },
+        startTls: () => {
+          throw new Error('plaintext only');
+        },
+      };
+    },
+  };
+  current.proxy = proxyOf({ tunnels: { db: postgres('REPLICA_URL', { hosts: [REPLICA], connect: late }) }, insecureUpstreams: false });
+  const client = appClientOf();
+  try {
+    const { state } = await client.unsafe('SELECT 1');
+    const sleeping = client.unsafe('SELECT pg_sleep(30)').execute();
+    await sleep(200);
+    const cancel = tcp({ host: '127.0.0.1', port });
+    await once(cancel, 'connect');
+    cancel.write(cancelRequest(state!));
+    const started = Date.now();
+    await assert.rejects(sleeping, (error: { code?: string }) => error.code === '57014');
+    assert.ok(Date.now() - started < 5000);
+    cancel.destroy();
+  } finally {
+    await client.end();
+  }
+});
+
+test("a tunnel's network binding is checked with the configuration: missing, it fails, and never falls back to a direct dial", () => {
+  const tunnel = (options: Parameters<typeof postgres>[1]) => () => credentialProxy({ credentials: {}, tunnels: { replica: postgres('REPLICA_URL', options) } });
+  // A binding the Worker lacks is undefined: the key is there, its value is not.
+  assert.throws(tunnel({ hosts: ['10.0.1.5'], connect: undefined }), /tunnel replica's connect is undefined, as a Worker's binding is when wrangler\.jsonc lacks it/);
+  assert.throws(tunnel({ hosts: ['10.0.1.5'], connect: {} as Network }), /has no connect method/);
+  // A binding reaches a whole network: the hosts in it are named.
+  const unused: Network = { connect: () => Promise.reject(new Error('unused')) };
+  assert.throws(tunnel({ connect: unused }), /names the hosts it reaches there/);
+  assert.throws(tunnel({ hosts: [], connect: unused }), /names the hosts it reaches there/);
+  // Private hosts, with a binding and without insecureUpstreams; never without it.
+  assert.doesNotThrow(tunnel({ hosts: ['10.0.1.5'], connect: unused }));
+  assert.throws(tunnel({ hosts: ['10.0.1.5'] }), /names a private host/);
+  for (const host of ['localhost.', 'LocalHost', '127.1', '::ffff:10.0.1.5', '[fd00::5]']) assert.throws(tunnel({ hosts: [host] }), /names a private host/, host);
+});
+
+test('a dial through a network binding still under way when the app leaves is given up: the socket that comes after is closed', async () => {
+  // A binding that answers only when told, with a socket that says when it is closed.
+  let answer!: (socket: WorkersSocket) => void;
+  let asked!: () => void;
+  const dialling = new Promise<void>((resolve) => (asked = resolve));
+  const pending: Network = {
+    connect: () => {
+      asked();
+      return new Promise<WorkersSocket>((done) => (answer = done));
+    },
+  };
+  current.proxy = proxyOf({ tunnels: { db: postgres('REPLICA_URL', { hosts: [REPLICA], connect: pending }) }, insecureUpstreams: false });
+  const raw = tcp({ host: '127.0.0.1', port });
+  await once(raw, 'connect');
+  raw.write(startup());
+  await once(raw, 'data');
+  raw.write(message('p', cstring(handle)));
+  await dialling;
+  raw.destroy();
+  await sleep(200);
+  let closed = false;
+  answer({ readable: new ReadableStream(), writable: new WritableStream(), opened: Promise.resolve(), closed: new Promise(() => undefined), close: async () => void (closed = true), startTls: () => { throw new Error('unused'); } });
+  for (let waited = 0; !closed && waited < 2000; waited += 20) await sleep(20);
+  assert.ok(closed, 'the late socket was closed');
+});
+
+type RawSession = Awaited<ReturnType<typeof rawSession>>;
+
+/** How long a raw session waits for the tunnel's next message before it fails: a regression fails its test, never hangs the file. */
+const RAW_READ_MS = 5_000;
+
+/** A raw session on the listener, as psql's wire is: the simple query protocol, COPY included. */
+async function rawSession() {
+  const socket = tcp({ host: '127.0.0.1', port });
+  await once(socket, 'connect');
+  let buffered = Buffer.alloc(0);
+  /** Why no more will come: the connection ended or failed. */
+  let gone: Error | undefined;
+  const waiting: (() => void)[] = [];
+  const wakeAll = () => waiting.splice(0).forEach((wake) => wake());
+  socket.on('data', (chunk: Buffer) => {
+    buffered = Buffer.concat([buffered, chunk]);
+    wakeAll();
+  });
+  socket.on('error', (error) => void (gone ??= error));
+  socket.on('close', () => {
+    gone ??= new Error('the tunnel closed the connection');
+    wakeAll();
+  });
+  const next = async (): Promise<{ type: string; body: Buffer }> => {
+    const deadline = Date.now() + RAW_READ_MS;
+    while (buffered.length < 5 || buffered.length < 1 + buffered.readInt32BE(1)) {
+      if (gone !== undefined) throw gone;
+      const left = deadline - Date.now();
+      if (left <= 0) throw new Error(`no message from the tunnel within ${RAW_READ_MS} ms`);
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, left);
+        waiting.push(() => (clearTimeout(timer), resolve()));
+      });
+    }
+    const length = buffered.readInt32BE(1);
+    const out = { type: String.fromCharCode(buffered[0]!), body: buffered.subarray(5, 1 + length) };
+    buffered = buffered.subarray(1 + length);
+    return out;
+  };
+  const write = (bytes: Buffer) => new Promise<void>((resolve) => socket.write(bytes, () => resolve()));
+  const until = async (type: string) => {
+    for (let got = await next(); ; got = await next()) {
+      if (got.type === 'E') throw new Error(got.body.toString());
+      if (got.type === type) return got;
+    }
+  };
+  try {
+    await write(startup());
+    await until('R');
+    await write(message('p', cstring(handle)));
+    await until('Z');
+  } catch (error) {
+    socket.destroy();
+    throw error;
+  }
+  return {
+    write,
+    until,
+    async query(text: string) {
+      await write(message('Q', cstring(text)));
+      await until('Z');
+    },
+    /** A message sent; the type of the first answer that is no notice or parameter. */
+    async send(type: string, body: Buffer) {
+      await write(message(type, body));
+      for (let got = await next(); ; got = await next()) if (!['N', 'S'].includes(got.type)) return got.type;
+    },
+    async copyOut(text: string) {
+      await write(message('Q', cstring(text)));
+      let out = '';
+      for (let got = await next(); got.type !== 'Z'; got = await next()) {
+        if (got.type === 'E') throw new Error(got.body.toString());
+        if (got.type === 'd') out += got.body.toString();
+      }
+      return out;
+    },
+    close: () => socket.destroy(),
+  };
+}
 
 // --- the wire, as psql writes it ---
 
