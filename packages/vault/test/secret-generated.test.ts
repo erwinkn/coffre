@@ -205,3 +205,20 @@ test('a generated value that is not what the contract says is a fault, before an
   for (const keys of bad) await assert.rejects(vault.change(writing(keys)), TypeError, JSON.stringify(keys).slice(0, 120));
   assert.equal(world.woken.length, 0);
 });
+
+test("`coffre run`'s own value: the first write into a personal config replaces the environment's version it was planned from, and of two runs at once exactly one writes", async () => {
+  // As 0.14.7's generated-values.test.ts: Bo has no config of prod; each run planned from prod's TOKEN, as listed.
+  const replaces = await listed('prod', 'TOKEN');
+  const run = (made_: string) => vault.change(writing([{ key: 'TOKEN', value: made_, generated: made('bytes:32:hex'), replaces, nature: 'secret' }], { mine: true }, 'bo-cli'));
+  const raced = await Promise.all([run('a'.repeat(64)), run('b'.repeat(64))]);
+  const won = raced.filter((each) => 'answer' in each);
+  assert.equal(won.length, 1, JSON.stringify(raced));
+  assert.deepEqual(raced.filter((each) => 'refused' in each), [{ refused: 'stale' }]);
+  assert.deepEqual((won[0] as { answer: { keys: unknown } }).answer.keys, { TOKEN: { version: 1, nature: 'secret' } });
+  // One config made, holding one version; prod's TOKEN untouched.
+  assert.deepEqual(await rowsOf(world.owner, sql`SELECT e.owner, s.key, s.current_version AS version, s.recipe FROM secrets s JOIN environments e ON e.id = s.environment_id WHERE e.owner = ${bo}`),
+    [{ owner: bo, key: 'TOKEN', version: 1, recipe: 'bytes:32:hex' }]);
+  assert.equal(await listed('prod', 'TOKEN'), replaces);
+  // Planned again from prod's version, a third run is stale too: Bo's own value is what the key reads now.
+  assert.deepEqual(await run('c'.repeat(64)), { refused: 'stale' });
+});

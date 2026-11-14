@@ -23,8 +23,6 @@ export const unservedRoutes = {
   ...unserved('GET /members/:member/bindings/:id/enrollments', "a binding's enrollments"),
   ...unserved('POST /members/:member/bindings/:id/enrollments', 'enrolling a workload'),
   ...unserved('POST /members/:member/bindings/:id/enrollments/:enrollment/promote', 'promoting an enrollment'),
-  // A missing key dismissed, or restored.
-  ...unserved('PATCH /projects/:project/:environment/dismissals', 'dismissing a missing key'),
   // A GitHub or GitLab repository looked up for a binding, and those the deployment's GitHub App is installed on.
   ...unserved('GET /workloads/lookup', 'looking up a repository'),
   ...unserved('GET /workloads/repositories', "the GitHub App's repositories"),

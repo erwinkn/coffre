@@ -17,6 +17,12 @@
   depends on `pg` or `pg-connection-string` any more, and a deployment
   installs no driver. Database URLs are read as before, TLS included.
 
+- **A restored version comes back as typed.** Restoring a version a recipe
+  made, or one half of a key pair, writes it as a value typed by hand:
+  Regenerate no longer makes its next one by that recipe, and the pair's
+  other half is not restored with it. Regenerate it, or write it again
+  with `--generate`, to have a recipe again.
+
 ## 0.14.7 (2026-11-13)
 
 - **An HMAC key written as text: `keyEncoding`.** An `hmac()` signer's or

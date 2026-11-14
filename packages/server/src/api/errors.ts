@@ -116,6 +116,10 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   inherited: ['conflict', 'a fork inherits from it: archive that fork first, or delete it first to delete this one for good'],
   // A place deleted for good (routes/places.ts), as 0.14.7 answered it.
   not_archived: ['conflict', 'it is not archived: archive it first, then delete it'],
+  // Missing keys dismissed, or restored (routes/keys.ts), as 0.14.7 answered.
+  held_here: ['conflict', 'it holds that key of its own, a value or a reference, which removing would not stop it serving: reset it to what it inherits first (`coffre reset`), or archive it (`coffre archive`)'],
+  no_config: ['not_found', 'you have no personal config of that environment: a value written there makes one'],
+  too_many_dismissals: ['bad_request', 'one request dismisses or restores 2,000 keys at most: send the rest in another'],
   too_many_keys: ['conflict', 'a fork copies 2,000 values at most: make it hold references to them (`references`), or inherit them (`inherit`), instead'],
   too_large: ['conflict', 'it holds more versions than one deletion erases: delete its environments one at a time first'],
   parent_archived: ['conflict', 'it inherits from an environment that is archived or deleted: restore that first'],

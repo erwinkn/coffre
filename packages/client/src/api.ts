@@ -103,6 +103,17 @@ export type Api = {
       moved: string[];
     };
   };
+  "PATCH /projects/:project/:environment/dismissals": {
+    input: {
+      [key: string]: null | true;
+    };
+    output: {
+      operationId: string | null;
+      keys: {
+        [key: string]: "dismissed" | "restored" | "unchanged";
+      };
+    };
+  };
   "DELETE /secrets/:project/:environment/:key/reference": {
     input: undefined;
     output: {
@@ -1020,10 +1031,6 @@ export type Api = {
         stranded: string[];
       };
     };
-  };
-  "PATCH /projects/:project/:environment/dismissals": {
-    input: undefined;
-    output: never;
   };
   "PATCH /folders/:folder": {
     input: {

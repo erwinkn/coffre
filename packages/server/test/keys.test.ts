@@ -327,6 +327,40 @@ test("what an environment lacks of its siblings' keys, and what its team dismiss
   assert.deepEqual((await missing('ada-cli', 'market/prod@me')).missing.map(({ key }) => key), ['D', 'Y', 'Z']);
 });
 
+test("dismissing a missing key, and restoring it, as 0.14.7 answered: one vault change and no statement of the app's, the list showing it apart", async () => {
+  const dismissals = (label: string, path: string, patch: unknown) => cost(() => call(label, 'PATCH', `/projects/${path}/dismissals`, patch));
+  const missing = async (path: string) => {
+    const [, body] = await call('bo-cli', 'GET', `/projects/${path}/missing`);
+    const { missing: lacking, dismissed } = body as { missing: { key: string }[]; dismissed: { key: string; dismissedBy: string }[] };
+    return [lacking.map(({ key }) => key), dismissed.map(({ key, dismissedBy }) => [key, dismissedBy])];
+  };
+  // Dismissing takes writing: Ada views market.
+  const [viewer, viewerCalls, viewerStatements] = await dismissals('ada-cli', 'market/prod', { Z: true });
+  assert.deepEqual([refused(viewer), viewerCalls, viewerStatements], [NO_ACCESS, ['change'], 0]);
+  // Bo dismisses prod's Z, which staging has; Y was dismissed already.
+  const [[status, body], calls, statements] = await dismissals('bo-cli', 'market/prod', { Z: true, Y: true });
+  assert.deepEqual([status, body.keys, typeof body.operationId, calls, statements], [200, { Z: 'dismissed', Y: 'unchanged' }, 'string', ['change'], 0]);
+  assert.deepEqual(await missing('market/prod'), [[], [['Y', 'user:root@acme.example'], ['Z', bo]]]);
+  // Restoring one brings it back to the list.
+  const [restored] = await dismissals('bo-cli', 'market/prod', { Y: null });
+  assert.deepEqual([restored[0], restored[1].keys], [200, { Y: 'restored' }]);
+  assert.deepEqual(await missing('market/prod'), [['Y'], [['Z', bo]]]);
+  // In a fork, a key it holds of its own is not removed: dev's A. One it inherits is, and a use there goes without it.
+  const [held] = await dismissals('bo-cli', 'market/dev', { A: true });
+  assert.deepEqual([held[0], held[1].reason], [409, 'held_here']);
+  assert.match(held[1].message!, /market\/dev: .*reset it to what it inherits first/);
+  assert.deepEqual((await dismissals('bo-cli', 'market/dev', { E: true }))[0][1].keys, { E: 'dismissed' });
+  // dev@me is the caller's personal config: Bo has none, and a dismissal makes none.
+  assert.deepEqual(refused((await dismissals('bo-cli', 'market/prod@me', { Z: true }))[0]), [404, 'not_found', 'no_config']);
+  // A patch says `true` or `null` of at least one key, and of 2,000 at most, as every body: past that, it asks the vault nothing
+  // (which refuses more itself, `too_many_dismissals`).
+  for (const patch of [{}, { Z: false }, { Z: 'yes' }, { 'not a key': true }]) assert.equal((await dismissals('bo-cli', 'market/prod', patch))[0][0], 400, JSON.stringify(patch));
+  const [many, manyCalls] = await dismissals('bo-cli', 'market/prod', Object.fromEntries(Array.from({ length: 2001 }, (_, i) => [`K_${i}`, true])));
+  assert.deepEqual([many[0], manyCalls], [400, []]);
+  assert.match(many[1].message!, /more than 2000 entries/);
+  assert.deepEqual((await dismissals('bo-cli', 'market/prod', Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`K_${i}`, true]))))[0][0], 200);
+});
+
 /** A version, and a reveal of the whole environment, by the same caller: the same answer, or the same refusal. */
 async function sameAsRead(label: string, path: string): Promise<string | null> {
   const [[status, body], calls] = await cost(() => call(label, 'GET', `/projects/${path}/version`));
