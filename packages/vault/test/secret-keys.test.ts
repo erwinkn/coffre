@@ -245,7 +245,7 @@ test('a folder of keys is renamed, merged or emptied whole, archived keys too, b
   assert.deepEqual([(await key('DATABASE_URL'))!.folder, (await key('OLD'))!.folder, (await key('PRIMARY'))!.folder], [null, null, null]);
   assert.deepEqual(await refile('bo-cli', 'data', null), { refused: 'no_folder' });
   // What the contract does not say is a fault: no folder to rename, or one no folder could be named.
-  for (const [folder, to] of [[null, 'x'], ['db', ' x'], ['db', 'a/b'], ['db', undefined], ['', 'x']] as const) {
+  for (const [folder, to] of [[null, 'x'], ['db', ' x'], ['db', 'a/b'], ['db', '\ud800'], ['db', undefined], ['', 'x']] as const) {
     await assert.rejects(refile('bo-cli', folder as never, to as never), TypeError, `${folder} ${to}`);
   }
 });

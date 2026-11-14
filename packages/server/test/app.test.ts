@@ -291,7 +291,7 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
   app.calls.length = 0;
   const unserved: [string, unknown, number][] = [
     ['market/prod/FLAG', { key: 'NEW_FLAG' }, 501], ['market/prod/FLAG', { key: 'FLAG' }, 501], ['market/prod/FLAG', { inherit: true }, 501], ['market/prod@me/FLAG', { folder: 'x' }, 501],
-    ['market/prod/FLAG', {}, 400], ['market/prod/FLAG', { inherit: true, folder: 'x' }, 400], ['market/prod/FLAG', { folder: ' x' }, 400], ['market/prod/FLAG', { archived: 'yes' }, 400], ['market/prod/FLAG', { sensitivity: 'plain' }, 400],
+    ['market/prod/FLAG', {}, 400], ['market/prod/FLAG', { inherit: true, folder: 'x' }, 400], ['market/prod/FLAG', { folder: ' x' }, 400], ['market/prod/FLAG', { folder: '\ud800' }, 400], ['market/prod/FLAG', { archived: 'yes' }, 400], ['market/prod/FLAG', { sensitivity: 'plain' }, 400],
   ];
   for (const [path, patch, code] of unserved) assert.equal((await call('bo-cli', 'PATCH', `secrets/${path}`, patch))[0][0], code, `${path} ${JSON.stringify(patch)}`);
   assert.deepEqual(app.calls, []);
@@ -315,7 +315,7 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
   const [[gone, why]] = await call('bo-cli', 'DELETE', 'folders/market/prod/data');
   assert.deepEqual([gone, why.error, why.reason], [404, 'not_found', 'no_folder']);
   app.calls.length = 0;
-  const shapes: [string, string, unknown, number][] = [['DELETE', 'folders/market/prod@me/data', undefined, 501], ['PATCH', 'folders/market/prod/%20data', { name: 'x' }, 400], ['PATCH', 'folders/market/prod/data', { name: 'a/b' }, 400]];
+  const shapes: [string, string, unknown, number][] = [['DELETE', 'folders/market/prod@me/data', undefined, 501], ['PATCH', 'folders/market/prod/%20data', { name: 'x' }, 400], ['PATCH', 'folders/market/prod/data', { name: 'a/b' }, 400], ['PATCH', 'folders/market/prod/data', { name: '\ud800' }, 400]];
   for (const [method, path, input, code] of shapes) assert.equal((await call('bo-cli', method, path, input))[0][0], code, path);
   assert.deepEqual(app.calls, []);
 });
