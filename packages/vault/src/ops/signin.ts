@@ -486,6 +486,8 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
   const shown = presented(input);
   const { kind, credential: token, hint } = input;
   const service = kind === 'service' ? (input as { member: unknown }).member : null;
+  // Whose personal token the route names: the caller's own, or none.
+  const forWhom = kind === 'personal' ? (input as { member: unknown }).member : null;
   const most = kind === 'service' ? SERVICE_MINUTES : MAX_PERSONAL_TOKEN_MINUTES;
   const wanted = kind === 'handle' || (kind === 'service' && (input as { scope: unknown }).scope === null) ? null : scopeAsked((input as { scope: unknown }).scope);
   const paths = kind === 'handle' ? pathsAsked((input as { paths: unknown }).paths) : null;
@@ -493,8 +495,8 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
     || !text(token?.token) || !HASH.test(token.token) || !Number.isInteger(token.minutes) || token.minutes < 1 || token.minutes > most
     || !(labelled(token.label) || (kind === 'service' && token.label === null))
     || !text(hint) || !new RegExp(`^${PREFIX[kind]}…[A-Za-z0-9_-]{4}$`).test(hint)
-    || (kind === 'service' ? !(typeof service === 'string' && text(service) && MEMBER.test(service) && service.startsWith('token:')) || (wanted === undefined) : kind === 'handle' ? paths === undefined : wanted == null)) {
-    throw new TypeError("a token is made of a kind, personal, handle or service, from its token's SHA-256 and its hint; for a week at most, a service's 366 days; with a label, a service's or none; and a scope of 1 to 1,000 places by path, a handle's environments, or a service account and its scope or none");
+    || (kind === 'service' ? !(typeof service === 'string' && text(service) && MEMBER.test(service) && service.startsWith('token:')) || (wanted === undefined) : kind === 'handle' ? paths === undefined : wanted == null || !(typeof forWhom === 'string' && text(forWhom) && MEMBER.test(forWhom) && forWhom.startsWith('user:')))) {
+    throw new TypeError("a token is made of a kind, personal, handle or service, from its token's SHA-256 and its hint; for a week at most, a service's 366 days; with a label, a service's or none; and a person and a scope of 1 to 1,000 places by path, a handle's environments, or a service account and its scope or none");
   }
   // Drawn here: a decision draws nothing.
   const id = randomUUID();
@@ -562,6 +564,8 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
         if (!(onSession(caller) || (kind === 'handle' && caller.credential.kind === 'personal'))) return NO_ACCESS;
       }
       if (kind === 'personal') {
+        // For themselves alone: a person names no one else's.
+        if (forWhom !== caller.principal) return NO_ACCESS;
         const policy: Policy = { ...holder.policy, roles: { ...definitionsOf(seen.asked), ...holder.policy.roles } };
         const person: Holdings & { policy: Policy } = { ...holder, policy };
         // As 0.14.7 told them: a role there is not, one its place does not take, or one that manages access; then a place that is not there; then one beyond them.

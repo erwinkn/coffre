@@ -43,6 +43,6 @@ export const PARAMS: Record<string, z.ZodType<string>> = {
   environment: environmentPath,
   key: secretKey,
   folder: folderName,
-  // A row's id: an identity's, a credential's.
-  id: z.uuid(),
+  // A row's id: an identity's, a credential's. In lowercase, as the vault takes one and Postgres writes one.
+  id: z.uuid().transform((id) => id.toLowerCase()),
 };

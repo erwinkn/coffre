@@ -277,7 +277,8 @@ test('a person unlinks an account of theirs, and the sessions it opened end with
   // Ada cannot unlink Bo's.
   const [refused, calls, statements] = await cost(() => unlink('ada-cli', bos.id));
   assert.deepEqual([refused.status, await refused.json(), calls, statements], [404, { error: 'not_found', message: 'that account: unknown sign-in account', reason: 'unknown_identity' }, ['change'], 0]);
-  const answered = await unlink('bo-cli', bos.id);
+  // An id in capitals is the same id, as the vault takes it.
+  const answered = await unlink('bo-cli', bos.id.toUpperCase());
   assert.deepEqual([answered.status, await answered.json()], [200, { unlinked: true }]);
   assert.equal(await whoIs(`${SESSION}=bo-web`), '401 unauthenticated');
   assert.equal((await unlink('bo-cli', bos.id)).status, 404);

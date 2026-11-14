@@ -87,7 +87,9 @@ beforeEach(async () => {
 const from = { request: 'req-1', ip: '192.0.2.7' };
 const shown = (label: string): Presented => ({ token: tokenOf(label).toString('hex'), proof: null, ...from });
 const made = (minutes = 60, label: string | null = 'deploy') => ({ token: tokenOf('minted').toString('hex'), minutes, label });
-const personal = (label: string, scope: Record<string, string>, minutes = 60) => ({ ...shown(label), op: 'token.create', kind: 'personal', credential: made(minutes), hint: 'coffre_pat_…Ab_9', scope }) as Asked<'token.create'>;
+/** Whose credential `label` is, by its first word: the person a personal token is asked for, unless a test names another. */
+const whose = (label: string) => ({ root, ada, bo, cy, dee } as Record<string, string>)[label.split('-')[0]!] ?? 'user:nobody@acme.example';
+const personal = (label: string, scope: Record<string, string>, minutes = 60, member = whose(label)) => ({ ...shown(label), op: 'token.create', kind: 'personal', member, credential: made(minutes), hint: 'coffre_pat_…Ab_9', scope }) as Asked<'token.create'>;
 const handle = (label: string, paths: string[], minutes = 60) => ({ ...shown(label), op: 'token.create', kind: 'handle', credential: made(minutes, 'run'), hint: 'coffre_use_…Ab_9', paths }) as Asked<'token.create'>;
 const serviceToken = (label: string, member: string, scope: Record<string, string> | null = null, minutes = 60) =>
   ({ ...shown(label), op: 'token.create', kind: 'service', credential: made(minutes, null), hint: 'coffre_svc_…Ab_9', member, scope }) as Asked<'token.create'>;
@@ -210,6 +212,9 @@ test('only a person on a session makes a personal token: a token never makes ano
   await write(world, ...rows('bindings', bound), ...rows('credentials', session('ci-pod', bound)));
   const scope = { 'market/dev': 'viewer' };
   assert.deepEqual(await vault.change(personal('cy-pat', scope)), { refused: 'no_access' });
+  // For themselves alone: Bo, on his session, names Cy's, and is refused as for anything beyond him.
+  assert.deepEqual(await vault.change(personal('bo-cli', scope, 60, cy)), { refused: 'no_access' });
+  assert.deepEqual(await vault.change(personal('bo-cli', scope, 60, bo.replace('bo', 'BO'))), { refused: 'no_access' });
   assert.deepEqual(await vault.change(personal('ci-token', scope)), { refused: 'not_a_person' });
   assert.deepEqual(await vault.change({ ...personal('ci-pod', scope), proof: 'ci-pod' }), { refused: 'workload_cannot_issue' });
   assert.deepEqual(await vault.change({ ...handle('ci-pod', ['market/dev']), proof: 'ci-pod' }), { refused: 'workload_cannot_issue' });
@@ -506,6 +511,9 @@ test('what the contract takes is checked before anything is read: a fault, never
     { ...personal('bo-cli', scope), hint: 'coffre_svc_…Ab_9' },
     { ...personal('bo-cli', scope), hint: 'coffre_pat_…Ab' },
     personal('bo-cli', {}),
+    personal('bo-cli', scope, 60, 'token:ci'),
+    personal('bo-cli', scope, 60, 'bo'),
+    { ...personal('bo-cli', scope), member: undefined },
     personal('bo-cli', Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`p${i}`, 'viewer']))),
     personal('bo-cli', { 'market/dev/x': 'viewer' }),
     personal('bo-cli', { 'Market/dev': 'viewer' }),
