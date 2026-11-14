@@ -2,7 +2,7 @@ import { TOMBSTONE } from '@coffre/core/schemas';
 import { getTableColumns, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
-import type { Queryable } from './database.ts';
+import { sentPrepared, type Queryable } from './database.ts';
 
 /**
  * Postgres's ways, in one place: the server's queries.ts uses these rather
@@ -29,9 +29,28 @@ export function forUpdate<Query extends { for: (strength: 'update' | 'no key upd
 /**
  * The rows a hand-written query answers, as the driver gives them. Column
  * names are the query's own, unmapped.
+ *
+ * With `prepare`, for a read sent on every call with new values (a use's),
+ * the statement goes prepared by name rather than unnamed, which Postgres
+ * parses and plans again each time it runs. A name is its text's, the same
+ * from every connection, so a pooler that keeps statements prepared on its
+ * own connections to the database (Hyperdrive, and PgBouncer with
+ * `max_prepared_statements`) has Postgres parse it once on each, and,
+ * after its first five runs, plan it no more where the plan for any values
+ * costs no more than the plans for each (Postgres's own choice, by default).
+ * On Workers a call's connection is new, so the client sends the Parse each
+ * time, with the rest, under the same Sync: no round trip more. Only for a
+ * query whose text is one of a few: a pooler keeps a bounded number per
+ * connection, so a text that varies by what was asked would push the others
+ * out. A pooler that passes named statements through to whichever
+ * connection it gives (PgBouncer in transaction mode without
+ * `max_prepared_statements`) fails the second client's Parse there (42P05):
+ * coffre connects to Postgres directly or through Hyperdrive. Not in a
+ * transaction, whose statements go unnamed (`sentPrepared`, database.ts).
  */
-export async function rowsOf<Row>(db: Queryable, query: SQL): Promise<Row[]> {
-  return [...(await (db as unknown as { execute(query: SQL): Promise<Row[]> }).execute(query))];
+export async function rowsOf<Row>(db: Queryable, query: SQL, { prepare = false }: { prepare?: boolean } = {}): Promise<Row[]> {
+  const rows = async () => [...(await (db as unknown as { execute(query: SQL): Promise<Row[]> }).execute(query))];
+  return prepare ? sentPrepared(rows) : rows();
 }
 
 /** Insert the rows whose unique keys are free; returns how many that was. */

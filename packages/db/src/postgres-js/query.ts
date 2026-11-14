@@ -12,6 +12,11 @@ export interface Statement {
 export interface QueryOptions {
   /** Sent with the simple protocol, one Query message: what a statement with no parameters is, by default. */
   simple: boolean;
+  /**
+   * Coffre: sent as a statement prepared by name (`statementName`, connection.ts), parsed once on each connection,
+   * where an unnamed one is parsed and planned again at every run: for a statement sent on every call, with new values.
+   */
+  prepare?: boolean;
 }
 
 /**
@@ -54,6 +59,8 @@ export class Query<T = unknown> extends Promise<T> {
   // What the connection works out as it sends it.
   parameters: unknown[] = [];
   statement: Statement | null = null;
+  /** Coffre: sent `prepare`d, what its connection knows it by, until Postgres has parsed it (`ParseComplete`, connection.ts). */
+  parsing: string | null = null;
   /** Whether its parameters' types are asked of the server before its values go (`typedByServer`, connection.ts). */
   describeFirst = false;
   /** A transaction's first statement: its BEGIN, sent ahead of it under its Sync (`begin`, index.ts); and whether it took. */

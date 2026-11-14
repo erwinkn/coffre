@@ -35,7 +35,8 @@ export function prepared<Q extends Select>(
     if (built === undefined) {
       const builder = build(db);
       // Drizzle's own preparation, which runs nothing, says which columns come back and which joins may be null.
-      // Unnamed on Postgres: no statement is prepared on the server, whose connections a call does not keep.
+      // Run unnamed, as Drizzle's session runs every statement: what caches here is the SQL Drizzle builds, not
+      // Postgres's plan. A read sent on every call, whose plan is worth keeping, goes as `rowsOf(…, { prepare })` (dialect.ts).
       const { fields, joinsNotNullableMap } = (builder as unknown as { prepare(): { fields: unknown; joinsNotNullableMap: unknown } }).prepare();
       built = { query: builder.toSQL(), fields, joinsNotNullableMap };
       builds.set(tables, built);

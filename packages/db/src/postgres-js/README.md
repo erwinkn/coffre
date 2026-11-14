@@ -24,8 +24,8 @@ What nothing in coffre reached: logical replication (`subscribe`), large
 objects, COPY streams (a COPY a statement asks for fails, with an error that
 says so), LISTEN/NOTIFY (a notification is dropped), cursors and `forEach`,
 `fetch_types` and array types read from `pg_type` (`postgresClient` takes
-Postgres's own as known), named prepared statements and their cache (every
-statement is unnamed, as coffre sent them), `transform`, the tagged template
+Postgres's own as known), the cache of named prepared statements (a
+statement is unnamed unless asked `prepare`, below), `transform`, the tagged template
 and its helpers (`sql\`…\``, `sql(rows)`, `sql.json`, `sql.typed`,
 `sql.file`), two-phase commit (`prepare`), several hosts and
 `target_session_attrs`, a statement's `cancel()`, and reading a URL and the
@@ -224,6 +224,25 @@ Each is marked `Coffre:` in the code:
   the connection goes on as after any answer. Upstream failed the statement
   already answering instead, and left this one waiting, its transaction and
   connection with it, for ever.
+- **A statement is prepared by name only when asked** (`prepare`, in
+  `query.ts`; `toBuffer`, `ParseComplete` and `statementName`, in
+  `connection.ts`). Upstream prepared every statement by default, named
+  `s1`, `s2`, … in the order a process first sent them, and kept them by
+  text on each connection. Here a statement goes unnamed, parsed and
+  planned at each run, unless `unsafe` is given `prepare: true`: then it is
+  named by a hash of its parameters' types and its text, the same name from
+  every connection and every process, so that a pooler that keeps
+  statements prepared on its connections to the database (Hyperdrive, and
+  PgBouncer with `max_prepared_statements`) knows it again from a client
+  it has not seen. Its first send on a socket carries its Parse, each send
+  its Describe, Bind and Execute, under one Sync: no round trip more than
+  unnamed, and on Workers, where each call's connection is new, the same
+  messages each time. The socket knows it as parsed once Postgres says so
+  (ParseComplete); one whose Parse failed is parsed again on its next send,
+  one that failed as it ran is not (Postgres would refuse a second Parse of
+  the name, 42P05). A transaction's first statement, which carries its
+  BEGIN, and one described first go unnamed. `rowsOf(…, { prepare: true })`
+  (`../dialect.ts`) is coffre's one way to ask for it.
 - **An idle connection holds no Node process open** (`idleTimer`, in
   `connection.ts`), as node-postgres's `allowExitOnIdle`: while it waits in
   the pool, its socket and its `idle_timeout` timer are unref'd, and taken

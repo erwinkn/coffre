@@ -107,14 +107,14 @@ export type PendingQuery<T extends readonly unknown[]> = Query<RowList<T>>;
 
 /** A transaction's statements, and its savepoints. */
 export interface TransactionSql {
-  unsafe<T extends readonly unknown[] = Row[]>(query: string, parameters?: unknown[], options?: { simple?: boolean }): PendingQuery<T>;
+  unsafe<T extends readonly unknown[] = Row[]>(query: string, parameters?: unknown[], options?: { simple?: boolean; prepare?: boolean }): PendingQuery<T>;
   /** A savepoint, rolled back to if `fn` fails. */
   savepoint<T>(fn: (sql: TransactionSql) => T | Promise<T>): Promise<Settled<T>>;
 }
 
 /** A connection held until `release()`. */
 export interface ReservedSql {
-  unsafe<T extends readonly unknown[] = Row[]>(query: string, parameters?: unknown[], options?: { simple?: boolean }): PendingQuery<T>;
+  unsafe<T extends readonly unknown[] = Row[]>(query: string, parameters?: unknown[], options?: { simple?: boolean; prepare?: boolean }): PendingQuery<T>;
   release(): void;
 }
 
@@ -122,9 +122,11 @@ export interface ReservedSql {
 export interface Sql {
   /**
    * A statement: with `parameters`, the extended protocol, one round trip;
-   * without, the simple one, unless `simple: false`.
+   * without, the simple one, unless `simple: false` or `prepare`. With
+   * `prepare`, a statement prepared by name, parsed once on each connection
+   * (`statementName`, connection.ts).
    */
-  unsafe<T extends readonly unknown[] = Row[]>(query: string, parameters?: unknown[], options?: { simple?: boolean }): PendingQuery<T>;
+  unsafe<T extends readonly unknown[] = Row[]>(query: string, parameters?: unknown[], options?: { simple?: boolean; prepare?: boolean }): PendingQuery<T>;
   /**
    * A transaction, on a connection held for it: BEGIN (`options` after it,
    * `isolation level serializable` and the like), `fn`, then COMMIT, or
@@ -201,7 +203,7 @@ export default function postgres(given: Options): Sql {
 
   /** `unsafe`, sending each statement through `handler`. */
   function unsafeOn(handler: (query: Query) => void): Sql['unsafe'] {
-    return (text, args = [], { simple = args.length === 0 } = {}) => new Query(text, args, handler, { simple }, Boolean(options.debug)) as never;
+    return (text, args = [], { prepare = false, simple = args.length === 0 && !prepare } = {}) => new Query(text, args, handler, { simple, prepare }, Boolean(options.debug)) as never;
   }
 
   /** A connection of the pool's own, held until given back: `reserve`'s, and a transaction's. */

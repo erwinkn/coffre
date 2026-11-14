@@ -55,6 +55,23 @@ const inside = new AsyncLocalStorage<{ client: Client; open: boolean }>();
 const ASKS = new Set<PropertyKey>(['unsafe', 'begin', 'reserve']);
 
 /**
+ * Whether the flow of work asks its statement prepared by name
+ * (`sentPrepared`): Drizzle's `execute` hands the client a text and its
+ * values, and no way to say more.
+ */
+const preparing = new AsyncLocalStorage<true>();
+
+/**
+ * `work`'s statement, `execute`d on the database, sent prepared by name
+ * (`prepare`, in `postgres-js/query.ts`): through `execute`, as every
+ * hand-written statement goes, so what wraps the database sees it as one.
+ * A transaction's statements go unnamed: its client is its own.
+ */
+export function sentPrepared<T>(work: () => Promise<T>): Promise<T> {
+  return preparing.run(true, work);
+}
+
+/**
  * `client`, refusing a query or a transaction asked from inside a transaction
  * it is already running. Work from any other flow, a concurrent request's,
  * or what the transaction left running once its work was done, goes on as before.
@@ -70,6 +87,8 @@ function guarded(client: Client): Client {
       if (typeof value !== 'function' || !ASKS.has(key)) return value;
       return (...args: unknown[]) => {
         refuse(target);
+        // A statement asked prepared (`sentPrepared`): `unsafe(text, values, options)`.
+        if (key === 'unsafe' && preparing.getStore() === true) args = [args[0], args[1] ?? [], { ...(args[2] as object | undefined), prepare: true }];
         return (value as (...args: unknown[]) => unknown).apply(target, args);
       };
     },
