@@ -282,9 +282,11 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
   const readers = sql`(SELECT r.id FROM secrets r WHERE r.source_id IN (SELECT s.id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(stopping)}::text[])))`;
   // Where each source is said to be, found by slugs: the decision holds every row found to what it is asked, by its MAC.
   const sourcePlaces = sql`(SELECT e.id FROM environments e JOIN projects p ON p.id = e.project_id WHERE (p.slug, e.slug) IN (SELECT * FROM unnest(${sql.param(refs.map((ref) => ref.to.project))}::text[], ${sql.param(refs.map((ref) => ref.to.environment))}::text[])))`;
-  // The value each key marked holds now, read only if it is no more than a change copies.
+  // The value each key marked holds now, read only if it is no more than a change copies: not one already of the nature
+  // asked, which is left as it is and copies nothing.
   const marked = copying(sql`(${secretVersions.secretId}, ${secretVersions.version}) IN (SELECT s.id, s.current_version FROM secrets s
-    WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(marks)}::text[]) AND s.current_version IS NOT NULL)`);
+    JOIN unnest(${sql.param(marks)}::text[], ${sql.param(marks.map((key) => byKey.get(key)!.nature!))}::text[]) AS m (key, nature) ON m.key = s.key
+    WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.current_version IS NOT NULL AND s.nature IS DISTINCT FROM m.nature)`);
   const read = {
     ...callerParts(shown.token, sql`(SELECT p.id FROM projects p WHERE p.slug = ANY(${sql.param(slugs)}::text[]))`),
     project: part(projects, sql`${projects.slug} = ANY(${sql.param(slugs)}::text[])`),
@@ -515,6 +517,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           if (unsaid !== undefined && unsaid !== from) vouched.push(unsaid);
           // The newest copy of the value restored, by its first date, a mark's or a restore's: it comes back no looser than
           // that, as 0.14.7 found it by its ciphertext. A value made sensitive in place is sensitive in its older versions too.
+          // Its first date has no MAC: one moved or deleted behind the vault hides the copy (docs/design/0.16.md, "A version is restored").
           const copy = from && seen.version.filter((row) => row.secretId === kept.id && row.firstWrittenAt.getTime() === from.firstWrittenAt.getTime())
             .reduce((newer, row) => (row.version > newer.version ? row : newer), from);
           if (copy !== undefined && copy !== from && copy !== unsaid) vouched.push(copy);

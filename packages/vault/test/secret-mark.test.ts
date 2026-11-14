@@ -321,6 +321,18 @@ test(`marks open and seal again ${MOST_COPIED / 2 ** 20} MiB of values at most i
   assert.ok('answer' in done && Object.values(done.answer.outcomes).every((outcome) => outcome === 'changed'));
 });
 
+test('a mark weighs only the values it changes: those already of the nature asked copy nothing', async () => {
+  const size = 64 * 1024;
+  const place = await big('big', Math.floor(MOST_COPIED / size), size);
+  await write(world, ...rows('secrets', value(world, secret(place, 'SMALL'), 'small', { plain: true })));
+  const keys = (await rowsOf<{ key: string }>(world.owner, sql`SELECT key FROM secrets WHERE environment_id = ${place.id} AND key <> 'SMALL'`)).map((row) => row.key);
+  assert.ok(await weighed(place) > MOST_COPIED);
+  // Every heavy one is a secret already, and only SMALL is changed.
+  const done = await mark('ada-cli', { ...Object.fromEntries(keys.map((key) => [key, 'secret' as const])), SMALL: 'secret' }, { environment: 'big' });
+  assert.ok('answer' in done, JSON.stringify(done));
+  assert.deepEqual(Object.entries(done.answer.outcomes).filter(([, outcome]) => outcome !== 'unchanged'), [['SMALL', 'changed']]);
+});
+
 test('the engine weighs what a change copies before it opens any, whatever its operation read', async () => {
   const size = 64 * 1024;
   const place = await big('big', Math.floor(MOST_COPIED / size), size);

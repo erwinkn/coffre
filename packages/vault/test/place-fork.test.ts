@@ -10,7 +10,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { secrets } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
 
-import { change, commit, MOST_COPIED, prepare, type Operation, type Parts } from '../src/change.ts';
+import { change, commit, MOST_COPIED, prepare, readParts, type Operation, type Parts } from '../src/change.ts';
 import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
@@ -325,4 +325,36 @@ test(`a fork copies ${MOST_COPIED / 2 ** 20} MiB of values at most, weighed befo
   assert.deepEqual(await counts(), before);
   const referred = answered(await vault.change(forking('ada-cli', 'over', 'heavy', true))).forked!;
   assert.deepEqual([referred.keys, referred.references, referred.copied], [keys.length, keys.length, []]);
+});
+
+test('a fork weighs only the values it copies: not a parent\'s a key overrides, nor one its forker refers to', async () => {
+  const size = 64 * 1024;
+  const count = Math.floor(MOST_COPIED / size);
+  const heavy = environment(market, 'heavy');
+  const light = environment(market, 'light', { parentId: heavy.id });
+  const names = Array.from({ length: count }, (_, n) => `KEY_${String(n).padStart(4, '0')}`);
+  await write(world, ...rows('environments', heavy, light), ...rows('secrets',
+    ...names.map((key, n) => value(world, secret(heavy, key), String(n % 10).repeat(size))),
+    ...names.map((key) => value(world, secret(light, key), 'small'))));
+  // light overrides every key of heavy's with five bytes: a copy of it copies those, not what heavy holds under them.
+  assert.equal(answered(await vault.change(forking('ada-cli', 'copy', 'light'))).forked!.keys, count);
+  // A fork by references copies only what its forker cannot refer to: Ada refers to all of them, and so reads none, heavy or not.
+  const referring = forking('ada-cli', 'refs', 'heavy', true);
+  const operation = OPERATIONS['environment.create'](referring, { workloads: world.workloads, owners: world.owners }) as Operation<Parts, unknown>;
+  assert.equal((await readParts(world, operation.read, operation.beside)).seen.version!.length, 0);
+});
+
+test('a fork by references weighs what it would copy before it reads any: past the bound it is refused, and its dry run says so', async () => {
+  // Sensitive values, which Eve reads and does not use: she refers to none of them, and so would copy them all.
+  const size = 64 * 1024;
+  const heavy = environment(market, 'heavy');
+  const keys = Array.from({ length: Math.floor(MOST_COPIED / size) }, (_, n) => value(world, secret(heavy, `KEY_${String(n).padStart(4, '0')}`), String(n % 10).repeat(size), { sensitive: true }));
+  await write(world, ...rows('environments', heavy), ...rows('secrets', ...keys));
+  const fork = forking('eve-cli', 'over', 'heavy', true);
+  const operation = OPERATIONS['environment.create'](fork, { workloads: world.workloads, owners: world.owners }) as Operation<Parts, unknown>;
+  assert.equal((await readParts(world, operation.read, operation.beside)).seen.version!.length, 0);
+  assert.deepEqual(await vault.weigh(fork), { refused: 'too_much_to_copy' });
+  const before = await counts();
+  assert.deepEqual(await vault.change(fork), { refused: 'too_much_to_copy' });
+  assert.deepEqual(await counts(), before);
 });
