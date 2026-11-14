@@ -1,11 +1,12 @@
 import { allows, EVERYWHERE, isCredentialScope, isInstanceRole, isScope, scopeWithReads, type CredentialScope, type Holdings, type Permission, type Policy, type RoleDefinition } from '@coffre/core/access';
 import { addressWithin, checkConstraints, type BindingPolicy, type Constraints } from '@coffre/core/identity';
 import { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
-import type { Called } from '@coffre/core/vault';
+import type { Called, SignedHead } from '@coffre/core/vault';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { keep, part, readParts, type Denied, type Refusal, type Running, type Seen } from './change.ts';
-import type { Row } from './rows.ts';
+import { checked, type Key, type Row, type Wire } from './rows.ts';
+import { headText } from './signer.ts';
 import type { Memory } from './use.ts';
 
 /**
@@ -335,6 +336,25 @@ export async function touch(vault: Pick<Running, 'db'> & { memory: Memory }, cre
   await vault.db.execute(sql`UPDATE credentials SET last_used_at = ${when}, last_used_ip = ${ip} WHERE id IN (${free})`).then(() => keep(touched, credential.id, { at }, at - TOUCHED_MS), () => {});
 }
 
+/** The log's head as its row holds it, in the words its MAC covers (`headText`): what rides beside a caller's rows when a page asks. */
+const HEAD = sql`
+  SELECT jsonb_build_object('size', size, 'keptSize', kept_size, 'keptRoot', encode(kept_root, 'hex'), 'agingSize', aging_size, 'agingRoot', encode(aging_root, 'hex'),
+    'agingFrom', aging_from, 'signedAt', (extract(epoch FROM signed_at) * 1000)::float8, 'mac', encode(mac, 'hex')) AS row
+  FROM log_head`;
+
+/**
+ * The head the vault signed, or null: no head yet, or a row whose MAC is
+ * not the vault's, which vouches for nothing. A number too large to read
+ * back whole fails the MAC like any other edit.
+ */
+function headOf(keys: readonly Key[], wire: Wire | undefined): SignedHead | null {
+  if (wire === undefined) return null;
+  const { mac, ...head } = wire as Parameters<typeof headText>[0] & { mac: string };
+  if (checked(keys, (key) => key.entries, headText(head), Buffer.from(mac, 'hex')) === undefined) return null;
+  const { size, keptSize, keptRoot, agingSize, agingRoot, agingFrom, signedAt } = head;
+  return { size, keptSize, keptRoot, agingSize, agingRoot, agingFrom, signedAt: new Date(signedAt).toISOString() };
+}
+
 /** A caller's rows as one read found them, and when: what `caller` remembers, under the token's hash. */
 export type CallerRead = { at: number; seen: Seen<ReturnType<typeof callerParts>> };
 
@@ -344,14 +364,26 @@ export type CallerRead = { at: number; seen: Seen<ReturnType<typeof callerParts>
  * with. One read, of every project, remembered as a use's rows are and
  * decided on again at each call. It opens and changes nothing, and logs
  * nothing: a use and a change read their caller themselves.
+ *
+ * With `head`, the log's head rides in the same statement and comes back
+ * with the answer once its MAC is held to the vault's keys: what the audit
+ * page proves the entries it shows against, since the app holds no key and
+ * the row is a writer's to edit. Never from memory: the head moves at each
+ * signing, and a remembered one would show the newest entries as unsigned.
  */
-export async function caller(vault: Pick<Running, 'db' | 'keys' | 'now'> & { memory: Memory; workloads: Workloads }, shown: Shown & { token: Buffer }): Promise<Called | Refusal> {
+export async function caller(vault: Pick<Running, 'db' | 'keys' | 'now'> & { memory: Memory; workloads: Workloads }, shown: Shown & { token: Buffer; head?: boolean }): Promise<Called | Refusal> {
   const { memory } = vault;
   const key = shown.token.toString('hex');
   const now = vault.now();
   let found = memory.callers.get(key);
+  let head: SignedHead | null | undefined;
   // Fresh only between its read and the memory's length after it: a clock set back makes nothing fresher.
   if (found !== undefined && !(now >= found.at && now < found.at + memory.seconds * 1000)) found = undefined;
+  if (shown.head === true) {
+    const read = await readParts(vault, callerParts(shown.token, null), { head: HEAD });
+    found = { at: now, seen: read.seen };
+    head = headOf(vault.keys, read.beside.head[0]);
+  }
   found ??= { at: now, seen: (await readParts(vault, callerParts(shown.token, null))).seen };
   const at = vault.now();
   const asking = callerFrom(found.seen, shown, vault.workloads, at);
@@ -366,5 +398,5 @@ export async function caller(vault: Pick<Running, 'db' | 'keys' | 'now'> & { mem
   // Unless a newer read of the same is there already: a slow call does not put its older rows back over it.
   if (memory.seconds > 0 && !((memory.callers.get(key)?.at ?? -Infinity) > found.at)) keep(memory.callers, key, found, at - memory.seconds * 1000);
   const { id, kind, expiresAt } = asking.credential;
-  return { principal: asking.principal, credential: { id, kind, expiresAt: expiresAt.toISOString() }, holds: asking.holds };
+  return { principal: asking.principal, credential: { id, kind, expiresAt: expiresAt.toISOString() }, holds: asking.holds, ...(head === undefined ? {} : { head }) };
 }

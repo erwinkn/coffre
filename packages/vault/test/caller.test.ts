@@ -11,6 +11,8 @@ import { sql } from 'drizzle-orm';
 import type { Called } from '@coffre/core/vault';
 
 import { caller } from '../src/caller.ts';
+import { keyOf, macOf, type Key } from '../src/rows.ts';
+import { headText } from '../src/signer.ts';
 import { memoryOf } from '../src/use.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
 import { amend, binding, credential, environment, grant, instance, principal, project, role, rows, session, tokenOf, user, write } from './world.ts';
@@ -225,4 +227,55 @@ test("a workload's session is who it is with its key alone; stopped, it is told 
   await amend(vault, 'bindings', sql`id = ${bound.id}`, { frozenAt: new Date(vault.now()) });
   vault.memory = memoryOf(2);
   assert.equal(await refused('pod', { proof: 'pod' }), 'frozen');
+});
+
+test('asked for the head, the same statement brings the one the vault signed, never from memory; an edited one, or none, is null', async () => {
+  const heading = async (label: string) => {
+    const answer = await caller(vault, { ...shown(label), head: true });
+    assert.ok(!('refused' in answer), JSON.stringify(answer));
+    return answer;
+  };
+  const head = { size: 7, keptSize: 3, keptRoot: 'aa'.repeat(32), agingSize: 4, agingRoot: 'bb'.repeat(32), agingFrom: 1, signedAt: vault.now() - 1500 };
+  const signed = { ...head, signedAt: new Date(head.signedAt).toISOString() };
+  /** The head's row as the signer writes it, under `key`. */
+  const put = (key: Key = vault.keys[0]!) =>
+    vault.owner.execute(sql`
+      INSERT INTO log_head (only_row, size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac)
+      VALUES (true, ${head.size}, ${head.keptSize}, decode(${head.keptRoot}, 'hex'), ${head.agingSize}, decode(${head.agingRoot}, 'hex'), ${head.agingFrom}, to_timestamp(${head.signedAt}::float8 / 1000), decode(${macOf(key, key.entries, headText(head)).toString('hex')}, 'hex'))
+      ON CONFLICT (only_row) DO UPDATE SET size = excluded.size, kept_size = excluded.kept_size, kept_root = excluded.kept_root, aging_size = excluded.aging_size, aging_root = excluded.aging_root, aging_from = excluded.aging_from, signed_at = excluded.signed_at, mac = excluded.mac`);
+
+  // Not asked, not given, and no head yet is null: the rows remembered a moment ago are read again with it.
+  assert.equal('head' in (await who('ada')), false);
+  statements = 0;
+  assert.equal((await heading('ada')).head, null);
+  assert.equal(statements, 1, 'one statement, the rows and the head');
+
+  await put();
+  statements = 0;
+  const answer = await heading('ada');
+  assert.equal(statements, 1, 'read again: a head is never remembered');
+  assert.deepEqual(answer.head, signed);
+  assert.deepEqual([answer.principal, answer.holds.grants], [ada, [{ projectId: w.market.id, environmentId: null, role: 'viewer' }]]);
+  // The rows it read are the ones the next plain call is answered from.
+  statements = 0;
+  assert.equal('head' in (await who('ada')), false);
+  assert.equal(statements, 0);
+
+  // Every field is under the MAC, and the MAC under the vault's keys: a row edited, or signed with another key, vouches for nothing.
+  const edits = [
+    sql`size = 8, aging_size = 5`, sql`kept_size = 4, aging_size = 3`, sql`kept_root = decode(${'cc'.repeat(32)}, 'hex')`, sql`aging_root = decode(${'cc'.repeat(32)}, 'hex')`,
+    sql`aging_from = 2`, sql`signed_at = signed_at + interval '1 millisecond'`, sql`mac = set_byte(mac, 0, get_byte(mac, 0) # 1)`, sql`mac = set_byte(mac, 35, get_byte(mac, 35) # 1)`,
+  ];
+  for (const edit of edits) {
+    await vault.owner.execute(sql`UPDATE log_head SET ${edit}`);
+    assert.equal((await heading('ada')).head, null, JSON.stringify(edit.queryChunks));
+    await put();
+    assert.deepEqual((await heading('ada')).head, signed);
+  }
+  await put(keyOf(Buffer.alloc(32, 9)));
+  assert.equal((await heading('ada')).head, null, "another key's");
+
+  // Whoever does not stand is told nothing, the head no more than the rest.
+  await put();
+  assert.deepEqual(await caller(vault, { ...shown('revoked'), head: true }), { refused: 'unauthenticated' });
 });
