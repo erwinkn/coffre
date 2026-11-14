@@ -158,10 +158,11 @@ test("a session reaches every route of the API as its service's own token does, 
   // Where a session would issue a credential or change someone's access, the vault refuses it for being a workload's,
   // before it weighs what its service holds: 403 workload_cannot_issue, where the token, a Viewer's, is refused 403 for
   // what it holds. 0.14.7 answered a session 403 workload_cannot_issue on every route that issues or changes access
-  // (`ISSUING_ROUTES`, api/workload-routes.ts), before the route ran: so these are its word, kept. Where the vault
-  // weighs the place first, or refuses any credential with a scope, which every session has, or the route's own
-  // validation comes first, a session is answered as the token is: removing a binding and protecting an environment
-  // are 403 no_access (0.14.7: workload_cannot_issue), as a scoped credential manages no service
+  // (`ISSUING_ROUTES`, api/workload-routes.ts), before the route ran: so most of these are its word, kept. Two were
+  // outside that list and refused 403 `workload` there, which 0.16 says no more: a handle made and a freeze lifted.
+  // Where the vault weighs the place first, or refuses any credential with a scope, which every session has, or the
+  // route's own validation comes first, a session is answered as the token is: removing a binding and protecting an
+  // environment are 403 no_access (0.14.7: workload_cannot_issue), as a scoped credential manages no service
   // (vault/src/ops/services.ts) and a Viewer protects nothing.
   const cannot = ([name, refused]: [string, string]) => `${name}: session 403 forbidden workload_cannot_issue, token 403 ${refused}`;
   assert.deepEqual(differ, ([
