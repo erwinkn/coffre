@@ -157,6 +157,42 @@ test("the app's own checks of a fetched set's signature and audience refuse befo
   assert.deepEqual([refused(elsewhere), elsewhereCalls], [[401, 'unauthenticated', 'audience'], []]);
 });
 
+test("which keys the vault verifies under, the app reads as the vault does, by the binding's address: a `jwks` its row carries beside a fetched address does not spare the app's check", async () => {
+  // A row whose columns disagree, newer than `main`: were the app to read `jwks`, it would leave a forged token to a vault that trusts the app's check for an address it fetches.
+  await write(world, ...rows('bindings', binding(DEPLOY, { claims: canonicalClaims(MAIN), scope: VIEWER, jwks: KUBE_JWKS, createdAt: new Date() })));
+  const [forged, calls] = await cost(() => exchange(idToken({}, { key: pair().privateKey })));
+  assert.deepEqual([refused(forged), calls, fetched], [[401, 'unauthenticated', 'signature'], [], [KEYS]]);
+});
+
+test('a service named as the vault takes none is told no binding trusts it, and nothing is read or asked', async () => {
+  for (const service of [`${DEPLOY}\0`, 'token:a b', 'token:\ud800']) {
+    const [answer, calls, statements] = await cost(() => exchange(idToken(), service));
+    assert.deepEqual([refused(answer), calls, statements], [[401, 'unauthenticated', 'no_match'], [], 0], JSON.stringify(service));
+  }
+});
+
+test('a token that does not decode is refused before anything is read, and logged once a minute', async () => {
+  const logged = mock.method(console, 'error', () => {});
+  const refusals = () => logged.mock.calls.filter((call) => (call.arguments[0] as { event?: string; reason?: string } | undefined)?.event === 'workload_exchange_refused').map((call) => (call.arguments[0] as { reason: string }).reason);
+  for (let i = 0; i < 2; i += 1) {
+    const [answer, calls, statements] = await cost(() => exchange('not.a.token', `token:garbled-${process.pid}`));
+    assert.deepEqual([refused(answer), calls, statements], [[401, 'unauthenticated', 'malformed'], [], 0]);
+  }
+  logged.mock.restore();
+  assert.deepEqual(refusals(), ['malformed']);
+});
+
+test("an unknown key's alert quotes the service's name as the shell reads it", async () => {
+  const odd = 'token:ci;id$(x)';
+  await write(world, ...rows('principals', principal(odd)), ...rows('grants', grant(odd, 'developer', { project: market })));
+  await write(world, ...rows('bindings', binding(odd, { profile: 'custom', issuer: KUBE, jwksUri: `sha256:${createHash('sha256').update(KUBE_JWKS).digest('hex')}`, jwks: KUBE_JWKS, claims: canonicalClaims({ sub: 'system:serviceaccount:ci:runner' }), scope: VIEWER })));
+  const logged = mock.method(console, 'error', () => {});
+  const answer = await exchange(idToken({ iss: KUBE, sub: 'system:serviceaccount:ci:runner' }, { key: pair().privateKey, kid: 'rotated' }), odd);
+  logged.mock.restore();
+  assert.deepEqual(refused(answer), [401, 'unauthenticated', 'unknown_signer']);
+  assert.match(alerts[0]!.text, /then coffre trust 'ci;id\$\(x\)' --issuer https:\/\/kubernetes\.acme\.example --replace-keys/);
+});
+
 test("claims no binding trusts are named, never the values a binding expects", async () => {
   const [answer, calls] = await cost(() => exchange(idToken({ repository_id: '1' })));
   assert.deepEqual([refused(answer), calls], [[401, 'unauthenticated', 'no_match'], ['change']]);

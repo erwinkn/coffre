@@ -15,7 +15,7 @@ import {
   type WorkloadProfile,
   type WorkloadsConfig,
 } from '@coffre/core/identity';
-import { rowId, SERVICE_MEMBER, shownMember, slug } from '@coffre/core/schemas';
+import { isServiceMember, rowId, shownMember, slug } from '@coffre/core/schemas';
 import type { Answers, Called, Change } from '@coffre/core/vault';
 import { z } from 'zod';
 
@@ -65,7 +65,7 @@ export type BindingMade = { id: string; scope: Record<string, string> };
 
 /** The service a path names: a binding is a service account's, `token:<name>`, as the vault takes one. */
 function serviceIn(raw: string): string {
-  if (!SERVICE_MEMBER.test(raw) || raw.length > 256) throw badRequest('a trust binding is a service account\'s: name it token:<name>');
+  if (!isServiceMember(raw)) throw badRequest('a trust binding is a service account\'s: name it token:<name>');
   return raw;
 }
 
@@ -153,6 +153,7 @@ function view(row: BindingRow, paths: Readonly<Record<string, string>>, keys: Re
   const scope = parsed<unknown>(row.scope, null);
   // A policy the row keeps that does not read as one still makes a workload's binding: shown as `{}`, never as none.
   const policy = row.policy === null ? null : parsed<unknown>(row.policy, {});
+  // Any policy that is no object, JSON's `null` included, reads as `{}`: the column's own nullness says which kind the binding is.
   let carried: KeySummary[] | null = null;
   if (row.jwks !== null) {
     try {
@@ -163,7 +164,7 @@ function view(row: BindingRow, paths: Readonly<Record<string, string>>, keys: Re
   }
   const pathOf = (id: string) => paths[id] ?? id;
   let shownPolicy: PolicyView | null = null;
-  if (policy !== null) {
+  if (row.policy !== null) {
     const { reads, ...rest } = isRecord(policy) ? policy : {};
     shownPolicy = (reads === undefined ? rest : { ...rest, reads: readsShown(reads, pathOf, keys) }) as PolicyView;
   }

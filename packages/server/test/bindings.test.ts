@@ -242,7 +242,7 @@ test('removing a binding is one change; one not live is not found, and whoever d
 
 test('a service named as the vault takes none, or a binding by an id in capitals: the first a 400 with nothing asked, the second the same binding', async () => {
   const jwks = { keys: [] };
-  for (const member of ['token:a b', 'token::x', 'token:']) {
+  for (const member of ['token:a b', 'token::x', 'token:', 'token:ci\0', `token:${'c'.repeat(251)}`]) {
     const named = encodeURIComponent(member);
     for (const [method, path, body] of [['GET', `/members/${named}/bindings`], ['POST', `/members/${named}/bindings`, { profile: 'custom', issuer: KUBE, claims: POD }], ['POST', `/members/${named}/bindings/keys`, { issuer: KUBE, jwks }], ['DELETE', `/members/${named}/bindings/${crypto.randomUUID()}`]] as const) {
       const [answer, calls, statements] = await cost(() => call('root-cli', method, path, body));
@@ -261,12 +261,13 @@ test('a row kept in a shape the vault would not write is listed as best it reads
   const old = environment({ id: ids.market! }, 'old~deleted-2026-10-05');
   await write(world, ...rows('environments', old));
   const scope = JSON.stringify([{ projectId: ids.market, environmentId: old.id, role: 'viewer' }]);
-  const policies = ['{"reads":null}', `{"reads":{"${ids.dev}":null}}`, '{"reads":{"x":{"keys":5}}}', 'not json', '[1]'];
+  const policies = ['{"reads":null}', `{"reads":{"${ids.dev}":null}}`, '{"reads":{"x":{"keys":5}}}', 'not json', '[1]', 'null', '"text"'];
   await write(world, ...rows('bindings', ...policies.map((policy) => binding(ci, { profile: 'kubernetes', issuer: KUBE, jwksUri: KEYS, claims: JSON.stringify(POD), scope, policy }))));
   const [[status, body]] = await list('ada-cli');
   assert.equal(status, 200, JSON.stringify(body));
   const shown = (body as { bindings: View[] }).bindings;
   assert.deepEqual(new Set(shown.map((row) => JSON.stringify(row.policy))), new Set(['{"reads":{}}', '{}']));
+  assert.equal(shown.length, policies.length);
   assert.deepEqual(shown[0]!.scope, { [old.id]: 'viewer' });
 });
 

@@ -1,4 +1,5 @@
 import {
+  CARRIED,
   decodeWorkloadToken,
   differingClaims,
   generateToken,
@@ -12,7 +13,7 @@ import {
   type WorkloadProfile,
   type WorkloadsConfig,
 } from '@coffre/core/identity';
-import { SERVICE_MEMBER, shownMember } from '@coffre/core/schemas';
+import { isServiceMember, shownMember } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { ApiError, noteTampered, notFound, refusal, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
@@ -118,7 +119,10 @@ async function exchanged(request: Request, runtime: CoffreRuntime, workloads: Wo
   try {
     decoded = decodeWorkloadToken(body.token);
   } catch (error) {
-    if (error instanceof WorkloadTokenRefused) return refuse(error.reason, error.message);
+    if (error instanceof WorkloadTokenRefused) {
+      if (isServiceMember(body.service)) logRefusal(error.reason, body.service, sourceIp, {});
+      return refuse(error.reason, error.message);
+    }
     throw error;
   }
   const service = body.service;
@@ -127,7 +131,7 @@ async function exchanged(request: Request, runtime: CoffreRuntime, workloads: Wo
     logRefusal('no_match', service, sourceIp, {});
     return refuse('no_match', `no binding of ${shownMember(service)} trusts tokens from ${issuer}`);
   };
-  if (!SERVICE_MEMBER.test(service)) return unbound();
+  if (!isServiceMember(service)) return unbound();
   // The rows the vault's exchange reads, in its order: past `MAX_BINDINGS` it takes none, and nor does the app.
   const live = await issuerBindings(runtime.db, service, issuer, MAX_BINDINGS + 1);
   const taking = live.length > MAX_BINDINGS ? [] : live.filter((binding) => binding.bearer);
@@ -137,7 +141,8 @@ async function exchanged(request: Request, runtime: CoffreRuntime, workloads: Wo
   const under: VerifiedUnder = { issuer, jwksUri: newest.jwksUri };
   let claims: Record<string, unknown> | null = null;
   // Keys the binding carries are the vault's to verify under, on its own row: the app has no row it can trust.
-  if (newest.jwks === null) {
+  // Which those are, the address says, as the vault reads it (`CARRIED`): never the unchecked `jwks` column, which a row's writer could empty for the app alone.
+  if (!newest.jwksUri.startsWith(CARRIED)) {
     try {
       claims = await verifyWithKeys(runtime.transport, newest.jwksUri, body.token, { issuer, audience: runtime.publicUrl, now: new Date() });
     } catch (error) {
@@ -244,7 +249,7 @@ async function unknownKey(workloads: WorkloadsConfig, service: string, binding: 
     session: null,
     ip: sourceIp,
     text: `${name}'s sign-in${sourceIp === null ? '' : ` from ${sourceIp}`} was refused: its token ${kid === null ? 'names no key' : `names key "${kid}"`}, not one uploaded for ${issuer}. `
-      + `If that issuer rotated its keys, upload them again: ${fetch}, then coffre trust ${name} --issuer ${shellWord(issuer)} --replace-keys --jwks-file keys.json --apply. Said once an hour at most.`,
+      + `If that issuer rotated its keys, upload them again: ${fetch}, then coffre trust ${shellWord(name)} --issuer ${shellWord(issuer)} --replace-keys --jwks-file keys.json --apply. Said once an hour at most.`,
   };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const sent = (async () => workloads.alert!(alert))().catch((error: unknown) => console.error("the deployment's workload alert failed", logged(error)));
