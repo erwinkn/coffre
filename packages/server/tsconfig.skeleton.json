@@ -1,0 +1,8 @@
+{
+  // The app that loads on the 0.16 contract (docs/design/0.16.md, "The server"), typechecked alone: the entry points
+  // and what they import, and its tests. 0.14's files beside it do not build until their area is moved, and this
+  // file goes when `pnpm typecheck` passes for the whole package again.
+  "extends": "../../tsconfig.base.json",
+  "include": [],
+  "files": ["src/cloudflare.ts", "src/start.ts", "src/routes.ts", "test/app.test.ts", "test/app-workers.test.ts", "test/workers/app-worker.ts", "../vault/src/cloudflare-workers.d.ts"]
+}

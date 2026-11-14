@@ -1,7 +1,6 @@
 import { z } from 'zod';
 
 import { gaveUp, isUnavailable } from '@coffre/db/dialect';
-import { KeyRetired } from '@coffre/db/log';
 
 import { logged } from '../logged.ts';
 
@@ -14,7 +13,7 @@ import { logged } from '../logged.ts';
  *   403 forbidden          the caller lacks the permission
  *   403 registration_required  signed in, but not a member of this instance
  *   403 cross_origin       a change sent with a browser cookie, from another site
- *   403 vault_refused      the vault said no; `reason` is its code (`no_grant`, `removed`, ...)
+ *   403 vault_refused      the vault said no; `reason` is its word (`no_access`, ...)
  *   403 bulk_limit         the vault said no: too many secrets read in too short a time
  *   403 insufficient_scope a request through MCP whose connection lacks the scope the route needs
  *   404 not_found          no such project, environment, secret or member
@@ -24,8 +23,6 @@ import { logged } from '../logged.ts';
  *   501 not_implemented    a route this release declares and does not serve yet
  *   503 unavailable        something coffre needs is not answering: the vault, a platform, its database
  *   503 migrating          the database lacks this version's migrations: nothing is served until `coffre migrate`
- *   503 rotating           the app is moving to its new key: nothing is served until it has (key-rotation.ts)
- *   503 app_key            the log is under an app key this deployment does not hold, or has moved on from its own
  *   500 internal_error     a bug; the details are in the server log only
  *
  * The message is written for a person and is safe to show them.
@@ -46,8 +43,6 @@ export const ERROR_STATUS = {
   not_implemented: 501,
   unavailable: 503,
   migrating: 503,
-  rotating: 503,
-  app_key: 503,
   internal_error: 500,
 } as const;
 
@@ -78,27 +73,31 @@ export const forbidden = (message = 'you do not have permission to do that') =>
 export const notFound = (message = 'not found') => new ApiError('not_found', message);
 export const conflict = (message: string) => new ApiError('conflict', message);
 /**
- * A route of docs/design/workload-access.md that is declared, in every map
- * that lists the API, before the change that serves it: its message names
- * that change.
+ * The vault's refusals the API words itself, each with its code. Any other
+ * is 403 `vault_refused`, the vault's word as its `reason`: an area's
+ * operations add theirs here as they are served.
  */
-export const notBuilt = (what: string, change: string) =>
-  new ApiError('not_implemented', `${what} is not served yet: docs/design/workload-access.md, ${change}, brings it`);
+const REFUSALS: Record<string, [ErrorCode, string]> = {
+  unauthenticated: ['unauthenticated', 'that credential is unknown, expired or revoked'],
+  // One answer for a place that is not there and one the caller holds nothing in: the vault says neither which.
+  no_access: ['vault_refused', 'no such place, or nothing you may do this in'],
+  bulk_limit: ['bulk_limit', 'too many secrets read in too short a time; try again later'],
+  // Not a refusal of the caller's access: nobody is handed a sensitive value.
+  sensitive: ['forbidden', 'a sensitive value is handed back to no person: an app uses it through the credential proxy, and a service account reads it'],
+  not_owner_issued: ['forbidden', 'a service account reads a sensitive value only on a token or trust binding an Owner of its project issued'],
+  use_only: ['forbidden', "this workload uses that value only through coffre: its binding's reads do not list it where it is held"],
+  parent_unreadable: ['forbidden', 'that is inherited from an environment you cannot read'],
+  unknown_key: ['not_found', 'unknown secret'],
+  no_value: ['not_found', 'that secret holds no value'],
+  unreadable: ['conflict', 'that is a reference whose source cannot be read'],
+  archived: ['conflict', 'that secret is archived: bring it back before writing it'],
+  broken_chain: ['conflict', 'the environment inherits from one that is gone'],
+};
 
-/** The vault's refusal, as the API answers it. */
-export function vaultRefused(refusal: { code: string; message: string }): ApiError {
-  if (refusal.code === 'bulk_limit') {
-    return new ApiError('bulk_limit', 'too many secrets read in too short a time; try again later', refusal.code);
-  }
-  // A sensitive value, which no person is handed: not a refusal of their access, which the message says how to use.
-  if (refusal.code === 'sensitive') return new ApiError('forbidden', refusal.message, refusal.code);
-  // A sensitive value its credential's issuer could not hand a service account (R32): the message says who can.
-  if (refusal.code === 'not_owner_issued') return new ApiError('forbidden', refusal.message, refusal.code);
-  // Not the caller's doing: the instance is misconfigured, and stays unable to open any value until restarted.
-  if (refusal.code === 'wrong_kek') return new ApiError('unavailable', refusal.message, refusal.code);
-  // Valid, and refused only by who else owns the instance now: the message says what to do first.
-  if (refusal.code === 'last_owner') return new ApiError('conflict', refusal.message, refusal.code);
-  return new ApiError('vault_refused', `the vault refused: ${refusal.message}`, refusal.code);
+/** The vault's refusal, as the API answers it: `what` names what was asked for, `market/prod/KEY`. */
+export function refusal(refused: string, what?: string): ApiError {
+  const [code, message] = REFUSALS[refused] ?? ['vault_refused', `the vault refused: ${refused}`];
+  return new ApiError(code, what === undefined ? message : `${what}: ${message}`, refused);
 }
 
 /**
@@ -122,10 +121,6 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
     const body: ErrorBody = { error: error.code, message: error.message };
     if (error.reason !== undefined) body.reason = error.reason;
     return { status: error.status, body };
-  }
-  // An instance still under a key the log moved on from, as for the seconds a deploy takes: refused, not a bug.
-  if (error instanceof KeyRetired) {
-    return { status: 503, body: { error: 'app_key', message: 'this instance runs under an app key the audit log has moved on from: a newer deployment replaces it' } };
   }
   if (error instanceof z.ZodError) {
     const issue = error.issues[0];

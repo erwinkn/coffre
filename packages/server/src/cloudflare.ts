@@ -23,22 +23,12 @@
  *   export default {
  *     fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
  *       handler.fetch(request, { context: coffre.request(env, ctx) }),
- *     scheduled: coffre.scheduled,
  *   };
  *
  * coffre's server routes (`@coffre/server/routes`) and pages (`@coffre/ui`)
  * go in the app's route tree, and its middleware (`@coffre/server/start`) in
  * its src/start.ts; see `coffre init --workers`.
  */
-export {
-  createCoffre,
-  postgres,
-  type CoffreWorker,
-  type GatesNamespace,
-  type PostgresDatabase,
-  type SocketsNamespace,
-  type WaitUntil,
-  type WorkersConfig,
-} from './cloudflare-handler.ts';
+export { createCoffre, postgres, type CoffreWorker, type PostgresDatabase, type WaitUntil, type WorkersConfig } from './cloudflare-handler.ts';
 export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './scope.ts';
 export * from './index.ts';
