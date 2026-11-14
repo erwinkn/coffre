@@ -8,6 +8,7 @@ import { after } from 'node:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { github, signin, type RateLimiter } from '@coffre/core/identity';
 
+import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { openApp, PUBLIC_URL, SESSION } from './app-fixture.ts';
 
@@ -15,8 +16,12 @@ export const RESOURCE = `${PUBLIC_URL}/mcp`;
 export const CLAUDE_CODE = 'https://claude.ai/oauth/claude-code-client-metadata';
 const REDIRECT = 'http://localhost:51234/callback';
 
+/** A cluster whose workloads a service account may trust: its discovery document, which a binding's making asks. */
+export const KUBE = 'https://kubernetes.acme.example';
+
 const transport: WorkloadTransport = {
   json: async (url) => {
+    if (url.href === `${KUBE}/.well-known/openid-configuration`) return { issuer: KUBE, jwks_uri: `${KUBE}/openid/v1/jwks` };
     if (url.href !== CLAUDE_CODE) throw FetchRefused.answered(url, 404);
     return { client_id: CLAUDE_CODE, client_name: 'Claude Code', redirect_uris: ['http://localhost/callback'], token_endpoint_auth_method: 'none' };
   },
@@ -34,9 +39,12 @@ const limiter = (which: 'other' | 'connection'): RateLimiter => ({
 export const app = await openApp({
   auth: signin({
     providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })],
+    // Workloads trusted, for the tools that bind them.
+    workloads: { limits: processLimits() },
     mcp: { limits: { perSource: limiter('other'), perConnection: limiter('connection'), total: limiter('other') } },
   }),
   transport,
+  workloads: {},
 });
 after(() => app.close());
 

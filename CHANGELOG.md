@@ -6,6 +6,12 @@
   Node comes back in 0.16.1: `@coffre/server` exports no `./node`, so a
   Node deployment that updates fails at its import of
   `@coffre/server/node`. Stay on 0.14 until 0.16.1.
+- **Known gaps of 0.16 so far.** MCP's `admit_member` adds a service
+  account only for whoever runs the instance: a person the instance's
+  service-account setting lets add one is refused until 0.16 serves that
+  setting again (`GET /api/me` says `setsUpServices: false`). A token's or a
+  binding's preview (`?dryRun=1`) answers what it would reach, but not the
+  places whose sensitive values it will not read (`withheld`).
 - **Postgres only.** coffre no longer runs on SQLite. `@coffre/db` drops its
   SQLite schema, migrations and driver (`@libsql/client`), and a `file:`
   URL is refused wherever a database URL is taken (`createCoffre`,

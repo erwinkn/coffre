@@ -20,7 +20,7 @@ import { COFFRE_VERSION } from '../version.ts';
 import { resourceMetadataUrl } from './http.ts';
 import { mcpOf } from './oauth.ts';
 import { findApproval } from '../db/queries/approvals.ts';
-import { approvalUrl, approvalWait, ask, MAX_PENDING, named, OUTCOME_SECONDS, outcomeOf, settle, statusOf } from './approvals.ts';
+import { approvalUrl, approvalWait, ask, askable, MAX_PENDING, named, OUTCOME_SECONDS, outcomeOf, settle, statusOf } from './approvals.ts';
 import { INSTRUCTIONS, listed, TOOL_BY_NAME, TOOLS, type Connection, type Tool, type ToolContext, usable } from './tools.ts';
 
 /** The revision coffre speaks, stateless. */
@@ -402,6 +402,7 @@ async function change(
     }
     row = found;
   } else {
+    askable(args);
     await tool.change!.check?.({ ctx, connection }, args as never);
     const asked = await ask(ctx, connection.id, tool, args);
     if ('full' in asked) return answer(toolError(`${MAX_PENDING} changes are waiting for the person already: ask them to decide those on coffre first.`));

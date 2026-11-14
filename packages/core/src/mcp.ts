@@ -41,6 +41,8 @@ export const MAX_CLIENTS = 10_000;
 export const APPROVAL_SECONDS = 5 * 60;
 /** Approvals a connection holds waiting at once: no flood of prompts, and no more than this many entries an expiry. */
 export const MAX_PENDING = 5;
+/** The longest a call's arguments are, as canonical JSON, that an approval keeps: a few names, a note, a scope of some places. */
+export const MAX_ASK_ARGUMENTS = 4096;
 /** The tools whose Approve changes nothing but shows the person a value (`mcp.decide`): every other is approved by its change. */
 export const MCP_SHOWS: readonly string[] = ['show_secret_value'];
 

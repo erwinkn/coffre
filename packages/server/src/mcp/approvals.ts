@@ -9,7 +9,7 @@
 // returns (D36), and it hears how it ended by the approval's id, a read.
 import { createHash } from 'node:crypto';
 
-import { APPROVAL_SECONDS, MAX_PENDING } from '@coffre/core/mcp';
+import { APPROVAL_SECONDS, MAX_ASK_ARGUMENTS, MAX_PENDING } from '@coffre/core/mcp';
 
 import { changed } from '../api/change.ts';
 import type { ApiContext } from '../api/context.ts';
@@ -113,13 +113,25 @@ export const approvalUrl = (publicUrl: string, id: string) => `${publicUrl}/appr
 const UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 
 /**
+ * A call's arguments as its approval keeps them, canonical JSON, or the 400
+ * that says they are too long for one, which the vault would take as a
+ * fault: checked before anything is read or asked.
+ */
+export function askable(args: Record<string, unknown>): string {
+  const text = canonical(args);
+  if (text.length > MAX_ASK_ARGUMENTS) throw badRequest(`this call's arguments are too long to ask for an approval: ${MAX_ASK_ARGUMENTS} characters as JSON at most, so name fewer places or claims at once`);
+  return text;
+}
+
+/**
  * The approval for a call that names none, the vault's (`mcp.ask`): a new
  * one, or the one the same call waits on (`joined`); none (`full`) past
  * `MAX_PENDING` waiting.
  */
 export async function ask(ctx: ApiContext, connection: string, tool: Tool, args: Record<string, unknown>): Promise<{ id: string; expiresAt: Date; joined: boolean } | { full: true }> {
+  const asked = askable(args);
   for (let attempt = 0; ; attempt += 1) {
-    const answer = await ctx.vault.change<'mcp.ask'>({ ...ctx.shown, op: 'mcp.ask', tool: tool.name, arguments: canonical(args), place: tool.change!.place(args as never) });
+    const answer = await ctx.vault.change<'mcp.ask'>({ ...ctx.shown, op: 'mcp.ask', tool: tool.name, arguments: asked, place: tool.change!.place(args as never) });
     if (!('refused' in answer)) return { id: answer.answer.approval, expiresAt: new Date(answer.answer.expiresAt), joined: false };
     if (answer.refused === 'full') return { full: true };
     if (answer.refused !== 'pending') throw refusal(answer.refused, tool.name);

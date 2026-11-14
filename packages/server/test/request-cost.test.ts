@@ -460,6 +460,8 @@ const requests: Record<string, Entry> = {
     request: () => take<{ id: string }>(api('bo-cli', 'POST', `/members/${ci}/tokens`, { label: null, expiresInDays: 1 }), (body) => (serviceToken = body.id)),
     calls: ['change'], statements: 0,
   },
+  // What a token would reach, weighed and not made: one `weigh`, no statement, nothing written, nothing sealed.
+  'POST /members/:member/tokens?dryRun=1': { request: () => api('bo-cli', 'POST', `/members/${ci}/tokens?dryRun=1`, { label: null, expiresInDays: 1, scope: { 'market/dev': 'viewer' } }), calls: ['weigh'], statements: 0 },
   'DELETE /members/:member/tokens/:id': { request: () => api('bo-cli', 'DELETE', `/members/${ci}/tokens/${serviceToken}`), calls: ['change'], statements: 0 },
   'DELETE /sessions/:id': { request: () => api('bo-cli', 'DELETE', `/sessions/${personal}`), calls: ['change'], statements: 0 },
   'POST /handles': { request: () => take<{ id: string; token: string }>(api('ada-cli', 'POST', '/handles', { label: 'run', paths: ['market/dev'] }), (body) => ([handle, handleToken] = [body.id, body.token])), calls: ['change'], statements: 0 },
@@ -502,6 +504,12 @@ const requests: Record<string, Entry> = {
   'POST /members/:member/bindings': {
     request: () => take<{ binding: { id: string } }>(api('bo-cli', 'POST', `/members/${ci}/bindings`, { profile: 'custom', issuer: KUBE, claims: POD, scope: { 'market/dev': 'viewer' } }), (body) => (bound = body.binding.id)),
     calls: ['caller', 'change'], statements: 1,
+  },
+  // A binding weighed and not made: one `weigh`, which says whether the caller may bind before its issuer is asked
+  // where its keys are, so no `caller` and no statement first.
+  'POST /members/:member/bindings?dryRun=1': {
+    request: () => api('bo-cli', 'POST', `/members/${ci}/bindings?dryRun=1`, { profile: 'custom', issuer: KUBE, claims: POD, scope: { 'market/dev': 'viewer' } }),
+    calls: ['weigh'], statements: 0,
   },
   'GET /members/:member/bindings': { request: () => api('bo-cli', 'GET', `/members/${ci}/bindings`), calls: ['caller'], statements: 1 },
   'GET /members/:member/bindings, by the service itself': { request: () => api('ci-token', 'GET', `/members/${ci}/bindings`), calls: ['caller'], statements: 1 },

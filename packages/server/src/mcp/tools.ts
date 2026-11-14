@@ -4,9 +4,10 @@
 // could with the CLI, and the vault holds each use to the connection's own
 // rules: a value only with `reveal`, no change at all. Read, here: what is
 // there, and values only to a connection with Reveal values; the changes,
-// which wait for the person's approval, are in changes.ts.
+// which wait for the person's approval, are in changes.ts (a secret's),
+// members.ts (places and access) and services.ts (a service's ways in).
 import { apiMember } from '@coffre/client';
-import { PERMISSIONS, runsInstance, type Permission } from '@coffre/core/access';
+import { makesProjects, PERMISSIONS, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
 import type { Called, Presented } from '@coffre/core/vault';
 import { z } from 'zod';
@@ -15,7 +16,9 @@ import { canAnywhere } from '../api/caller.ts';
 import type { ApiContext } from '../api/context.ts';
 import { badRequest } from '../api/errors.ts';
 import { runRoute } from '../api/router.ts';
-import { CHANGE_TOOLS, type Change } from './changes.ts';
+import { SECRET_TOOLS, type Change } from './changes.ts';
+import { MEMBER_TOOLS } from './members.ts';
+import { SERVICE_TOOLS } from './services.ts';
 
 /** What a tool answers: its structured result, and the text a model reads. */
 export type ToolResult = { structured: Record<string, unknown>; text?: string };
@@ -165,6 +168,29 @@ const READ_TOOLS: readonly Tool[] = [
       return { structured: { member: report, tokens, bindings } };
     },
   }),
+  tool({
+    name: 'read_audit_log',
+    needs: 'audit.read',
+    title: 'Read the audit log',
+    description: 'The audit log, newest first: what was done, by whom, where, allowed or refused. 50 entries a call unless asked; page back with `before`, the oldest seq seen.',
+    scope: 'read',
+    readOnly: true,
+    idempotent: true,
+    destructive: false,
+    input: z
+      .object({
+        path: z.string().min(1).max(300).optional().describe('Only entries about a project, environment or secret'),
+        actor: member.optional().describe('Only entries by this member'),
+        decision: z.enum(['allow', 'deny']).optional(),
+        before: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional().describe('Only entries older than this seq'),
+        limit: z.number().int().min(1).max(200).optional(),
+      })
+      .strict(),
+    output: object({ entries: list }),
+    run: async ({ ctx }, { actor, limit, ...rest }) => ({
+      structured: await runRoute('GET /audit', {}, { ...rest, ...(actor === undefined ? {} : { actor: apiMember(actor) }), limit: limit ?? 50 }, ctx),
+    }),
+  }),
 ];
 
 /** Values to the model: only with Reveal values, which the person ticked under its warning, and which the vault holds the use to. */
@@ -190,19 +216,20 @@ const REVEAL_VALUES = tool({
   },
 });
 
-export const TOOLS: readonly Tool[] = [...READ_TOOLS, REVEAL_VALUES, ...CHANGE_TOOLS];
+export const TOOLS: readonly Tool[] = [...READ_TOOLS, REVEAL_VALUES, ...SECRET_TOOLS, ...MEMBER_TOOLS, ...SERVICE_TOOLS];
 
 export const TOOL_BY_NAME = new Map(TOOLS.map((entry) => [entry.name, entry]));
 
 /**
- * Who could ever use a tool, by their roles: every member (`anyone`), those
+ * Who could ever use a tool, by their roles: every member (`anyone`), an
+ * Admin or Owner whose scope takes in new projects (`new-project`), those
  * who may set up a service
  * account (`services`: who runs the instance, or a person who holds
  * anything anywhere, as the instance's setting allows, which the API
  * applies), or whoever holds a permission somewhere, by a grant or their
  * instance role.
  */
-export type Need = 'anyone' | 'services' | Permission;
+export type Need = 'anyone' | 'new-project' | 'services' | Permission;
 
 /**
  * Whether the person's roles, as they are now, let them use `tool`
@@ -214,6 +241,7 @@ export function usable(called: Called, tool: Tool): boolean {
   const { needs } = tool;
   const person = called.principal.startsWith('user:');
   if (needs === 'anyone') return true;
+  if (needs === 'new-project') return makesProjects(called.holds);
   if (needs === 'services') return runsInstance(called.holds) || (person && PERMISSIONS.some((permission) => canAnywhere(called, permission)));
   // Reading takes read, or, of a person's own personal config, use of the environment it configures (R8).
   return canAnywhere(called, needs) || (needs === 'secret.read' && person && canAnywhere(called, 'secret.use'));

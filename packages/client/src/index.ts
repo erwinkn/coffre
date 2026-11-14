@@ -10,7 +10,7 @@
  * its own handling of Cloudflare Access redirects. A request that never
  * reaches the instance throws `Unreachable`, which says why.
  */
-import type { Api, AuthInfo, DeletionResult, DryRunOutcome, DryRunResult, RoleImpact, SetResult } from './api.ts';
+import type { Api, AuthInfo, BindingPlan, DeletionResult, DryRunOutcome, DryRunResult, RoleImpact, SetResult, TokenPlan } from './api.ts';
 import { Unreachable } from './reach.ts';
 
 export type {
@@ -20,6 +20,7 @@ export type {
   AuditEntryView,
   AuthInfo,
   AuthorizationView,
+  BindingPlan,
   BindingView,
   ConnectedApp,
   Decision,
@@ -49,6 +50,7 @@ export type {
   SecretVersion,
   SessionRow,
   SetResult,
+  TokenPlan,
   TokenRow,
   WorkloadIds,
 } from './api.ts';
@@ -297,10 +299,10 @@ export function createClient(options: ClientOptions) {
      */
     tokens: {
       list: (member: string) => call('GET /members/:member/tokens', { member }),
-      /** What the token would reach, as the server would issue it now; issues nothing. Not served in 0.16 yet: a 501. */
+      /** What the token would reach, as the server would issue it now; issues nothing. */
       preview: (member: string, input: RouteInput<'POST /members/:member/tokens'>) => {
         const [method, route] = address('POST /members/:member/tokens', { member });
-        return send(method, `${route}?dryRun=1`, input) as Promise<Exclude<RouteOutput<'POST /members/:member/tokens'>, { token: string }>>;
+        return send(method, `${route}?dryRun=1`, input) as Promise<TokenPlan>;
       },
       /** The value is in the answer, and only there. */
       issue: (member: string, input: RouteInput<'POST /members/:member/tokens'>) =>
@@ -322,13 +324,13 @@ export function createClient(options: ClientOptions) {
     /** Trust bindings: which CI runs may sign in as a service, by their platform's ID token. */
     bindings: {
       list: (member: string) => call('GET /members/:member/bindings', { member }),
-      /** The binding as it would be saved, the keys its issuer names, and what it replaces; writes nothing. Not served in 0.16 yet: a 501. */
+      /** The binding as it would be saved, the keys its issuer names, and what it replaces; writes nothing. */
       preview: (member: string, input: RouteInput<'POST /members/:member/bindings'>) => {
         const [method, route] = address('POST /members/:member/bindings', { member });
-        return send(method, `${route}?dryRun=1`, input) as Promise<Exclude<RouteOutput<'POST /members/:member/bindings'>, { binding: unknown }>>;
+        return send(method, `${route}?dryRun=1`, input) as Promise<BindingPlan>;
       },
       create: (member: string, input: RouteInput<'POST /members/:member/bindings'>) =>
-        call('POST /members/:member/bindings', { member }, input),
+        call('POST /members/:member/bindings', { member }, input) as Promise<Extract<RouteOutput<'POST /members/:member/bindings'>, { binding: unknown }>>,
       /** The service's bindings on an issuer that new keys would replace, and the keys as checked; writes nothing. Not served in 0.16 yet: a 501. */
       previewKeys: (member: string, input: RouteInput<'POST /members/:member/bindings/keys'>) => {
         const [method, route] = address('POST /members/:member/bindings/keys', { member });

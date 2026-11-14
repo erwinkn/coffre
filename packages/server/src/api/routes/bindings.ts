@@ -1,6 +1,7 @@
 import { isCredentialScope, isScope, managesService, MAX_SCOPE_PLACES, ROLE_ID, runsInstance, type Permission, type Place, type RoleDefinition } from '@coffre/core/access';
 import {
   BindingInvalid,
+  CARRIED,
   checkBinding,
   checkPolicy,
   isBearerProfile,
@@ -11,7 +12,9 @@ import {
   uploadedKeys,
   type BindingClaims,
   type BindingPolicy,
+  type CheckedBinding,
   type KeySummary,
+  type UploadedKeys,
   type WorkloadProfile,
   type WorkloadsConfig,
 } from '@coffre/core/identity';
@@ -21,7 +24,7 @@ import { z } from 'zod';
 
 import { serviceBindings, type BindingRow, type ServiceBindings } from '../../db/queries/bindings.ts';
 import { discoverKeys, DiscoveryFailed } from '../../workloads/discovery.ts';
-import { changed } from '../change.ts';
+import { changed, weighed } from '../change.ts';
 import type { ApiContext } from '../context.ts';
 import { ApiError, badRequest, notFound, refusal } from '../errors.ts';
 import { route } from '../route.ts';
@@ -60,6 +63,24 @@ export type BindingView = {
   lastUsedAt: string | null;
 };
 
+/**
+ * What making a binding would do (`?dryRun=1`), in 0.14.7's shape: the
+ * binding as checked, where its keys are or the keys it carries, what it
+ * would reach, by path and role, and the bindings it replaces, each asked.
+ */
+export type BindingPlan = {
+  profile: WorkloadProfile;
+  issuer: string;
+  jwksUri: string;
+  keys: KeySummary[] | null;
+  claims: BindingClaims;
+  scope: Record<string, string>;
+  policy: PolicyView | null;
+  /** 0.14.7's places whose sensitive values it would not read (R32): never answered yet, as the weighing does not say them. */
+  withheld?: string[];
+  replaces: { id: string; why: 'asked' }[];
+};
+
 /** A binding made or re-keyed: its id, and what it reaches, by path and role, as the vault sealed it. */
 export type BindingMade = { id: string; scope: Record<string, string> };
 
@@ -79,10 +100,10 @@ export function workloadsOf(ctx: ApiContext): WorkloadsConfig {
 /** What `invalid` means of a binding: the vault's words for what its checks refuse, which the app's own checks word first where they can. */
 const INVALID = 'a role the instance does not have, a read outside its scope or of a key its environment does not hold, a policy its reads break, keys that are no JWKS, or bindings replaced that reach nothing the service still holds';
 
-/** `token.bind` or `token.unbind`, asked with what the request showed: its answer, or its refusal in the API's words. */
-async function bindingChange<O extends 'token.bind' | 'token.unbind'>(ctx: ApiContext, change: Extract<Change, { op: O }>, member: string): Promise<Answers[O]> {
+/** `token.bind` or `token.unbind`, asked with what the request showed, or only weighed: its answer, or its refusal in the API's words. */
+async function bindingChange<O extends 'token.bind' | 'token.unbind'>(ctx: ApiContext, change: Extract<Change, { op: O }>, member: string, ask: 'change' | 'weigh' = 'change'): Promise<Answers[O]> {
   try {
-    return await changed<O>(ctx, change, shownMember(member));
+    return ask === 'weigh' ? await weighed<O>(ctx, change, shownMember(member)) : await changed<O>(ctx, change, shownMember(member));
   } catch (error) {
     if (error instanceof ApiError && error.reason === 'invalid') throw new ApiError('conflict', `${shownMember(member)}: ${INVALID}`, 'invalid');
     throw error;
@@ -215,9 +236,9 @@ const readsByPath = z.record(environmentPath, z.union([z.literal('*'), z.array(k
 const label = kept(120).refine((value) => value !== '' && value === value.trim() && !/\p{Cc}/u.test(value), 'a label is 1 to 120 characters, with no control character and no space around it');
 
 /** Uploaded keys, checked as the vault checks them, or the 400 that says what is wrong with them. */
-async function checkedKeys(value: unknown): Promise<void> {
+async function checkedKeys(value: unknown): Promise<UploadedKeys> {
   try {
-    await uploadedKeys(value);
+    return await uploadedKeys(value);
   } catch (error) {
     if (error instanceof KeysInvalid) throw badRequest(error.message);
     throw error;
@@ -233,6 +254,16 @@ async function checkedKeys(value: unknown): Promise<void> {
 async function mayBind(ctx: ApiContext, member: string): Promise<void> {
   const who = await ctx.caller();
   if (!manages(who, await serviceBindings(ctx.db, member, new Date()))) throw refusal('no_access', shownMember(member));
+}
+
+/** Where an issuer's discovery says its keys are, or the 400 that says why coffre cannot use it. */
+async function discovered(ctx: ApiContext, issuer: string, workloads: WorkloadsConfig): Promise<string> {
+  try {
+    return await discoverKeys(ctx.transport, issuer, { allowLoopback: workloads.allowLoopback });
+  } catch (error) {
+    if (error instanceof DiscoveryFailed) throw badRequest(`coffre could not use ${issuer}: ${error.message}`);
+    throw error;
+  }
 }
 
 const NO_PREVIEW = new ApiError('not_implemented', "a binding's preview (?dryRun=1) is not served yet: the binding is made, and what it reaches is its answer");
@@ -262,6 +293,9 @@ export const bindingRoutes = {
    * answer is the binding's id and what it reaches, and the bindings it
    * replaced. Asking the issuer costs one `caller` and one statement more,
    * first, which keep it to whoever manages the service (`mayBind`).
+   * `?dryRun=1` answers what it would do (`BindingPlan`) and makes nothing:
+   * one weigh, and no statement, since the weighing itself says whether the
+   * caller may bind before the issuer is asked.
    */
   ...route('POST /members/:member/bindings', {
     input: z.object({
@@ -275,15 +309,13 @@ export const bindingRoutes = {
       policy: z.record(z.string(), z.unknown()).refine((policy) => policy.reads === undefined || readsByPath.safeParse(policy.reads).success, 'a policy\'s reads name environments by path, and each its keys by name, or "*"').optional(),
     }).strict(),
     query: dryRun,
-    run: async (ctx, { params, input, query }): Promise<{ binding: BindingMade; replaced: string[] }> => {
+    run: async (ctx, { params, input, query }): Promise<{ binding: BindingMade; replaced: string[] } | BindingPlan> => {
       const workloads = workloadsOf(ctx);
       const member = serviceIn(params.member);
-      if (query.dryRun !== undefined) throw NO_PREVIEW;
       const uploaded = input.jwks !== undefined;
-      let issuer: string;
+      let checked: CheckedBinding;
       try {
-        const checked = checkBinding({ profile: input.profile, issuer: input.issuer ?? null, claims: input.claims }, { allowLoopback: workloads.allowLoopback, uploaded });
-        issuer = checked.issuer;
+        checked = checkBinding({ profile: input.profile, issuer: input.issuer ?? null, claims: input.claims }, { allowLoopback: workloads.allowLoopback, uploaded });
         // A workload's binding: every one but a bearer binding with no policy, which a CI run's exchange takes; none under `useOnly`.
         if (!isBearerProfile(checked.profile) || input.policy !== undefined || workloads.useOnly) {
           const { reads, ...rest } = input.policy ?? {};
@@ -295,22 +327,36 @@ export const bindingRoutes = {
         if (error instanceof BindingInvalid) throw badRequest(error.message);
         throw error;
       }
-      if (uploaded) await checkedKeys(input.jwks);
-      let keys: { uri: string } | { jwks: unknown };
-      try {
-        // Keys uploaded with it; a URN's, its issuer; else where its issuer's discovery says they are, asked only for whoever may bind.
-        if (uploaded) keys = { jwks: input.jwks };
-        else if (Object.hasOwn(PROFILE_URNS, input.profile)) keys = { uri: issuer };
-        else {
-          await mayBind(ctx, member);
-          keys = { uri: await discoverKeys(ctx.transport, issuer, { allowLoopback: workloads.allowLoopback }) };
-        }
-      } catch (error) {
-        if (error instanceof DiscoveryFailed) throw badRequest(`coffre could not use ${issuer}: ${error.message}`);
-        throw error;
+      const { issuer } = checked;
+      const carried = uploaded ? await checkedKeys(input.jwks) : null;
+      // A URN's keys are its issuer, which keeps one source of keys.
+      const urn = Object.hasOwn(PROFILE_URNS, input.profile);
+      const binding = (keys: { uri: string } | { jwks: unknown }) => ({ profile: input.profile, issuer, claims: input.claims, keys, policy: input.policy ?? null, scope: input.scope ?? null, label: input.label ?? null, replaces: input.replaces ?? [] });
+      if (query.dryRun !== undefined) {
+        // Weighed with its issuer standing in for where its keys are, which nothing it reaches depends on; the issuer
+        // is asked only once the weighing said the caller may bind, so no one else makes coffre fetch a host they name.
+        const plan = await bindingChange<'token.bind'>(ctx, { op: 'token.bind', member, binding: binding(uploaded ? { jwks: input.jwks } : { uri: issuer }) }, member, 'weigh');
+        const jwksUri = carried !== null ? `${CARRIED}${carried.digest}` : urn ? issuer : await discovered(ctx, issuer, workloads);
+        return {
+          profile: checked.profile,
+          issuer,
+          jwksUri,
+          keys: carried?.keys ?? null,
+          claims: checked.claims,
+          scope: plan.bindings[0]!.scope,
+          policy: (input.policy as PolicyView | undefined) ?? null,
+          replaces: plan.replaced.map((id) => ({ id, why: 'asked' as const })),
+        };
       }
-      const binding = { profile: input.profile, issuer, claims: input.claims, keys, policy: input.policy ?? null, scope: input.scope ?? null, label: input.label ?? null, replaces: input.replaces ?? [] };
-      const bound = await bindingChange<'token.bind'>(ctx, { op: 'token.bind', member, binding }, member);
+      let keys: { uri: string } | { jwks: unknown };
+      // Keys uploaded with it; a URN's, its issuer; else where its issuer's discovery says they are, asked only for whoever may bind.
+      if (uploaded) keys = { jwks: input.jwks };
+      else if (urn) keys = { uri: issuer };
+      else {
+        await mayBind(ctx, member);
+        keys = { uri: await discovered(ctx, issuer, workloads) };
+      }
+      const bound = await bindingChange<'token.bind'>(ctx, { op: 'token.bind', member, binding: binding(keys) }, member);
       return { binding: bound.bindings[0]!, replaced: bound.replaced };
     },
   }),

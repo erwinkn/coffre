@@ -12,7 +12,9 @@ import { after, beforeEach, test } from 'node:test';
 
 import { PERMISSIONS } from '@coffre/core/access';
 import { github, signin } from '@coffre/core/identity';
+import { rowsOf } from '@coffre/db/dialect';
 import { binding, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, user, value, write } from '@coffre/vault/testing';
+import { sql } from 'drizzle-orm';
 
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
@@ -93,6 +95,8 @@ async function cost<T>(run: () => Promise<T>): Promise<[T, string[], number]> {
 const refused = ([status, body]: [number, Body]) => [status, body.error, body.reason];
 const bind = (label: string, body: Record<string, unknown>, query = '') => cost(() => call(label, 'POST', `/members/${ci}/bindings${query}`, { profile: 'custom', issuer: KUBE, claims: POD, ...body }));
 const list = (label: string, member = ci) => cost(() => call(label, 'GET', `/members/${member}/bindings`));
+/** The vault's entries not yet signed into the log, past the seed's own. */
+const pending = async () => (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`)).map((row) => JSON.parse(row.body) as { action: string; detail: Record<string, unknown> }).filter((entry) => entry.action !== 'test.write');
 
 type View = { id: string; profile: string; issuer: string; jwksUri: string; keys: unknown; claims: unknown; scope: unknown; policy: unknown; label: string | null; createdAt: string; createdBy: string; lastUsedAt: string | null };
 
@@ -187,9 +191,20 @@ test('a binding is checked before anything is asked: its profile\'s rules, its k
   assert.deepEqual(refused(await call('ada-cli', 'POST', `/members/${ada}/bindings`, { profile: 'custom', issuer: KUBE, claims: POD })), [400, 'bad_request', undefined]);
 });
 
-test('a preview is not served yet: 501, and nothing asked', async () => {
-  const [answer, calls, statements] = await bind('ada-cli', {}, '?dryRun=1');
-  assert.deepEqual([refused(answer), calls, statements], [[501, 'not_implemented', undefined], [], 0]);
+test("a preview (`?dryRun=1`) is the binding weighed and not made: one weigh, its issuer asked only once that says the caller may bind, nothing written; a refusal is logged as the change's", async () => {
+  const [[status, body], calls, statements] = await bind('ada-cli', { label: 'pods', scope: { 'market/dev': 'developer' } }, '?dryRun=1');
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.deepEqual(body, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, keys: null, claims: POD, scope: { 'market/dev': 'developer' }, policy: null, replaces: [] });
+  assert.deepEqual([calls, statements, fetched], [['weigh'], 0, [`${KUBE}/.well-known/openid-configuration`]]);
+  assert.deepEqual(((await list('ada-cli'))[0][1] as { bindings: unknown[] }).bindings, [], 'nothing made');
+  assert.deepEqual(await pending(), [], 'nothing logged');
+
+  // Whoever does not manage the service makes coffre ask no issuer anything; the log says they asked, as of a change.
+  fetched.length = 0;
+  const [answer, refusedCalls, refusedStatements] = await bind('bo-cli', {}, '?dryRun=1');
+  assert.deepEqual([refused(answer), refusedCalls, refusedStatements, fetched], [[403, 'vault_refused', 'no_access'], ['weigh'], 0, []]);
+  assert.deepEqual((await pending()).map((entry) => [entry.action, entry.detail.refused]), [['token.bind', 'no_access']]);
+  // The keys' preview is not served yet.
   const [keysAnswer] = await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: KUBE, jwks: { keys: [] } }));
   assert.equal(keysAnswer[0], 501);
 });
