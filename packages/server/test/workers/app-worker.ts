@@ -8,12 +8,13 @@
 // proxy has one credential, `echo`, whose upstream is a fake inside the
 // Worker (its `egress`): it answers what it was sent, the key reversed so
 // that the proxy's redaction leaves it, so a request through the proxy goes
-// all the way but for the network.
+// all the way but for the network; and one tunnel, `db`, to the suite's
+// database, whose WebSockets go to their Durable Object, `SOCKETS`.
 import { github, signin } from '@coffre/core/identity';
 import { postgres as vaultDatabase, vault } from '@coffre/vault/cloudflare';
 
-import { createCoffre, postgres, type GatesNamespace, type Vault as VaultBinding, type WaitUntil } from '../../src/cloudflare.ts';
-import { credentialProxy, header } from '../../src/plugins/credential-proxy.ts';
+import { createCoffre, postgres, type GatesNamespace, type SocketsNamespace, type Vault as VaultBinding, type WaitUntil } from '../../src/cloudflare.ts';
+import { credentialProxy, header, postgres as tunnel } from '../../src/plugins/credential-proxy.ts';
 import { processLimits } from '../../src/workloads/limits.ts';
 
 export { CoffreSigner } from '@coffre/vault/cloudflare';
@@ -25,6 +26,7 @@ type Env = {
   VAULT_KEY: string;
   VAULT: VaultBinding;
   GATES: GatesNamespace;
+  SOCKETS: SocketsNamespace;
 };
 
 export const Vault = vault((env: Env) => ({
@@ -41,6 +43,7 @@ const coffre = createCoffre((env: Env) => ({
   auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits() } }),
   auditChainKey: env.APP_KEY,
   gates: env.GATES,
+  sockets: env.SOCKETS,
   plugins: [
     credentialProxy({
       credentials: {
@@ -50,14 +53,21 @@ const coffre = createCoffre((env: Env) => ({
           egress: { fetch: async (url, init) => Response.json({ path: url.pathname, reversed: [...(new Headers(init.headers).get('authorization') ?? '')].reverse().join('') }) },
         },
       },
+      // The suite's database is on loopback, which only insecureUpstreams dials; its checks every second.
+      tunnels: { db: tunnel('TUNNEL_URL') },
+      insecureUpstreams: true,
+      recheckSeconds: 1,
     }),
   ],
 }));
 
 export const CoffreGates = coffre.Gates;
+export const CoffreSockets = coffre.Sockets;
 
 export default {
   fetch(request: Request, env: Env, ctx: WaitUntil): Promise<Response> {
+    const socket = coffre.upgrade(request, env);
+    if (socket !== null) return socket;
     const scope = coffre.request(env, ctx).coffre;
     return scope.respond(request, async (page) => {
       if (new URL(request.url).pathname !== '/page') return scope.route(request);

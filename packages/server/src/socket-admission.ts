@@ -1,8 +1,8 @@
-// What a plugin's WebSocket passes before it opens, on Node and on Workers
-// alike: the migration and key door, as `respond` keeps it for every other request,
-// then the plugin under the path, which refuses or hands back its session.
+// What a plugin's WebSocket passes before it opens: the migration door, as
+// `respond` keeps it for every other request, then the plugin under the
+// path, which refuses or hands back its session.
 import { UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
-import { keyReady, schemaReady } from './app.ts';
+import { schemaReady } from './app.ts';
 import { pluginSocket, type SocketSession } from './plugins.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
@@ -22,9 +22,7 @@ export async function admitSocket(request: Request, runtime: CoffreRuntime, sour
     (async () =>
       !(await schemaReady(runtime))
         ? new Response("coffre's database lacks this version's migrations", { status: 503 })
-        : (await keyReady(runtime)) !== null
-          ? new Response('coffre is not serving under its app key yet', { status: 503 })
-          : ((await pluginSocket(request, runtime, sourceIp)) ?? new Response('no WebSocket here', { status: 404 })))(),
+        : ((await pluginSocket(request, runtime, sourceIp)) ?? new Response('no WebSocket here', { status: 404 })))(),
     hold,
   );
 }

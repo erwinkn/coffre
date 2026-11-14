@@ -28,7 +28,7 @@ import { propertySettings } from '../../../scripts/property-settings.ts';
 import '../src/api/router.ts';
 import { routes } from '../src/api/routes.ts';
 import { unservedRoutes } from '../src/api/routes/unserved.ts';
-import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
+import { credentialProxy, header, postgres } from '../src/plugins/credential-proxy.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { openApp, PUBLIC_URL, SESSION } from './app-fixture.ts';
@@ -70,8 +70,13 @@ const workloads = { limits: processLimits({ perSource: 100_000, total: 100_000 }
 // And for MCP's OAuth endpoints, which anyone may call.
 const mcp = { limits: processLimits({ perSource: 100_000, perConnection: 100_000, total: 100_000 }) };
 // The credential proxy, for `coffre run`'s plan: one credential of dev's keys, the rest handed back as they are, in an
-// environment it generates values for, so that the plan reads its person's personal config and names what to make.
-const proxy = credentialProxy({ credentials: { cloudflare: { upstream: 'https://api.cloudflare.example/client/v4', inject: header('authorization', 'Bearer {CLOUDFLARE_API_TOKEN}') } }, generate: { 'market/dev': 'all' } });
+// environment it generates values for, so that the plan reads its person's personal config and names what to make; and
+// a tunnel to the database dev's DATABASE_URL names, `fake`, which its admission checks and never dials here.
+const proxy = credentialProxy({
+  credentials: { cloudflare: { upstream: 'https://api.cloudflare.example/client/v4', inject: header('authorization', 'Bearer {CLOUDFLARE_API_TOKEN}') } },
+  tunnels: { db: postgres('DATABASE_URL', { hosts: ['fake'] }) },
+  generate: { 'market/dev': 'all' },
+});
 const app = await openApp({ auth: signin({ providers: [acme], workloads, mcp }), transport, workloads: {}, plugins: [proxy] });
 const { world } = app;
 
@@ -210,7 +215,8 @@ const release = { name: 'Release', description: 'Ships.', permissions: ['secret.
  *
  * Not served yet, and priced here once they are: a workload's session
  * approved, a binding's enrollments, a workload's own exchange
- * (`POST /api/auth/workload`), and the credential proxy.
+ * (`POST /api/auth/workload`), and the credential proxy's presigning,
+ * signing, verifying and ciphers.
  */
 const requests: Record<string, Entry> = {
   // A caller's own view: one `caller`, then the page's statements, scoped by its answer.
@@ -440,6 +446,18 @@ const requests: Record<string, Entry> = {
   // reads and write are counted in test/proxy-plan.test.ts (2 reads, and 1 write a minute).
   'GET /use/:project/:environment': { request: () => app.request('/use/market/dev', { headers: { authorization: `Bearer ${handleToken}` } }), calls: ['peek', 'use'], statements: 0, fixed: true },
   'GET /use/:project/:environment, again': { request: () => app.request('/use/market/dev', { headers: { authorization: `Bearer ${handleToken}` } }), calls: ['peek', 'use'], statements: 0, fixed: true },
+  // A tunnel's WebSocket, as its Durable Object admits it (`admitSocket`): the handle's row, where its run ends, then one use,
+  // which opens the database's URL. Its login asks one `peek` more, and each check of its group one, an interval apart,
+  // however many connections it holds (test/proxy-tunnel.test.ts); neither touches the app's database. Admitted, a 204 here.
+  'GET /use/:project/:environment/:tunnel, a WebSocket': {
+    request: async () => {
+      const answer = await app.socket('/use/market/dev/db', { headers: { authorization: `Bearer ${handleToken}`, upgrade: 'websocket' } });
+      return answer instanceof Response ? answer : new Response(null, { status: 204 });
+    },
+    calls: ['use'],
+    statements: 1,
+    fixed: true,
+  },
   'DELETE /handles/:id': { request: () => api('ada-cli', 'DELETE', `/handles/${handle}`), calls: ['change'], statements: 0 },
   // A service account's trust bindings. Making one is weighed as the change first, `caller` and one statement, before its
   // issuer is asked where its keys are. A CI run's exchange is one statement, which bindings to verify under, and one

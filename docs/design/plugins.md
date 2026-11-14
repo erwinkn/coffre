@@ -182,7 +182,8 @@ else is needed.
 - `handle(handle)`: whether a handle still stands, opening nothing, and
   the environments it was made for, which the proxy's stable URL resolves to.
 - `routes.socket`: a WebSocket under the plugin's prefix, its bytes and TCP
-  out, on Node through `createCoffre(…).upgrade`.
+  out. On 0.16, on Workers, through `createCoffre(…).upgrade` and the Sockets
+  Durable Object (`coffre.Sockets`); Node's returns in 0.16.1.
 
 **Added since, for workload access** ([workload-access.md](workload-access.md), its PR 1a):
 
@@ -219,6 +220,14 @@ else is needed.
   which of them opened plain, and why each other is not given, which the
   caller does without. Both read the vault's rows now, never its memory
   (`fresh`): a plan follows the writes `coffre run` just made.
+
+**Added in 0.16, for a tunnel** (`packages/server/src/plugins.ts`, [0.16.md](0.16.md), "The proxy"):
+
+- `stands(caller, { path, keys, upstream })`: whether the caller may still
+  use those keys for that upstream, the vault's `peek` of the rows read
+  now, opening and logging nothing. An open tunnel asks it before its
+  login and on its timer; a workload's asks without a new proof or its
+  gate, its socket authenticated already.
 
 **Capabilities to add later**, each when its first plugin needs it (none is
 built):

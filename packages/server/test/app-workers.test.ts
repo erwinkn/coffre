@@ -16,9 +16,11 @@ import { fileURLToPath } from 'node:url';
 import { bodyDigest, createProof, generateProofKey, thumbprint } from '@coffre/client/dpop';
 import { generateToken } from '@coffre/core/identity';
 import { rowsOf } from '@coffre/db/dialect';
-import { APP_URL, binding, credential, emptyDatabase, environment, grant, identity, instance, openConfiguredVault, principal, project, role, rows, secret, session, slowPostgres, user, value, VAULT_URL, write } from '@coffre/vault/testing';
+import { amend, APP_URL, binding, credential, emptyDatabase, environment, grant, identity, instance, openConfiguredVault, principal, project, role, rows, secret, session, slowPostgres, user, value, VAULT_URL, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
+
+import { appClient, tunnelListener } from './tunnel-listener.ts';
 
 const VAULT_KEY = randomBytes(32).toString('base64');
 // The instance's rows are written here as the Worker's vault would write them: under its keys.
@@ -36,6 +38,9 @@ const HANDLE = generateToken('handle');
 const API_KEY = 'sk_workers_0123456789';
 /** What the upstream answers for a request with `API_KEY` in: its `authorization`, reversed (test/workers/app-worker.ts). */
 const ECHOED = { path: '/v1/ping', reversed: [...`Bearer ${API_KEY}`].reverse().join('') };
+/** A handle of ada's, for market/data, whose `TUNNEL_URL` is the suite's database, as the app's login: the tunnel `db` reaches it. */
+const TUNNEL_HANDLE = generateToken('handle');
+let tunnelHandleId: string;
 
 let worker: Unstable_DevWorker;
 let dir: string;
@@ -46,19 +51,22 @@ let vault: Awaited<ReturnType<typeof slowPostgres>>;
 before(async () => {
   await emptyDatabase(world.owner);
   const market = project('market');
-  const [prod, staging, apis] = [environment(market, 'prod'), environment(market, 'staging', { protected: true }), environment(market, 'apis')];
+  const [prod, staging, apis, data] = [environment(market, 'prod'), environment(market, 'staging', { protected: true }), environment(market, 'apis'), environment(market, 'data')];
   const url = await value(world, secret(prod, 'DATABASE_URL'), 'postgres://märkt');
   const apiKey = await value(world, secret(apis, 'API_KEY'), API_KEY);
   // A plain value no credential covers: what `coffre run`'s plan hands the app as it is.
   const region = await value(world, secret(apis, 'REGION'), 'eu-west-3', { plain: true });
+  const tunnelUrl = await value(world, secret(data, 'TUNNEL_URL'), `${APP_URL}?sslmode=disable`, { sensitive: true });
+  const tunnelHandle = credential(TUNNEL_HANDLE, ada, { kind: 'handle', scope: JSON.stringify([{ projectId: market.id, environmentId: data.id, role: 'viewer' }]), places: JSON.stringify([{ environmentId: data.id, personal: false }]) });
+  tunnelHandleId = tunnelHandle.id;
   const used = { lastUsedAt: new Date() };
   const github = identity(bo);
   const deploy = binding(DEPLOY, { policy: '{}', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) });
   await write(
     world,
     ...rows('projects', market),
-    ...rows('environments', prod, staging, apis),
-    ...rows('secrets', url, apiKey, region),
+    ...rows('environments', prod, staging, apis, data),
+    ...rows('secrets', url, apiKey, region, tunnelUrl),
     ...rows('roles', role(false, 'viewer', ['secret.read', 'secret.use'], []), role(false, 'developer', ['secret.read', 'secret.write']), role(true, 'member', [])),
     ...rows('policy', instance()),
     ...rows('principals', principal(ada), principal(bo), principal(DEPLOY)),
@@ -66,7 +74,7 @@ before(async () => {
     ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market }), grant(DEPLOY, 'viewer', { project: market })),
     ...rows('bindings', deploy),
     ...rows('credentials', credential('ada-cli', ada, used), credential('bo-cli', bo, used), credential(BROWSER, bo, { ...used, kind: 'browser', identityId: github.id }), session(WORKLOAD, deploy, { jkt: await thumbprint(KEY.jwk), places: JSON.stringify([{ environmentId: apis.id }]) }),
-      credential(HANDLE, ada, { kind: 'handle', scope: JSON.stringify([{ projectId: market.id, environmentId: apis.id, role: 'viewer' }]), places: JSON.stringify([{ environmentId: apis.id, personal: false }]) })),
+      credential(HANDLE, ada, { kind: 'handle', scope: JSON.stringify([{ projectId: market.id, environmentId: apis.id, role: 'viewer' }]), places: JSON.stringify([{ environmentId: apis.id, personal: false }]) }), tunnelHandle),
   );
 
   [app, vault] = await Promise.all([slowPostgres(3, APP_URL), slowPostgres(3, VAULT_URL)]);
@@ -85,8 +93,8 @@ before(async () => {
       ],
       // As a deployment's two Workers: the app binds the vault's entrypoint, and the vault its signer.
       services: [{ binding: 'VAULT', service: name, entrypoint: 'Vault' }],
-      durable_objects: { bindings: [{ name: 'SIGNER', class_name: 'CoffreSigner' }, { name: 'GATES', class_name: 'CoffreGates' }] },
-      migrations: [{ tag: 'signer', new_sqlite_classes: ['CoffreSigner'] }, { tag: 'gates', new_sqlite_classes: ['CoffreGates'] }],
+      durable_objects: { bindings: [{ name: 'SIGNER', class_name: 'CoffreSigner' }, { name: 'GATES', class_name: 'CoffreGates' }, { name: 'SOCKETS', class_name: 'CoffreSockets' }] },
+      migrations: [{ tag: 'signer', new_sqlite_classes: ['CoffreSigner'] }, { tag: 'gates', new_sqlite_classes: ['CoffreGates'] }, { tag: 'sockets', new_sqlite_classes: ['CoffreSockets'] }],
     }),
   );
   // Bundled from the packages' sources, as the tests read them.
@@ -124,7 +132,7 @@ test("a page's read: the vault asked once who is asking, on one connection, the 
   assert.equal((await ask('/api/me')).status, 401);
   const [me, mine, theirs] = await opened(() => ask('/api/me', bearer('ada-cli')));
   assert.equal(me.status, 200, JSON.stringify(me.body));
-  assert.deepEqual([(me.body.principal as { id: string }).id, me.body.environments], ['ada@acme.example', [{ project: 'market', environment: 'apis', permissions: ['secret.read', 'secret.use'] }, { project: 'market', environment: 'prod', permissions: ['secret.read', 'secret.use'] }]]);
+  assert.deepEqual([(me.body.principal as { id: string }).id, me.body.environments], ['ada@acme.example', ['apis', 'data', 'prod'].map((environment) => ({ project: 'market', environment, permissions: ['secret.read', 'secret.use'] }))]);
   assert.deepEqual([mine, theirs], [1, 1]);
   assert.ok(me.headers.has('content-security-policy'));
   // Asked again at once: the vault remembers its rows, and opens no connection; the app lists again.
@@ -215,4 +223,27 @@ test('a request through the credential proxy on Workers: one use of the vault, b
   assert.equal(plan.status, 200, JSON.stringify(plan.body));
   assert.deepEqual(plan.body, { environment: 'market/apis', env: { API_KEY: HANDLE, REGION: 'eu-west-3' }, credentials: { echo: 'https://secrets.acme.example/use/market/apis/echo' }, tunnels: {}, left: [] });
   assert.deepEqual([planApp, planVault], [0, 2]);
+});
+
+test("a tunnel on Workers: `coffre.upgrade` sends the WebSocket to its object, which the vault admits with one use, and a revocation ends at its next check", { timeout: 120_000 }, async () => {
+  const listener = await tunnelListener(`ws://${worker.address}:${worker.port}/use/market/data/db`, TUNNEL_HANDLE);
+  try {
+    const client = appClient(listener.port, TUNNEL_HANDLE);
+    // The object's first WebSocket: the migration door and the handle's row on one connection of the app's; the vault's
+    // use at admission and its peek before the login, each a connection of the vault's.
+    const [rows, appOpened, vaultOpened] = await opened(async () => [...(await client.unsafe('SELECT current_user AS who'))]);
+    assert.deepEqual(rows, [{ who: 'coffre_runtime' }]);
+    assert.deepEqual([appOpened, vaultOpened], [1, 2]);
+    const revoked = Date.now();
+    await amend(world, 'credentials', sql`id = ${tunnelHandleId}`, { revokedAt: new Date(), revokedBy: ada });
+    // A check a second, ten to answer at most: the next one ends it.
+    const ended = await client.ended;
+    assert.ok(ended - revoked < 4000, `${ended - revoked} ms`);
+    await client.end();
+    const another = appClient(listener.port, TUNNEL_HANDLE);
+    await assert.rejects(another.unsafe('SELECT 1'), 'nor is a new one let in');
+    await another.end();
+  } finally {
+    listener.close();
+  }
 });

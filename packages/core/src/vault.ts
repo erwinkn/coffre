@@ -132,8 +132,9 @@ export type UseInput = Presented & {
   upstream: string | null;
   /**
    * Read the rows now, never from the vault's memory (`memorySeconds`): an
-   * answer that must see a change just made, `coffre run`'s plan after the
-   * values it generated were written. The read is remembered all the same.
+   * answer that must see a change just made (`coffre run`'s plan after the
+   * values it generated were written). Any read may ask it; the rows read are
+   * remembered all the same.
    */
   fresh?: boolean;
 };

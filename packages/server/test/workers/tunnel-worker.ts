@@ -77,7 +77,6 @@ export const CoffreSockets = socketsObject<Env>((env) => {
     // The suite's database is on loopback: only the direct tunnel needs this, never the replica's.
     insecureUpstreams: true,
     recheckSeconds: 0.5,
-    cacheSeconds: 0,
   });
   const uses = new Map<string, number>();
   let refusals = 0;
@@ -97,18 +96,24 @@ export const CoffreSockets = socketsObject<Env>((env) => {
     },
     use: async (handle: string) => {
       if (handle === TURNS) await (reading = reading.then(() => new Promise((resolve) => setTimeout(resolve, 500))));
-      const used = (uses.get(handle) ?? 0) + 1;
-      uses.set(handle, used);
-      if (handle === REVOKED && used > 3) throw new CoffreError(401, 'unauthorized', 'the handle was revoked');
+      if (asked(handle) > 3) throw new CoffreError(401, 'unauthorized', 'the handle was revoked');
       return {
         values: { DATABASE_URL: `${env.DATABASE_URL}?sslmode=disable`, REPLICA_URL: replica, STALL_URL: 'postgres://u:p@10.9.8.9:5432/d?sslmode=disable' },
         plain: [],
-        keys: ['DATABASE_URL', 'REPLICA_URL', 'STALL_URL'],
         environment: { path: 'market/dev', personal: false },
-        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        workload: null,
       };
     },
+    // The vault's word on an open tunnel, before its login and on its timer: a revoked handle's fourth asking says no.
+    stands: async (handle: string) => asked(handle) <= 3,
   } as unknown as PluginContext;
+  /** How many times the vault was asked about `handle`, this time included: only `REVOKED`'s are counted. */
+  function asked(handle: string): number {
+    if (handle !== REVOKED) return 0;
+    const count = (uses.get(handle) ?? 0) + 1;
+    uses.set(handle, count);
+    return count;
+  }
   return (request, _, hold) => {
     // What the suite asks of the stand-in itself: how many admissions of `TURNS` read at once.
     if (request.headers.get('authorization') === `Bearer ${TOGETHER}`) return Promise.resolve(new Response(JSON.stringify(most), { status: 409 }));

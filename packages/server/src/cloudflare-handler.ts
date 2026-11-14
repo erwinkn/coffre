@@ -3,10 +3,13 @@ import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 
 import { cloudflareSourceIp } from './auth.ts';
 import { CoffreGates, workersGates, type GatesNamespace } from './cloudflare-gates.ts';
+import { forwardSocket, IDLE_DATABASE_MS, socketsObject, type SocketsNamespace } from './cloudflare-sockets.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
 import type { Gates } from './gate.ts';
+import { takesSocket } from './plugins.ts';
 import { createRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
+import { admitSocket } from './socket-admission.ts';
 import { fetchTransport } from './workloads/transport.ts';
 
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
@@ -20,6 +23,13 @@ export type WorkersConfig = CoffreConfig & {
    * the deployment takes no workload session.
    */
   gates?: GatesNamespace;
+  /**
+   * The Durable Object that hosts plugins' WebSockets, `CoffreSockets`
+   * (`CoffreWorker.Sockets`), bound as `SOCKETS`: `sockets: env.SOCKETS`.
+   * The credential proxy's database tunnel runs there, one object per
+   * `coffre run` and database. Without it, a WebSocket is refused.
+   */
+  sockets?: SocketsNamespace;
 };
 
 /** The part of the Workers `ExecutionContext` coffre uses. */
@@ -41,6 +51,14 @@ export type CoffreWorker<Env> = {
    * since a 0.14 deployment's Worker names it and its cron still fires.
    */
   scheduled(controller: unknown, env: Env, ctx: WaitUntil): Promise<void>;
+  /**
+   * A WebSocket a plugin takes, sent on to its Durable Object; null for any
+   * other request, which Start answers: `coffre.upgrade(request, env) ??
+   * handler.fetch(…)`.
+   */
+  upgrade(request: Request, env: Env): Promise<Response> | null;
+  /** The Durable Object class `SOCKETS` binds, which the Worker exports: `export const CoffreSockets = coffre.Sockets`. */
+  Sockets: ReturnType<typeof socketsObject<Env>>;
   /**
    * 0.14's audit anchor's Durable Object, inert: a 0.14 deployment's app still
    * binds and exports it (`export const CoffreAnchor = coffre.Anchor`), and
@@ -96,6 +114,20 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
       return { coffre: requestScope(runtime, cloudflareSourceIp, close) };
     },
     async scheduled() {},
+    upgrade(request, env) {
+      if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return null;
+      const { config, resolved } = configured(env);
+      if (!takesSocket(request, resolved.plugins)) return null;
+      if (config.sockets === undefined) return Promise.resolve(new Response('this deployment hosts no WebSockets: its configuration names no sockets binding', { status: 501 }));
+      return forwardSocket(request, config.sockets);
+    },
+    // The object's coffre lasts as long as it does: its database client, which only routes, opens with a query and closes once idle.
+    Sockets: socketsObject<Env>((env) => {
+      const { config, resolved, gates } = configured(env);
+      const pool = new HyperdrivePool(config.database.hyperdrive.connectionString, { closeIdleMs: IDLE_DATABASE_MS });
+      const runtime = createRuntime(resolved, createDatabase(pool), config.vault, { transport: fetchTransport(), gates });
+      return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, hold);
+    }),
     Anchor: CoffreAnchor,
     Gates: CoffreGates,
   };
