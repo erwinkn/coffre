@@ -247,6 +247,22 @@ async function sent(who: Held, method: string, path: string, body?: unknown, thr
   return read(await through.request(path, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }));
 }
 
+test("a session reading the audit page asks the vault for its caller with the head, its own call each request, with the session's proof", async () => {
+  // The session reaches one environment, so it reads no project's log: the page asks the vault first all the same.
+  const heads: { proof: string | null; request: string }[] = [];
+  for (let n = 0; n < 2; n++) {
+    const [answer, calls, , gated] = await cost(() => sent(deploy, 'GET', '/api/audit'));
+    assert.deepEqual([answer.status, answer.body.error, answer.body.message], [403, 'forbidden', 'you do not hold audit.read on any project']);
+    assert.equal(answer.headers.get('dpop-nonce'), await nonceOf(DEPLOY));
+    assert.deepEqual([calls, gated], [['caller'], [DEPLOY]]);
+    const input = app.inputs.at(-1) as { head?: boolean; proof: string | null; request: string };
+    assert.equal(input.head, true);
+    assert.notEqual(input.proof, null);
+    heads.push(input);
+  }
+  assert.notEqual(heads[0]!.request, heads[1]!.request);
+});
+
 test("a session the vault stops is answered as 0.14.7 answered it, at its caller, a use and a change alike, with the gate's nonce", async () => {
   const noReads = await openApp({ auth, workloads: { noReads: true }, gates });
   try {
