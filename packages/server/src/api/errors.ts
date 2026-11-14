@@ -104,6 +104,9 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   reference_to_itself: ['conflict', 'a key cannot be a reference to itself'],
   reference_to_reference: ['conflict', 'that is itself a reference: a reference reads a value, so point at its source instead'],
   no_reference: ['not_found', 'that key is no reference'],
+  // A key renamed (routes/secrets.ts).
+  duplicate_key: ['conflict', 'the environment holds a key of that name already, archived or not'],
+  duplicate_key_below: ['conflict', 'an environment that inherits this one holds a key of that name of its own: rename or archive that one first'],
   // Folders of keys (routes/secrets.ts).
   no_folder: ['not_found', 'no key is filed in that folder there'],
   // A fork's key reset to what it inherits, or that undone (routes/secrets.ts).
@@ -136,6 +139,10 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   // Sign-in (signin.ts, routes/signin.ts): as 0.14 answered.
   unknown_identity: ['not_found', 'unknown sign-in account'],
   unknown_code: ['not_found', 'that code is unknown or has expired'],
+  // Tokens, handles and sessions (routes/tokens.ts): one answer for a credential that is not there, ended, or not the caller's to end.
+  unknown_credential: ['not_found', 'unknown credential'],
+  unknown_principal: ['not_found', 'no such service account'],
+  no_grants: ['bad_request', 'a credential reaches only what its account holds when it is made: give the account a grant first'],
 };
 
 /** Refusals about the instance, not what was asked for: their words are the same whatever the request named. */

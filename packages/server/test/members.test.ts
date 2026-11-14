@@ -362,7 +362,7 @@ test("a service account made with its grants, and given more, each one change an
 });
 
 test('what is not served yet answers 501', async () => {
-  for (const [method, path] of [['GET', `/members/${ada}`], ['GET', `/members/${ci}/tokens`], ['POST', `/members/${ci}/bindings/${crypto.randomUUID()}/enrollments`]] as const) {
+  for (const [method, path] of [['GET', `/members/${ada}`], ['GET', `/members/${ci}/bindings/${crypto.randomUUID()}/enrollments`], ['POST', `/members/${ci}/bindings/${crypto.randomUUID()}/enrollments`]] as const) {
     assert.deepEqual(refused(await call('cy-cli', method, path, method === 'GET' ? undefined : {})), [501, 'not_implemented', undefined], `${method} ${path}`);
   }
 });

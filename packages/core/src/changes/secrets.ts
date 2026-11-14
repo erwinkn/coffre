@@ -1,11 +1,13 @@
 /** The changes of keys and their values (`packages/vault/src/ops/secrets.ts`). */
-export type SecretsChanges = SecretWrite | SecretRefile | ReferenceBreak;
+export type SecretsChanges = SecretWrite | SecretRename | SecretRefile | ReferenceBreak;
 
 export type SecretsAnswers = {
   /** Each key given a value, written or restored: the version it is at now, and the nature it was written as. A key made a reference is given none. */
   'secret.write': { keys: Record<string, { version: number; nature: Nature }> };
   /** Where the reference read, as its source's rows say: null when the vault does not see them. */
   'reference.break': { source: SecretPath | null };
+  /** The key renamed, by its id. */
+  'secret.rename': { id: string };
   /** The keys filed there, by name, in order. */
   'secret.refile': { moved: string[] };
 };
@@ -86,6 +88,33 @@ export type SecretWrite = {
   /** In the caller's personal config of `environment` (`dev@me`), made by this write if they have none and it gives a key a value. */
   mine?: boolean;
   keys: KeyWrite[];
+};
+
+/**
+ * A key renamed (`to`), with its history, by whoever writes keys there. A
+ * live key, named as `SecretWrite`'s: an archived one is brought back
+ * first (`archived`), and a name the environment holds already, archived
+ * or not, is `duplicate_key`. Its references read it still, by its id.
+ *
+ * The name carries down to every environment that inherits from it, forks
+ * of forks, archived ones and personal configs included: each one's own
+ * row of the key, its override, takes the new name, and so does its
+ * dismissal, so each goes on overriding or doing without the key it did.
+ * Where one already holds a key of the new name of its own, a shared fork
+ * refuses the rename, `duplicate_key_below`; a personal config, named to
+ * nobody but its owner, has its own moved out of the way, `NEW_2` (or
+ * `_3`, and on). No value moves, so the renamer needs nothing in the
+ * forks. Renamed onto its own name, nothing changes. In the caller's
+ * personal config (`mine`), as `SecretWrite`'s: a config has no forks.
+ */
+export type SecretRename = {
+  op: 'secret.rename';
+  project: string;
+  environment: string;
+  /** In the caller's personal config of `environment` (`dev@me`). */
+  mine?: boolean;
+  key: string;
+  to: string;
 };
 
 /**

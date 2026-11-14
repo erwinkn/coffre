@@ -25,7 +25,7 @@ import { route } from '../route.ts';
 const PRINCIPAL = /^(user|token):[^\s:]\S*$/;
 
 /** A member named in a path: `user:<email>`, which is one person however it is cased, or `token:<name>`. */
-function memberOf(raw: string): string {
+export function memberOf(raw: string): string {
   const member = raw.startsWith('user:') ? raw.toLowerCase() : raw;
   if (member.length > 256 || !PRINCIPAL.test(member) || member.includes('\0') || !wellFormed(member)) throw badRequest('name a member as user:<email> or token:<name>');
   return member;
