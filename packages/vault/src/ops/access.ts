@@ -338,10 +338,11 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
   };
 }
 
-/** What a removal ends, as the count beside its read said it. */
+/** What a removal ends, as the count beside its read said it: one row, always, whose absence is a fault, never none. */
 function ending(counted: unknown): { sessions: number; tokens: number; apps: number } {
   const { sessions, tokens, apps } = (counted ?? {}) as Record<string, unknown>;
-  return { sessions: Number(sessions ?? 0), tokens: Number(tokens ?? 0), apps: Number(apps ?? 0) };
+  if (![sessions, tokens, apps].every((count) => typeof count === 'number' && Number.isSafeInteger(count))) throw new Error('a removal reads what it ends beside its rows, as one row of counts');
+  return { sessions: sessions as number, tokens: tokens as number, apps: apps as number };
 }
 
 /** The most places one change of grants names: as many as a credential's scope does. */
