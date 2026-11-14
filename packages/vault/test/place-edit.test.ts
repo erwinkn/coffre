@@ -411,7 +411,7 @@ test("a workload's session neither protects nor unprotects, whatever its service
   assert.deepEqual(await by('environment.unprotect'), { refused: 'workload_cannot_issue' });
   assert.deepEqual(await denied(), ['environment.protect', 'environment.unprotect'].map((action) => [action, api, { project: 'market', environment: 'prod', refused: 'workload_cannot_issue' }, [`project:${market.id}`, `environment:${prod.id}`]]));
   // It still writes there, as its service may.
-  assert.ok('answer' in (await vault.change({ ...shown('pod'), proof: 'pod', op: 'secret.write', project: 'market', environment: 'prod', values: [{ key: 'TOKEN', value: 'tok', nature: 'secret' }] })));
+  assert.ok('answer' in (await vault.change({ ...shown('pod'), proof: 'pod', op: 'secret.write', project: 'market', environment: 'prod', keys: [{ key: 'TOKEN', value: 'tok', nature: 'secret' }] })));
 });
 
 test('an upstream credential frozen in an environment by whoever writes there, used by nobody, and thawed by an Owner of the project', async () => {
@@ -488,7 +488,7 @@ test('an edit decided on the same rows as another change: whichever commits seco
   assert.equal(await commit(world, two), false);
   assert.deepEqual(await vault.change(by('ada-cli', 'environment.update', { environment: 'staging', slug: 'live' }) as never), { refused: 'exists' });
   // A write in an environment as it is archived.
-  const writing = by('ada-cli', 'secret.write', { environment: 'preview', values: [{ key: 'TOKEN', value: 'tok', nature: 'secret' }] });
+  const writing = by('ada-cli', 'secret.write', { environment: 'preview', keys: [{ key: 'TOKEN', value: 'tok', nature: 'secret' }] });
   const [w, a] = [await prepared(writing), await prepared(by('ada-cli', 'environment.archive', { environment: 'preview' }))];
   assert.equal(await commit(world, a), true);
   assert.equal(await commit(world, w), false);
