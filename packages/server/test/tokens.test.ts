@@ -195,9 +195,14 @@ test('a personal token made by its person on a session: drawn by the app, and it
 
 test("a personal token is its person's own, made on a session, with a label, minutes and a scope; what does not parse asks nothing", async () => {
   const scope = { 'market/dev': 'viewer' };
-  // Another person's, and one made on a token: as the vault refuses anything beyond the caller.
+  // Another person's: as the vault refuses anything beyond the caller.
   assert.deepEqual(refused(await call('bo-cli', 'POST', `/members/${cy}/tokens`, { label: 'x', expiresInMinutes: 60, scope })), [403, 'vault_refused', 'no_access']);
-  assert.deepEqual(refused(await call('bo-pat', 'POST', `/members/${bo}/tokens`, { label: 'x', expiresInMinutes: 60, scope })), [403, 'vault_refused', 'no_access']);
+  // One asked on a personal token, for its person or anyone else: told it is the token, in 0.14.7's words.
+  for (const member of [bo, cy]) {
+    const [status, body] = await call('bo-pat', 'POST', `/members/${member}/tokens`, { label: 'x', expiresInMinutes: 60, scope });
+    assert.deepEqual(refused([status, body]), [403, 'forbidden', 'personal_token'], member);
+    assert.match(body.message!, /a personal token cannot do this: only its person can, signed in as themselves$/);
+  }
   // A service's token names no person's.
   const service = await call('ci-token', 'POST', '/members/user:ci@acme.example/tokens', { label: 'x', expiresInMinutes: 60, scope });
   assert.deepEqual(refused(service), [403, 'forbidden', 'not_a_person']);

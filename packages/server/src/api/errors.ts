@@ -128,6 +128,7 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   too_large: ['conflict', 'it holds more versions than one deletion erases: delete its environments one at a time first'],
   parent_archived: ['conflict', 'it inherits from an environment that is archived or deleted: restore that first'],
   too_deep: ['conflict', 'that environment already inherits from three: fork one higher up'],
+  personal_token: ['forbidden', 'a personal token cannot do this: only its person can, signed in as themselves'],
   workload_cannot_issue: ['forbidden', "a workload's session issues no credential and changes no one's access"],
   not_a_person: ['forbidden', 'a service account keeps no personal config: name the environment itself'],
   // Members and their grants (routes/members.ts): to whoever may manage them, as 0.14 answered.
