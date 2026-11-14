@@ -3,8 +3,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments } from '@coffre/db/schema';
 
-import { environmentsCreatedAt, insert, liveEnvironment, liveKeysIn, MAX_PARENTS, parentsOf, personalConfig, places, resolvePath, type ResolvedPath } from '../db/queries.ts';
-import { can, lists, placeOf } from './caller.ts';
+import { insert, liveEnvironment, MAX_PARENTS, parentsOf, personalConfig, resolvePath, type ResolvedPath } from '../db/queries.ts';
+import { lists, placeOf } from './caller.ts';
 import { allowed, audited, denied, Refusal, withRefusals, type ApiContext } from './context.ts';
 import { conflict, forbidden, notFound } from './errors.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
@@ -85,41 +85,4 @@ export async function makePersonal(ctx: ApiContext, place: ResolvedPath, action:
     if (mine?.environment == null) throw notFound(`${formatPath({ project: place.project.slug, environment: `${of.slug}@me` })} went away as it was made`);
     return { place: mine, created: made };
   });
-}
-
-/** A personal config as its project's maintainers see it: whose, of what, and its keys' names. */
-export type PersonalConfig = {
-  owner: string;
-  /** The environment it is a config of, by slug. */
-  of: string;
-  /** Its own slug, which deleting it names: `DELETE /projects/market/dev-p-3f9c2a1b`. */
-  slug: string;
-  /** The keys it holds a value of, by name; never a value. */
-  keys: string[];
-  archived: boolean;
-  createdAt: string;
-};
-
-/**
- * A project's personal configs, for whoever manages its environments: that
- * they exist, whose they are, and the names of their keys, which within a
- * project are no secret (R6). Their values stay their owners' alone.
- */
-export async function listPersonal(ctx: ApiContext, place: ResolvedPath): Promise<{ configs: PersonalConfig[] }> {
-  const project = (await places(ctx.db)).find((each) => each.id === place.project.id);
-  const configs = project?.environments.filter((environment) => environment.owner !== null) ?? [];
-  const keys = await liveKeysIn(ctx.db, configs.map((config) => config.id));
-  const created = await environmentsCreatedAt(ctx.db, configs.map((config) => config.id));
-  return {
-    configs: configs
-      .map((config) => ({
-        owner: config.owner!,
-        of: config.parentSlug ?? '?',
-        slug: config.slug,
-        keys: keys.filter((key) => key.environmentId === config.id).map((key) => key.key).sort(),
-        archived: config.archivedAt !== null,
-        createdAt: (created.get(config.id) ?? new Date(0)).toISOString(),
-      }))
-      .sort((a, b) => (a.of < b.of ? -1 : a.of > b.of ? 1 : a.owner < b.owner ? -1 : 1)),
-  };
 }

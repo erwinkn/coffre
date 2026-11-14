@@ -258,9 +258,10 @@ test('a personal config is a person\'s, of an environment they read or use, one 
     ['environment.create', api, { project: 'market', environment: 'prod', refused: 'not_a_person' }, of],
     ['environment.create', eve, { project: 'market', environment: 'prod', refused: 'no_access' }, of],
   ]);
-  // A viewer of one protected environment reads it: a personal config takes nothing more. It is protected through its environment, not by its own row.
+  // A viewer of one protected environment reads it: a personal config takes nothing more. It is protected through its environment, not by its own row,
+  // which its answer says.
   const hers = answered(await vault.change(mine('eve-cli', 'guarded')));
-  assert.equal(hers.protected, false);
+  assert.equal(hers.protected, true);
   assert.equal((await environmentRow(hers.id))!.protected, false);
 });
 

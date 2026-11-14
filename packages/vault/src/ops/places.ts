@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { allows, makesProjects, ownsProject } from '@coffre/core/access';
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
 import { PROJECT_PAGES } from '@coffre/core/pages';
-import type { Answers, EnvironmentCreate, EnvironmentEdit, PlacesChanges, Presented, ProjectCreate, ProjectEdit } from '@coffre/core/vault';
+import type { Answers, EnvironmentCreate, EnvironmentEdit, EnvironmentEdited, FolderRefile, PlacesChanges, Presented, ProjectCreate, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
 import { environments, projects, secrets } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
@@ -164,7 +164,8 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
           objects: [`project:${place.id}`, `environment:${id}`, ...(parent === null ? [] : [`environment:${parent.id}`]), `principal:${caller.principal}`, `credential:${caller.credential.id}`],
           detail: { slug, protected: guarded, ...(parent === null ? {} : mine ? { personal: parent.slug } : { inherits: parent.slug }) },
         },
-        answer: { id, slug, protected: guarded },
+        // A personal config is protected as its environment is, through it: its own row never says so.
+        answer: { id, slug, protected: mine ? parent!.protected : guarded },
       };
     },
   };
@@ -195,6 +196,23 @@ const standing = (row: { slug: string }) => !row.slug.includes('~');
 function edited<T extends Sealed>(table: T, was: Row<T>, changes: Partial<Fresh<T>>) {
   const { mac: _, ...kept } = was as Row<T> & { mac: unknown };
   return put(table, { ...kept, ...changes } as Fresh<T>, was);
+}
+
+/** A project as an edit leaves it: the row read, with what changes. */
+function projectLeft(was: Row<typeof projects>, changes: Partial<Fresh<typeof projects>> = {}): ProjectEdited {
+  const now = { ...was, ...changes };
+  return { id: now.id, slug: now.slug, archivedAt: now.archivedAt?.toISOString() ?? null, folder: now.folder };
+}
+
+/** An environment as an edit leaves it. */
+function environmentLeft(was: Row<typeof environments>, changes: Partial<Fresh<typeof environments>> = {}): EnvironmentEdited {
+  const now = { ...was, ...changes };
+  return { id: now.id, slug: now.slug, archivedAt: now.archivedAt?.toISOString() ?? null, protected: now.protected };
+}
+
+/** A project's edit: its row written with `changes`, or none when nothing changes, the entry, and the project as it leaves it. */
+function projectEdit(place: Row<typeof projects>, changes: Partial<Fresh<typeof projects>> | null, entry: Said): Plan<ProjectEdited> {
+  return { writes: changes === null ? [] : [edited(projects, place, changes)], entry, answer: projectLeft(place, changes ?? {}) };
 }
 
 /**
@@ -347,7 +365,7 @@ function projectUpdate(input: Op<ProjectEdit, 'project.update'>, vault: Deciding
     decide({ caller, place, seen, entry }) {
       if (!manages(caller, place)) return NO_ACCESS;
       if (place.slug !== slug && seen.taken.some((row) => row.slug === slug)) return { refused: 'exists' };
-      return { writes: place.slug === slug ? [] : [edited(projects, place, { slug })], entry: entry({ from: place.slug, slug }), answer: { id: place.id } };
+      return projectEdit(place, place.slug === slug ? null : { slug }, entry({ from: place.slug, slug }));
     },
   });
 }
@@ -358,9 +376,9 @@ function projectArchive(input: Op<ProjectEdit, 'project.archive'>, vault: Decidi
     read: (project) => readers(sql`s.project_id = ${project}`, sql`h.project_id <> ${project}`),
     decide({ caller, place, seen, at, entry }) {
       if (!manages(caller, place)) return NO_ACCESS;
-      if (place.archivedAt !== null) return { writes: [], entry: entry({ slug: place.slug }), answer: { id: place.id } };
+      if (place.archivedAt !== null) return projectEdit(place, null, entry({ slug: place.slug }));
       if (stopped(seen, (row) => row.projectId === place.id).length > 0) return { refused: 'referenced' };
-      return { writes: [edited(projects, place, { archivedAt: new Date(at) })], entry: entry({ slug: place.slug }), answer: { id: place.id } };
+      return projectEdit(place, { archivedAt: new Date(at) }, entry({ slug: place.slug }));
     },
   });
 }
@@ -370,7 +388,7 @@ function projectRestore(input: Op<ProjectEdit, 'project.restore'>, vault: Decidi
   return onProject(input, vault, {
     decide({ caller, place, entry }) {
       if (!manages(caller, place)) return NO_ACCESS;
-      return { writes: place.archivedAt === null ? [] : [edited(projects, place, { archivedAt: null })], entry: entry({ slug: place.slug }), answer: { id: place.id } };
+      return projectEdit(place, place.archivedAt === null ? null : { archivedAt: null }, entry({ slug: place.slug }));
     },
   });
 }
@@ -382,9 +400,42 @@ function projectMove(input: Op<ProjectEdit, 'project.move'>, vault: Deciding): O
   return onProject(input, vault, {
     decide({ caller, place, entry }) {
       if (!manages(caller, place)) return NO_ACCESS;
-      return { writes: place.folder === to ? [] : [edited(projects, place, { folder: to })], entry: entry({ slug: place.slug, from: place.folder, to }), answer: { id: place.id } };
+      return projectEdit(place, place.folder === to ? null : { folder: to }, entry({ slug: place.slug, from: place.folder, to }));
     },
   });
+}
+
+/**
+ * A folder of projects renamed, or emptied: every project filed there, in
+ * one change, by whoever manages each one. The projects are read by the
+ * folder, and the caller's holdings in them.
+ */
+function folderRefile(input: Presented & FolderRefile, vault: Deciding): Operation<Parts, Answers['folder.refile']> {
+  const shown = presented(input);
+  const { folder: from, to } = input;
+  if (from === null || !folder(from) || !folder(to)) throw new TypeError('a folder is renamed to one of 1 to 64 characters, with no "/", no control character and no space at either end, or emptied');
+  const filed = sql`(SELECT p.id FROM projects p WHERE p.folder = ${from})`;
+  const read = { ...callerParts(shown.token, filed), filed: part(projects, sql`${projects.folder} = ${from}`) };
+  /** The projects filed there, a deletion's tombstones left out. */
+  const there = (seen: Seen<typeof read>) => seen.filed.filter((row) => row.folder === from && standing(row));
+  return {
+    read,
+    // A folder's name is no slug, which is all a refusal logs of what was asked: the projects filed there name it.
+    denied: refusedTo('folder.refile', shown, vault.workloads, { objects: (seen: Seen<typeof read>) => there(seen).map((row) => `project:${row.id}`) }),
+    decide(seen: Seen<typeof read>, at: number) {
+      const caller = asking(seen, shown, vault, at);
+      if ('refused' in caller) return caller;
+      const projectsThere = there(seen);
+      // Half a folder renamed would be two folders: all of them, or none.
+      if (projectsThere.length === 0 || projectsThere.some((row) => !manages(caller, row))) return NO_ACCESS;
+      const moved = projectsThere.map((row) => row.slug).sort();
+      return {
+        writes: to === from ? [] : projectsThere.map((row) => edited(projects, row, { folder: to })),
+        entry: { ...by(caller, shown), action: 'folder.refile', objects: [...projectsThere.map((row) => `project:${row.id}`), `principal:${caller.principal}`, `credential:${caller.credential.id}`], detail: { folder: from, to, projects: moved } },
+        answer: { moved },
+      };
+    },
+  };
 }
 
 /** An environment's new slug, free in its project. */
@@ -397,7 +448,7 @@ function environmentUpdate(input: Op<EnvironmentEdit, 'environment.update'>, vau
     decide({ caller, place, environment, seen, entry }) {
       if (!managesEnvironments(caller, place)) return NO_ACCESS;
       if (environment.slug !== slug && seen.taken.some((row) => row.projectId === place.id && row.slug === slug)) return { refused: 'exists' };
-      return { writes: environment.slug === slug ? [] : [edited(environments, environment, { slug })], entry: entry({ from: environment.slug, slug }), answer: { id: environment.id } };
+      return { writes: environment.slug === slug ? [] : [edited(environments, environment, { slug })], entry: entry({ from: environment.slug, slug }), answer: environmentLeft(environment, { slug }) };
     },
   });
 }
@@ -415,7 +466,7 @@ function environmentArchive(input: Op<EnvironmentEdit, 'environment.archive'>, v
     read: (project, environment) => ({ ...childrenOf(environment), ...readers(sql`s.project_id = ${project} AND s.environment_id = ${environment}`, sql`h.environment_id <> ${environment}`) }),
     decide({ caller, place, environment, seen, at, entry }) {
       if (!managesEnvironments(caller, place)) return NO_ACCESS;
-      if (environment.archivedAt !== null) return { writes: [], entry: entry({ slug: environment.slug }), answer: { id: environment.id } };
+      if (environment.archivedAt !== null) return { writes: [], entry: entry({ slug: environment.slug }), answer: environmentLeft(environment) };
       // In an archived project, nothing is read from it already.
       if (place.archivedAt === null && stopped(seen, (row) => row.environmentId === environment.id).length > 0) return { refused: 'referenced' };
       const children = seen.child.filter((row) => row.parentId === environment.id && row.projectId === place.id && live(row));
@@ -424,7 +475,7 @@ function environmentArchive(input: Op<EnvironmentEdit, 'environment.archive'>, v
       return {
         writes: [edited(environments, environment, { archivedAt }), ...children.map((row) => edited(environments, row, { archivedAt }))],
         entry: entry({ slug: environment.slug, ...(children.length === 0 ? {} : { personal: children.map((row) => row.slug) }) }, children.map((row) => `environment:${row.id}`)),
-        answer: { id: environment.id },
+        answer: environmentLeft(environment, { archivedAt }),
       };
     },
   });
@@ -440,14 +491,14 @@ function environmentRestore(input: Op<EnvironmentEdit, 'environment.restore'>, v
     read: (project, environment) => ({ ...childrenOf(environment), chain: chainFrom(project, input.environment, MAX_PARENTS + 1) }),
     decide({ caller, place, environment, seen, entry }) {
       if (!managesEnvironments(caller, place)) return NO_ACCESS;
-      if (environment.archivedAt === null) return { writes: [], entry: entry({ slug: environment.slug }), answer: { id: environment.id } };
+      if (environment.archivedAt === null) return { writes: [], entry: entry({ slug: environment.slug }), answer: environmentLeft(environment) };
       const parents = ancestry(environment, seen.chain);
       if (parents !== 'ok') return { refused: parents };
       const children = seen.child.filter((row) => row.parentId === environment.id && row.projectId === place.id && row.owner !== null && standing(row) && row.archivedAt !== null);
       return {
         writes: [edited(environments, environment, { archivedAt: null }), ...children.map((row) => edited(environments, row, { archivedAt: null }))],
         entry: entry({ slug: environment.slug, ...(children.length === 0 ? {} : { personal: children.map((row) => row.slug) }) }, children.map((row) => `environment:${row.id}`)),
-        answer: { id: environment.id },
+        answer: environmentLeft(environment, { archivedAt: null }),
       };
     },
   });
@@ -478,7 +529,7 @@ function ancestry(environment: Row<typeof environments>, rows: readonly Row<type
  * project alone.
  */
 function protection(on: boolean) {
-  return (input: Op<EnvironmentEdit, 'environment.protect' | 'environment.unprotect'>, vault: Deciding): Operation<Parts, Edited> =>
+  return (input: Op<EnvironmentEdit, 'environment.protect' | 'environment.unprotect'>, vault: Deciding): Operation<Parts, EnvironmentEdited> =>
     onEnvironment(input, vault, {
       decide({ caller, place, environment, entry }) {
         if (!managesEnvironments(caller, place)) return NO_ACCESS;
@@ -486,12 +537,10 @@ function protection(on: boolean) {
         if (caller.workload !== null) return { refused: 'workload_cannot_issue' };
         // Taking it off widens what people hold there (R30).
         if (!on && !owns(caller, place.id)) return NO_ACCESS;
-        return { writes: environment.protected === on ? [] : [edited(environments, environment, { protected: on })], entry: entry({ slug: environment.slug }), answer: { id: environment.id } };
+        return { writes: environment.protected === on ? [] : [edited(environments, environment, { protected: on })], entry: entry({ slug: environment.slug }), answer: environmentLeft(environment, { protected: on }) };
       },
     });
 }
-
-type Edited = { id: string };
 
 /**
  * An upstream credential frozen in a live environment, or the freeze lifted
@@ -499,7 +548,7 @@ type Edited = { id: string };
  * there, lifted by an Owner of the project.
  */
 function freezing(on: boolean) {
-  return (input: Op<EnvironmentEdit, 'upstream.freeze' | 'upstream.thaw'>, vault: Deciding): Operation<Parts, Edited> => {
+  return (input: Op<EnvironmentEdit, 'upstream.freeze' | 'upstream.thaw'>, vault: Deciding): Operation<Parts, EnvironmentEdited> => {
     const { upstream } = input;
     if (typeof upstream !== 'string' || !CREDENTIAL_NAME.test(upstream)) throw new TypeError('an upstream credential is named as the deployment names it: a-z, then up to 31 of a-z, 0-9 and -');
     return onEnvironment(input, vault, {
@@ -509,7 +558,7 @@ function freezing(on: boolean) {
         if (on ? !caller.may('secret.write', environment) : !owns(caller, place.id)) return NO_ACCESS;
         const frozen = environment.frozenCredentials.includes(upstream);
         const next = on ? [...environment.frozenCredentials, upstream].sort() : environment.frozenCredentials.filter((name) => name !== upstream);
-        return { writes: frozen === on ? [] : [edited(environments, environment, { frozenCredentials: next })], entry: entry({ slug: environment.slug, upstream }), answer: { id: environment.id } };
+        return { writes: frozen === on ? [] : [edited(environments, environment, { frozenCredentials: next })], entry: entry({ slug: environment.slug, upstream }), answer: environmentLeft(environment) };
       },
     });
   };
@@ -523,6 +572,7 @@ export const placeOperations: Operations<PlacesChanges> = {
   'project.archive': projectArchive,
   'project.restore': projectRestore,
   'project.move': projectMove,
+  'folder.refile': folderRefile,
   'environment.update': environmentUpdate,
   'environment.archive': environmentArchive,
   'environment.restore': environmentRestore,

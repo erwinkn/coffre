@@ -92,6 +92,14 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   unreadable: ['conflict', 'that is a reference whose source cannot be read'],
   archived: ['conflict', 'that secret is archived: bring it back before writing it'],
   broken_chain: ['conflict', 'the environment inherits from one that is gone'],
+  // Projects and environments (routes/places.ts).
+  exists: ['conflict', 'that is there already: its slug is taken'],
+  referenced: ['conflict', 'a reference held elsewhere reads a value in it: archiving would stop that read, so break the reference first'],
+  inherited: ['conflict', 'a fork inherits from it: archive the fork first'],
+  parent_archived: ['conflict', 'it inherits from an environment that is archived or deleted: restore that first'],
+  too_deep: ['conflict', 'that environment already inherits from three: fork one higher up'],
+  workload_cannot_issue: ['forbidden', "a workload's session issues no credential and changes no one's access"],
+  not_a_person: ['forbidden', 'a service account keeps no personal config: name the environment itself'],
 };
 
 /** The vault's refusal, as the API answers it: `what` names what was asked for, `market/prod/KEY`. */
