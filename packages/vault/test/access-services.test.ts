@@ -23,7 +23,7 @@ const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now
 after(() => world.close());
 
 const [ada, fay, sam, dv, mk, bo] = ['ada', 'fay', 'sam', 'dv', 'mk', 'bo'].map(user) as [string, string, string, string, string, string];
-const [ci, prodOnly, empty, gone, theirs, both] = ['ci', 'prod', 'empty', 'gone', 'theirs', 'both'].map((name) => `token:${name}`) as [string, string, string, string, string, string];
+const [ci, prodOnly, empty, gone, theirs, both, ops] = ['ci', 'prod', 'empty', 'gone', 'theirs', 'both', 'ops'].map((name) => `token:${name}`) as [string, string, string, string, string, string, string];
 let market: ReturnType<typeof project>;
 let dev: ReturnType<typeof environment>;
 let prod: ReturnType<typeof environment>;
@@ -39,7 +39,7 @@ beforeEach(async () => {
   const billingProd = environment(billing, 'prod');
   await write(world, ...rows('projects', market, billing), ...rows('environments', dev, prod, billingProd),
     ...rows('roles', role(true, 'owner', ['grant.manage']), role(true, 'admin', ['grant.manage']), role(true, 'member', []),
-      role(false, 'viewer', ['secret.read']), role(false, 'contributor', ['secret.use']),
+      role(false, 'viewer', ['secret.read']), role(false, 'contributor', ['secret.use']), role(false, 'admin', ['grant.manage', 'project.manage']),
       // A Developer only uses a protected environment's values.
       role(false, 'developer', ['secret.read', 'secret.use', 'secret.write'], ['secret.use'])),
     // Ada and Fay run the instance, Sam is an Admin of market alone; Dv is a Developer of market/dev and a Viewer of billing/prod, Mk a Developer of all of market; Bo holds nothing.
@@ -49,13 +49,16 @@ beforeEach(async () => {
       // and removed another; Fay removed the last. Dv set up one more, which holds something in both projects.
       principal(ci, { statusChangedBy: dv }), principal(prodOnly, { statusChangedBy: fay }), principal(empty, { statusChangedBy: dv }),
       principal(gone, { status: 'removed', generation: 1, statusChangedBy: dv }), principal(theirs, { status: 'removed', generation: 1, statusChangedBy: fay }),
-      principal(both, { statusChangedBy: dv })),
+      principal(both, { statusChangedBy: dv }), principal(ops, { statusChangedBy: fay })),
     ...rows('policy', instance()),
     ...rows('grants', grant(dv, 'developer', { environment: dev }), grant(dv, 'viewer', { environment: billingProd }), grant(mk, 'developer', { project: market }),
-      grant(ci, 'developer', { environment: dev }), grant(prodOnly, 'viewer', { environment: prod }), grant(both, 'developer', { environment: dev }), grant(both, 'viewer', { environment: billingProd })),
+      grant(ci, 'developer', { environment: dev }), grant(prodOnly, 'viewer', { environment: prod }), grant(both, 'developer', { environment: dev }), grant(both, 'viewer', { environment: billingProd }),
+      // Ops, a service account, manages access on market.
+      grant(ops, 'admin', { project: market })),
     ...rows('credentials', ...[ada, fay, sam, dv, mk, bo].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who)),
       // A personal token of Dv's, scoped as tokens are: what it sets up would outlive it.
-      credential('dv-pat', dv, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: dev.id, role: 'developer' }]) })));
+      credential('dv-pat', dv, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: dev.id, role: 'developer' }]) }),
+      credential('ops-token', ops, { scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'admin', permissions: { normal: ['grant.manage', 'project.manage'], protected: ['grant.manage', 'project.manage'] } }]) })));
   world.woken.length = 0;
 });
 
@@ -184,7 +187,11 @@ test('a service account admitted with its first grants in one change, all or non
     assert.deepEqual(await admit('dv-pat', 'token:other', onDev('viewer')), { refused: 'no_access' });
     assert.deepEqual(await set('sam-cli', 'token:other', onDev('viewer')), { refused: 'not_a_member' }, 'without admit, to whoever manages access there, what 0.14 said');
     assert.deepEqual(await admit('sam-cli', theirs, onDev('viewer')), { refused: 'no_access' }, 'one Fay removed, whoever manages access there but does not run the instance does not bring back');
+    // A service account's token that manages access gives grants, but sets up no service account: it would outlive it.
+    assert.deepEqual(await admit('ops-token', 'token:child', { project: 'market', role: 'viewer' }), { refused: 'no_access' });
+    assert.deepEqual(await put('ops-token', 'token:child'), { refused: 'no_access' });
   });
+  assert.deepEqual(await set('ops-token', ci, { project: 'market', role: 'viewer' }), { answer: { changes: ['created'] } }, 'but gives one that is a member what it may');
   await assert.rejects(admit('fay-cli', bo, onDev('viewer')), TypeError, 'a person is admitted by an instance role, never with grants');
   assert.deepEqual(await admit('fay-cli', theirs, { project: 'market', environment: 'prod', role: 'viewer' }), { answer: { changes: ['created'], created: true } }, 'whoever runs the instance brings back any');
 });
@@ -213,26 +220,35 @@ test('a row of what these weigh, written behind the vault, refuses them, tampere
   await nothingWritten(async () => {
     assert.deepEqual(await remove('dv-cli', ci), { refused: 'tampered' });
     assert.deepEqual(await set('dv-cli', ci, onDev('developer')), { refused: 'tampered' });
-    // Told only to whoever could make the change: not on a token.
+    // Told only to whoever could make the change: not on a token, nor to Bo, who holds nothing.
     assert.deepEqual(await remove('dv-pat', ci), { refused: 'no_access' });
     assert.deepEqual(await set('dv-pat', ci, onDev('developer')), { refused: 'no_access' });
+    assert.deepEqual(await remove('bo-cli', ci), { refused: 'no_access' });
+    assert.deepEqual(await set('bo-cli', ci, onDev('developer')), { refused: 'no_access' });
   });
   assert.deepEqual(await set('dv-cli', empty, onDev('viewer')), { answer: { changes: ['created'] } }, 'another service account\'s rows weigh nothing here');
 
   // Prod unprotected behind the vault: its row, whatever it says, is read and found unsealed.
   await world.owner.execute(sql`UPDATE environments SET protected = false WHERE id = ${prod.id}`);
   await nothingWritten(async () => {
-    assert.deepEqual(await set('mk-cli', empty, { project: 'market', role: 'viewer' }), { refused: 'tampered' });
+    // Dv's own, which holds dev alone: the project asked weighs, whatever else the service holds.
+    assert.deepEqual(await set('dv-cli', empty, onDev('developer')), { refused: 'tampered' });
+    assert.deepEqual(await set('mk-cli', prodOnly, onDev('viewer')), { refused: 'no_access' }, 'not Mk\'s: told nothing');
     assert.deepEqual(await put('dv-cli', 'token:other'), { refused: 'tampered' });
     assert.deepEqual(await admit('dv-cli', 'token:other', onDev('viewer')), { refused: 'tampered' });
     assert.deepEqual(await put('dv-pat', 'token:other'), { refused: 'no_access' }, 'not on a token');
+    assert.deepEqual(await put('bo-cli', 'token:other'), { refused: 'no_access' }, 'nor to whoever holds nothing');
   });
   await world.owner.execute(sql`UPDATE environments SET protected = true WHERE id = ${prod.id}`);
   assert.ok('answer' in await put('dv-cli', 'token:other'), 'as it was, it is the vault\'s again');
 
-  // The setting edited behind the vault: it may say more than it said.
+  // The setting edited behind the vault: it may say more than it said. Without it, nobody sets one up by it, and is told
+  // no more; whoever manages access somewhere needs none, and is told.
   await world.owner.execute(sql`UPDATE policy SET service_accounts = '{"projects":"all","environments":{"except":["prod"]}}'`);
-  await nothingWritten(async () => assert.deepEqual(await put('dv-cli', 'token:third'), { refused: 'tampered' }));
+  await nothingWritten(async () => {
+    assert.deepEqual(await put('dv-cli', 'token:third'), { refused: 'no_access' });
+    assert.deepEqual(await put('sam-cli', 'token:third'), { refused: 'tampered' });
+  });
   assert.ok('answer' in await put('fay-cli', 'token:third'), 'whoever runs the instance weighs none of it');
 
   // A person's row edited: whoever does not run the instance removes no person, and is told nothing of their row.

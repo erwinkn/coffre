@@ -17,7 +17,7 @@ import type { Deciding } from '../vault.ts';
 import { asking, NOWHERE } from './asking.ts';
 import type { Operations } from './index.ts';
 import { presented, text } from './input.ts';
-import { definitionsOf, held as holding, manages, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
+import { definitionsOf, held as holding, managesSealed, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
 
 /**
  * The changes of members, grants, roles and the instance's policy
@@ -225,13 +225,14 @@ function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Par
         // Only a person, on a session (a service account's credentials always have a scope), sets up a service account, as
         // `member`: what they set up would outlive a credential with a scope.
         if (!service || (role !== null && role !== 'member') || scope !== null || !onSession(caller)) return { refused: 'no_access' };
-        // A row written behind the vault is not a row that is absent: a grant of theirs, a role, a place, the setting.
-        if (Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
         const places: Place[] = [
           ...seen.everyProject.map((row) => ({ projectId: row.id })),
           ...seen.everyEnvironment.map((row) => ({ projectId: row.projectId, environmentId: row.id, environmentSlug: row.slug })),
         ];
         if (!setsUpServices(withRoles(caller, seen.defined), settingOf(seen), places)) return { refused: 'no_access' };
+        // A row written behind the vault is not a row that is absent: a place's protection edited, a role, the setting. Told
+        // only to whoever may by the rows the vault wrote: anyone else is refused as they would be without it.
+        if (Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
       }
       // A row the vault did not write is neither someone new nor a member to change: added over it, the write would fail.
       if (unsealed.member > 0) return { refused: 'tampered' };
@@ -312,10 +313,10 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
       const caller = managing(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       if (!runs(caller)) {
-        if (!principal.startsWith('token:') || !onSession(caller)) return { refused: 'no_access' };
-        // A row written behind the vault is not a row that is absent: a grant of the service's hidden, its place's protection edited.
+        if (!principal.startsWith('token:') || !managesSealed(caller, seen, principal, at)) return { refused: 'no_access' };
+        // A row written behind the vault is not a row that is absent: a grant of the service's hidden, its place's protection
+        // edited. Told only to whoever manages it by the rows the vault wrote (`managesSealed`).
         if (Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
-        if (manages(caller, seen, unsealed, principal, at) !== true) return { refused: 'no_access' };
       }
       const [was] = seen.member;
       if (was === undefined || was.status !== 'active') return { refused: was === undefined ? 'not_a_member' : 'removed' };
@@ -460,8 +461,6 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
         if (!(environment === null ? allows(caller.holds, 'grant.manage', { projectId: project.id }) : caller.may('grant.manage', environment))) everywhere = false;
       }
       if (!everywhere && !(service && onSession(caller))) return { refused: 'no_access' };
-      // A row written behind the vault is not a row that is absent: a grant of the service's hidden, a role or a place's protection edited.
-      if (service && Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
       const [member] = seen.member;
       const admitting = admit && (member === undefined || member.status === 'removed');
       // The generation its grants are of: one admitted here is new, or in the one its removal moved on to.
@@ -472,10 +471,10 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
         const runner = runs(caller);
         const holder = withRoles(caller, seen.defined);
         const where = places.map(({ project, environment }): Place => (environment == null ? { projectId: project!.id } : { projectId: project!.id, environmentId: environment.id, environmentSlug: environment.slug }));
-        if (admitting) {
-          // Brought back by whoever removed it, or runs the instance: never past someone else's removal.
-          if (!runner && member !== undefined && member.statusChangedBy !== caller.principal) return { refused: 'no_access' };
-          if (!runner && !setsUpServices(holder, setting, where)) return { refused: 'no_access' };
+        // Admitted by a person on a session, who could set one up here; brought back by whoever removed it: never past
+        // someone else's removal. A service account's token that manages access sets up no other: it would outlive it.
+        if (admitting && !runner && (!onSession(caller) || (member !== undefined && member.statusChangedBy !== caller.principal) || !setsUpServices(holder, setting, where))) {
+          return { refused: 'no_access' };
         }
         if (!everywhere) {
           // They manage it: they could give it every grant it holds, the one at a place asked included, so taking one away is
@@ -487,6 +486,9 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
           if (!changes.every(({ role }, i) => role === null || givesService(holder, setting, role, where[i]!))) return { refused: 'no_access' };
         }
       }
+      // A row written behind the vault is not a row that is absent: a grant of the service's hidden, a role or a place's
+      // protection edited. Told only to whoever may by the rows the vault wrote: anyone else is refused as they would be without it.
+      if (service && Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
       // To whoever may change the member's grants at every place asked, what 0.14 told them of the member.
       if (!admitting) {
         if (member === undefined) return { refused: 'not_a_member' };

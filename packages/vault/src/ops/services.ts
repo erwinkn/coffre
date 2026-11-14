@@ -118,6 +118,19 @@ export function manages(caller: Asking, seen: ServiceSeen, unsealed: Unsealed<Re
   // service's token that holds `grant.manage` would make another's tokens, or a new one of its own past its revocation.
   if (!onSession(caller)) return false;
   if (unsealed.held + unsealed.places + unsealed.beside > 0) return 'tampered';
+  return managesSealed(caller, seen, member, at);
+}
+
+/**
+ * Whether the caller manages the service account `member` by the rows the
+ * vault wrote alone, as `manages` weighs them: a row written behind it is
+ * left out, which only lets them manage it more easily. So one who does not
+ * by these rows does not at all, and is told no more; one who does is
+ * refused `tampered` by the change while such a row is there.
+ */
+export function managesSealed(caller: Asking, seen: ServiceSeen, member: string, at: number): boolean {
+  if (runs(caller)) return true;
+  if (!onSession(caller)) return false;
   const account = serviceOf(seen, member, at);
   const setting = settingOf(seen);
   if (account === null || setting === null) return false;
