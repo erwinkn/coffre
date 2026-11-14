@@ -18,6 +18,8 @@ export type MemberRow = {
   scope: string | null;
   /** Whether their instance role holds anything where nothing is protected, as the instance's `roles` row defines it. */
   roleHolds: boolean;
+  /** Their instance role as the instance's `roles` row defines it: none, a role it no longer has. */
+  roleDefinition: Definition | null;
   /** The slug of each project the scope's text names, by id: the scope is parsed by the route, which reads only those it names. */
   scopeSlugs: Record<string, string>;
   statusChangedAt: string;
@@ -31,9 +33,12 @@ export type GrantRow = {
   /** Null for a grant on the whole project. */
   environment: PlaceRow['environments'][number] | null;
   role: string;
-  definition: { name: string; permissions: string[] } | null;
+  definition: Definition | null;
   expiresAt: string | null;
 };
+
+/** A role as its row defines it: what it holds, and what of that it holds in a protected environment. */
+export type Definition = { name: string; permissions: string[]; protected: string[] };
 
 type Raw = {
   id: string;
@@ -41,11 +46,14 @@ type Raw = {
   role: string;
   scope: string | null;
   role_holds: boolean | null;
+  role_name: string | null;
+  role_permissions: string[] | null;
+  role_protected: string[] | null;
   scope_slugs: Record<string, string> | null;
   status_changed_at: Date | string;
   status_changed_by: string;
   grants: {
-    project_id: string; project: string; role: string; expires_at: string | null; role_name: string | null; permissions: string[] | null;
+    project_id: string; project: string; role: string; expires_at: string | null; role_name: string | null; permissions: string[] | null; guarded: string[] | null;
     environment_id: string | null; environment: string | null; archived_at: string | null; protected: boolean | null; owner: string | null;
     parent_id: string | null; parent: string | null; parent_archived: boolean | null; parent_protected: boolean | null;
   }[] | null;
@@ -82,12 +90,12 @@ export async function members(
     db,
     sql`
       SELECT m.id, m.status, m.role, m.scope, m.status_changed_at, m.status_changed_by,
-        cardinality(ir.permissions) > 0 AS role_holds, scoped.slugs AS scope_slugs, held.grants
+        cardinality(ir.permissions) > 0 AS role_holds, ir.name AS role_name, ir.permissions AS role_permissions, ir.protected AS role_protected, scoped.slugs AS scope_slugs, held.grants
       FROM principals m
       LEFT JOIN roles ir ON ir.instance AND ir.id = m.role
       LEFT JOIN LATERAL (
         SELECT json_agg(json_build_object(
-          'project_id', gp.id, 'project', gp.slug, 'role', g.role, 'expires_at', g.expires_at, 'role_name', r.name, 'permissions', r.permissions,
+          'project_id', gp.id, 'project', gp.slug, 'role', g.role, 'expires_at', g.expires_at, 'role_name', r.name, 'permissions', r.permissions, 'guarded', r.protected,
           'environment_id', e.id, 'environment', e.slug, 'archived_at', e.archived_at, 'protected', e.protected, 'owner', e.owner,
           'parent_id', parent.id, 'parent', parent.slug, 'parent_archived', parent.archived_at IS NOT NULL, 'parent_protected', parent.protected
         ) ORDER BY gp.slug, e.slug NULLS LAST) AS grants
@@ -115,6 +123,7 @@ export async function members(
     role: row.role,
     scope: row.scope,
     roleHolds: row.role_holds === true,
+    roleDefinition: row.role_name === null ? null : { name: row.role_name, permissions: row.role_permissions ?? [], protected: row.role_protected ?? [] },
     scopeSlugs: row.scope_slugs ?? {},
     statusChangedAt: iso(row.status_changed_at),
     statusChangedBy: row.status_changed_by,
@@ -130,7 +139,7 @@ export async function members(
         parent: grant.parent_id === null ? null : { id: grant.parent_id, slug: grant.parent!, archived: grant.parent_archived === true, protected: grant.parent_protected === true },
       },
       role: grant.role,
-      definition: grant.role_name === null ? null : { name: grant.role_name, permissions: grant.permissions ?? [] },
+      definition: grant.role_name === null ? null : { name: grant.role_name, permissions: grant.permissions ?? [], protected: grant.guarded ?? [] },
       expiresAt: grant.expires_at === null ? null : iso(grant.expires_at),
     })),
   }));

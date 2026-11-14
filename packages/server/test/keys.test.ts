@@ -235,10 +235,12 @@ test("a key's versions: the newest twenty, then older ones a page at a time, nev
 });
 
 test('references into and out of a place, to whoever lists or manages either end', async () => {
-  type Reference = { holder: string; source: string; state: string; version: number | null; readers: null; canBreak: boolean; holderArchived: boolean };
+  type Reference = { holder: string; source: string; state: string; version: number | null; readers: string[] | null; canBreak: boolean; holderArchived: boolean };
   const references = async (label: string, path: string) => {
     const [[status, body], calls, statements] = await cost(() => call(label, 'GET', `/references?path=${encodeURIComponent(path)}`));
-    assert.deepEqual([status, calls, statements], [200, ['caller'], 1], JSON.stringify(body));
+    // Readers, for an access manager's alone, are one statement more.
+    const read = (body.references as Reference[] | undefined)?.some(({ readers }) => readers !== null) === true;
+    assert.deepEqual([status, calls, statements], [200, ['caller'], read ? 2 : 1], JSON.stringify(body));
     return (body.references as Reference[]).map(({ holder, source, state, version, readers, canBreak, holderArchived }) => [holder, source, state, version, readers, canBreak, holderArchived]);
   };
   // Billing's, by the end in market Ada lists; market's own.
@@ -263,6 +265,44 @@ test('references into and out of a place, to whoever lists or manages either end
     assert.deepEqual([refused(answer), calls, statements], [NO_ACCESS, ['caller'], 1], `${label} ${path}`);
   }
   for (const path of ['', 'a/b/c/d', 'Market', 'market/prod/1X']) assert.equal((await call('ada-cli', 'GET', `/references?path=${encodeURIComponent(path)}`))[0], 400, path);
+});
+
+test("who reads through a reference: the members who read its holder's environment, to whoever manages either project's access, at one statement more", async () => {
+  const [hal, ivy, jo, kim, max, rex] = [user('hal'), user('ivy'), user('jo'), user('kim'), user('max'), user('rex')];
+  const [market, billing] = [{ id: ids.market }, { id: ids.billing }];
+  const [staging, adas] = [{ id: ids.staging, projectId: ids.market }, { id: ids.adas, projectId: ids.market }];
+  await write(
+    world,
+    ...rows('secrets', secret(staging, 'SREF', { sourceId: ids.a }), secret(adas, 'MINE', { sourceId: ids.a })),
+    ...rows('roles', role(false, 'admin', ['secret.read', 'grant.manage']), role(false, 'manager', ['grant.manage'])),
+    // Hal administers billing, Ivy manages market's access and reads nothing, Max owns market alone; Jo's grant has ended,
+    // Kim's is from before a removal, Rex is removed. cv is a service account viewing market.
+    ...rows('principals', principal(hal), principal(ivy), principal(jo), principal(kim, { generation: 1 }), principal(max, { role: 'owner', scope: JSON.stringify({ projects: { only: [ids.market] }, environments: 'all' }) }), principal(rex, { status: 'removed' }), principal('token:cv')),
+    ...rows('grants',
+      grant(hal, 'admin', { project: billing }), grant(ivy, 'manager', { project: market }),
+      grant(jo, 'viewer', { project: market }, { expiresAt: new Date(Date.UTC(2020, 0, 1)) }), grant(kim, 'viewer', { project: market }), grant(rex, 'viewer', { project: market }), grant('token:cv', 'viewer', { project: market })),
+    ...rows('credentials', ...[hal, ivy].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who))),
+  );
+  const readers = async (label: string, path: string) => {
+    const [[status, body], calls, statements] = await cost(() => call(label, 'GET', `/references?path=${encodeURIComponent(path)}`));
+    const shown = body.references as { holder: string; readers: string[] | null }[];
+    assert.deepEqual([status, calls, statements], [200, ['caller'], shown.some((reference) => reference.readers !== null) ? 2 : 1], JSON.stringify(body));
+    return Object.fromEntries(shown.map(({ holder, readers }) => [holder, readers]));
+  };
+  // Prod's readers: by grant, a service account's too, and by an instance role whose scope takes market in. Staging is protected:
+  // a person who views market holds nothing there, a service account holds its role's other column, a maintainer's role holds its
+  // protected column. Ada's config is read by Ada alone.
+  const inMarket = { 'market/prod/R': [ci, cj, 'token:cv', ada, bo, cy, max], 'market/staging/SREF': [ci, cj, 'token:cv', bo, cy, max], 'market/prod-ada/MINE': [ada] };
+  const inBilling = { 'billing/prod/LINK': [cy, hal], 'billing/stale/DEAD': [cy, hal] };
+  // Ivy manages market's access: every reference with an end there, LINK's readers in billing too, as 0.14.7 showed them.
+  assert.deepEqual(await readers('ivy-cli', 'market'), { ...inBilling, ...inMarket });
+  // Hal manages billing's: its own references, whose sources are in market.
+  assert.deepEqual(await readers('hal-cli', 'billing'), inBilling);
+  assert.deepEqual(await readers('cy-cli', 'market/prod/A'), { 'billing/prod/LINK': inBilling['billing/prod/LINK'], 'market/prod-ada/MINE': inMarket['market/prod-ada/MINE'], 'market/prod/R': inMarket['market/prod/R'], 'market/staging/SREF': inMarket['market/staging/SREF'] });
+  // Anyone else is shown none, at one statement; so is a manager shown no reference.
+  assert.deepEqual(await readers('bo-cli', 'market/staging'), { 'market/staging/SREF': null });
+  assert.deepEqual(await readers('ada-cli', 'market/prod/A'), { 'billing/prod/LINK': null, 'market/prod-ada/MINE': null, 'market/prod/R': null, 'market/staging/SREF': null });
+  assert.deepEqual(await readers('ivy-cli', 'market/dev'), {});
 });
 
 test("what an environment lacks of its siblings' keys, and what its team dismissed", async () => {

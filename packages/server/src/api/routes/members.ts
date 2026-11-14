@@ -1,9 +1,10 @@
-import { administers, EVERYWHERE, inScope, isScope, normalScope, runsInstance, type Filter, type InstanceRole, type Permission, type Role, type Scope } from '@coffre/core/access';
+import type { Queryable } from '@coffre/db';
+import { administers, EVERYWHERE, inScope, isScope, normalScope, runsInstance, type Filter, type InstanceRole, type Permission, type Policy, type Role, type RoleDefinition, type Scope } from '@coffre/core/access';
 import { instanceRole, roleId, scopeInput, slug } from '@coffre/core/schemas';
 import type { AccessChange, Called } from '@coffre/core/vault';
 import { z } from 'zod';
 
-import { members, projectNamed, projectSlugs, type GrantRow, type MemberRow } from '../../db/queries/members.ts';
+import { members, projectNamed, projectSlugs, type Definition, type GrantRow, type MemberRow } from '../../db/queries/members.ts';
 import type { PlaceRow } from '../../db/queries/places.ts';
 import { can, canAnywhere, permissionsAt, placeOf, projectsReached, type Place } from '../caller.ts';
 import { changed } from '../change.ts';
@@ -104,6 +105,40 @@ function scopeView(scope: Scope, slugs: Record<string, string>): Scope {
 }
 
 const placeOfGrant = (grant: GrantRow): Place => placeOf(grant.project, grant.environment);
+
+/**
+ * Who reads each of these places, by name: the active members whose grants
+ * or instance role hold `secret.read` there, weighed by the rule the vault
+ * decides by (`can`), on what each holds as the vault would read it: their
+ * live grants, and the definitions of the roles they hold, from the rows,
+ * unchecked. A person holds a protected environment's column of their
+ * roles there, a service account the other one; a personal config is read
+ * by its owner alone. What a reference's `readers` show: it decides
+ * nothing, and no credential's scope narrows it. One statement, the grants
+ * on these places' projects alone, however many places.
+ */
+const definitionOf = (row: Definition): RoleDefinition => ({ name: row.name, description: '', permissions: row.permissions as Permission[], protected: row.protected as Permission[] });
+
+export async function readersAt(db: Queryable, who: Called, places: readonly Place[], now: Date): Promise<string[][]> {
+  if (places.length === 0) return [];
+  const rows = await members(db, { within: [...new Set(places.map((place) => place.projectId))], listed: 'held', roles: true, removed: false, scopes: false, now });
+  const holders = rows.map((row) => ({
+    principal: row.id,
+    holds: {
+      role: roleOf(row),
+      scope: standingOf(row),
+      grants: row.grants.map((grant) => ({ projectId: grant.project.id, environmentId: grant.environment?.id ?? null, role: grant.role as Role })),
+      // As the vault's answer about them would carry it: the roles they hold, no other, and every environment the instance protects.
+      policy: {
+        ...who.holds.policy,
+        roles: Object.fromEntries(row.grants.flatMap((grant) => (grant.definition === null ? [] : [[grant.role, definitionOf(grant.definition)]]))),
+        instanceRoles: Object.fromEntries(row.roleDefinition === null ? [] : [[row.role, definitionOf(row.roleDefinition)]]) as Policy['instanceRoles'],
+      },
+      service: typeOf(row.id) === 'service',
+    },
+  }));
+  return places.map((place) => holders.filter((holder) => can(holder, 'secret.read', place)).map((holder) => holder.principal));
+}
 
 /** By project, then environment, the project-wide grant after its environments. */
 function byPlace(a: GrantRow, b: GrantRow): number {
