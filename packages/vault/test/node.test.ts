@@ -5,6 +5,7 @@ import { Agent, createServer, request } from 'node:http';
 import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { inspect } from 'node:util';
 
 import { KekCancelledError, KekRefusedError, KekUnavailableError } from '@coffre/core/kek';
 import { isUnavailable, isUnreachable } from '@coffre/db/dialect';
@@ -49,6 +50,38 @@ test('the vault leaves an idle connection open for the server to reuse: it never
     assert.equal(await call(vault.socket, agent), first, 'the next call went on a new connection');
   } finally {
     agent.destroy();
+    await vault.close();
+    await db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a body that is no JSON is 400, and its words, which JSON quotes, never reach the log', async (t) => {
+  const db = await openTestVault();
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-socket-'));
+  const vault = await serveVault({
+    socket: join(dir, 'vault.sock'),
+    database: db.db,
+    kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') },
+    owners: ['root@acme.example'],
+  }, { wake: () => {} });
+  const logged: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => void logged.push(args));
+  try {
+    for (const body of ['coffre-canary', '{"coffre-canary": 1}']) {
+      const answer = await new Promise<{ status?: number; text: string }>((resolve, reject) => {
+        const req = request({ socketPath: vault.socket, method: 'POST', path: '/use', headers: { 'content-type': 'application/json' } }, (res) => {
+          let text = '';
+          res.on('data', (chunk) => (text += chunk));
+          res.on('end', () => resolve({ status: res.statusCode, text }));
+        });
+        req.on('error', reject);
+        req.end(body);
+      });
+      assert.deepEqual(answer, { status: 400, text: JSON.stringify({ error: 'the arguments must be a JSON array' }) }, body);
+    }
+    assert.ok(!inspect(logged, { depth: null }).includes('coffre-canary'), 'the body in the log');
+  } finally {
     await vault.close();
     await db.close();
     rmSync(dir, { recursive: true, force: true });

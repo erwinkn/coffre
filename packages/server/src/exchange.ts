@@ -28,7 +28,7 @@ import { presented } from './auth.ts';
 import { issuerBindings, type IssuerBinding } from './db/queries/bindings.ts';
 import { environmentPaths } from './db/queries/places.ts';
 import { errorResponse, jsonResponse, readLimitedJson } from './http.ts';
-import { logged } from './logged.ts';
+import { logged } from '@coffre/db/dialect';
 import type { CoffreRuntime } from './runtime.ts';
 import { dpopToken, provenSession, SessionRefused, sessionStopped, signedUrl, withNonce } from './sessions.ts';
 import { checkAwsRequest, readStsAnswer, stsFetch, StsUnavailable } from './workloads/aws.ts';

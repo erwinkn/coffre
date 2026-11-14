@@ -35,7 +35,7 @@ import { migrateDatabase } from '@coffre/db/migrate';
 import { runScheduled, settleKey, walkAuditBacklog } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
 import { processGates } from './gate.ts';
-import { logged } from './logged.ts';
+import { logged } from '@coffre/db/dialect';
 import { upgrade } from './node-sockets.ts';
 import { createRuntime, type CoffreRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';

@@ -1,7 +1,7 @@
 import { open, seal as sealValue, type Envelope } from '@coffre/core/envelope';
 import { KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
-import { gaveUpCode } from '@coffre/db/dialect';
+import { gaveUpCode, logged } from '@coffre/db/dialect';
 import { later, laterRows } from '@coffre/db/later';
 import { bindings, environments, mcpApprovals, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
@@ -446,7 +446,7 @@ async function decided<P extends Parts, A, C = undefined>(vault: Running, operat
     try {
       said = operation.denied?.(seen, at, refusal);
     } catch (error) {
-      console.error('coffre: a refused change was not logged', error);
+      console.error('coffre: a refused change was not logged', logged(error));
     }
     return { refused: refusal.refused, said };
   };
@@ -680,7 +680,7 @@ async function deny(vault: Running, said: Denied): Promise<void> {
   try {
     await bounded(vault.db, sql`INSERT INTO log_pending (kept, body, mac) VALUES (${entry.kept}, ${entry.body}, decode(${entry.mac.toString('hex')}, 'hex'))`);
   } catch (error) {
-    console.error('coffre: a refused change was not logged', error);
+    console.error('coffre: a refused change was not logged', logged(error));
     // Forgotten, so that the next one is tried: unless a later one took its place meanwhile.
     if (vault.refused.get(mark)?.at === at) vault.refused.delete(mark);
     return;

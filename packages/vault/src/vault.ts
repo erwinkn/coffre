@@ -1,6 +1,7 @@
 import { keyCheckOf } from '@coffre/core/kek';
 import { PURPOSES, type About, type Answers, type Asked, type Change, type McpUnasked, type Presented, type Unasked, type Upstream, type UseInput, type Vault, type WorkloadsUnasked } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
+import { logged } from '@coffre/db/dialect';
 
 import type { ResolvedVaultConfig } from './config.ts';
 import { caller } from './caller.ts';
@@ -87,7 +88,7 @@ export type Deciding = Pick<Serving, 'workloads'> & { owners: readonly string[] 
 
 export function openVault(db: Database, prepared: PreparedVault, { wake, now = Date.now }: VaultOptions): Vault {
   // A wake-up that throws, or whose promise rejects, fails nothing: the write it tells of has committed, and its answer is owed.
-  const failed = (error: unknown) => console.error('coffre: the signer was not told of an entry', error);
+  const failed = (error: unknown) => console.error('coffre: the signer was not told of an entry', logged(error));
   const told = (hash: Buffer) => {
     try {
       void Promise.resolve(wake(hash)).catch(failed);

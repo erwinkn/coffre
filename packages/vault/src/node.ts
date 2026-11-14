@@ -24,6 +24,7 @@ import { Agent, createServer, request as httpRequest, type IncomingMessage } fro
 import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
+import { logged } from '@coffre/db/dialect';
 
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { failureOf } from './failure.ts';
@@ -71,12 +72,12 @@ export async function serveVault(config: NodeVaultConfig & { socket: string }, o
     };
     if (req.method !== 'POST' || !METHOD_NAMES.has(name)) return reply(404, { error: 'not a vault call' });
     try {
-      const args = JSON.parse(await readBody(req)) as unknown;
-      if (!Array.isArray(args)) return reply(400, { error: 'the arguments must be a JSON array' });
+      const args = argumentsOf(await readBody(req));
+      if (args === undefined) return reply(400, { error: 'the arguments must be a JSON array' });
       const result = await (vault[name as keyof Vault] as (...args: unknown[]) => Promise<unknown>)(...args);
       reply(200, result === undefined ? {} : { result });
     } catch (error) {
-      console.error(`vault ${name} failed`, error);
+      console.error(`vault ${name} failed`, logged(error));
       const { status, body } = failureOf(error);
       reply(status, body);
     }
@@ -141,6 +142,16 @@ export function connectVault(socket: string): Vault {
       req.end(body);
     });
   return Object.fromEntries(METHODS.map((name) => [name, call(name)])) as unknown as Vault;
+}
+
+/** A call's arguments, or none: JSON's own error would quote the body, which a log line must not. */
+function argumentsOf(body: string): unknown[] | undefined {
+  try {
+    const args = JSON.parse(body) as unknown;
+    return Array.isArray(args) ? args : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function readBody(stream: IncomingMessage): Promise<string> {

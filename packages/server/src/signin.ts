@@ -23,7 +23,7 @@ import { unadmitted, type Admission } from './behind-access.ts';
 import { waitingDeviceLogins } from './db/queries/signin.ts';
 import { apiCredential, isSameOrigin } from './fetch-api.ts';
 import { errorResponse, jsonResponse, readJson } from './http.ts';
-import { logged } from './logged.ts';
+import { logged } from '@coffre/db/dialect';
 import type { CoffreRuntime } from './runtime.ts';
 import { dpopToken, provenSession, SessionRefused, withNonce } from './sessions.ts';
 

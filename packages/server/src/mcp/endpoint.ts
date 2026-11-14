@@ -7,14 +7,13 @@
 // is first (`caller`): nothing here runs for a request without a good one.
 import { MCP_SCOPE_INFO, scopeString, type McpScope } from '@coffre/core/mcp';
 import { tokenKind } from '@coffre/core/identity';
-import { isUnavailable } from '@coffre/db/dialect';
+import { isUnavailable, logged } from '@coffre/db/dialect';
 import { z } from 'zod';
 
 import type { ApiContext } from '../api/context.ts';
 import { ApiError, keyServiceDown, toErrorBody } from '../api/errors.ts';
 import { bearerToken, presented } from '../auth.ts';
 import { errorResponse, jsonResponse, readLimitedJson } from '../http.ts';
-import { logged } from '../logged.ts';
 import type { CoffreRuntime } from '../runtime.ts';
 import { COFFRE_VERSION } from '../version.ts';
 import { resourceMetadataUrl } from './http.ts';

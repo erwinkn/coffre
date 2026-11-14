@@ -1,10 +1,11 @@
 // What an unhandled error leaves in the log: its message, and on Postgres
-// the fields that say what went wrong, but never the query's parameters,
-// which may hold a value. Logged as it was, an error showed only its stack
+// its code and the names it gives, but never its words or the query's
+// parameters, either of which may quote a value. Logged as it was, an error showed only its stack
 // on Workers. And what the request is told: an outage is 503 `unavailable`,
 // which says when to ask again; anything else is a bug's 500.
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { inspect } from 'node:util';
 
 import { openDatabase } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
@@ -28,22 +29,45 @@ function logs(t: { mock: { method: (object: Console, name: 'error', fn: (...args
 
 const failed = (work: () => Promise<unknown>) => work().then(() => assert.fail('the query ran'), (thrown: unknown) => thrown);
 
-test('an unhandled database error is logged with its message and what Postgres said, never its parameters', async (t) => {
-  const value = 'coffre-canary-not-for-the-log';
+test("an unhandled database error is logged with its query and Postgres's code, never its parameters", async (t) => {
+  // A parameter whose lines look like a stack's frames: the stack begins with the message, and so with it.
+  const value = 'coffre-canary-not-for-the-log\n    at private-request-value (frame.js:1:1)';
   const error = await failed(() => db.select({ v: sql`${value}` }).from(sql`no_such_table`));
+  assert.ok(String((error as Error).stack).includes('private-request-value'));
   const logged = logs(t);
   assert.deepEqual(toErrorBody(error), INTERNAL);
   assert.equal(logged.length, 1);
   const [label, line] = logged[0] as [string, Record<string, unknown>];
   assert.equal(label, 'unhandled API error');
-  assert.ok(!JSON.stringify(logged).includes(value), 'a parameter in the log');
+  assert.ok(!inspect(logged, { depth: null }).includes('coffre-canary'), 'a parameter in the log');
+  assert.ok(!inspect(logged, { depth: null }).includes('private-request-value'), 'a parameter in the stack');
   assert.match(String(line.message), /^Failed query: select \$1 from no_such_table$/);
   // The frames, which name this file, and not the message the stack begins with.
   assert.ok(typeof line.stack === 'string' && line.stack.includes('logged.test.ts'), 'no stack');
   assert.ok(!String(line.stack).includes('Failed query'), 'the stack repeats the message');
   const cause = line.cause as Record<string, unknown>;
   assert.deepEqual([cause.code, cause.severity, typeof cause.routine], ['42P01', 'ERROR', 'string']);
-  assert.match(String(cause.message), /relation "no_such_table" does not exist/);
+  assert.equal(cause.message, "Postgres's words are left out: they may quote a value");
+});
+
+test('a value Postgres quotes, a cast it could not make or a row a constraint refused, never reaches the log, nor one an error rebuilt across a call quotes', async (t) => {
+  const value = 'coffre-canary-cast';
+  const cast = await failed(() => db.execute(sql`SELECT ${value}::uuid`));
+  const twice = await failed(() => db.transaction(async (tx) => {
+    await tx.execute(sql`CREATE TEMPORARY TABLE kept (key text CONSTRAINT kept_key_unique UNIQUE) ON COMMIT DROP`);
+    await tx.execute(sql`INSERT INTO kept VALUES (${value}), (${value})`);
+  }));
+  // As the vault's errors reach the app across its call: their words, and Postgres's code, kept.
+  const rebuilt = [Object.assign(new Error(`invalid input syntax for type uuid: "${value}"`), { code: '22P02' }), new Error(`Failed query: select $1\nparams: ${value}`)];
+  // Each quotes the value, as it is: the log is what leaves it out.
+  for (const error of [cast, twice, ...rebuilt]) assert.ok(inspect(error, { depth: null }).includes(value));
+  const logged = logs(t);
+  for (const error of [cast, twice, ...rebuilt]) assert.deepEqual(toErrorBody(error), INTERNAL);
+  assert.equal(logged.length, 4);
+  assert.ok(!inspect(logged, { depth: null }).includes(value), 'a value in the log');
+  const [castLine, twiceLine, rebuiltLine, drizzleLine] = logged.map(([, line]) => line as Record<string, unknown>);
+  assert.deepEqual([(castLine!.cause as Record<string, unknown>).code, (twiceLine!.cause as Record<string, unknown>).constraint, rebuiltLine!.code], ['22P02', 'kept_key_unique', '22P02']);
+  assert.equal(drizzleLine!.message, 'Failed query: select $1');
 });
 
 test('a broken constraint is logged by its name and its table, and not the row that broke it', async (t) => {
@@ -76,6 +100,8 @@ test("a database that does not answer is 503 unavailable, the request's to ask a
   }
   // A lock waited on past its bound is an outage under a busy database, and a transaction held too long otherwise.
   assert.deepEqual(logged.map(([label]) => label), [...Array(4).fill('a dependency did not answer'), 'a statement gave up waiting']);
+  // What the words said, which the log leaves out, as a fixed word: 58000 alone is many a failure.
+  assert.deepEqual(logged.map(([, line]) => (line as { failure?: string }).failure), ['pool full', 'pool full', 'unreachable', 'pool full', 'gave up waiting']);
 
   // A query that is wrong is a bug, whatever its words, a parameter Drizzle quotes included.
   logged.length = 0;

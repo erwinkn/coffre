@@ -1,4 +1,5 @@
 import type { Database } from '@coffre/db';
+import { logged } from '@coffre/db/dialect';
 
 import { adopt, type Adopting } from './adopt.ts';
 import type { Key } from './rows.ts';
@@ -226,7 +227,7 @@ export class SignerHost {
         this.#failed = null;
       } catch (error) {
         this.#failed = { at: this.#on.now(), error: error instanceof Error ? error.message : String(error) };
-        console.error('coffre: the vault did not adopt its database, and every call is answered 503 adopting until it does', error);
+        console.error('coffre: the vault did not adopt its database, and every call is answered 503 adopting until it does', logged(error));
       }
       // It returned, done or not.
       this.#on.storage.kv.delete(ADOPTING);
@@ -307,7 +308,7 @@ export class SignerHost {
     } catch (error) {
       // A blank signer's, which failed to go on from the database (`#resume`): tried again as an adoption is, since a wrong vault key fails each try, and each reads every row.
       if (signer !== null && !signer.dead && signer.blank) next = now + ADOPT_AGAIN_MS;
-      console.error('coffre: a run of the signer failed, and the next tries again', error);
+      console.error('coffre: a run of the signer failed, and the next tries again', logged(error));
     }
     // Before anything is sent: an object stopped in the middle of an alert has its next run set. One alarm runs at a time, so a slow alert holds that run back, by `ALERT_MS` at most.
     await this.#by(next);
@@ -316,7 +317,7 @@ export class SignerHost {
     try {
       await this.#tell(signer, now);
     } catch (error) {
-      console.error('coffre: the signer could not send what it found, and tries again after its next run', error);
+      console.error('coffre: the signer could not send what it found, and tries again after its next run', logged(error));
     }
   }
 
@@ -353,7 +354,7 @@ export class SignerHost {
         await this.#send(alert);
       } catch (error) {
         if (found.length <= KEEP) throw error;
-        console.error(`coffre: an alert could not be sent, and ${found.length} findings waited for it. They are let go, and here is what it said:\n${alert.text}`, alert.findings, error);
+        console.error(`coffre: an alert could not be sent, and ${found.length} findings waited for it. They are let go, and here is what it said:\n${alert.text}`, alert.findings, logged(error));
         reached = false;
       }
       return reached;
