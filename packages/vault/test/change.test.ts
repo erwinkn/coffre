@@ -15,6 +15,7 @@ import { entryOf, type Said } from '../src/entry.ts';
 import { keyOf, nameOf, sealedBy, shapeOf, type Fresh, type Row, type Sealed } from '../src/rows.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 import { emptyDatabase, openTestVault, VAULT_URL } from './database.ts';
+import { credential } from './world.ts';
 
 const { bindings, credentials, deviceLogins, dismissedKeys, enrollmentCodes, environments, grants, identities, oauthClients, policy, principals, projects, roles, secrets } = schema;
 
@@ -270,20 +271,25 @@ test('a refusal writes nothing, and a change logs what it replaced', async () =>
   assert.equal(entryOf([keyOf(randomBytes(32))], logged), undefined);
 });
 
-test('a change leaves what only says when a row was last seen', async () => {
+test('a change leaves what only says when a row was last used, and nothing else: an account\'s last sign-in is a change\'s to write', async () => {
   const id = randomUUID();
+  const session = credential('ada-web', ada);
   const account: Fresh<typeof identities> = { id, provider: 'github', subject: '1', issuerHash: 'x', generation: 0, principal: ada, email: null, createdAt: at, createdBy: ada, lastSignInAt: null, revokedAt: null, revokedBy: null };
-  await done(writing(put(principals, member(ada, 'owner')), put(identities, account)));
-  const read = { account: part(identities, eq(identities.id, id)) };
+  await done(writing(put(principals, member(ada, 'owner')), put(identities, account), put(credentials, session)));
+  const read = { session: part(credentials, eq(credentials.id, session.id)), account: part(identities, eq(identities.id, id)) };
   const revoke = await prepare(vault, {
     read,
-    decide: ({ account: [found] }: Seen<typeof read>) => ({ writes: [put(identities, { ...account, revokedAt: at, revokedBy: ada }, found!)], entry: said('identity.revoke', ada), answer: null }),
+    decide: ({ session: [found] }: Seen<typeof read>) => ({ writes: [put(credentials, { ...session, revokedAt: at, revokedBy: ada }, found!)], entry: said('token.revoke', ada), answer: null }),
   });
-  // A sign-in between the read and the write moves the last sign-in on, with no change.
-  await vault.owner.update(identities).set({ lastSignInAt: at }).where(sql`id = ${id}`);
+  // A use between the read and the write moves the last use on, with no change.
+  await vault.owner.update(credentials).set({ lastUsedAt: at, lastUsedIp: '192.0.2.7' }).where(sql`id = ${session.id}`);
   assert.equal(await commit(vault, revoke as never), true, 'the MAC does not cover it');
-  const [found] = await seenOf(identities);
-  assert.deepEqual([found!.revokedBy, found!.lastSignInAt], [ada, at]);
+  const [found] = await seenOf(credentials);
+  assert.deepEqual([found!.revokedBy, found!.lastUsedAt, found!.lastUsedIp], [ada, at, '192.0.2.7']);
+  // Not so an account's last sign-in: moved on behind the vault, the row is no longer the vault's.
+  assert.equal((await seenOf(identities)).length, 1);
+  await vault.owner.update(identities).set({ lastSignInAt: at }).where(sql`id = ${id}`);
+  assert.deepEqual(await seenOf(identities), []);
 });
 
 test('a row is dropped only as it was read', async () => {

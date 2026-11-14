@@ -5,6 +5,7 @@ import type { CallerKind, CredentialScope, GrantPlace, Holdings, InstanceRole, P
 import type { AccessAnswers, AccessChanges } from './changes/access.ts';
 import type { PlacesAnswers, PlacesChanges } from './changes/places.ts';
 import type { SecretsAnswers, SecretsChanges } from './changes/secrets.ts';
+import type { SigninAnswers, SigninChanges, Unasked } from './changes/signin.ts';
 import type { BindingPolicy, Constraints } from './identity/index.ts';
 
 export type { CallerKind } from './access.ts';
@@ -45,14 +46,23 @@ export interface Vault {
    * Make a change: one operation, named as its log entry's action is, with
    * its input. All of it, or none.
    */
-  change<O extends Change['op']>(input: Presented & Extract<Change, { op: O }>): Promise<{ answer: Answers[O] } | Refused>;
+  change<O extends Change['op']>(input: Asked<O>): Promise<{ answer: Answers[O] } | Refused>;
 }
 
+/** Where a request came from, which every call carries. */
+export type Trace = {
+  /** The app's id for the request, for the log. */
+  request: string | null;
+  /** The address it came from, for the log, and for a workload's binding that names its sources. */
+  ip: string | null;
+};
+
 /**
- * What a request showed, which every call starts with. The app never says
- * who is asking: the vault finds the credential by its token.
+ * What a request showed, which every call but a change nobody asks starts
+ * with. The app never says who is asking: the vault finds the credential
+ * by its token.
  */
-export type Presented = {
+export type Presented = Trace & {
   /** The SHA-256 of the token the request presented, in lowercase hex. */
   token: string;
   /**
@@ -61,11 +71,14 @@ export type Presented = {
    * is its key's alone. Null with no proof.
    */
   proof: string | null;
-  /** The app's id for the request, for the log. */
-  request: string | null;
-  /** The address it came from, for the log, and for a workload's binding that names its sources. */
-  ip: string | null;
 };
+
+/**
+ * A change as the app sends it: its operation's input, with what the
+ * request showed, or for one nobody asks (`Unasked`), where it came from
+ * alone.
+ */
+export type Asked<O extends Change['op']> = O extends Change['op'] ? (O extends Unasked ? Trace : Presented) & Extract<Change, { op: O }> : never;
 
 export type UseInput = Presented & {
   /** The place, by its slugs. */
@@ -127,12 +140,13 @@ export type Refused = { refused: string };
  * Each area's are in a file of its own (`changes/`), with what each
  * answers once it is made.
  */
-export type Change = SecretsChanges | PlacesChanges | AccessChanges;
-export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers;
+export type Change = SecretsChanges | PlacesChanges | AccessChanges | SigninChanges;
+export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers & SigninAnswers;
 
 export type * from './changes/access.ts';
 export type * from './changes/places.ts';
 export type * from './changes/secrets.ts';
+export type * from './changes/signin.ts';
 
 // 0.14's contract, from here on: each type goes with the last of the server's code that names it.
 

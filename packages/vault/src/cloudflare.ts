@@ -19,7 +19,7 @@
  * change takes one in the database, so they share one log and one bulk
  * limit.
  */
-import type { Change, Presented, UseInput, Vault } from '@coffre/core/vault';
+import type { Asked, Change, Presented, UseInput, Vault } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
@@ -90,7 +90,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
 
   async use(input: UseInput) { return this.#call((vault) => vault.use(input)); }
   async caller(input: Presented) { return this.#call((vault) => vault.caller(input)); }
-  async change<O extends Change['op']>(input: Presented & Extract<Change, { op: O }>) { return this.#call((vault) => vault.change(input)); }
+  async change<O extends Change['op']>(input: Asked<O>) { return this.#call((vault) => vault.change(input)); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {

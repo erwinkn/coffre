@@ -380,6 +380,14 @@ DROP INDEX identities_active_subject;
 ALTER TABLE identities DROP CONSTRAINT identities_auth_mac_check, DROP COLUMN auth_mac, DROP COLUMN active_subject;
 --> statement-breakpoint
 
+-- An account bound before its member's last removal is dead. 0.14 revoked it in a transaction after the removal's, and
+-- again at the member's next sign-in, so one that failed in between left it live. 0.16 is to revoke it with the removal,
+-- and at no other time, and one left live would hold the account for good: nobody could sign in with it again.
+UPDATE identities AS account SET revoked_at = now(), revoked_by = 'system:signin'
+  FROM principals AS member
+ WHERE member.id = account.principal AND account.generation < member.generation AND account.revoked_at IS NULL;
+--> statement-breakpoint
+
 ALTER TABLE service_bindings RENAME TO bindings;
 --> statement-breakpoint
 DROP INDEX service_bindings_principal_idx;
