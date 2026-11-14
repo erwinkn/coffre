@@ -1,8 +1,9 @@
 // A member's tokens, handles and ending a session over HTTP on the 0.16
 // contract (docs/design/0.16.md, "Signing in from the server"): making or
-// ending one is one `change` and no statement; a member's list is one call
-// to the vault (`caller`) and one statement, in 0.14.7's shapes. Cases from
-// 0.14.7's signin-service and personal-tokens tests where they still hold.
+// ending one is one `change`; a member's list is scoped by the vault's
+// answer about its caller, in 0.14.7's shapes. What each costs,
+// request-cost.test.ts holds. Cases from 0.14.7's signin-service and
+// personal-tokens tests where they still hold.
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
@@ -111,10 +112,9 @@ const listed = async (bearer: string, member: string): Promise<[Listed[], string
   return [body.tokens as Listed[], calls, statements];
 };
 
-test("a service account's live tokens and its workloads' sessions, newest first, to whoever manages it and to itself: one call to the vault and one statement", async () => {
+test("a service account's live tokens and its workloads' sessions, newest first, to whoever manages it and to itself", async () => {
   for (const bearer of ['root-cli', 'bo-cli', 'ci-token']) {
-    const [tokens, calls, statements] = await listed(bearer, ci);
-    assert.deepEqual([calls, statements], [['caller'], 1], bearer);
+    const [tokens] = await listed(bearer, ci);
     // Never one revoked, expired, or a CI run's from its binding; each place of a scope by path, those still there.
     assert.deepEqual(tokens.map((token) => token.id), [ids.ciPod, ids.ciToken], bearer);
     // As stored, but for its own use, which a request on it records.
@@ -152,8 +152,7 @@ test("who manages a service account is weighed inside the instance's setting: ou
 
 test("a person's personal tokens and handles, to them on a session of theirs and to whoever runs the instance; a personal token lists none", async () => {
   for (const bearer of ['bo-cli', 'root-cli']) {
-    const [tokens, calls, statements] = await listed(bearer, bo);
-    assert.deepEqual([calls, statements], [['caller'], 1]);
+    const [tokens] = await listed(bearer, bo);
     // Made at the same instant: by id after.
     assert.deepEqual(tokens.map((token) => [token.id, token.scope]), [[ids.boPat, { 'market/dev': 'viewer' }], [ids.boHandle, {}]].sort(([a], [b]) => ((a as string) < (b as string) ? -1 : 1)));
   }
@@ -178,10 +177,9 @@ test("an instance role with no row, or one written behind the vault, is no role:
   }
 });
 
-test('a personal token made by its person on a session: drawn by the app, one change and no statement, and it signs in', async () => {
-  const [[status, body], calls, statements] = await cost(() => call('bo-cli', 'POST', `/members/${bo}/tokens`, { label: ' script ', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } }));
+test('a personal token made by its person on a session: drawn by the app, and it signs in', async () => {
+  const [status, body] = await call('bo-cli', 'POST', `/members/${bo}/tokens`, { label: ' script ', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
   assert.equal(status, 200, JSON.stringify(body));
-  assert.deepEqual([calls, statements], [['change'], 0]);
   const { id, token, expiresAt, scope } = body as { id: string; token: string; expiresAt: string; scope: Record<string, string> };
   assert.match(token, /^coffre_pat_[A-Za-z0-9_-]{43}$/);
   assert.deepEqual(scope, { 'market/dev': 'viewer' });
@@ -234,10 +232,9 @@ test("0.14.7's preview of a token (`?dryRun=1`) is not served yet, and makes not
   assert.equal((await listed('root-cli', ci))[0].length, before);
 });
 
-test("a service's token, made by whoever manages it: its scope, or every grant it holds; one change and no statement", async () => {
-  const [[status, body], calls, statements] = await cost(() => call('bo-cli', 'POST', `/members/${ci}/tokens`, { label: null, expiresInDays: 30 }));
+test("a service's token, made by whoever manages it: its scope, or every grant it holds", async () => {
+  const [status, body] = await call('bo-cli', 'POST', `/members/${ci}/tokens`, { label: null, expiresInDays: 30 });
   assert.equal(status, 200, JSON.stringify(body));
-  assert.deepEqual([calls, statements], [['change'], 0]);
   assert.match(body.token as string, /^coffre_svc_[A-Za-z0-9_-]{43}$/);
   assert.deepEqual(body.scope, { 'market/dev': 'developer' });
   assert.ok(Math.abs(Date.parse(body.expiresAt as string) - Date.now() - 30 * 86_400_000) < 60_000);
@@ -255,9 +252,8 @@ test("a service's token, made by whoever manages it: its scope, or every grant i
   assert.deepEqual(app.calls, []);
 });
 
-test("ending a member's token: theirs, by whoever manages the account or runs the instance, and once; one change and no statement", async () => {
-  const [answer, calls, statements] = await cost(() => call('bo-cli', 'DELETE', `/members/${ci}/tokens/${ids.ciToken}`));
-  assert.deepEqual([answer, calls, statements], [[200, { revoked: true }], ['change'], 0]);
+test("ending a member's token: theirs, by whoever manages the account or runs the instance, and once", async () => {
+  assert.deepEqual(await call('bo-cli', 'DELETE', `/members/${ci}/tokens/${ids.ciToken}`), [200, { revoked: true }]);
   assert.equal((await call('ci-token', 'GET', '/me'))[0], 401);
   // Ended already, not ci's, not Bo's to end, or no credential at all: one answer.
   for (const [bearer, member, id] of [['bo-cli', ci, ids.ciToken], ['bo-cli', ops, ids.ciPod], ['cy-cli', ci, ids.ciPod], ['bo-cli', ci, ids.boPat], ['root-cli', ci, '00000000-0000-4000-8000-000000000000']] as const) {
@@ -270,10 +266,9 @@ test("ending a member's token: theirs, by whoever manages the account or runs th
   assert.deepEqual(refused(await call('bo-cli', 'DELETE', `/members/${ci}/tokens/not-an-id`)), [400, 'bad_request', undefined]);
 });
 
-test('a handle: made by a person on a session or a personal token of theirs, for the proxy, and ended by them; one change each', async () => {
-  const [[status, body], calls, statements] = await cost(() => call('bo-cli', 'POST', '/handles', { label: 'run', paths: ['market/dev'] }));
+test('a handle: made by a person on a session or a personal token of theirs, for the proxy, and ended by them', async () => {
+  const [status, body] = await call('bo-cli', 'POST', '/handles', { label: 'run', paths: ['market/dev'] });
   assert.equal(status, 200, JSON.stringify(body));
-  assert.deepEqual([calls, statements], [['change'], 0]);
   assert.match(body.token as string, /^coffre_use_[A-Za-z0-9_-]{43}$/);
   // Bo reads dev: viewer there, which reads and uses, and writes nothing.
   assert.deepEqual(body.scope, { 'market/dev': 'viewer' });
@@ -297,9 +292,8 @@ test('a handle: made by a person on a session or a personal token of theirs, for
   assert.deepEqual(app.calls, []);
 });
 
-test("ending a session: the caller's own, or anyone's to whoever runs the instance; one change and no statement", async () => {
-  const [answer, calls, statements] = await cost(() => call('bo-cli', 'DELETE', `/sessions/${ids.cyCli}`));
-  assert.deepEqual([refused(answer), calls, statements], [[404, 'not_found', 'unknown_credential'], ['change'], 0]);
+test("ending a session: the caller's own, or anyone's to whoever runs the instance", async () => {
+  assert.deepEqual(refused(await call('bo-cli', 'DELETE', `/sessions/${ids.cyCli}`)), [404, 'not_found', 'unknown_credential']);
   // An id in capitals is the same id.
   assert.deepEqual(await call('root-cli', 'DELETE', `/sessions/${ids.cyCli!.toUpperCase()}`), [200, { revoked: true }]);
   assert.equal((await call('cy-cli', 'GET', '/me'))[0], 401);

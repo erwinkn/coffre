@@ -1,8 +1,8 @@
 // The instance's roles and settings over HTTP on the 0.16 contract
-// (docs/design/0.16.md, "The server"), in 0.14.7's shapes: the list, one call
-// to the vault (`caller`) and one statement; a change, one `change` and no
-// statement; a change weighed first, `caller` and three, and made as weighed.
-// Cases from 0.14.7's roles-api and instance-roles tests where they still hold.
+// (docs/design/0.16.md, "The server"), in 0.14.7's shapes: the list, a
+// change, and a change weighed first and made as weighed. What each costs,
+// request-cost.test.ts holds. Cases from 0.14.7's roles-api and
+// instance-roles tests where they still hold.
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
@@ -89,9 +89,8 @@ const stored = async () => JSON.stringify(await world.owner.execute(sql`SELECT i
 const developer = normalDefinition(ROLES.developer);
 const narrowed: RoleDefinition = { ...developer, permissions: ['secret.use', 'secret.write'] };
 
-test('every role, as the instance defines it, for any member: one call to the vault and one statement', async () => {
-  const [listed, calls, statements] = await cost(() => roles('bo-cli'));
-  assert.deepEqual([calls, statements], [['caller'], 1]);
+test('every role, as the instance defines it, for any member', async () => {
+  const listed = await roles('bo-cli');
   // Those that ship, in the order they ship, each with the grants that name it; the instance's, with the people who hold them.
   assert.deepEqual(listed.roles.map((role) => `${role.id} ${role.grants}`), ['viewer 1', 'contributor 0', 'developer 2', 'maintainer 0', 'access-manager 0', 'auditor 0', 'owner 0']);
   assert.deepEqual(listed.instanceRoles.map((role) => `${role.id} ${role.grants}`), ['member 2', 'auditor 0', 'developer 0', 'admin 2', 'owner 1']);
@@ -112,10 +111,10 @@ test('every role, as the instance defines it, for any member: one call to the va
   assert.deepEqual(now.roles[7], { id: 'release', ...release, builtin: false, edited: false, fixed: false, default: null, assignableToEnvironment: true, grants: 1 });
 });
 
-test('a change weighed is caller and three statements, and changes nothing; made with the revision that answered, it is one change and no statement', async () => {
+test('a change weighed says who would gain or lose what, and changes nothing; made with the revision that answered, it is made', async () => {
   const before = await stored();
-  const [[status, impact], calls, statements] = await cost(() => call('cy-cli', 'PUT', '/roles/developer?dryRun=1', narrowed));
-  assert.deepEqual([status, calls, statements], [200, ['caller'], 3]);
+  const [status, impact] = await call('cy-cli', 'PUT', '/roles/developer?dryRun=1', narrowed);
+  assert.equal(status, 200, JSON.stringify(impact));
   // Bo loses reading where nothing is protected, and ci, a service account, which holds the first column everywhere, at prod too.
   assert.deepEqual(impact, {
     impact: [
@@ -128,8 +127,7 @@ test('a change weighed is caller and three statements, and changes nothing; made
   assert.equal(await stored(), before);
   assert.deepEqual(app.calls.slice(-1), ['caller'], 'nothing asked of the vault but who calls');
 
-  const [made, madeCalls, madeStatements] = await cost(() => call('cy-cli', 'PUT', `/roles/developer?revision=${roleRevision(developer)}`, narrowed));
-  assert.deepEqual([made, madeCalls, madeStatements], [[200, { role: { id: 'developer', ...narrowed, builtin: true, edited: true, fixed: false, default: developer, assignableToEnvironment: true, grants: null } }], ['change'], 0]);
+  assert.deepEqual(await call('cy-cli', 'PUT', `/roles/developer?revision=${roleRevision(developer)}`, narrowed), [200, { role: { id: 'developer', ...narrowed, builtin: true, edited: true, fixed: false, default: developer, assignableToEnvironment: true, grants: null } }]);
   // Weighed from the role as it was: it changed since, so it is weighed again.
   assert.deepEqual(refused(await call('cy-cli', 'DELETE', `/roles/developer?revision=${roleRevision(developer)}`)), [409, 'conflict', 'policy_changed']);
   // With no revision, made from the role as it is: put back as it ships.
@@ -204,14 +202,14 @@ test(`a change is weighed across at most ${WEIGHED_MOST} roles, members, grants 
 
 test('roles defined, put back and deleted: a grant naming one an Owner made refuses its deletion, and one not there is not found', async () => {
   const change = (label: string, method: string, path: string, body?: unknown) => cost(() => call(label, method, path, body));
-  assert.deepEqual(await change('cy-cli', 'PUT', '/roles/release', release), [[200, { role: { id: 'release', ...release, builtin: false, edited: false, fixed: false, default: null, assignableToEnvironment: true, grants: null } }], ['change'], 0]);
+  assert.deepEqual((await change('cy-cli', 'PUT', '/roles/release', release))[0], [200, { role: { id: 'release', ...release, builtin: false, edited: false, fixed: false, default: null, assignableToEnvironment: true, grants: null } }]);
   assert.deepEqual((await call('cy-cli', 'PATCH', `/access/${eve}`, { market: 'release' }))[0], 200);
   assert.deepEqual(refused((await change('cy-cli', 'DELETE', '/roles/release'))[0]), [409, 'conflict', 'role_granted']);
   // Weighing it says the same, with how many.
   const [weighedDeletion] = await change('cy-cli', 'DELETE', '/roles/release?dryRun=1');
   assert.deepEqual([...refused(weighedDeletion), weighedDeletion[1].message], [409, 'conflict', 'role_granted', '1 grant names release: revoke it first']);
   assert.deepEqual((await call('cy-cli', 'PATCH', `/access/${eve}`, { market: null }))[0], 200);
-  assert.deepEqual(await change('cy-cli', 'DELETE', '/roles/release'), [[200, { role: null }], ['change'], 0]);
+  assert.deepEqual((await change('cy-cli', 'DELETE', '/roles/release'))[0], [200, { role: null }]);
   assert.deepEqual(refused((await change('cy-cli', 'DELETE', '/roles/release'))[0]), [404, 'not_found', undefined]);
   assert.deepEqual(refused((await change('cy-cli', 'DELETE', '/roles/release?dryRun=1'))[0]), [404, 'not_found', undefined]);
   // A role that ships takes nothing only a project has while a grant on an environment names it: Eve views market/prod.
@@ -262,15 +260,15 @@ test('an instance role whose row is gone, or not the vault\'s, is none: its hold
   }
 });
 
-test("the instance's settings: read by whoever runs it, caller and one statement, and set in one change and no statement", async () => {
+test("the instance's settings: read by whoever runs it, and set in one change", async () => {
   const everywhere = { projects: 'all', environments: 'all' };
-  assert.deepEqual(await cost(() => call('fay-cli', 'GET', '/settings')), [[200, { serviceAccounts: everywhere }], ['caller'], 1]);
+  assert.deepEqual(await call('fay-cli', 'GET', '/settings'), [200, { serviceAccounts: everywhere }]);
   for (const label of ['al-cli', 'bo-cli', 'cy-token']) assert.deepEqual(refused((await cost(() => call(label, 'GET', '/settings')))[0]), NO_ACCESS, label);
 
   // Set by slug, either filter left out is all, and answered as the row now holds it.
   const asked = { projects: { only: ['market', 'billing', 'market'] }, environments: { except: ['prod'] } };
   const set = { projects: { only: ['billing', 'market'] }, environments: { except: ['prod'] } };
-  assert.deepEqual(await cost(() => call('fay-cli', 'PUT', '/settings', { serviceAccounts: asked })), [[200, { serviceAccounts: set }], ['change'], 0]);
+  assert.deepEqual(await call('fay-cli', 'PUT', '/settings', { serviceAccounts: asked }), [200, { serviceAccounts: set }]);
   assert.deepEqual((await call('cy-cli', 'GET', '/settings'))[1], { serviceAccounts: set });
   assert.deepEqual((await call('cy-cli', 'PUT', '/settings', { serviceAccounts: { environments: { only: ['dev'] } } }))[1], { serviceAccounts: { projects: 'all', environments: { only: ['dev'] } } });
   // A project renamed is shown by its slug now; one deleted, not at all.

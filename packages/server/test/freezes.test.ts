@@ -1,7 +1,8 @@
 // Freezes over HTTP on the 0.16 contract (docs/design/workload-access.md,
 // section 8.2; docs/design/0.16.md, "The server"): a workload's use frozen
-// and the freeze lifted, each one change of the vault's and no statement,
-// the target in any spelling `freezeTarget` takes and answered in its one.
+// and the freeze lifted, each one change of the vault's, the target in any
+// spelling `freezeTarget` takes and answered in its one. What each costs,
+// request-cost.test.ts holds.
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
@@ -61,9 +62,9 @@ const lift = (label: string, target: string) => cost(() => call(label, 'DELETE',
 const frozenAt = async (table: 'principals' | 'bindings' | 'credentials', id: string) =>
   (await rowsOf<{ frozen_at: Date | null }>(world.owner, sql`SELECT frozen_at FROM ${sql.identifier(table)} WHERE id::text = ${id}`))[0]?.frozen_at ?? null;
 
-test("a service account's manager freezes it, and lifts the freeze: one change and no statement each, the target in its one spelling", async () => {
-  const [[status, body], calls, statements] = await freeze('bo-cli', 'service:ci');
-  assert.deepEqual([status, body.target, calls, statements], [200, ci, ['change'], 0]);
+test("a service account's manager freezes it, and lifts the freeze, the target in its one spelling", async () => {
+  const [[status, body]] = await freeze('bo-cli', 'service:ci');
+  assert.deepEqual([status, body.target], [200, ci]);
   assert.equal(typeof body.frozenAt, 'string');
   assert.ok((await frozenAt('principals', ci)) !== null);
   // Frozen again, it keeps its time.

@@ -1,7 +1,6 @@
 // Projects and environments over HTTP on the 0.16 contract (docs/design/0.16.md,
-// "The server"): each change one call to the vault and no statement of the app,
-// each list one call and a fixed number of statements, scoped by the vault's
-// answer about its caller.
+// "The server"): each change one of the vault's, each list scoped by the
+// vault's answer about its caller. What each costs, request-cost.test.ts holds.
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
@@ -93,9 +92,9 @@ const params = (query: unknown) => new PgDialect().sqlToQuery(query as SQL).para
 type Listed = { slug: string; archivedAt: string | null; folder: string | null; permissions: string[]; secretCount: number | null; environments: { slug: string; accessible: boolean; parent: string | null; protected: boolean; unprotectable: boolean; personal: boolean; details: { archivedAt: string | null; secretCount: number | null } | null }[] };
 const listed = async (label: string) => (await call(label, 'GET', '/projects'))[1].projects as Listed[];
 
-test('the projects list is one call to the vault and two statements, scoped by its answer, and stays so however much there is', async () => {
-  const [[status, body], calls, statements] = await cost(() => call('bo-cli', 'GET', '/projects'));
-  assert.deepEqual([status, calls, statements], [200, ['caller'], 2], JSON.stringify(body));
+test("the projects list is scoped by the vault's answer about its caller, however much there is", async () => {
+  const [status, body] = await call('bo-cli', 'GET', '/projects');
+  assert.equal(status, 200, JSON.stringify(body));
   const [market] = body.projects as Listed[];
   assert.deepEqual({ ...market, environments: undefined }, { slug: 'market', name: 'market', archivedAt: null, folder: 'Payments', permissions: ['secret.read', 'secret.write', 'environment.manage', 'project.manage'], secretCount: 4, environments: undefined });
   // Not Ada's personal config: hers alone. A fork's count is of the keys it resolves to: its own, and those of prod it did not dismiss.
@@ -133,15 +132,11 @@ test('the projects list is one call to the vault and two statements, scoped by i
   const [stewarded] = await listed('gus-cli');
   assert.deepEqual([stewarded!.secretCount, stewarded!.environments.map((at) => [at.slug, at.accessible, at.details?.secretCount, at.details === null])], [null, [['fork', false, null, false], ['old', false, null, false], ['prod', false, null, false], ['staging', false, null, false]]]);
 
-  // Grown: forty more projects, each of three environments and five keys. The same calls, and the same statements.
+  // Grown: forty more projects, each of three environments and five keys, his to view.
   const more = Array.from({ length: 40 }, (_, n) => project(`p${n}`));
   const places = more.flatMap((at) => ['dev', 'staging', 'prod'].map((slug) => environment(at, slug)));
   await write(world, ...rows('projects', ...more), ...rows('environments', ...places), ...rows('secrets', ...places.flatMap((at) => ['K1', 'K2', 'K3', 'K4', 'K5'].map((key) => secret(at, key)))), ...rows('grants', ...more.map((at) => grant(bo, 'viewer', { project: at }))));
   world.memory.callers.clear();
-  for (const label of ['bo-cli', 'cy-cli', 'ed-cli']) {
-    const [[grown], again, count] = await cost(() => call(label, 'GET', '/projects'));
-    assert.deepEqual([grown, again, count], [200, ['caller'], 2], label);
-  }
   assert.equal((await listed('bo-cli')).length, 41);
   assert.equal((await listed('bo-cli')).find((at) => at.slug === 'p7')!.secretCount, 5);
 });
@@ -151,8 +146,8 @@ test("a credential scoped to one environment narrows the lists to it, however mu
   const scoped = (normal: string[]) => JSON.stringify([{ projectId: ids.market, environmentId: ids.prod, role: 'owner', ...(normal.length === 0 ? {} : { permissions: { normal, protected: normal } }) }]);
   await write(world, ...rows('credentials', credential('cy-prod', cy, { kind: 'personal', scope: scoped(['secret.read', 'secret.write']) }), credential('cy-bad', cy, { kind: 'personal', scope: scoped([]) })));
   assert.deepEqual(await listed('cy-bad'), []);
-  const [[status, body], calls, statements] = await cost(() => call('cy-prod', 'GET', '/projects'));
-  assert.deepEqual([status, calls, statements], [200, ['caller'], 2], JSON.stringify(body));
+  const [status, body] = await call('cy-prod', 'GET', '/projects');
+  assert.equal(status, 200, JSON.stringify(body));
   const projects = body.projects as Listed[];
   assert.deepEqual(projects.map((at) => [at.slug, at.permissions, at.secretCount]), [['market', [], 2]]);
   assert.deepEqual(projects[0]!.environments.map(({ slug, accessible, unprotectable, details }) => [slug, accessible, unprotectable, details?.secretCount ?? null]), [['fork', false, false, null], ['old', false, false, null], ['prod', true, false, 2], ['staging', false, false, null]]);
@@ -171,8 +166,8 @@ test("a personal config as deep as a chain goes counts each key its chain resolv
   const bos = environment(made.market, 'f3-bo', { parentId: f3.id, owner: bo });
   const restored = { ...dismissed(f2, 'B'), restoredAt: new Date(0), restoredBy: dismissed(f2, 'B').dismissedBy };
   await write(world, ...rows('environments', f2, f3, bos), ...rows('secrets', secret(f2, 'E'), secret(bos, 'MINE'), secret(bos, 'A', { archivedAt: new Date(0) })), ...rows('dismissedKeys', dismissed(f2, 'D'), restored, dismissed(bos, 'E')));
-  const [[status, body], calls, statements] = await cost(() => call('bo-cli', 'GET', '/projects'));
-  assert.deepEqual([status, calls, statements], [200, ['caller'], 2], JSON.stringify(body));
+  const [status, body] = await call('bo-cli', 'GET', '/projects');
+  assert.equal(status, 200, JSON.stringify(body));
   const [market] = body.projects as Listed[];
   // f2 and f3: prod's A (fork's override archived, its dismissal restored) and f2's E; D dismissed at f2, B at fork, which a restored dismissal of f2's does not undo.
   // Bo's config: MINE, and prod's A, four up, its own A archived; E dismissed.
@@ -186,10 +181,9 @@ test('an archived project is listed to whoever runs the instance or manages it; 
   assert.deepEqual((await listed('ada-cli')).map((at) => at.slug), []);
   const [kept] = await listed('bo-cli');
   assert.deepEqual([kept!.slug, kept!.archivedAt === null, kept!.secretCount], ['market', false, null]);
-  // A caller with nothing anywhere: no project, and one statement.
+  // A caller with nothing anywhere: no project.
   await write(world, ...rows('principals', principal(user('fay')), principal(user('hal'), { role: 'auditor' })), ...rows('credentials', credential('fay-cli', user('fay')), credential('hal-cli', user('hal'))));
-  const [[, none], calls, statements] = await cost(() => call('fay-cli', 'GET', '/projects'));
-  assert.deepEqual([none.projects, calls, statements], [[], ['caller'], 1]);
+  assert.deepEqual((await listed('fay-cli')), []);
   // Hal's role reaches every project, and holds something in market's staging alone: market, archived, is not his to see, and billing holds nothing of his.
   assert.deepEqual((await listed('hal-cli')).map((at) => at.slug), []);
   await world.owner.execute(sql`UPDATE projects SET archived_at = NULL WHERE slug = 'market'`);
@@ -199,8 +193,8 @@ test('an archived project is listed to whoever runs the instance or manages it; 
 });
 
 test("a project's personal configs, to whoever manages its environments: whose, of what, and their keys by name", async () => {
-  const [[status, body], calls, statements] = await cost(() => call('bo-cli', 'GET', '/personal/market'));
-  assert.deepEqual([status, calls, statements], [200, ['caller'], 1], JSON.stringify(body));
+  const [status, body] = await call('bo-cli', 'GET', '/personal/market');
+  assert.equal(status, 200, JSON.stringify(body));
   assert.deepEqual(body.configs, [
     { owner: ada, of: 'prod', slug: 'prod-ada', keys: ['OWN'], archived: false, createdAt: '2026-11-13T09:00:00.000Z' },
     { owner: dee, of: 'prod', slug: 'prod-dee', keys: [], archived: false, createdAt: '2026-11-13T09:00:00.000Z' },
@@ -213,9 +207,8 @@ test("a project's personal configs, to whoever manages its environments: whose, 
   assert.deepEqual((await call('cy-cli', 'GET', '/personal/billing'))[1], { configs: [] });
 });
 
-test('a project is made by one call to the vault and no statement; one there already is refused', async () => {
-  const [[status, body], calls, statements] = await cost(() => call('cy-cli', 'PUT', '/projects/shop', { name: 'Shop' }));
-  assert.deepEqual([status, body, calls, statements], [200, { project: { slug: 'shop', name: 'shop', archivedAt: null }, created: true }, ['change'], 0]);
+test('a project is made; one there already is refused', async () => {
+  assert.deepEqual(await call('cy-cli', 'PUT', '/projects/shop', { name: 'Shop' }), [200, { project: { slug: 'shop', name: 'shop', archivedAt: null }, created: true }]);
   assert.deepEqual(await projectRow('shop'), { slug: 'shop', archived: false, folder: null });
   assert.deepEqual(refused(await call('cy-cli', 'PUT', '/projects/shop')), [409, 'conflict', 'exists']);
   // shelf is archived, and there all the same.
@@ -228,8 +221,7 @@ test('a project is made by one call to the vault and no statement; one there alr
 });
 
 test('an environment, an inheriting fork and a personal config are made by one call each; a fork that copies is not served', async () => {
-  const [[status, body], calls, statements] = await cost(() => call('bo-cli', 'PUT', '/projects/market/qa'));
-  assert.deepEqual([status, body, calls, statements], [200, { environment: { slug: 'qa', name: 'qa', archivedAt: null, protected: false }, created: true, forked: null }, ['change'], 0]);
+  assert.deepEqual(await call('bo-cli', 'PUT', '/projects/market/qa'), [200, { environment: { slug: 'qa', name: 'qa', archivedAt: null, protected: false }, created: true, forked: null }]);
   // A fork of staging is protected as staging is, from its first moment.
   assert.deepEqual((await call('bo-cli', 'PUT', '/projects/market/hotfix', { from: 'staging', inherit: true }))[1], { environment: { slug: 'hotfix', name: 'hotfix', archivedAt: null, protected: true }, created: true, forked: { from: 'staging', keys: 0, references: 0, copied: [], inherits: true } });
   assert.deepEqual(await environmentRow('hotfix'), { slug: 'hotfix', archived: false, protected: true, parent: 'staging' });
@@ -266,8 +258,7 @@ test('an environment, an inheriting fork and a personal config are made by one c
 
 test('a project is re-slugged, archived, restored or filed by one call each, which answers it as it is left; one change a request', async () => {
   const patch = (label: string, body: unknown, slug = 'market') => call(label, 'PATCH', `/projects/${slug}`, body);
-  const [[status, body], calls, statements] = await cost(() => patch('bo-cli', { slug: 'shop' }));
-  assert.deepEqual([status, body, calls, statements], [200, { project: { slug: 'shop', name: 'shop', archivedAt: null, folder: 'Payments' } }, ['change'], 0]);
+  assert.deepEqual(await patch('bo-cli', { slug: 'shop' }), [200, { project: { slug: 'shop', name: 'shop', archivedAt: null, folder: 'Payments' } }]);
   // billing's LINK reads shop's A: archiving shop would stop that read. Once billing is archived, nothing reads it.
   assert.deepEqual(refused(await patch('bo-cli', { archived: true }, 'shop')), [409, 'conflict', 'referenced']);
   assert.match(String((await patch('bo-cli', { archived: true }, 'shop'))[1].message), /^shop: a reference held elsewhere/);
@@ -295,8 +286,7 @@ test('a project is re-slugged, archived, restored or filed by one call each, whi
 
 test('an environment is re-slugged, archived, restored, protected or unprotected by one call each; its protection off by an Owner of its project alone', async () => {
   const patch = (label: string, environment: string, body: unknown) => call(label, 'PATCH', `/projects/market/${environment}`, body);
-  const [[status, body], calls, statements] = await cost(() => patch('bo-cli', 'prod', { protected: true }));
-  assert.deepEqual([status, body, calls, statements], [200, { environment: { slug: 'prod', name: 'prod', archivedAt: null, protected: true } }, ['change'], 0]);
+  assert.deepEqual(await patch('bo-cli', 'prod', { protected: true }), [200, { environment: { slug: 'prod', name: 'prod', archivedAt: null, protected: true } }]);
   // Who maintains it protects it; only an Owner of market takes that off: Dee by her grant, Cy by the instance's role. Never a service account.
   assert.deepEqual(refused(await patch('bo-cli', 'prod', { protected: false })), NO_ACCESS);
   assert.deepEqual(refused(await patch('ci-token', 'prod', { protected: false })), NO_ACCESS);
@@ -331,8 +321,7 @@ test('an environment is re-slugged, archived, restored, protected or unprotected
 });
 
 test("a folder of projects is renamed or emptied whole, in one call, by who manages every project in it", async () => {
-  const [[status, body], calls, statements] = await cost(() => call('cy-cli', 'PATCH', '/folders/Payments', { name: 'Money' }));
-  assert.deepEqual([status, body, calls, statements], [200, { folder: 'Money', moved: ['billing', 'market'] }, ['change'], 0]);
+  assert.deepEqual(await call('cy-cli', 'PATCH', '/folders/Payments', { name: 'Money' }), [200, { folder: 'Money', moved: ['billing', 'market'] }]);
   // Bo manages market, not billing: half a folder renamed would be two folders.
   assert.deepEqual(refused(await call('bo-cli', 'PATCH', '/folders/Money', { name: 'Mine' })), NO_ACCESS);
   assert.deepEqual([(await projectRow('market'))!.folder, (await projectRow('billing'))!.folder], ['Money', 'Money']);

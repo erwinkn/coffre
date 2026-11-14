@@ -73,7 +73,7 @@ const lists = (who: Called, place: Place) => can(who, 'secret.read', place) || c
 type ReferenceState = 'live' | 'broken' | 'source_archived' | 'source_deleted' | 'source_is_reference' | 'source_empty';
 
 /** A reference as the API shows it: where it is held, what it reads, and whether it does. */
-type ReferenceView = {
+export type ReferenceView = {
   /** The secret that is the reference. */
   id: string;
   holder: string;

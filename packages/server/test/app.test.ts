@@ -16,6 +16,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 
 import { can, placeOf, projectsReached } from '../src/api/caller.ts';
+import { unservedRoutes } from '../src/api/routes/unserved.ts';
 import { openApp, PUBLIC_URL, SESSION } from './app-fixture.ts';
 
 const app = await openApp();
@@ -90,9 +91,9 @@ async function cost<T>(run: () => Promise<T>): Promise<[T, string[], number]> {
   return [result, app.calls.slice(calls), app.statements - statements];
 }
 
-test('a reveal is one call to the vault and no statement of the app: the token hashed, never looked up', async () => {
-  const [[status, body], calls, statements] = await cost(() => reveal('ada-cli', 'market/prod/DATABASE_URL'));
-  assert.deepEqual([status, calls, statements], [200, ['use'], 0], JSON.stringify(body));
+test("a reveal answers the values the vault opened, and the vault's entry names the request", async () => {
+  const [status, body] = await reveal('ada-cli', 'market/prod/DATABASE_URL');
+  assert.equal(status, 200, JSON.stringify(body));
   assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', values: { DATABASE_URL: 'postgres://märkt' }, sensitive: [], useOnly: [], version: null });
   assert.match(String(body.operationId), /^[0-9a-f-]{36}$/);
   // The vault's entry names the request by the id the app answered with.
@@ -184,10 +185,10 @@ test('what only the app sees of a request, it holds before the vault is asked: n
   assert.deepEqual(await tried(as(PERSONAL, body)), [200, undefined, undefined, ['use']]);
 });
 
-test('a write is one change of the vault and no statement of the app; what it refuses, and what is not served yet', async () => {
+test("a write answers each key's version; what it refuses, and what is not served yet", async () => {
   const patch = (label: string, path: string, values: unknown) => answered(app.request(`/api/secrets/${path}`, as(label, { method: 'PATCH', body: JSON.stringify(values) })));
-  const [[status, body], calls, statements] = await cost(() => patch('bo-cli', 'market/prod', { API_KEY: 'k1', FLAG: { value: 'off', sensitivity: 'plain' }, STRIPE_KEY: { value: 'sk_2', sensitivity: 'sensitive' } }));
-  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  const [status, body] = await patch('bo-cli', 'market/prod', { API_KEY: 'k1', FLAG: { value: 'off', sensitivity: 'plain' }, STRIPE_KEY: { value: 'sk_2', sensitivity: 'sensitive' } });
+  assert.equal(status, 200, JSON.stringify(body));
   assert.deepEqual(body.keys, { API_KEY: { version: 1, sensitivity: 'secret' }, FLAG: { version: 2, sensitivity: 'plain' }, STRIPE_KEY: { version: 2, sensitivity: 'sensitive' } });
   world.memory.reads.clear();
   assert.deepEqual((await reveal('bo-cli', 'market/prod'))[1].values, { API_KEY: 'k1', DATABASE_URL: 'postgres://märkt', FLAG: 'off' });
@@ -317,8 +318,8 @@ test("`coffre import` plans from a dry run: what is unchanged is not written aga
 test('a key made a reference, and a reference broken, is one change each: it reads its source, until broken', async () => {
   const patch = (label: string, path: string, values: unknown) => answered(app.request(`/api/secrets/${path}`, as(label, { method: 'PATCH', body: JSON.stringify(values) })));
   const unlink = (label: string, path: string) => cost(() => answered(app.request(`/api/secrets/${path}/reference`, as(label, { method: 'DELETE' }))));
-  const [[status, body], calls, statements] = await cost(() => patch('bo-cli', 'market/prod', { LINK: { ref: 'market/prod/DATABASE_URL' }, API_KEY: 'k1' }));
-  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  const [status, body] = await patch('bo-cli', 'market/prod', { LINK: { ref: 'market/prod/DATABASE_URL' }, API_KEY: 'k1' });
+  assert.equal(status, 200, JSON.stringify(body));
   assert.deepEqual(body.keys, { API_KEY: { version: 1, sensitivity: 'secret' }, LINK: { reference: 'market/prod/DATABASE_URL' } });
   world.memory.reads.clear();
   assert.deepEqual((await reveal('ada-cli', 'market/prod/LINK'))[1].values, { LINK: 'postgres://märkt' }, 'whoever reads here reads it');
@@ -334,8 +335,8 @@ test('a key made a reference, and a reference broken, is one change each: it rea
   }
 
   assert.deepEqual((await unlink('ada-cli', 'market/prod/LINK'))[0].slice(0, 1), [403], 'a viewer breaks nothing');
-  const [[broke, broken], did, ran] = await unlink('bo-cli', 'market/prod/LINK');
-  assert.deepEqual([broke, did, ran], [200, ['change'], 0], JSON.stringify(broken));
+  const [[broke, broken]] = await unlink('bo-cli', 'market/prod/LINK');
+  assert.equal(broke, 200, JSON.stringify(broken));
   assert.deepEqual({ ...broken, operationId: 'x' }, { operationId: 'x', reference: { holder: 'market/prod/LINK', source: 'market/prod/DATABASE_URL', state: 'broken' } });
   for (const path of ['market/prod/LINK', 'market/prod/DATABASE_URL', 'market/prod@me/LINK']) {
     const [[got, said]] = await unlink('bo-cli', path);
@@ -356,8 +357,8 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
     sql`SELECT s.key, s.folder, s.archived_at IS NOT NULL AS archived FROM secrets s JOIN environments e ON e.id = s.environment_id WHERE e.slug = 'prod' AND s.key IN ('DATABASE_URL', 'FLAG', 'OLD') ORDER BY s.key`)).map((row) => [row.key, [row.folder, row.archived]]));
 
   // `null` archives a key, beside a value written: one change.
-  const [[status, body], calls, statements] = await call('dee-cli', 'PATCH', 'secrets/market/prod', { DATABASE_URL: null, API_KEY: 'k1' });
-  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  const [[status, body]] = await call('dee-cli', 'PATCH', 'secrets/market/prod', { DATABASE_URL: null, API_KEY: 'k1' });
+  assert.equal(status, 200, JSON.stringify(body));
   assert.deepEqual(body.keys, { API_KEY: { version: 1, sensitivity: 'secret' }, DATABASE_URL: { archived: true } });
   world.memory.reads.clear();
   assert.deepEqual((await reveal('dee-cli', 'market/prod/DATABASE_URL')).map((part, i) => (i === 0 ? part : (part as Body).reason)), [404, 'unknown_key']);
@@ -365,8 +366,8 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
   assert.deepEqual((await call('bo-cli', 'PATCH', 'secrets/market/prod', { FLAG: null }))[0].map((part, i) => (i === 0 ? part : (part as Body).reason)), [403, 'no_access']);
 
   // One key: brought back and filed at once, or filed alone, archived or not.
-  const [[back, brought], did, ran] = await call('dee-cli', 'PATCH', 'secrets/market/prod/DATABASE_URL', { archived: false, folder: 'db' });
-  assert.deepEqual([back, did, ran], [200, ['change'], 0], JSON.stringify(brought));
+  const [[back, brought]] = await call('dee-cli', 'PATCH', 'secrets/market/prod/DATABASE_URL', { archived: false, folder: 'db' });
+  assert.equal(back, 200, JSON.stringify(brought));
   assert.deepEqual({ ...brought, operationId: 'x' }, { operationId: 'x', key: 'DATABASE_URL', archived: false, folder: 'db' });
   for (const key of ['FLAG', 'OLD']) assert.equal((await call('bo-cli', 'PATCH', `secrets/market/prod/${key}`, { folder: 'db' }))[0][0], 200, key);
   // Its own name beside what is asked is no rename.
@@ -398,8 +399,8 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
   assert.deepEqual([tampered, said.error, said.reason], [409, 'conflict', 'unreadable']);
   await behind('db');
   assert.deepEqual(await filed(), { DATABASE_URL: ['db', false], FLAG: ['db', false], OLD: ['db', true] });
-  const [[renamed, moved], asked, queried] = await call('bo-cli', 'PATCH', 'folders/market/prod/db', { name: 'data' });
-  assert.deepEqual([renamed, asked, queried], [200, ['change'], 0], JSON.stringify(moved));
+  const [[renamed, moved]] = await call('bo-cli', 'PATCH', 'folders/market/prod/db', { name: 'data' });
+  assert.equal(renamed, 200, JSON.stringify(moved));
   assert.deepEqual({ ...moved, operationId: 'x' }, { operationId: 'x', folder: 'data', moved: ['DATABASE_URL', 'FLAG', 'OLD'] });
   assert.deepEqual(await filed(), { DATABASE_URL: ['data', false], FLAG: ['data', false], OLD: ['data', true] });
   const [[emptied, out]] = await call('bo-cli', 'DELETE', 'folders/market/prod/data');
@@ -416,8 +417,8 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
 test('a key renamed is one change, alone: the vault carries the name down', async () => {
   const call = (label: string, path: string, body: unknown) => cost(() => answered(app.request(`/api/secrets/${path}`, as(label, { method: 'PATCH', body: JSON.stringify(body) }))));
   const keys = async () => (await rowsOf<{ key: string }>(world.owner, sql`SELECT s.key FROM secrets s JOIN environments e ON e.id = s.environment_id WHERE e.slug = 'prod' AND s.key IN ('FLAG', 'NEW_FLAG') ORDER BY s.key`)).map((row) => row.key);
-  const [[status, body], calls, statements] = await call('bo-cli', 'market/prod/FLAG', { key: 'NEW_FLAG' });
-  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  const [[status, body]] = await call('bo-cli', 'market/prod/FLAG', { key: 'NEW_FLAG' });
+  assert.equal(status, 200, JSON.stringify(body));
   assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', key: 'NEW_FLAG' });
   assert.deepEqual(await keys(), ['NEW_FLAG']);
   // Onto its own name, it is asked all the same, and changes nothing.
@@ -438,8 +439,8 @@ test('a key renamed is one change, alone: the vault carries the name down', asyn
 test('a version restored is one change: the key\'s next version is the old value, as it was kept', async () => {
   const call = (label: string, path: string, body: unknown) => cost(() => answered(app.request(`/api/secrets/${path}/restore`, as(label, json(body)))));
   assert.equal((await answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ DATABASE_URL: 'postgres://new' }) }))))[0], 200);
-  const [[status, body], calls, statements] = await call('bo-cli', 'market/prod/DATABASE_URL', { version: 1 });
-  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  const [[status, body]] = await call('bo-cli', 'market/prod/DATABASE_URL', { version: 1 });
+  assert.equal(status, 200, JSON.stringify(body));
   assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', key: 'DATABASE_URL', version: 3, sensitivity: 'secret' });
   world.memory.reads.clear();
   assert.deepEqual((await reveal('ada-cli', 'market/prod/DATABASE_URL'))[1].values, { DATABASE_URL: 'postgres://märkt' });
@@ -471,8 +472,8 @@ test("a write in `dev@me` is one change, in the caller's personal config of dev,
     return (await reveal(label, path))[1].values;
   };
   // Bo has none: his first value makes it, in the same change. Prod's own values are not his to see the history of here.
-  const [[status, body], calls, statements] = await call('bo-cli', 'PATCH', 'secrets/market/prod@me', { LOCAL: 'his', FLAG: 'off locally' });
-  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  const [[status, body]] = await call('bo-cli', 'PATCH', 'secrets/market/prod@me', { LOCAL: 'his', FLAG: 'off locally' });
+  assert.equal(status, 200, JSON.stringify(body));
   // A plain value written over stays plain in a config: nobody but its owner lists it.
   assert.deepEqual(body.keys, { LOCAL: { version: 1, sensitivity: 'secret' }, FLAG: { version: 1, sensitivity: 'plain' } });
   assert.deepEqual(await values('bo-cli', 'market/prod@me'), { DATABASE_URL: 'postgres://märkt', FLAG: 'off locally', LOCAL: 'his' });
@@ -502,8 +503,8 @@ test("a fork's key reset to what it inherits, and that undone, is one change eac
     return (await reveal('bo-cli', path))[1].values;
   };
   assert.equal((await call('bo-cli', 'market/fork', { S_KEY: 'overridden' }))[0][0], 200);
-  const [[status, body], calls, statements] = await call('bo-cli', 'market/fork/S_KEY', { inherit: true });
-  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  const [[status, body]] = await call('bo-cli', 'market/fork/S_KEY', { inherit: true });
+  assert.equal(status, 200, JSON.stringify(body));
   assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', key: 'S_KEY', inherit: true });
   assert.deepEqual(await values('market/fork/S_KEY'), { S_KEY: 'staging only' });
   assert.equal((await call('bo-cli', 'market/fork/S_KEY', { inherit: false }))[0][0], 200);
@@ -548,10 +549,10 @@ test('a path is a route or it is not: its method, its segments and its body are 
   assert.deepEqual(await tried('/mcp', { method: 'POST' }), [404, 'not_found', null]);
 });
 
-test('who is asking, and where they hold something: one call to the vault, one statement, scoped by its answer', async () => {
+test("who is asking, and where they hold something, scoped by the vault's answer", async () => {
   const me = (label: string) => answered(app.request('/api/me', as(label)));
-  const [[status, mine], calls, statements] = await cost(() => me('ada-cli'));
-  assert.deepEqual([status, calls, statements], [200, ['caller'], 1], JSON.stringify(mine));
+  const [status, mine] = await me('ada-cli');
+  assert.equal(status, 200, JSON.stringify(mine));
   assert.deepEqual(
     { principal: mine.principal, registered: mine.registered, instanceRole: mine.instanceRole, runsInstance: mine.runsInstance, canReadAudit: mine.canReadAudit, scope: mine.scope, credentialExpiresAt: mine.credentialExpiresAt },
     { principal: { type: 'user', id: 'ada@acme.example' }, registered: true, instanceRole: 'member', runsInstance: false, canReadAudit: false, scope: { projects: 'all', environments: 'all' }, credentialExpiresAt: '2027-01-01T00:00:00.000Z' },
@@ -574,9 +575,8 @@ test('who is asking, and where they hold something: one call to the vault, one s
   app.executed.length = 0;
   await me('ada-cli');
   assert.deepEqual(params(app.executed.at(-1)), [[market!.id]]);
-  // Whoever runs the instance reads every project, in one statement still.
-  const [[, owner], , all] = await cost(() => me('cy-cli'));
-  assert.equal(all, 1);
+  // Whoever runs the instance reads every project.
+  const [, owner] = await me('cy-cli');
   assert.deepEqual(params(app.executed.at(-1)), []);
   assert.deepEqual([owner.runsInstance, owner.canReadAudit, owner.setsUpServices], [true, true, true]);
   // Not Ada's personal config, which is hers alone, nor what a deletion left behind.
@@ -668,6 +668,17 @@ test('behind Cloudflare Access nothing of the API is served yet: an assertion is
     assert.deepEqual(behind.calls, []);
   } finally {
     await behind.close();
+  }
+});
+
+test("each of 0.14.7's routes not served yet answers 501, not 404, and asks the vault nothing", async () => {
+  const sample: Record<string, string> = { project: 'market', environment: 'prod', member: 'ada@acme.example', target: 'market' };
+  for (const key of Object.keys(unservedRoutes)) {
+    const [method, pattern] = key.split(' ') as [string, string];
+    const path = pattern.replace(/:(\w+)/g, (_, name: string) => sample[name] ?? randomUUID());
+    const [[status, body], calls, statements] = await cost(() => answered(app.request(`/api${path}`, as('ada-cli', method === 'GET' ? {} : { method, body: '{}' }))));
+    assert.deepEqual([status, body.error, calls, statements], [501, 'not_implemented', [], 0], key);
+    assert.match(String(body.message), /is not served yet$/, key);
   }
 });
 

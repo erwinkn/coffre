@@ -1,8 +1,9 @@
 // Sign-in's paths on the 0.16 contract (docs/design/0.16.md, "Signing in
 // from the server"): the browser's round trip through a provider, linking
 // and unlinking an account, signing out, and the device login over HTTP,
-// each one call to the vault, with the real vault. Cases from 0.14.7's
-// signin-service tests where they still hold.
+// each one call to the vault, with the real vault. What each costs,
+// request-cost.test.ts holds. Cases from 0.14.7's signin-service tests where
+// they still hold.
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { after, beforeEach, test } from 'node:test';
@@ -131,17 +132,16 @@ const dbRows = <T>(query: SQL) => rowsOf<T>(world.owner, query);
 const ADOPTING = "coffre's vault has not taken over its database yet; try again in a moment";
 const TAMPERED = { error: 'tampered', message: "a record coffre's vault reads failed its integrity check: whoever runs coffre has the details in its server log", reason: 'tampered' };
 
-test('the sign-in page reads how the instance signs people in, before anyone is signed in: no vault call, no statement', async () => {
-  const [response, calls, statements] = await cost(() => app.request('/api/auth'));
-  assert.deepEqual([response.status, calls, statements], [200, [], 0]);
+test('the sign-in page reads how the instance signs people in, before anyone is signed in', async () => {
+  const response = await app.request('/api/auth');
+  assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { signin: { title: 'Sign in to coffre', note: null, providers: [{ id: 'acme', label: 'Acme SSO', brand: 'oidc' }, { id: 'globex', label: 'Globex', brand: 'oidc' }] }, access: null });
   assert.equal((await app.request('/api/auth', { method: 'POST' })).status, 405);
 });
 
-test("a first sign-in binds the account by its verified email and opens a browser session: one vault call, no statement of the app's", async () => {
-  const [response, calls, statements] = await cost(() => roundTrip(account('acme-ada', 'Ada@Acme.Example'), { query: '?next=/projects/market' }));
+test('a first sign-in binds the account by its verified email and opens a browser session', async () => {
+  const response = await roundTrip(account('acme-ada', 'Ada@Acme.Example'), { query: '?next=/projects/market' });
   assert.deepEqual(landed(response), [302, '/projects/market']);
-  assert.deepEqual([calls, statements], [['change'], 0]);
   const cookies = cookiesOf(response);
   // The pending state goes, whatever the way out; the session comes, for the deployment's 12 hours.
   assert.deepEqual(cookies[PENDING], { value: '', attributes: 'Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Secure' });
@@ -247,10 +247,9 @@ test('a vault call that throws once the provider has answered still clears the p
   assert.equal(change.mock.callCount(), 2);
 });
 
-test('a person links a second account on the session that asked, and it signs them in after; one vault call', async () => {
-  const [response, calls, statements] = await cost(() => roundTrip(account('acme-bo-work', 'bo@work.example'), { cookie: `${SESSION}=bo-web`, query: '?link=1' }));
+test('a person links a second account on the session that asked, and it signs them in after', async () => {
+  const response = await roundTrip(account('acme-bo-work', 'bo@work.example'), { cookie: `${SESSION}=bo-web`, query: '?link=1' });
   assert.deepEqual(landed(response), [302, '/account?linked=acme']);
-  assert.deepEqual([calls, statements], [['change'], 0]);
   assert.equal(cookiesOf(response)[SESSION], undefined);
   const again = await roundTrip(account('acme-bo-work'));
   assert.equal(await whoIs(`${SESSION}=${cookiesOf(again)[SESSION]!.value}`), 'bo@acme.example');
@@ -272,11 +271,11 @@ test('a link is refused for another session than the one that asked, an account 
   assert.deepEqual(await dbRows(sql`SELECT subject FROM identities ORDER BY subject`), [{ subject: 'acme-bo' }, { subject: 'acme-dee' }]);
 });
 
-test('a person unlinks an account of theirs, and the sessions it opened end with it: one change, no statement', async () => {
+test('a person unlinks an account of theirs, and the sessions it opened end with it', async () => {
   const unlink = (label: string, id: string) => app.request(`/api/identities/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${label}` } });
   // Ada cannot unlink Bo's.
-  const [refused, calls, statements] = await cost(() => unlink('ada-cli', bos.id));
-  assert.deepEqual([refused.status, await refused.json(), calls, statements], [404, { error: 'not_found', message: 'that account: unknown sign-in account', reason: 'unknown_identity' }, ['change'], 0]);
+  const refused = await unlink('ada-cli', bos.id);
+  assert.deepEqual([refused.status, await refused.json()], [404, { error: 'not_found', message: 'that account: unknown sign-in account', reason: 'unknown_identity' }]);
   // An id in capitals is the same id, as the vault takes it.
   const answered = await unlink('bo-cli', bos.id.toUpperCase());
   assert.deepEqual([answered.status, await answered.json()], [200, { unlinked: true }]);
@@ -290,8 +289,8 @@ test('signing out ends the browser session and clears its cookie, posted from co
   // Another site's page cannot sign anyone out.
   const [crossed, crossedCalls] = await cost(() => signOut(`${SESSION}=bo-web`, 'cross-site'));
   assert.deepEqual([crossed.status, ((await crossed.json()) as { error: string }).error, crossedCalls], [403, 'cross_origin', []]);
-  const [response, calls, statements] = await cost(() => signOut(`${SESSION}=bo-web`));
-  assert.deepEqual([...landed(response), calls, statements], [303, '/login', ['change'], 0]);
+  const response = await signOut(`${SESSION}=bo-web`);
+  assert.deepEqual(landed(response), [303, '/login']);
   assert.deepEqual(cookiesOf(response)[SESSION], { value: '', attributes: 'Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Secure' });
   assert.equal(await whoIs(`${SESSION}=bo-web`), '401 unauthenticated');
   // A session already ended is signed out all the same; no cookie asks nothing.
@@ -303,8 +302,8 @@ test('signing out ends the browser session and clears its cookie, posted from co
 
 test('`coffre logout` ends the token it sends, and one that no longer stands is signed out already', async () => {
   const logout = (headers: Record<string, string>) => app.request('/api/auth/logout', { method: 'POST', headers });
-  const [response, calls, statements] = await cost(() => logout({ authorization: 'Bearer bo-cli' }));
-  assert.deepEqual([response.status, await response.json(), calls, statements], [200, { signedOut: true }, ['change'], 0]);
+  const response = await logout({ authorization: 'Bearer bo-cli' });
+  assert.deepEqual([response.status, await response.json()], [200, { signedOut: true }]);
   assert.equal((await app.request('/api/me', { headers: { authorization: 'Bearer bo-cli' } })).status, 401);
   assert.deepEqual(await (await logout({ authorization: 'Bearer bo-cli' })).json(), { signedOut: true });
   assert.equal(await whoIs(`${SESSION}=bo-web`), 'bo@acme.example');
@@ -327,20 +326,18 @@ const decide = (code: string, approve: boolean, headers: Record<string, string> 
   app.request(`/api/device-logins/${code}`, { method: 'POST', headers, body: JSON.stringify({ approve }) });
 
 test('a device login over HTTP: the CLI starts it, Bo sees and approves it, the CLI collects a session of his, once', async () => {
-  const [login, calls, statements] = await cost(() => started());
-  // The cap's one statement, then the vault's one change.
-  assert.deepEqual([calls, statements], [['change'], 1]);
+  const login = await started();
   assert.match(login.user_code, /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/);
   assert.deepEqual({ ...login, device_code: undefined, user_code: undefined }, {
     device_code: undefined, user_code: undefined, verification_uri: `${PUBLIC_URL}/auth/device`, verification_uri_complete: `${PUBLIC_URL}/auth/device?code=${login.user_code}`, expires_in: 600, interval: 5,
   });
   assert.deepEqual(await poll(login.device_code), [400, { error: 'authorization_pending' }]);
 
-  // The page `coffre login` opens, the code typed as a person types it: one caller, one statement.
+  // The page `coffre login` opens, the code typed as a person types it.
   const typed = login.user_code.replace('-', '').toLowerCase();
-  const [page, pageCalls, pageStatements] = await cost(() => app.request(`/api/device-logins/${typed}`, { headers: { cookie: `${SESSION}=bo-web` } }));
+  const page = await app.request(`/api/device-logins/${typed}`, { headers: { cookie: `${SESSION}=bo-web` } });
   const shown = (await page.json()) as { request: Record<string, unknown>; sessionDays: number };
-  assert.deepEqual([page.status, pageCalls, pageStatements], [200, ['caller'], 1]);
+  assert.equal(page.status, 200);
   assert.deepEqual({ ...shown, request: { ...shown.request, createdAt: undefined, expiresAt: undefined } }, {
     request: { userCode: login.user_code, clientLabel: 'laptop', clientIp: '192.0.2.7', createdAt: undefined, expiresAt: undefined }, sessionDays: 30,
   });
@@ -349,8 +346,8 @@ test('a device login over HTTP: the CLI starts it, Bo sees and approves it, the 
   assert.deepEqual([token.status, ((await token.json()) as { reason: string }).reason], [403, 'no_access']);
   assert.equal((await app.request(`/api/device-logins/${typed}`)).status, 401);
 
-  const [decided, decideCalls, decideStatements] = await cost(() => decide(typed, true));
-  assert.deepEqual([decided.status, await decided.json(), decideCalls, decideStatements], [200, { decided: true }, ['change'], 0]);
+  const decided = await decide(typed, true);
+  assert.deepEqual([decided.status, await decided.json()], [200, { decided: true }]);
   const [status, session] = await poll(login.device_code);
   assert.equal(status, 200);
   assert.match(String(session.access_token), /^coffre_cli_/);

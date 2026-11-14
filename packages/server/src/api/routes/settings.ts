@@ -27,9 +27,12 @@ function settingOf(text: string): Scope {
   return { projects: { only: [] }, environments: { only: [] } };
 }
 
+/** The instance's settings: where people set up service accounts themselves, projects by slug. */
+export type SettingsView = { serviceAccounts: Scope };
+
 export const settingsRoutes = {
   ...route('GET /settings', {
-    run: async (ctx) => {
+    run: async (ctx): Promise<SettingsView> => {
       const who = await ctx.caller();
       if (!runsInstance(who.holds)) throw refusal('no_access');
       const row = await settingsRow(ctx.db);
@@ -48,7 +51,7 @@ export const settingsRoutes = {
    */
   ...route('PUT /settings', {
     input: z.object({ serviceAccounts: scopeInput }).strict(),
-    run: async (ctx, { input }) => {
+    run: async (ctx, { input }): Promise<SettingsView> => {
       const serviceAccounts = normalScope({ projects: input.serviceAccounts.projects ?? 'all', environments: input.serviceAccounts.environments ?? 'all' });
       await changed(ctx, { op: 'settings.change', serviceAccounts }, 'settings');
       return { serviceAccounts };
