@@ -7,9 +7,10 @@ import { ApiError } from './api/errors.ts';
 import { serveApi } from './api/router.ts';
 import { bearerToken, presented, sessionCookie, sessionCookieName } from './auth.ts';
 import { BROWSERS_ONLY, machineCredential, unregisteredMe, type Admission } from './behind-access.ts';
-import { errorResponse, jsonResponse } from './http.ts';
+import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { dpopToken, provenSession, SessionRefused, sessionStopped } from './sessions.ts';
+import { describeSignin } from './signin.ts';
 
 /**
  * How a request proves who it is. A cookie is `ambient`: the browser attaches
@@ -70,6 +71,11 @@ type AskCaller = (shown: Presented) => Promise<Called>;
  */
 export async function fetchApi(request: Request, runtime: CoffreRuntime, options: { sourceIp: string | null; caller?: AskCaller; page?: Request; access?: Admission }): Promise<Response> {
   const { access } = options;
+  // How this instance signs people in: anyone's to read, the sign-in page's before there is anyone to be, so it asks
+  // for no credential and nothing of the vault. Of the page's own request in its render: whether Access sent an assertion.
+  if (new URL(request.url).pathname === '/api/auth') {
+    return request.method === 'GET' || request.method === 'HEAD' ? describeSignin(options.page ?? request, runtime, options.sourceIp) : methodNotAllowed(['GET']);
+  }
   let nonce: string | null = null;
   let response: Response;
   try {
