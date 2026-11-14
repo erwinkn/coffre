@@ -30,6 +30,7 @@ beforeEach(async () => {
   await emptyDatabase(world.owner);
   world.memory.reads.clear();
   world.memory.logged.clear();
+  world.refused.clear();
   market = project('market');
   const billing = project('billing');
   prod = environment(market, 'prod');
@@ -52,7 +53,9 @@ beforeEach(async () => {
 const shown = (label: string): Presented => ({ token: tokenOf(label).toString('hex'), proof: null, request: 'req-1', ip: '192.0.2.7' });
 const writing = (label: string, keys: KeyWrite[], more: Partial<SecretWrite> = {}): Presented & SecretWrite => ({ ...shown(label), op: 'secret.write', project: 'market', environment: 'prod', keys, ...more });
 const reveal = (keys: string[], place: Partial<UseInput> = {}): UseInput => ({ ...shown('ada-cli'), project: 'market', environment: 'prod', mine: false, keys, purpose: 'reveal', upstream: null, ...place });
-const count = async (table: 'log_pending' | 'secret_versions') => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM ${sql.identifier(table)}`))[0]!.n;
+/** Rows of a table: of the log, the entries kept, which are what a change wrote, not the refusals logged. */
+const count = async (table: 'log_pending' | 'secret_versions') => (await rowsOf<{ n: number }>(world.owner, table === 'log_pending' ? sql`SELECT count(*)::int AS n FROM log_pending WHERE kept` : sql`SELECT count(*)::int AS n FROM secret_versions`))[0]!.n;
+const denied = async () => (await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(world.owner, sql`SELECT kept, body, mac FROM log_pending WHERE NOT kept ORDER BY id`)).map((row) => entryOf(world.keys, row)!);
 const written = async () => {
   const [row] = await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(world.owner, sql`SELECT kept, body, mac FROM log_pending WHERE kept ORDER BY id DESC LIMIT 1`);
   return entryOf(world.keys, row!)!;
@@ -65,8 +68,8 @@ const given = async (keys: string[], place: Partial<UseInput> = {}) => {
   return answer.values.map((item) => ('refused' in item ? item.refused : item.value));
 };
 const key = async (name: string, where = prod.id) => (await rowsOf<{ archived: boolean; folder: string | null; versions: number }>(world.owner, sql`SELECT archived_at IS NOT NULL AS archived, folder, versions FROM secrets WHERE environment_id = ${where} AND key = ${name}`))[0];
-/** Nothing written since `before`, the log included, and the signer told of nothing. */
-const nothing = async (before: number[]) => assert.deepEqual([await count('log_pending'), await count('secret_versions'), world.woken.length], [...before, 0]);
+/** Nothing written since `before`: no entry kept, no version. */
+const nothing = async (before: number[]) => assert.deepEqual([await count('log_pending'), await count('secret_versions')], before);
 
 test('a key archived serves nothing and keeps its versions; brought back, it serves its value again', async () => {
   const versions = await count('secret_versions');
@@ -101,6 +104,13 @@ test('a value is written over an archived key only as it is brought back, which 
   // One key the caller may not change refuses them all.
   assert.deepEqual(await vault.change(writing('bo-cli', [{ key: 'NEW', value: 'v', nature: 'secret' }, { key: 'DATABASE_URL', archived: true }])), { refused: 'no_access' });
   await nothing(before);
+  // Each who was refused is logged, once in the minute, with the first reason.
+  assert.deepEqual((await denied()).map((entry) => [entry.actor, entry.detail]), [
+    [ada, { project: 'market', environment: 'prod', refused: 'archived' }],
+    [cy, { project: 'market', environment: 'prod', refused: 'no_access' }],
+    [bo, { project: 'market', environment: 'prod', refused: 'no_access' }],
+    [dee, { project: 'market', environment: 'prod', refused: 'no_access' }],
+  ]);
 
   assert.deepEqual(await vault.change(writing('cy-cli', [{ key: 'DATABASE_URL', archived: true }])), { answer: { versions: {} } });
   assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'OLD', value: 'back', nature: 'secret', archived: false }])), { answer: { versions: { OLD: 1 } } });
