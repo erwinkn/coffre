@@ -154,6 +154,15 @@ export class SignerHost {
     if (this.#signer !== null && !this.#signer.dead) return this.#signer;
     const signer = await Signer.open({ db: this.#on.db, keys: this.#on.keys, now: this.#on.now, store: this.#store, keepUsesDays: this.#on.keepUsesDays });
     this.#alarm = await this.#on.storage.getAlarm();
+    // A mark left on disk: the last adoption never returned, whatever it got to. Said once, by whichever call opens the signer first.
+    const since = this.#on.storage.kv.get(ADOPTING);
+    if (typeof since === 'number') {
+      const error = `the adoption started at ${new Date(since).toISOString()} never returned: Cloudflare resets the signer's call past 30 s, and 0.16.0 adopts what fits in one call (docs/design/0.16.md, "The adoption")`;
+      this.#failed = { at: since, error };
+      console.error(`coffre: ${error}`);
+      this.#on.storage.kv.delete(ADOPTING);
+      await this.#on.storage.sync();
+    }
     this.#signer = signer;
     return signer;
   }
@@ -186,12 +195,6 @@ export class SignerHost {
       const signer = await this.#load();
       if (this.#knows(signer)) return true;
       const now = this.#on.now();
-      const since = this.#on.storage.kv.get(ADOPTING);
-      if (this.#failed === null && typeof since === 'number') {
-        const error = `the adoption started at ${new Date(since).toISOString()} never returned: Cloudflare resets the signer's call past 30 s, and 0.16.0 adopts what fits in one call (docs/design/0.16.md, "The adoption")`;
-        this.#failed = { at: since, error };
-        console.error(`coffre: ${error}`);
-      }
       if (this.#failed !== null && now < this.#failed.at + ADOPT_AGAIN_MS) return false;
       try {
         // Before anything is written: an object that stops before the adoption's entry is signed has its alarm sign it.

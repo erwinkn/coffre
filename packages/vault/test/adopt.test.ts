@@ -353,6 +353,31 @@ test("an adoption cut off by a reset of the signer's object is said by the next 
   assert.equal(kept.kept.has('adopting since'), false);
 });
 
+test("an adoption cut off after its entry was signed is said once, by whichever call opens the signer first, an alarm included", async (t) => {
+  await upgraded();
+  const logged = t.mock.method(console, 'error', () => {});
+  const host = (storage: ReturnType<typeof objectStorage>) => new SignerHost({ storage, alone: (run) => run(), keys: vault.keys, db: vault.db, now: vault.now, keepUsesDays: 90, adopting: config });
+  const storage = objectStorage();
+  assert.equal(await host(storage).adopt(), true);
+  // The reset, after the signature was on disk and before the mark was taken off.
+  const started = vault.now() - 40_000;
+  storage.kv.put('adopting since', started);
+  const lines = () => logged.mock.calls.filter((call) => String(call.arguments[0]).includes('never returned'));
+
+  const next = host(storage);
+  await next.alarm();
+  assert.deepEqual(
+    lines().map((call) => call.arguments[0]),
+    [`coffre: the adoption started at ${new Date(started).toISOString()} never returned: Cloudflare resets the signer's call past 30 s, and 0.16.0 adopts what fits in one call (docs/design/0.16.md, "The adoption")`],
+  );
+  assert.equal(storage.kept.has('adopting since'), false);
+  // Adopted all the same: the vault serves, and the line is not said again.
+  assert.equal(await next.adopt(), true);
+  assert.equal((await next.status()).adoption, null);
+  assert.equal((await host(storage).adopt()), true);
+  assert.equal(lines().length, 1);
+});
+
 test('a database is adopted once: again, it changes nothing, and two vaults at once adopt it once', async () => {
   await upgraded();
   assert.equal(await adopting(), true);
