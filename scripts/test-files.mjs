@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-// The test files the suite runs (scripts/test-suite.sh): every file its
-// globs find, but those packages/server/tsconfig.json excludes, 0.14's files
-// that do not build on 0.16 yet. A file the list names that no longer exists
-// is an error, so the list cannot outlive what it lists.
+// The test files the suite runs (scripts/test-suite.sh), and the server's own
+// `pnpm test`: every file its globs find, from the current directory, but
+// those packages/server/tsconfig.json excludes, 0.14's files that do not build
+// on 0.16 yet. A file the list names that no longer exists is an error, so the
+// list cannot outlive what it lists.
 //
 //   node scripts/test-files.mjs <glob>...
 import { existsSync, globSync, readFileSync } from 'node:fs';
@@ -20,6 +21,6 @@ if (gone.length > 0) {
   process.exit(1);
 }
 
-const excluded = new Set(exclude.map((path) => join(server, path)));
-const found = process.argv.slice(2).flatMap((pattern) => globSync(pattern, { cwd: root, exclude: (path) => path.endsWith('node_modules') }));
-console.log([...new Set(found)].filter((path) => !excluded.has(path)).sort().join('\n'));
+const excluded = new Set(exclude.map((path) => join(root, server, path)));
+const found = process.argv.slice(2).flatMap((pattern) => globSync(pattern, { exclude: (path) => path.endsWith('node_modules') }));
+console.log([...new Set(found)].filter((path) => !excluded.has(resolve(path))).sort().join('\n'));

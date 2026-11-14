@@ -17,7 +17,8 @@ trap 'node --conditions=coffre:source scripts/test-databases.mjs cleanup "$COFFR
 ./scripts/setup-test-database.sh
 
 # Every test file but 0.14's that do not build on 0.16 yet, which packages/server/tsconfig.json lists.
-files=$(node scripts/test-files.mjs "scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts")
-mapfile -t files <<<"$files"
+# A read loop, not mapfile: macOS's Bash 3.2 has none.
+files=()
+while IFS= read -r file; do files+=("$file"); done < <(node scripts/test-files.mjs "scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts")
 
 node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@" "${files[@]}"
