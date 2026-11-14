@@ -10,7 +10,7 @@ import { and, eq, is, not, sql, type SQL } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
 
 import { failureOf } from '../src/failure.ts';
-import { Busy, CHANGE_LOCK, change, commit, drop, part, prepare, put, type Operation, type Parts, type Refusal, type Seen, type Write } from '../src/change.ts';
+import { Busy, CHANGE_LOCK, change, commit, drop, part, prepare, put, written, type Operation, type Parts, type Refusal, type Seen, type Write } from '../src/change.ts';
 import { entryOf, type Said } from '../src/entry.ts';
 import { keyOf, nameOf, sealedBy, shapeOf, type Fresh, type Row, type Sealed } from '../src/rows.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
@@ -319,12 +319,34 @@ test('a change that spends a proof is made once: a second is refused `replayed` 
   assert.deepEqual(await change(vault, promote('member', proof)), { refused: 'replayed' });
   assert.deepEqual([await entries(), vault.woken.length, (await seenOf(principals))[0]!.role], [before + 1, 1, 'admin']);
   assert.deepEqual(await change(vault, promote('member', randomBytes(32))), { answer: 'member' });
-  // Two at once on one proof: one is made.
+  // Two at once on one proof, each on rows of its own, so that nothing but the proof sets them apart: one is made.
+  await done(writing(put(principals, member(bo))));
   const twin = randomBytes(32);
-  const [left, right] = await Promise.all([prepare(vault, promote('admin', twin)), prepare(vault, promote('auditor', twin))]);
-  assert.deepEqual([await commit(vault, left as never), await commit(vault, right as never)], [true, false]);
-  assert.deepEqual(await change(vault, promote('auditor', twin)), { refused: 'replayed' });
+  const others = { who: part(principals, eq(principals.id, bo)) };
+  const [left, right] = await Promise.all([
+    prepare(vault, promote('admin', twin)),
+    prepare(vault, { read: others, decide: ({ who: [found] }: Seen<typeof others>) => ({ writes: [put(principals, member(bo, 'admin'), found!)], once: twin, entry: said('role.admin', bo), answer: 'admin' }) }),
+  ]);
+  assert.deepEqual([await written(vault, left as never), await written(vault, right as never)], ['made', 'spent']);
+  assert.equal((await seenOf(principals)).find((row) => row.id === bo)!.role, 'member');
+  // A row that moved is told before a proof that was spent: the change starts over, and is made, its proof spent once.
+  const later = randomBytes(32);
+  let moved = false;
+  const racing: Operation<typeof read, string> = {
+    ...promote('auditor', later),
+    async check() {
+      if (!moved) {
+        moved = true;
+        await done({ read, decide: ({ who: [found] }) => ({ writes: [put(principals, member(ada, 'owner'), found!)], entry: said('role.owner', ada), answer: null }) });
+      }
+      return undefined;
+    },
+  };
+  assert.deepEqual(await change(vault, racing), { answer: 'auditor' });
+  assert.equal((await spent()).filter((hash) => hash === later.toString('hex')).length, 1);
+  // A proof is its hash's 32 bytes, as a Buffer: anything else is told before a write.
   await assert.rejects(change(vault, promote('admin', randomBytes(16))), /32 bytes/);
+  await assert.rejects(change(vault, promote('admin', new Uint8Array(32) as Buffer)), /32 bytes/);
 });
 
 test('a check runs between a change\'s read and its decision, on the rows read, and again each time the change starts over', async () => {
@@ -349,8 +371,11 @@ test('a check runs between a change\'s read and its decision, on the rows read, 
   assert.deepEqual(await change(vault, operation), { answer: 'checked as admin' });
   assert.deepEqual(checks, ['owner 0', 'admin 0']);
   // A check that fails, fails the change, which writes nothing.
-  await assert.rejects(change(vault, { ...operation, check: () => Promise.reject(new Error('no such key')) }), /no such key/);
-  assert.equal((await seenOf(principals))[0]!.role, 'member');
+  const logged = async () => (await rowsOf<{ n: number }>(vault.owner, sql`SELECT count(*)::int AS n FROM log_pending`))[0]!.n;
+  const before = await logged();
+  const failing: Operation<typeof read, string, string> = { ...operation, check: () => Promise.reject(new Error('no such key')), decide: ({ who: [found] }) => ({ writes: [put(principals, member(ada, 'auditor'), found!)], entry: said('role.auditor', ada), answer: 'x' }) };
+  await assert.rejects(change(vault, failing), /no such key/);
+  assert.deepEqual([(await seenOf(principals))[0]!.role, await logged()], ['member', before]);
 });
 
 test('a row is dropped only as it was read', async () => {

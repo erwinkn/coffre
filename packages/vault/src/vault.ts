@@ -76,7 +76,7 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
     async change<O extends Change['op']>(input: Asked<O>) {
       if (!Object.hasOwn(OPERATIONS, input.op)) throw new TypeError('a change names an operation the contract has');
       // The registry holds each operation under its own name: what it answers is that name's.
-      const operation = OPERATIONS[input.op] as unknown as (input: Asked<O>, vault: Deciding) => Operation<Parts, Answers[O]>;
+      const operation = OPERATIONS[input.op] as unknown as (input: Asked<O>, vault: Deciding) => Operation<Parts, Answers[O], unknown>;
       return change(serving, operation(input, { workloads: serving.workloads, owners: prepared.owners }));
     },
   };

@@ -285,6 +285,8 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
   // After the read, and the check: the entry's date is the decision's, and the write is sent next.
   const at = vault.now();
   const plan = operation.decide(seen, at, unsealed, checked);
+  // Told before anything is sealed: a proof is spent by its hash's own bytes.
+  if (!('refused' in plan) && plan.once !== undefined && !(Buffer.isBuffer(plan.once) && plan.once.length === 32)) throw new Error('a change spends a proof by the 32 bytes of its SHA-256');
   if ('refused' in plan) {
     // What the log says of it is the operation's to say, and never costs the refusal: one that cannot be said is not logged.
     let said: Denied | null | undefined;
@@ -339,16 +341,16 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
     versions.push(toWire(secretVersions, { ...version, ...(await sealValue(text, contextOf(held, version, place.owner), vault.keks)) }));
   }
   // Dated now, as the write is sent: sealing a value, through a key service, takes as long as it takes.
-  const entry = pending(key, plan.entry, vault.now(), rows);
+  const dated = vault.now();
+  const entry = pending(key, plan.entry, dated, rows);
 
   // The same rows, read again by the same conditions: one that changed, went or came since makes the lists differ.
   const again = sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || encode(${table}.mac, 'hex') FROM ${table} WHERE ${where}`), sql` UNION ALL `);
   const statements: SQL[] = [sql`same AS (SELECT (SELECT coalesce(array_agg(x ORDER BY x COLLATE "C"), '{}') FROM (${again}) seen (x)) = ${sql.param(tokens.sort())}::text[] AS ok)`];
   const { once } = plan;
-  if (once !== undefined && once.length !== 32) throw new Error('a change spends a proof by the 32 bytes of its SHA-256');
   // Spent only if the rows have not moved, so that a change that starts over does not find its own; and then everything
   // else is written only if it was not spent before: each write below selects from it, and so writes nothing without it.
-  if (once !== undefined) statements.push(sql`spent AS (INSERT INTO spent_id_tokens (hash, spent_at) SELECT decode(${once.toString('hex')}, 'hex'), ${new Date(vault.now()).toISOString()}::timestamptz FROM same WHERE same.ok ON CONFLICT DO NOTHING RETURNING hash)`);
+  if (once !== undefined) statements.push(sql`spent AS (INSERT INTO spent_id_tokens (hash, spent_at) SELECT decode(${once.toString('hex')}, 'hex'), ${new Date(dated).toISOString()}::timestamptz FROM same WHERE same.ok ON CONFLICT DO NOTHING RETURNING hash)`);
   const made = once === undefined ? sql`same WHERE same.ok` : sql`same, spent WHERE same.ok`;
   const fromRows = (table: PgTable, wires: Wire[]) => sql`jsonb_populate_recordset(null::${table}, ${JSON.stringify(wires)}::jsonb) j, ${made}`;
   for (const { table, inserts, updates, deletes } of written.values()) {
@@ -380,18 +382,24 @@ function label(name: string): string {
 }
 
 /**
- * A prepared change's write. False when a row it read has changed since:
- * nothing was written. The lock is taken by a statement of its own, ahead
- * of the write: a statement sees the database as of when it starts, so a
- * write that took the lock itself would compare against rows from before
- * it waited (`bounded`).
+ * Whether a prepared change's write was made. False when nothing was
+ * written: a row it read has changed since, or its proof was spent before
+ * (`written` says which). The lock is taken by a statement of its own,
+ * ahead of the write: a statement sees the database as of when it starts,
+ * so a write that took the lock itself would compare against rows from
+ * before it waited (`bounded`).
  */
 export async function commit<A>(vault: Running, prepared: Prepared<A>): Promise<boolean> {
   return (await written(vault, prepared)) === 'made';
 }
 
-/** A prepared change's write: made; `moved`, a row it read has changed since; or `spent`, its proof was spent before. Only the first writes anything. */
-async function written<A>(vault: Running, prepared: Prepared<A>): Promise<'made' | 'moved' | 'spent'> {
+/**
+ * A prepared change's write: made; `moved`, a row it read has changed
+ * since, which starts the change over; or `spent`, its proof was spent
+ * before, which refuses it. Only the first writes anything. A row that
+ * moved is told first: its proof was not this write's to spend yet.
+ */
+export async function written<A>(vault: Running, prepared: Prepared<A>): Promise<'made' | 'moved' | 'spent'> {
   // Were the write's answer lost on its way back, this throws for a write that landed, and the signer finds its entry unannounced, as after a vault that died.
   const [same] = await bounded<{ ok: boolean; fresh: boolean | null }>(vault.db, prepared.statement, { first: sql`pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})` });
   if (!same!.ok) return 'moved';
@@ -446,6 +454,7 @@ export async function change<P extends Parts, A, C = undefined>(vault: Running, 
     }
     const outcome = await written(vault, prepared);
     if (outcome === 'made') return { answer: prepared.answer };
+    // Not logged: a proof comes with a change nobody asks, and a refusal nobody who stands asked writes nothing (D236).
     if (outcome === 'spent') return REPLAYED;
   }
   throw new Busy(`a change started ${ATTEMPTS} times over, each time behind another change to the rows it read`);
