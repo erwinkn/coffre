@@ -62,6 +62,8 @@ const transport: WorkloadTransport = {
   async json(url) {
     if (url.href === `${KUBE}/.well-known/openid-configuration`) return { issuer: KUBE, jwks_uri: `${KUBE}/openid/v1/jwks` };
     if (url.href === `${KUBE}/openid/v1/jwks`) return jwksOf(published);
+    // A GitHub owner, which a binding's lookup asks GitHub's public API for.
+    if (url.href === 'https://api.github.com/users/acme') return { id: 9919, login: 'acme' };
     throw FetchRefused.answered(url, 404);
   },
 };
@@ -489,6 +491,12 @@ const requests: Record<string, Entry> = {
     calls: ['change'], statements: 1, fixed: true,
   },
   'DELETE /members/:member/bindings/:id': { request: () => api('bo-cli', 'DELETE', `/members/${ci}/bindings/${bound}`), calls: ['change'], statements: 0 },
+  // What a binding names, looked up, for whoever sets up a service account: one who runs the instance by `caller` alone; a
+  // person by the instance's setting and the places they reach, two statements. What is asked of GitHub is no statement:
+  // routes/workloads.ts says how much, at most. With no GitHub App here, the repositories are `{ app: null }`.
+  'GET /workloads/lookup': { request: () => api('bo-cli', 'GET', '/workloads/lookup?github=acme'), calls: ['caller'], statements: 2 },
+  'GET /workloads/lookup, by whoever runs the instance': { request: () => api('cy-cli', 'GET', '/workloads/lookup?github=acme'), calls: ['caller'], statements: 0, fixed: true },
+  'GET /workloads/repositories': { request: () => api('bo-cli', 'GET', '/workloads/repositories'), calls: ['caller'], statements: 2 },
   'PUT /roles/:role': { request: () => api('cy-cli', 'PUT', '/roles/release', release), calls: ['change'], statements: 0 },
   'DELETE /roles/:role': { request: () => api('cy-cli', 'DELETE', '/roles/release'), calls: ['change'], statements: 0 },
   'PUT /instance-roles/:role': { request: () => api('cy-cli', 'PUT', '/instance-roles/auditor', { name: 'Auditor', description: `Round ${round}.`, permissions: ['audit.read'], protected: [] }), calls: ['change'], statements: 0 },

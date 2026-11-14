@@ -63,3 +63,13 @@ export async function settingsRow(db: Queryable): Promise<{ serviceAccounts: str
   );
   return row === undefined ? null : { serviceAccounts: row.service_accounts, slugs: row.slugs ?? {} };
 }
+
+/**
+ * Where people set up service accounts themselves, as the policy row keeps
+ * it (JSON, projects by id); null when the instance has no policy row. One
+ * statement, of one row.
+ */
+export async function serviceAccountsSetting(db: Queryable): Promise<string | null> {
+  const [row] = await rowsOf<{ service_accounts: string }>(db, sql`SELECT service_accounts FROM policy WHERE only_row`);
+  return row?.service_accounts ?? null;
+}
