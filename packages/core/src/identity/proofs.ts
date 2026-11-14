@@ -123,9 +123,10 @@ export function audienceTried<B extends ProofBinding>(aud: unknown, bindings: re
 }
 
 /**
- * A token's times on the vault's clock, `now` in milliseconds, as jose and
- * `issuedRefusal` hold them, each within the clock tolerance: not before
- * its `nbf`, before its `exp`, issued `maxAge` seconds ago at most (an hour,
+ * A token's times on the vault's clock, `now` in milliseconds, each within
+ * the clock tolerance, as 0.14 held them: not before its `nbf`, to jose's
+ * whole second; before its `exp`, to the millisecond, as 0.14's exchange
+ * checked it again; issued `maxAge` seconds ago at most (an hour,
  * or any age for a token its platform hands out again), and, where a binding
  * carries its keys, living `maxLifetime` seconds at most.
  */
@@ -133,7 +134,7 @@ export function timesRefusal(claims: DecodedToken['claims'], now: number, { maxA
   const seconds = Math.floor(now / 1000);
   // 0.14's `not_yet_valid` and `too_long` are `too_old` here, as a token issued in the future already was: past its time.
   if (typeof claims.nbf === 'number' && claims.nbf > seconds + CLOCK_TOLERANCE_SECONDS) return 'too_old';
-  if (claims.exp <= seconds - CLOCK_TOLERANCE_SECONDS) return 'expired';
+  if (claims.exp <= now / 1000 - CLOCK_TOLERANCE_SECONDS) return 'expired';
   if (issuedRefusal(claims.iat, now / 1000, maxAge ?? Infinity) !== null) return 'too_old';
   if (maxLifetime !== null && claims.exp - claims.iat > maxLifetime) return 'too_old';
   return null;

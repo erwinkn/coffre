@@ -75,6 +75,10 @@ test("a CI run's token is for this instance alone, within its times on the vault
   assert.equal(match({ ...MAIN, aud: undefined }, bound), 'audience');
   assert.equal(typeof match({ ...MAIN, exp: at(-29) }, bound), 'object');
   assert.equal(match({ ...MAIN, exp: at(-30) }, bound), 'expired');
+  // `nbf` holds to jose's whole second, `exp` to the millisecond: a fractional one ends within its second.
+  assert.equal(typeof match({ ...MAIN, exp: at(-30) + 0.5 }, bound, RUN, FETCHED, NOW + 499), 'object');
+  assert.equal(match({ ...MAIN, exp: at(-30) + 0.5 }, bound, RUN, FETCHED, NOW + 500), 'expired');
+  assert.equal(match({ ...MAIN, nbf: at(30) + 0.5 }, bound, RUN, FETCHED, NOW + 999), 'too_old');
   assert.equal(typeof match({ ...MAIN, iat: at(-3600) }, bound), 'object');
   assert.equal(match({ ...MAIN, iat: at(-3601) }, bound), 'too_old');
   assert.equal(typeof match({ ...MAIN, iat: at(30) }, bound), 'object');
