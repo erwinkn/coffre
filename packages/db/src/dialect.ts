@@ -5,8 +5,8 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Queryable } from './database.ts';
 
 /**
- * Postgres's ways, in one place: the queries in the server's queries.ts and
- * the vault's store.ts use these rather than spell them out.
+ * Postgres's ways, in one place: the server's queries.ts uses these rather
+ * than spell them out.
  */
 
 export type Table = PgTable;

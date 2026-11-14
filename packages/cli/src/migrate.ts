@@ -137,7 +137,6 @@ async function migrateDeployment(
   const { applied, pending, notOwner } = status;
   if (pending.length === 0) {
     // Nothing to apply now, but the next release's migrations would be refused: said while there is time.
-    // The preview reads with the owner's login, which this is not.
     if (notOwner !== null) {
       if (options.backupLogin !== undefined) throw new MigrateError(`${notOwner.message}. Nothing was changed`);
       out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}\n`);
