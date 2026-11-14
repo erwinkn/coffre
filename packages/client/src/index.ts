@@ -10,7 +10,7 @@
  * its own handling of Cloudflare Access redirects. A request that never
  * reaches the instance throws `Unreachable`, which says why.
  */
-import type { Api, AuthInfo, DryRunOutcome, DryRunResult, RoleImpact, SetResult } from './api.ts';
+import type { Api, AuthInfo, DeletionResult, DryRunOutcome, DryRunResult, RoleImpact, SetResult } from './api.ts';
 import { Unreachable } from './reach.ts';
 
 export type {
@@ -21,6 +21,8 @@ export type {
   AuthorizationView,
   BindingView,
   ConnectedApp,
+  Deletion,
+  DeletionResult,
   DismissedKey,
   DryRunOutcome,
   DryRunResult,
@@ -189,7 +191,7 @@ export function createClient(options: ClientOptions) {
       /** What deleting an archived project would erase and revoke; changes nothing. */
       previewDelete: (project: string) => {
         const [method, route] = address('DELETE /projects/:project', { project });
-        return send(method, `${route}?dryRun=1`, undefined) as Promise<RouteOutput<'DELETE /projects/:project'>>;
+        return send(method, `${route}?dryRun=1`, undefined) as Promise<DeletionResult>;
       },
       /** Delete an archived project for good: its values erased, its grants revoked, its slug free. Owners only. */
       delete: (project: string) => call('DELETE /projects/:project', { project }),
@@ -210,7 +212,7 @@ export function createClient(options: ClientOptions) {
       /** What deleting an archived environment would erase and revoke; changes nothing. */
       previewDelete: (path: string) => {
         const [method, route] = address('DELETE /projects/:project/:environment', place(path));
-        return send(method, `${route}?dryRun=1`, undefined) as Promise<RouteOutput<'DELETE /projects/:project/:environment'>>;
+        return send(method, `${route}?dryRun=1`, undefined) as Promise<DeletionResult>;
       },
       /** Delete an archived environment for good, as a project is. Owners only. */
       delete: (path: string) => call('DELETE /projects/:project/:environment', place(path)),
