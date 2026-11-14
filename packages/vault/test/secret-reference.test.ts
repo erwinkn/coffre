@@ -136,6 +136,22 @@ test('a reference is made only to a live key its maker reads where it is held, n
   assert.deepEqual(await held('GONE'), { key: 'GONE', source_id: flag.id, versions: 0, current_version: null, nature: null, archived: false });
 });
 
+test('an archived key brought back in the same write is a source, in either order, and one left archived is none', async () => {
+  assert.ok('answer' in await vault.change(writing('ada-cli', { DATABASE_URL: { archived: true } })));
+  assert.deepEqual(await vault.change(writing('ada-cli', { NEW: 'market/prod/DATABASE_URL' })), { refused: 'unknown_key' });
+  assert.deepEqual(await vault.change(writing('ada-cli', { NEW: 'market/prod/DATABASE_URL', DATABASE_URL: { folder: 'db' } })), { refused: 'unknown_key' }, 'filed, still archived');
+  assert.equal(await held('NEW'), undefined);
+  assert.ok('answer' in await vault.change(writing('ada-cli', { NEW: 'market/prod/DATABASE_URL', DATABASE_URL: { archived: false } })));
+  assert.deepEqual(await held('NEW'), { key: 'NEW', source_id: url.id, versions: 0, current_version: null, nature: null, archived: false });
+  assert.deepEqual(await given('ada-cli', ['NEW']), [[1, 'postgres://old']]);
+
+  // The other way round: brought back first, then made the source.
+  assert.ok('answer' in await vault.change(writing('ada-cli', { NEW: { value: 'x', nature: 'secret' } })));
+  assert.ok('answer' in await vault.change(writing('ada-cli', { DATABASE_URL: { archived: true } })));
+  assert.ok('answer' in await vault.change(writing('ada-cli', { DATABASE_URL: { archived: false }, OTHER: 'market/prod/DATABASE_URL' })));
+  assert.deepEqual(await held('OTHER'), { key: 'OTHER', source_id: url.id, versions: 0, current_version: null, nature: null, archived: false });
+});
+
 test('one hop: a key others read is made no reference, and each is decided on what the write leaves', async () => {
   // billing/prod/STRIPE_KEY is read by market/prod/LINK.
   assert.deepEqual(await vault.change(writing('ada-cli', { STRIPE_KEY: 'billing/prod/FLAG' }, { project: 'billing' })), { refused: 'referenced' });

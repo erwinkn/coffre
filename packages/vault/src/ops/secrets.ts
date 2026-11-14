@@ -163,7 +163,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         const where = whose && seen.targetPlace.find((row) => row.projectId === whose.id && row.slug === to.environment && live(row));
         // As for the place written: not there, someone's personal config, or not theirs to read are one answer.
         if (where === undefined || where.owner !== null || !caller.may('secret.read', where)) return { refused: 'no_access' };
-        const row = seen.target.find((found) => found.projectId === where.projectId && found.environmentId === where.id && found.key === to.key && found.archivedAt === null);
+        // Archived or not: whether it is is asked of what the write leaves, which may bring it back.
+        const row = seen.target.find((found) => found.projectId === where.projectId && found.environmentId === where.id && found.key === to.key);
         // A source's row edited behind the vault is not guessed at either.
         if (row === undefined) return { refused: unsealed.target > 0 ? 'unreadable' : 'unknown_key' };
         targets.set(key, { row, where });
@@ -256,6 +257,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         const { row, where } = targets.get(key)!;
         const holder = held.get(key)?.id ?? fresh.get(key)!.secret;
         const source = leaves.get(row.id) ?? row;
+        // An archived key is no source, unless the same write brings it back.
+        if (source.archivedAt !== null) return { refused: 'unknown_key' };
         if (source.id === holder) return { refused: 'reference_to_itself' };
         // One hop: a reference reads a value, never another reference, nor is one read through.
         if (source.sourceId !== null) return { refused: 'reference_to_reference' };
