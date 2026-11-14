@@ -51,7 +51,7 @@ const MOST_EMAILS = 20;
 /** The longest a browser's session lasts, whatever the app asks: the most a deployment's `browserSessionHours` says. */
 const BROWSER_MINUTES = 7 * 24 * 60;
 /** Who made what the vault makes of itself: an Owner its configuration names. */
-const VAULT = 'system:vault';
+export const VAULT = 'system:vault';
 
 const email = (value: unknown): value is string => text(value) && EMAIL.test(value) && value === value.toLowerCase();
 
@@ -153,7 +153,7 @@ function signin(input: Asked<'signin'>, vault: Deciding): Operation<Parts, Answe
 
       const expiresAt = new Date(at + session.minutes * 60_000);
       writes.push(put(credentials, {
-        id: ids.credential, kind: 'browser', tokenHash: Buffer.from(session.token, 'hex'), tokenHint: null, previousTokenHash: null, generation: who.generation, principal: who.id, identityId,
+        id: ids.credential, kind: 'browser', tokenHash: Buffer.from(session.token, 'hex'), tokenHint: null, previousTokenHash: null, codeHash: null, generation: who.generation, principal: who.id, identityId,
         scope: null, places: null, label: session.label, createdAt: now, createdBy: who.id, expiresAt, lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
         jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
       }));
@@ -651,7 +651,7 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
       const scope = sealedScope(issued);
       return {
         writes: [put(credentials, {
-          id, kind, tokenHash: Buffer.from(token.token, 'hex'), tokenHint: hint, previousTokenHash: null, generation, principal, identityId: null,
+          id, kind, tokenHash: Buffer.from(token.token, 'hex'), tokenHint: hint, previousTokenHash: null, codeHash: null, generation, principal, identityId: null,
           scope: JSON.stringify(scope), places: places === null ? null : JSON.stringify(places), label: token.label, createdAt: now, createdBy: caller.principal, expiresAt,
           lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
           jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
@@ -678,10 +678,10 @@ const CLI_MINUTES = 365 * 24 * 60;
  * writes. A change nobody asks reads it, as a sign-in does: on a database
  * not adopted yet it would begin the log, and the adoption would never run.
  */
-const instancePart = () => part(policy, sql`${policy.onlyRow}`);
+export const instancePart = () => part(policy, sql`${policy.onlyRow}`);
 
 /** `adopting` before the adoption, `tampered` for an instance's row that is not the vault's; else nothing. */
-const adopted = (rows: readonly unknown[], unsealed: number): Refusal | undefined => (rows.length === 0 ? { refused: unsealed > 0 ? 'tampered' : 'adopting' } : undefined);
+export const adopted = (rows: readonly unknown[], unsealed: number): Refusal | undefined => (rows.length === 0 ? { refused: unsealed > 0 ? 'tampered' : 'adopting' } : undefined);
 
 /**
  * A CLI asks to be signed in from a browser (`DeviceStart`): one row
@@ -835,7 +835,7 @@ function deviceRedeem(input: Asked<'device.redeem'>): Operation<Parts, Answers['
         writes: [
           amended(deviceLogins, row, { consumedAt: now }),
           put(credentials, {
-            id, kind: 'cli', tokenHash: Buffer.from(session.token, 'hex'), tokenHint: null, previousTokenHash: null, generation: who.generation, principal: who.id, identityId: null,
+            id, kind: 'cli', tokenHash: Buffer.from(session.token, 'hex'), tokenHint: null, previousTokenHash: null, codeHash: null, generation: who.generation, principal: who.id, identityId: null,
             scope: null, places: null, label: row.clientLabel, createdAt: now, createdBy: who.id, expiresAt, lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
             jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
           }),

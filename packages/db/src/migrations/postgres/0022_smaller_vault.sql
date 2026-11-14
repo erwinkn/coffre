@@ -508,16 +508,19 @@ ALTER TABLE credentials
     DROP COLUMN auth_mac,
     ALTER COLUMN token_hint DROP NOT NULL,
     ADD COLUMN previous_token_hash bytea,
+    ADD COLUMN code_hash bytea,
     ADD COLUMN client text,
     ADD COLUMN challenge text;
 --> statement-breakpoint
 ALTER TABLE credentials
     ADD CONSTRAINT credentials_kind_check CHECK (kind IN ('browser', 'cli', 'service', 'personal', 'handle', 'workload', 'mcp')),
     ADD CONSTRAINT credentials_mcp_client_check CHECK ((kind = 'mcp') = (client IS NOT NULL) AND (challenge IS NULL OR kind = 'mcp')),
-    ADD CONSTRAINT credentials_previous_token_hash_check CHECK (previous_token_hash IS NULL OR octet_length(previous_token_hash) = 32);
+    ADD CONSTRAINT credentials_previous_token_hash_check CHECK (previous_token_hash IS NULL OR octet_length(previous_token_hash) = 32),
+    ADD CONSTRAINT credentials_code_hash_key UNIQUE (code_hash),
+    ADD CONSTRAINT credentials_code_hash_check CHECK (code_hash IS NULL OR (kind = 'mcp' AND octet_length(code_hash) = 32));
 --> statement-breakpoint
-INSERT INTO credentials (id, kind, token_hash, previous_token_hash, generation, principal, label, created_at, created_by, expires_at, last_used_at, last_used_ip, client)
-SELECT id, 'mcp', refresh_hash, refresh_previous_hash, generation, principal, client_name, created_at, principal, expires_at, last_used_at, last_used_ip,
+INSERT INTO credentials (id, kind, token_hash, previous_token_hash, code_hash, generation, principal, label, created_at, created_by, expires_at, last_used_at, last_used_ip, client)
+SELECT id, 'mcp', refresh_hash, refresh_previous_hash, code_hash, generation, principal, client_name, created_at, principal, expires_at, last_used_at, last_used_ip,
        jsonb_build_object('id', client_id, 'host', client_host, 'registration', registration, 'redirectUri', redirect_uri, 'scopes', scopes)::text
   FROM mcp_connections
  WHERE refresh_hash IS NOT NULL AND revoked_at IS NULL AND expires_at > now();
@@ -532,6 +535,8 @@ ALTER TABLE mcp_approvals
 DROP TABLE mcp_connections;
 --> statement-breakpoint
 CREATE INDEX credentials_previous_token_idx ON credentials (previous_token_hash) WHERE previous_token_hash IS NOT NULL;
+--> statement-breakpoint
+CREATE INDEX credentials_client_idx ON credentials ((client::jsonb ->> 'id')) WHERE client IS NOT NULL;
 --> statement-breakpoint
 CREATE INDEX credentials_expiry_idx ON credentials (expires_at);
 --> statement-breakpoint

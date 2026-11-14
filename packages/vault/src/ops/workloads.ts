@@ -122,7 +122,7 @@ function tokenExchange(input: Asked<'token.exchange'>, vault: Deciding): Operati
       const spent = found.spends!;
       return {
         writes: [put(credentials, {
-          id, kind: 'service', tokenHash: Buffer.from(credential, 'hex'), tokenHint: null, previousTokenHash: null, generation: binding.generation, principal: account.id, identityId: null,
+          id, kind: 'service', tokenHash: Buffer.from(credential, 'hex'), tokenHint: null, previousTokenHash: null, codeHash: null, generation: binding.generation, principal: account.id, identityId: null,
           // Its binding's, on its own row: what it reaches is the binding's as it is now, and never more than that row says.
           scope: scopeOf(binding.scope), places: null, label: binding.label, createdAt: now, createdBy: `binding:${binding.id}`, expiresAt, lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
           jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: JSON.stringify(run), client: null, challenge: null,
@@ -285,7 +285,7 @@ function workloadSignin(input: Asked<'workload.signin'>, vault: Deciding): Opera
       const now = new Date(at);
       return {
         writes: [put(credentials, {
-          id, kind: 'workload', tokenHash: Buffer.from(credential, 'hex'), tokenHint: null, previousTokenHash: null, generation: binding.generation, principal: account.id, identityId: null,
+          id, kind: 'workload', tokenHash: Buffer.from(credential, 'hex'), tokenHint: null, previousTokenHash: null, codeHash: null, generation: binding.generation, principal: account.id, identityId: null,
           // Its binding's scope on its own row, and the places it reaches as of now, where `/use/<credential>` goes when it names none.
           scope, places: JSON.stringify(places.map((environmentId) => ({ environmentId, personal: false }))), label: binding.label, createdAt: now, createdBy: `binding:${binding.id}`,
           expiresAt, lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,

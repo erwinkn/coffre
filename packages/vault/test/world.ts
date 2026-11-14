@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { bindings, credentials, deviceLogins, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets } from '@coffre/db/schema';
+import { bindings, credentials, deviceLogins, dismissedKeys, environments, grants, identities, oauthClients, policy, principals, projects, roles, secrets } from '@coffre/db/schema';
 import { eq, sql, type SQL } from 'drizzle-orm';
 
 import { change, put, part, type Value, type Write } from '../src/change.ts';
@@ -46,7 +46,7 @@ export function role(instance: boolean, id: string, permissions: string[], guard
 /** A credential whose token is `tokenOf(label)`: a CLI session unless told. */
 export function credential(label: string, of: string, more: Partial<Fresh<typeof credentials>> = {}): Fresh<typeof credentials> {
   return {
-    id: randomUUID(), kind: of.startsWith('token:') ? 'service' : 'cli', tokenHash: tokenOf(label), tokenHint: null, previousTokenHash: null, generation: 0, principal: of, identityId: null,
+    id: randomUUID(), kind: of.startsWith('token:') ? 'service' : 'cli', tokenHash: tokenOf(label), tokenHint: null, previousTokenHash: null, codeHash: null, generation: 0, principal: of, identityId: null,
     scope: null, places: null, label, createdAt: at, createdBy: of, expiresAt: new Date(Date.UTC(2027, 0, 1)), lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
     jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null, ...more,
   };
@@ -78,7 +78,12 @@ export function dismissed(of: { id: string }, key: string): Fresh<typeof dismiss
   return { environmentId: of.id, key, dismissedAt: at, dismissedBy: root, restoredAt: null, restoredBy: null };
 }
 
-export const TABLES = { projects, environments, secrets, principals, grants, roles, credentials, identities, dismissedKeys, bindings, policy, deviceLogins };
+/** A registered OAuth client, made at `at` unless told: its redirect a loopback one. */
+export function oauthClient(name: string, more: Partial<Fresh<typeof oauthClients>> = {}): Fresh<typeof oauthClients> {
+  return { id: randomUUID(), name, redirectUris: '["http://127.0.0.1/callback"]', createdAt: at, createdIp: null, revokedAt: null, ...more };
+}
+
+export const TABLES = { projects, environments, secrets, principals, grants, roles, credentials, identities, dismissedKeys, bindings, policy, deviceLogins, oauthClients };
 
 /** Rows of one table, as writes of a change. */
 export const rows = <K extends keyof typeof TABLES>(table: K, ...of: Fresh<(typeof TABLES)[K]>[]): Write[] => of.map((row) => put(TABLES[table], row as never));
