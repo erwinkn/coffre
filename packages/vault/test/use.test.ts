@@ -408,8 +408,8 @@ test('while the database cannot be reached, a proxied use is answered from the r
   vault.tick(1);
   await assert.rejects(use(vault, proxied), REFUSED);
   assert.equal(recall(vault, proxied), undefined);
-  // Nothing is left but the date of the refusal, which answers nothing.
-  assert.deepEqual([...vault.memory.reads.values()].map((kept) => [kept.refused, kept.opened.size]), [[true, 0]]);
+  // Nothing is left but when the expired credential was refused.
+  assert.deepEqual([vault.memory.reads.size, vault.memory.refusals.size], [0, 1]);
 
   // The database back, Ada's next proxied use reads and is logged: its entry says her two that were due one and had
   // none, and since when. The one after says nothing of them, nor does Bo's, who had none.
@@ -490,11 +490,16 @@ test('an outage hides a change only while it lasts; a read that answers stands, 
   assert.deepEqual(await got(other), { FLAG: 'on' });
   assert.deepEqual((await unlogged()).at(-1), { since: new Date(vault.now() - 120_000).toISOString(), uses: 1 });
 
-  // With no memory at all, a read that answers still takes the place of the rows kept for an outage.
+  // With no memory at all, a failure is still remembered for two seconds, and a read that answers still takes the
+  // place of the rows kept for an outage.
   Object.assign(vault, { memory: memoryOf(0, 300) });
   assert.deepEqual(await got(other), { FLAG: 'on' });
   down = unreachable();
-  assert.deepEqual(await got(other), { FLAG: 'on' });
+  assert.deepEqual([await got(other), await got(other), down.tried], [{ FLAG: 'on' }, { FLAG: 'on' }, 1]);
+  vault.tick(1999);
+  assert.deepEqual([await got(other), down.tried], [{ FLAG: 'on' }, 1]);
+  vault.tick(1);
+  assert.deepEqual([await got(other), down.tried], [{ FLAG: 'on' }, 2]);
   down.back();
   vault.tick(60_000);
   down = unreachable({ writes: true });
@@ -550,11 +555,41 @@ test('what answers an outage is looked for when the database fails: rows that ag
     down.back();
     assert.equal(await got(late), 'unauthenticated');
   }
+
+  // The refusal itself is not remembered: what is given right after it is used at once.
+  const dees = ask('dee', 'market/prod', ['FLAG'], { purpose: 'use' });
+  assert.equal(await got(dees), 'no_access');
+  await write(vault, ...rows('grants', grant(dee, 'viewer', { project: w.market })));
+  assert.deepEqual(await got(dees), { FLAG: 'on' });
+});
+
+test('an outage answers for its own length, whatever the memory\'s, and nothing the bulk cap has refused since', async () => {
+  // A memory longer than the outage's length: a write that comes due past it fails, fresh as the rows are.
+  Object.assign(vault, { memory: memoryOf(600, 60) });
+  const proxied = ask('ada', 'market/prod', ['FLAG'], { purpose: 'use' });
+  assert.deepEqual(await got(proxied), { FLAG: 'on' });
+  vault.tick(60_000);
+  let down = unreachable({ writes: true });
+  await assert.rejects(use(vault, proxied), REFUSED);
+  down.back();
+
+  // A use the cap refuses, on rows it was answered from before: they answer no outage after.
+  Object.assign(vault, { memory: memoryOf(120, 300) });
+  const other = ask('cy', 'market/prod', ['FLAG'], { purpose: 'use' });
+  assert.deepEqual(await got(other), { FLAG: 'on' });
+  vault.tick(60_000);
+  Object.assign(vault, { cap: { count: 0, windowMs: 15 * 60_000 } });
+  assert.equal(await got(other), 'bulk_limit');
+  down = unreachable();
+  await assert.rejects(use(vault, other), REFUSED);
+  down.back();
 });
 
 test('with no outage length set, and for a failure that is no outage, a use fails with the database', async () => {
-  // The default: the memory's two seconds, then the failure.
+  // The default: the memory's two seconds, then the failure. And no refusal's date is kept.
   const proxied = ask('ada', 'market/prod', ['FLAG'], { purpose: 'use' });
+  assert.equal(await got(ask('dee', 'market/prod', ['FLAG'], { purpose: 'use' })), 'no_access');
+  assert.equal(vault.memory.refusals.size, 0);
   assert.deepEqual(await got(proxied), { FLAG: 'on' });
   let down = unreachable();
   vault.tick(1999);
