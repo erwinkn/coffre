@@ -4,16 +4,17 @@ import { after, beforeEach, test } from 'node:test';
 import { inclusionProof, leafHash, nodesFrom, tileMap, verifyInclusion } from '@coffre/core/log';
 import { openDatabase } from '@coffre/db/connect';
 import { rowsOf } from '@coffre/db/dialect';
-import { principals } from '@coffre/db/schema';
+import { credentials, principals } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
+import { caller } from '../src/caller.ts';
 import { change, drop, part, put } from '../src/change.ts';
 import { pending, type Pending } from '../src/entry.ts';
 import { checked } from '../src/rows.ts';
-import { headText, Signer, type Finding } from '../src/signer.ts';
+import { HEAD_ROW, headText, Signer, type Finding } from '../src/signer.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 import { emptyDatabase, memoryStore, openTestVault, VAULT_URL } from './database.ts';
-import { principal, user } from './world.ts';
+import { credential, principal, tokenOf, user } from './world.ts';
 
 /**
  * The signer against a database writer, on Postgres: each protection of
@@ -83,7 +84,7 @@ const waiting = async () => (await rowsOf<{ n: number }>(vault.owner, sql`SELECT
 async function proven(): Promise<void> {
   const [head] = await rowsOf<{ size: number; keptSize: number; keptRoot: string; agingSize: number; agingRoot: string; agingFrom: number; signedAt: number; mac: Buffer }>(
     vault.owner,
-    sql`SELECT size::int, kept_size::int AS "keptSize", encode(kept_root, 'hex') AS "keptRoot", aging_size::int AS "agingSize", encode(aging_root, 'hex') AS "agingRoot", aging_from::int AS "agingFrom", (extract(epoch FROM signed_at) * 1000)::float8 AS "signedAt", mac FROM log_head`,
+    sql`SELECT size::int, kept_size::int AS "keptSize", encode(kept_root, 'hex') AS "keptRoot", aging_size::int AS "agingSize", encode(aging_root, 'hex') AS "agingRoot", aging_from::int AS "agingFrom", round(extract(epoch FROM signed_at) * 1000)::float8 AS "signedAt", mac FROM log_head`,
   );
   assert.ok(head !== undefined && checked(vault.keys, (key) => key.entries, headText(head), head.mac) !== undefined, 'the head is under the vault\'s MAC');
   for (const kept of [true, false]) {
@@ -94,6 +95,39 @@ async function proven(): Promise<void> {
     for (const { leaf, body } of entries) assert.ok(verifyInclusion(leafHash(Buffer.from(body)), leaf, size, inclusionProof(nodes, leaf, size), Buffer.from(root, 'hex')), `leaf ${leaf}`);
   }
 }
+
+test('the head the signer wrote is the one a caller is answered, whole, and again after the next signing', async () => {
+  await member(ada, 'member');
+  // Her session, written as a change writes one, so that the signer's mirror has its row.
+  const made = await change(vault, {
+    read: { found: part(credentials, sql`false`) },
+    decide: () => ({ writes: [put(credentials, credential('ada', ada, { lastUsedAt: new Date(vault.now()) }), null)], entry: { kept: true, action: 'signin', actor: ada, credential: null, request: null, ip: null, objects: [`principal:${ada}`], detail: {} }, answer: null }),
+  });
+  assert.ok('answer' in made);
+  const asked = async () => {
+    const answer = await caller(vault, { token: tokenOf('ada'), proof: null, ip: null, head: true });
+    assert.ok(!('refused' in answer), JSON.stringify(answer));
+    return answer.head;
+  };
+  const stored = async () => (await rowsOf<{ size: number; keptSize: number; keptRoot: string; agingSize: number; agingRoot: string; agingFrom: number; signedAt: string }>(
+    vault.owner,
+    sql`SELECT size::int, kept_size::int AS "keptSize", encode(kept_root, 'hex') AS "keptRoot", aging_size::int AS "agingSize", encode(aging_root, 'hex') AS "agingRoot", aging_from::int AS "agingFrom", to_char(signed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "signedAt" FROM log_head`,
+  ))[0];
+  assert.equal(await asked(), null, 'nothing signed yet');
+  // Signed at a millisecond no binary fraction holds exactly.
+  vault.tick(1377);
+  assert.deepEqual(await run(), []);
+  const first = await asked();
+  assert.ok(first !== null && first !== undefined);
+  assert.deepEqual([first.size, first.keptSize, first.agingSize, first.signedAt], [2, 2, 0, new Date(vault.now()).toISOString()]);
+  assert.deepEqual(first, await stored());
+  await wait(reading('a'));
+  vault.tick(1);
+  assert.deepEqual(await run(), []);
+  const second = await asked();
+  assert.deepEqual(second, await stored());
+  assert.deepEqual([second?.size, second?.agingSize, second?.keptRoot], [3, 1, first.keptRoot]);
+});
 
 test('entries are numbered in the order written, each under its tree, and every one proves against the signed head', async () => {
   await member(ada, 'owner');
@@ -286,6 +320,61 @@ test('the full run finds a row put back, one deleted, one written behind the vau
   // Wrong still, each of them, which is no news.
   assert.deepEqual(await run(), []);
   assert.deepEqual(signer.standing, [{ found: 'row', of: named(bo) }, ...found]);
+});
+
+test('the full run finds an older head put back, though it is genuine, one edited under its MAC, and one deleted; the next signing writes the head again, and a signer opened again holds it still', async () => {
+  const head = async () => (await rowsOf<{ mac: string }>(vault.owner, sql`SELECT encode(mac, 'hex') AS mac FROM log_head`))[0]?.mac ?? null;
+  /** The head it signed last, as the signer keeps it: its MAC is the last field. */
+  const kept = () => (JSON.parse(store.kept.get('head') as string) as unknown[]).at(-1);
+  const wrong = [{ found: 'row', of: HEAD_ROW }];
+  // No head yet, and none signed: nothing to find.
+  assert.deepEqual(await run(), []);
+  await member(bo, 'owner');
+  assert.deepEqual(await run(), []);
+  const [{ older }] = (await rowsOf<{ older: unknown }>(vault.owner, sql`SELECT to_jsonb(log_head) AS older FROM log_head`)) as [{ older: unknown }];
+  await member(bo, 'member');
+  assert.deepEqual(await run(), []);
+  const last = await head();
+  assert.equal(kept(), last);
+  // The head of one entry ago, whole: under the vault's MAC, as `caller` would find, and not the last.
+  await vault.owner.execute(sql`UPDATE log_head SET (size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac) = (SELECT size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac FROM jsonb_populate_record(NULL::log_head, ${JSON.stringify(older)}::jsonb))`);
+  assert.notEqual(await head(), last);
+  assert.deepEqual(await run(false), []);
+  assert.deepEqual(await run(), wrong);
+  // Wrong still, which is no news, to a signer opened again from its storage too.
+  assert.deepEqual(await run(), []);
+  signer = await open();
+  assert.deepEqual(await run(), []);
+  assert.deepEqual(signer.standing, wrong);
+  // The next signing writes the head it signs: right again, to the check after it, since a run reads before it moves.
+  await member(cy, 'member');
+  assert.deepEqual(await run(), []);
+  assert.deepEqual(signer.standing, wrong);
+  assert.deepEqual(await run(), []);
+  assert.deepEqual(signer.standing, []);
+  assert.equal(await head(), kept());
+  await proven();
+  // Opened again from its storage with the head right: it holds the head it signed, and finds nothing.
+  signer = await open();
+  assert.deepEqual(await run(), []);
+  assert.deepEqual(signer.standing, []);
+  // Each column edited in turn, the MAC left, then the MAC alone: no caller is answered such a head, and it is not the
+  // one signed. A date with no number is read as one more edit, not a read that fails.
+  const edits = [
+    sql`aging_from = aging_from + 1, aging_size = aging_size + 1, size = size + 1`, sql`kept_root = sha256(kept_root)`, sql`aging_root = sha256(aging_root)`,
+    sql`signed_at = signed_at + interval '1 millisecond'`, sql`signed_at = 'infinity'`, sql`kept_size = kept_size + 1, size = size + 1`, sql`mac = set_byte(mac, 35, get_byte(mac, 35) # 1)`,
+  ];
+  for (const edit of edits) {
+    const [{ before }] = (await rowsOf<{ before: unknown }>(vault.owner, sql`SELECT to_jsonb(log_head) AS before FROM log_head`)) as [{ before: unknown }];
+    await vault.owner.execute(sql`UPDATE log_head SET ${edit}`);
+    assert.deepEqual(await run(), wrong);
+    await vault.owner.execute(sql`UPDATE log_head SET (size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac) = (SELECT size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac FROM jsonb_populate_record(NULL::log_head, ${JSON.stringify(before)}::jsonb))`);
+    assert.deepEqual(await run(), []);
+    assert.deepEqual(signer.standing, []);
+  }
+  // Gone: news again.
+  await vault.owner.execute(sql`DELETE FROM log_head`);
+  assert.deepEqual(await run(), wrong);
 });
 
 test('an entry told of during a run, or after it was signed, raises nothing', async () => {

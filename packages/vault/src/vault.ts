@@ -74,7 +74,7 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
       return peek(serving, asked(input));
     },
     async caller(input) {
-      return caller(serving, presented(input));
+      return caller(serving, { ...presented(input), head: input.head === true });
     },
     async change<O extends Change['op']>(input: Asked<O>) {
       if (!Object.hasOwn(OPERATIONS, input.op)) throw new TypeError('a change names an operation the contract has');
