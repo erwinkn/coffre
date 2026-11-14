@@ -149,6 +149,9 @@ const owners = () => part(principals, sql`${principals.status} = 'active' AND ${
 /** Whether an Owner of the whole instance stays once `principal` is not one. */
 const anotherOwner = (seen: readonly Row<typeof principals>[], principal: string) => seen.some((row) => row.id !== principal && ownsAll(row));
 
+/** R1's refusal (`instance-roles.md`, "Only Owners make Owners"), which the app words as 0.14.7 did. */
+const OWNERS_ONLY = { refused: 'not_allowed' };
+
 /**
  * A member admitted, brought back or given an instance role (`member.put`),
  * as their row calls for, which only this read knows, as 0.14.7's `admit`
@@ -224,7 +227,7 @@ function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Par
 
       if (was === undefined || was.status === 'removed') {
         const given = role ?? 'member';
-        if (given === 'owner' && !ownsAllAsking(caller)) return { refused: 'no_access' };
+        if (given === 'owner' && !ownsAllAsking(caller)) return OWNERS_ONLY;
         if (named(vault, principal) && !(given === 'owner' && written === null)) return { refused: 'configured_owner' };
         const now = new Date(at);
         const row: Fresh<typeof principals> = was === undefined
@@ -242,7 +245,9 @@ function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Par
       const answer = { ...standing(next.role, next.scope), created: false };
       // Asked as it is, it changes nothing, so whoever runs the instance may ask it, of anyone, themselves included, as 0.14 did. Its entry says so, as `secret.write`'s with no key does.
       if (was.role === next.role && was.scope === next.scope) return { writes: [], entry: said('member.role', caller, shown, objects, { member: principal, role: next.role, scope: answer.scope, unchanged: true }), answer };
-      if ((was.role === 'owner' || next.role === 'owner' || principal === caller.principal) && !ownsAllAsking(caller)) return { refused: 'no_access' };
+      if ((was.role === 'owner' || next.role === 'owner') && !ownsAllAsking(caller)) return OWNERS_ONLY;
+      // Nor their own, but an Owner of all of it, who holds all there is: `no_access`, where 0.14.7's app answered 409 (0.16.md).
+      if (principal === caller.principal && !ownsAllAsking(caller)) return { refused: 'no_access' };
       const ownsAfter = next.role === 'owner' && next.scope === null;
       if (named(vault, principal) && !ownsAfter) return { refused: 'configured_owner' };
       if (ownsAll(was) && !ownsAfter && !anotherOwner(seen.owners, principal)) return { refused: 'last_owner' };
@@ -311,7 +316,7 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
       }
       const [was] = seen.member;
       if (was === undefined || was.status !== 'active') return { refused: was === undefined ? 'not_a_member' : 'removed' };
-      if (was.role === 'owner' && !ownsAllAsking(caller)) return { refused: 'no_access' };
+      if (was.role === 'owner' && !ownsAllAsking(caller)) return OWNERS_ONLY;
       if (named(vault, principal)) return { refused: 'configured_owner' };
       if (ownsAll(was) && !anotherOwner(seen.owners, principal)) return { refused: 'last_owner' };
       // An account of theirs the vault cannot read may be one still live: removed, they would sign in with it once back.

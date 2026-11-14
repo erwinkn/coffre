@@ -136,6 +136,8 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   removed: ['conflict', 'they were removed: add them again first'],
   last_owner: ['conflict', 'the instance keeps one Owner of all of it: make another one first'],
   configured_owner: ['conflict', "the deployment names them an Owner, which they stay while its configuration says so"],
+  // R1 (instance-roles.md, "Only Owners make Owners"), in 0.14.7's words, which the UI shows.
+  not_allowed: ['vault_refused', 'only an Owner of the whole instance makes someone an Owner, or changes or removes one'],
   invalid: ['conflict', 'a role the instance does not have, one that holds what only a project has given on an environment, or an end that has passed'],
   // The instance's roles (routes/roles.ts), as 0.14.7 answered.
   role_granted: ['conflict', 'a grant names that role: revoke it first'],

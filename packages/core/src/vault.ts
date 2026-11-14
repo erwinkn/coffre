@@ -649,9 +649,9 @@ export type AdmitInput = Correlation & Through & {
    * Left out, an existing member keeps theirs and a new one is a `member`.
    * Changing it takes someone who runs the instance, about someone else;
    * making someone an Owner, or changing an Owner's, an Owner of the whole
-   * instance, who may change their own too. It never leaves the instance
-   * without an Owner of all of it (`last_owner`), nor demotes one the
-   * deployment names (`owners`; `not_allowed`).
+   * instance (`not_allowed`), who may change their own too. It never leaves
+   * the instance without an Owner of all of it (`last_owner`), nor demotes
+   * one the deployment names (`owners`; `configured_owner`).
    */
   role?: InstanceRole;
   scope?: Scope;
