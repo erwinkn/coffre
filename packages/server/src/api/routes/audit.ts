@@ -1,8 +1,10 @@
+import { runsInstance } from '@coffre/core/access';
 import { environmentPath, secretKey, slug } from '@coffre/core/schemas';
+import type { About } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { listAudit, type AuditPage } from '../audit.ts';
-import { badRequest } from '../errors.ts';
+import { badRequest, forbidden } from '../errors.ts';
 import { parsePath, type Path } from '../paths.ts';
 import { route } from '../route.ts';
 
@@ -28,6 +30,18 @@ export const auditRoutes = {
     }),
     run: (ctx, { input: { path, detail, ...rest } }): Promise<AuditPage> =>
       listAudit(ctx, { ...rest, detail: detail !== undefined, ...(path === undefined ? {} : { path: placeNamed(path) }) }),
+  }),
+  /**
+   * What the keys an operator keeps are checked against (`coffre verify
+   * keys`, Settings › Keys): the vault's `about`, for whoever runs the
+   * instance, as 0.14.7 served it. No secret, and no statement: two calls
+   * to the vault, `caller` and `about`.
+   */
+  ...route('GET /audit/keys', {
+    run: async (ctx): Promise<About> => {
+      if (!runsInstance((await ctx.caller()).holds)) throw forbidden('only an admin or owner of the whole instance may read what the keys are checked against');
+      return ctx.vault.about();
+    },
   }),
 };
 

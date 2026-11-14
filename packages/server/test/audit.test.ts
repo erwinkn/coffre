@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
+import { derivedSigningKey, keyCheckOf } from '@coffre/core/kek';
 import type { Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
@@ -393,4 +394,19 @@ test('a page about more places than the index is read by reads the log itself, a
     next = paged.next;
   } while (next !== null);
   assert.deepEqual(shown, brief(scoped));
+});
+
+test("what the keys an operator keeps are checked against: the vault's `about`, for whoever runs the instance alone, with no statement", async () => {
+  const [calls, statements] = [app.calls.length, app.statements];
+  assert.deepEqual(await call('cy-cli', 'GET', '/audit/keys'), [200, {
+    kek: { provider: 'local', id: 'app-test' },
+    previous: [],
+    checks: [keyCheckOf(derivedSigningKey(Buffer.alloc(32, 9)))],
+  }]);
+  assert.deepEqual([app.calls.slice(calls), app.statements - statements], [['caller', 'about'], 0]);
+  // An Admin of market, an Auditor of the whole instance, a lead of market: none runs it.
+  for (const label of ['al-cli', 'aud-cli', 'bo-cli']) {
+    const [status, body] = await call(label, 'GET', '/audit/keys');
+    assert.deepEqual([status, body.error], [403, 'forbidden'], label);
+  }
 });

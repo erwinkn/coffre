@@ -221,26 +221,24 @@ export async function verifyLeftovers(cli: Cli, admin: Person, setups: string[],
 }
 
 /**
- * `coffre verify keys`, with the admin's session, the keys piped in: this
- * deployment's pass; a wrong vault key fails and the right app key passes;
- * a malformed app key fails. No key is ever printed.
+ * `coffre verify keys`, with the admin's session, the key piped in: this
+ * deployment's vault key passes, its vault ID as given; a wrong key and a
+ * malformed one each fail, named. No key is ever printed.
  */
 export async function verifyKeys(cli: Cli): Promise<string> {
   const wrong = Buffer.alloc(32, 7).toString('base64');
-  // Piped in, as a script does: the vault key's line, then the app key's.
-  const runs: { args: string[]; input: string; code: number; vault: string; app: string; said?: RegExp }[] = [
-    { args: ['--vault-id', KEYS.VAULT_KEY_ID], input: `${KEYS.VAULT_KEY}\n${KEYS.APP_KEY}\n`, code: 0, vault: '✓', app: '✓' },
-    { args: [], input: `${wrong}\n${KEYS.APP_KEY}\n`, code: 1, vault: '✗', app: '✓', said: /✗ vault key +not this instance's vault key/ },
-    { args: [], input: `${KEYS.VAULT_KEY}\nnot-a-key\n`, code: 1, vault: '✓', app: '✗', said: /✗ app key +not an app key/ },
+  const runs: { args: string[]; input: string; code: number; key: string; said?: RegExp }[] = [
+    { args: ['--vault-id', KEYS.VAULT_KEY_ID], input: `${KEYS.VAULT_KEY}\n`, code: 0, key: '✓' },
+    { args: [], input: `${wrong}\n`, code: 1, key: '✗', said: /✗ key +not this instance's/ },
+    { args: [], input: 'not-a-key\n', code: 1, key: '✗', said: /✗ key +not a key/ },
   ];
-  for (const { args, input, code, vault, app, said } of runs) {
+  for (const { args, input, code, key, said } of runs) {
     const run = await cli.run(['verify', 'keys', ...args], {}, input);
-    const seen = marks(run.output);
-    expect(run.code === code && seen['vault key'] === vault && seen['app key'] === app, `coffre verify keys exited ${run.code}`, run.output);
-    if (said !== undefined) expect(said.test(run.output), 'it did not say which key is not right', run.output);
-    for (const key of [KEYS.VAULT_KEY, KEYS.APP_KEY, wrong, 'not-a-key']) expect(!run.output.includes(key), 'a key was printed', run.output);
+    expect(run.code === code && marks(run.output)['key'] === key, `coffre verify keys exited ${run.code}`, run.output);
+    if (said !== undefined) expect(said.test(run.output), 'it did not say the key is not right', run.output);
+    for (const shown of [KEYS.VAULT_KEY, KEYS.APP_KEY, wrong, 'not-a-key']) expect(!run.output.includes(shown), 'a key was printed', run.output);
   }
-  return "this deployment's keys pass, vault ID included; a wrong vault key and a malformed app key are each named; no key shown";
+  return "this deployment's vault key passes, vault ID included; a wrong key and a malformed one are each named; no key shown";
 }
 
 /**

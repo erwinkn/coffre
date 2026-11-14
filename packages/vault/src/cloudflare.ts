@@ -26,7 +26,7 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 
 import { signerObject, signerOf, type SignerNamespace } from './cloudflare-signer.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
-import { openVault, prepareVault, type PreparedVault } from './vault.ts';
+import { about, openVault, prepareVault, type PreparedVault } from './vault.ts';
 
 export type { Vault, VaultConfig };
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
@@ -93,6 +93,8 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async caller(input: Presented & { head?: boolean }) { return this.#call((vault) => vault.caller(input)); }
   async change<O extends Change['op']>(input: Asked<O>) { return this.#call((vault) => vault.change(input)); }
   async weigh<O extends Exclude<Change['op'], Unasked | WorkloadsUnasked | McpUnasked>>(input: Asked<O>) { return this.#call((vault) => vault.weigh(input)); }
+  /** From the configuration alone: no database, nor the signer's stub, is opened for it. */
+  async about() { return about(this.#ready().prepared); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {

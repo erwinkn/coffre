@@ -67,6 +67,13 @@ export interface Vault {
    * exchange rests on a proof, which this would try without spending.
    */
   weigh<O extends Exclude<Change['op'], Unasked | WorkloadsUnasked | McpUnasked>>(input: Asked<O>): Promise<{ answer: Answers[O] } | Refused>;
+  /**
+   * The vault's configuration that is no secret: its vault keys and its
+   * signing keys' checks. It asks no caller, reads nothing, writes no
+   * entry and opens no connection: it answers what the vault was started
+   * with, the same to anyone, so whoever may see it is the app's to say.
+   */
+  about(): Promise<About>;
 }
 
 /** Where a request came from, which every call carries. */
@@ -383,12 +390,15 @@ export type Wrapped = { wrapped: WrappedKey[]; seqs: number[]; sensitive: boolea
 export type WrappedKey = { kekProvider: string; kekId: string; kekVersion: string; bytes: string };
 
 /**
- * The vault key the vault wraps under now, by provider and ID, and each
- * vault key's check, newest first: a known value wrapped under it
- * (`KEY_CHECK_VALUE` in `@coffre/core/kek`), in its newest `key.check`
- * entry that carries the vault's MAC, at `seq`.
+ * What `about` answers. `kek` is the vault key that wraps every new data
+ * key, `previous` those it still unwraps with, by provider and ID.
+ * `checks` holds the check of each key the vault signs and seals with
+ * (`keyCheckOf` in `@coffre/core/kek`): the one it signs with first, then
+ * those it only verifies with. A check is of a signing key, not of a vault
+ * key, so it names none: with a key service and a `signingKey`, no vault
+ * key has a check at all.
  */
-export type KeyChecks = { current: { kekProvider: string; kekId: string }; checks: (WrappedKey & { seq: number })[] };
+export type About = { kek: { provider: string; id: string }; previous: { provider: string; id: string }[]; checks: string[] };
 
 /**
  * Whether a read hands values back to whoever asked, which a person never

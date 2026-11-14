@@ -69,36 +69,37 @@ check that what you keep is what the instance runs with:
 coffre verify keys
 ```
 
-It asks for the vault key, then the app key, without showing either, and
-checks each against the current instance on your machine: neither is sent
-anywhere. Enter alone skips one. It needs an Admin or Owner of the whole instance.
+It asks for the vault key, or with a key service the `signingKey` you gave
+the vault, without showing it, and checks it against the current instance
+on your machine: it is not sent anywhere. It needs an Admin or Owner of the
+whole instance.
 
 ```
-Checking your keys against https://secrets.example.com
-  On this machine: what they're checked against was read from the instance, and the keys go nowhere.
+Checking your key against https://secrets.example.com
+  On this machine: what it's checked against was read from the instance, and the key goes nowhere.
 
-  ✓ vault key           the current one, vault ID vault-2026-10-02-k7q2xm
-  ✗ app key             not this instance's app key: the app signs with another
+  ✓ key                 the vault key the vault signs with now; it wraps under vault ID vault-2026-10-02-k7q2xm
 
-✗ The app key is not https://secrets.example.com's.
+✓ The key is https://secrets.example.com's.
 ```
 
-How it knows, without the instance learning anything: for each vault key,
-the vault writes a check, a known value wrapped under that key, in a
-`key.check` entry of the log; and every entry the app signs names its key by
-a fingerprint. The CLI reads the checks the vault vouches for and the app
-key's fingerprint (`GET /api/audit/keys`, owners only; none of it is
-secret), opens the current vault key's check with the key you pasted, and
-derives the fingerprint of the app key you pasted. The vault ID is bound
-into each check, so the one opened names it; `--vault-id <id>` checks the
-one you keep as well. A vault key the vault replaced opens its own check,
-and is named as such: "this is a previous vault key (vault ID …), not the
-current one". With AWS KMS there is no vault key to paste; a local key it
-replaced still checks as previous.
+How it knows, without the instance learning anything: the vault answers a
+check of each key it signs with, the one it signs with now first, each an
+HKDF-SHA-256 of that key under a label of its own, so the check opens and
+signs nothing (`GET /api/audit/keys`, Admins and Owners of the whole
+instance; none of it is secret). The CLI computes the check of the key you
+pasted, taken as a signing key and as a vault key, which stands for the
+signing key derived from it, and finds it among them. A key the vault only
+verifies with, one it replaced, is named as such: "a vault key the vault
+only verifies with, not the one it signs with now". The check proves the
+key, not its vault ID: the CLI shows the ID the instance wraps under, and
+`--vault-id <id>` compares the one you keep with it. With AWS KMS, paste
+the `signingKey`; a local key it replaced still checks as previous. The app
+key has nothing to check: since 0.16 it signs nothing, and losing it costs
+everyone a new sign-in.
 
-In a script, the keys are piped in, the vault key on the first line and
-the app key on the second, a blank line skipping one; never as arguments.
-It exits 1 unless every key given is the instance's.
+In a script, the key is piped in on the first line; never as an argument.
+It exits 1 unless the key is the one the instance signs with.
 
 ## AWS KMS
 

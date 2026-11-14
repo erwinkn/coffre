@@ -1,16 +1,15 @@
-// `coffre verify keys`: whether the keys in escrow are this instance's,
-// checked on this machine. The instance gives what they are checked
-// against, which is no secret (`GET /audit/keys`, for admins and owners of
-// the whole instance): each vault key's check, a known value the vault wrapped under it,
-// and the id the log records for the app key, a fingerprint of it. The vault
-// key is right if it opens the check of the key the vault wraps under now;
-// the app key, if it makes the same fingerprint. Neither key is sent, shown
-// or written down: they come from hidden prompts or stdin, never the
-// command line.
+// `coffre verify keys`: whether the key in escrow is this instance's,
+// checked on this machine. The instance gives what it is checked against,
+// which is no secret (`GET /audit/keys`, for admins and owners of the whole
+// instance): the vault's keys by ID, and a check of each key it signs with
+// (`keyCheckOf`), the one it signs with now first. A pasted key is right if
+// its check, taken as the signing key or as the vault key it stands for, is
+// that first one. The key is never sent, shown or written down: it comes
+// from a hidden prompt or stdin, never the command line.
 import { parseArgs } from 'node:util';
 
 import type { CoffreClient, RouteOutput } from '@coffre/client';
-import { appLogKeyId, opensKeyCheck } from '@coffre/core/kek';
+import { derivedSigningKey, keyCheckOf } from '@coffre/core/kek';
 
 import { hiddenLine, style, type Output } from '../tty.ts';
 import { Checks, Failure, Skip, stop } from './checks.ts';
@@ -18,16 +17,15 @@ import { Checks, Failure, Skip, stop } from './checks.ts';
 export const KEYS_USAGE = `usage:
   coffre verify keys [--vault-id <id>]
 
-Asks for the vault key, then the app key, without showing them, and checks
-each against the current instance, on this machine: neither is sent. Enter
-alone skips one. As an admin or owner of the whole instance.
+Asks for the vault key you keep, or the signing key you gave the vault,
+without showing it, and checks it against the current instance, on this
+machine: it is not sent. As an admin or owner of the whole instance.
 
-  --vault-id   the vault ID kept with the vault key, to check as well. It
-               is shown either way
+  --vault-id   the vault ID kept with the key, compared with the one the
+               instance wraps under. It is shown either way
 
-In a script, the keys come on stdin, the vault key on the first line and
-the app key on the second, a blank line skipping one; never as arguments.
-Exits 1 when a key is not the instance's.`;
+In a script, the key comes on stdin's first line; never as an argument.
+Exits 1 when it is not the key the instance signs with now.`;
 
 /** What the keys are checked against, as the instance gives it. */
 export type KeyMaterial = RouteOutput<'GET /audit/keys'>;
@@ -48,86 +46,52 @@ function malformed(what: string, text: string): Failure {
 }
 
 /**
- * The vault key: the one the vault wraps under now if it opens that key's
- * check; a key the vault replaced if it opens an older one's, which is said;
- * otherwise none of this instance's. The vault ID is bound into every
- * check, so the one opened names the key's.
+ * The key: right if its check is the first, that of the key the vault signs
+ * with now, taken as that signing key or as the local vault key it is
+ * derived from; one the vault only verifies with if it is a later one,
+ * which is said; otherwise none of this instance's. A check proves a
+ * signing key, never a vault ID: the ID is the instance's word, shown to be
+ * compared with the one kept beside the key.
  */
-export async function vaultKeyVerdict(text: string, material: KeyMaterial['vault'], vaultId?: string): Promise<string> {
+export function keyVerdict(text: string, about: KeyMaterial, vaultId?: string): string {
   if (text === '') throw new Skip('not given: not checked');
   const key = decoded(text);
-  if (key === null) throw malformed('a vault key', text);
+  if (key === null) throw malformed('a key', text);
+  const derived = derivedSigningKey(key);
   try {
-    const { current, checks } = material;
-    let opened: KeyMaterial['vault']['checks'][number] | undefined;
-    for (const check of checks) {
-      const wrapped = { kekProvider: check.provider, kekId: check.vaultId, kekVersion: check.version, bytes: Buffer.from(check.wrapped, 'base64') };
-      if (await opensKeyCheck(key, wrapped)) {
-        opened = check;
-        break;
-      }
+    // Both readings, the earlier check winning: a key-service deployment's signingKey may also be a vault key it kept, whose check is a later one.
+    const readings = [
+      { what: 'vault key', at: about.checks.indexOf(keyCheckOf(derived)) },
+      { what: 'signing key', at: about.checks.indexOf(keyCheckOf(key)) },
+    ].filter(({ at }) => at >= 0);
+    const { what, at } = readings.sort((a, b) => a.at - b.at)[0] ?? { what: 'key', at: -1 };
+    const now = about.kek.provider === 'local' ? `vault ID ${about.kek.id}` : `${about.kek.id}, in ${about.kek.provider}`;
+    if (at < 0) throw new Failure(`not this instance's: no key the vault signs or verifies with, taken as a vault key or as a signing key. The vault wraps under ${now}`);
+    if (at > 0) {
+      throw new Failure(`a ${what} the vault only verifies with, not the one it signs with now: a previous one, or a vault key beside the signingKey it was given, which is the one to check. The vault wraps under ${now}`);
     }
-    const now = current.provider === 'local' ? `vault ID ${current.vaultId}` : `${current.vaultId}, in ${current.provider}`;
-    if (opened === undefined) {
-      if (checks.length === 0) throw new Failure(`the vault holds no check to hold a key to yet. It wraps under ${now}`);
-      const opens = checks.length === 1 ? "it does not open the vault key's check" : `it opens none of the checks of its ${checks.length} vault keys, current or replaced`;
-      throw new Failure(`not this instance's vault key: ${opens}. The vault wraps under ${now}`);
-    }
-    if (opened.vaultId !== current.vaultId || opened.provider !== current.provider) {
-      throw new Failure(`this is a previous vault key (vault ID ${opened.vaultId}), not the current one: the vault wraps under ${now}`);
-    }
-    if (vaultId !== undefined && vaultId !== opened.vaultId) {
-      throw new Failure(`the key is right, but its vault ID is ${opened.vaultId}, not ${vaultId}: keep the right one with it`);
-    }
-    return `the current one, vault ID ${opened.vaultId}${vaultId === undefined ? '' : ', as given'}`;
+    if (vaultId !== undefined && vaultId !== about.kek.id) throw new Failure(`the ${what} is right, but the vault wraps under ${about.kek.id}, not ${vaultId}: keep the right ID with it`);
+    return `the ${what} the vault signs with now; it wraps under ${now}${vaultId === undefined ? '' : ', as given'}`;
   } finally {
     key.fill(0);
+    derived.fill(0);
   }
 }
 
-/**
- * The app key: right if the log's entries the app signs now would carry the
- * fingerprint it makes; one the app replaced if it makes one of theirs,
- * which is said; otherwise none of this instance's.
- */
-export function appKeyVerdict(text: string, material: KeyMaterial['app']): string {
-  if (text === '') throw new Skip('not given: not checked');
-  const key = decoded(text);
-  if (key === null) throw malformed('an app key', text);
-  try {
-    const id = appLogKeyId(key);
-    if ((material.previous ?? []).includes(id)) throw new Failure(`this is a previous app key (${id}), not the current one: the app signs with ${material.keyId}`);
-    if (id !== material.keyId) throw new Failure("not this instance's app key: the app signs with another");
-    return 'the one the app signs with now';
-  } finally {
-    key.fill(0);
-  }
-}
+type Source = { text: string; from: string; more: boolean };
 
-type Source = { text: string; from: string };
-
-/**
- * The two keys: stdin's lines in order when it is piped, or hidden prompts
- * on a terminal.
- */
-async function readKeys(): Promise<{ vault: Source; app: Source }> {
-  const missing = ['vault', 'app'] as const;
-  const asked: Partial<Record<'vault' | 'app', Source>> = {};
+/** The key: stdin's first line when it is piped, or a hidden prompt on a terminal. */
+async function readKey(): Promise<Source> {
   if (!process.stdin.isTTY) {
     let text = '';
     for await (const chunk of process.stdin) text += String(chunk);
-    const lines = text.split(/\r?\n/);
-    missing.forEach((which, i) => (asked[which] = { text: lines[i]?.trim() ?? '', from: 'stdin' }));
-  } else {
-    // On the terminal stdin is, as every prompt: stdout may be a pipe, as `coffre verify keys | tee report`.
-    const s = style(process.stderr);
-    for (const which of missing) {
-      const name = which === 'vault' ? 'Vault key' : 'App key';
-      const text = await hiddenLine(process.stdin, process.stderr, s, `${name}?`, 'Paste it: it stays hidden, and on this machine. Enter alone skips it.');
-      asked[which] = { text, from: 'the prompt' };
-    }
+    const [first = '', ...rest] = text.split(/\r?\n/);
+    return { text: first.trim(), from: 'stdin', more: rest.some((line) => line.trim() !== '') };
   }
-  return { vault: asked.vault!, app: asked.app! };
+  // On the terminal stdin is, as every prompt: stdout may be a pipe, as `coffre verify keys | tee report`.
+  const s = style(process.stderr);
+  const text = await hiddenLine(process.stdin, process.stderr, s, 'Vault key, or signing key?', 'Paste it: it stays hidden, and on this machine.');
+  return { text, from: 'the prompt', more: false };
 }
 
 export async function verifyKeys(args: string[], api: CoffreClient, origin: string, out: Output = process.stdout): Promise<void> {
@@ -138,25 +102,25 @@ export async function verifyKeys(args: string[], api: CoffreClient, origin: stri
   });
   if (values.help) stop(0, KEYS_USAGE);
   const vaultId = values['vault-id']?.trim() || undefined;
-  // What they are checked against comes first: someone who may not read it is told before pasting a key.
+  // What it is checked against comes first: someone who may not read it is told before pasting a key.
   const material = await api.audit.keys();
   const s = style(out);
-  out.write(`${s.bold(`Checking your keys against ${origin}`)}\n`);
-  out.write(s.dim("  On this machine: what they're checked against was read from the instance, and the keys go nowhere.\n\n"));
-  const keys = await readKeys();
+  out.write(`${s.bold(`Checking your key against ${origin}`)}\n`);
+  out.write(s.dim("  On this machine: what it's checked against was read from the instance, and the key goes nowhere.\n\n"));
+  const key = await readKey();
   const report = new Checks(out);
-  await report.check('vault key', {}, () => said(keys.vault, () => vaultKeyVerdict(keys.vault.text, material.vault, vaultId)));
-  await report.check('app key', {}, () => said(keys.app, () => appKeyVerdict(keys.app.text, material.app)));
-  const { failed, results } = report;
-  const right = results.filter(({ status }) => status === 'ok').map(({ name }) => name);
+  await report.check('key', {}, () => said(key, () => keyVerdict(key.text, material, vaultId)));
+  // 0.14 asked for the app key on the second line: 0.16's signs nothing a copy of it would be checked against.
+  if (key.more) out.write(s.dim("  stdin's other lines are not read: the app key has nothing to be checked against since 0.16, as it signs nothing.\n"));
+  const [result] = report.results;
   out.write(
-    failed.length > 0
-      ? `\n${s.red('✗')} ${s.bold(failed.length === 2 ? `Neither key is ${origin}'s.` : `The ${failed[0]} is not ${origin}'s.`)}\n`
-      : right.length === 0
+    report.failed.length > 0
+      ? `\n${s.red('✗')} ${s.bold(`The key is not the one ${origin} signs with.`)}\n`
+      : result?.status !== 'ok'
         ? `\n${s.red('✗')} ${s.bold('No key given: nothing checked.')}\n`
-        : `\n${s.green('✓')} ${s.bold(right.length === 2 ? `Both keys are ${origin}'s.` : `The ${right[0]} is ${origin}'s.`)}\n`,
+        : `\n${s.green('✓')} ${s.bold(`The key is ${origin}'s.`)}\n`,
   );
-  process.exitCode = failed.length > 0 || right.length === 0 ? 1 : 0;
+  process.exitCode = result?.status === 'ok' ? 0 : 1;
 }
 
 /** A key's verdict, and where the key came from when not a prompt: so that a script's run says it read stdin. */

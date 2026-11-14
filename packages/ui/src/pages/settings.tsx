@@ -154,31 +154,27 @@ function ServiceSetup({ scope }: { scope: Scope }) {
  * key typed into a web page would be within reach of everything running in it.
  */
 function Keys({ keys }: { keys: RouteOutput<'GET /audit/keys'> }) {
-  const { current, checks } = keys.vault;
-  const replaced = new Set(checks.map((check) => check.vaultId).filter((id) => id !== current.vaultId)).size;
+  const { kek, previous } = keys;
   return (
     <Card
       labelledBy="keys"
       title="Keys"
       description={
         <>
-          To check your vault key and app key against these, run <code>coffre verify keys</code>.
-          It reads them on your machine and sends neither.
+          To check the vault key you keep, or the signing key you gave the vault, run <code>coffre verify keys</code>.
+          It reads the key on your machine and sends it nowhere.
         </>
       }
     >
       <dl className="facts">
         <Fact label="Vault ID">
-          <span className="mono">{current.vaultId}</span>
+          <span className="mono">{kek.id}</span>
         </Fact>
         <Fact label="Vault key">
           <span>
-            Held by <span className="mono">{current.provider}</span>
-            {replaced > 0 && `; ${replaced} earlier vault key${replaced === 1 ? '' : 's'} still checkable`}
+            Held by <span className="mono">{kek.provider}</span>
+            {previous.length > 0 && `; ${previous.length} earlier vault key${previous.length === 1 ? '' : 's'} still unwrapping what ${previous.length === 1 ? 'it' : 'they'} wrapped`}
           </span>
-        </Fact>
-        <Fact label="App key">
-          <span className="mono">{keys.app.keyId}</span>
         </Fact>
       </dl>
     </Card>

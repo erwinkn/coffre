@@ -51,6 +51,7 @@ async function freshVault(database: string, { signer = true } = {}): Promise<{
   peek(bearer: string, path: string, keys: string[] | null): Promise<{ status: number; body: Peeked }>;
   write(bearer: string, path: string, values: Record<string, string>): Promise<{ status: number; body: { answer?: { keys: Record<string, { version: number; nature: string }>; outcomes: Record<string, unknown> }; refused?: string; error?: string } }>;
   post(path: string): Promise<{ error?: string }>;
+  get(path: string): Promise<unknown>;
   stop(): Promise<void>;
 }> {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-worker-'));
@@ -97,6 +98,9 @@ async function freshVault(database: string, { signer = true } = {}): Promise<{
     },
     async post(path) {
       return (await (await worker.fetch(path, { method: 'POST', signal: AbortSignal.timeout(20_000) })).json()) as { error?: string };
+    },
+    async get(path) {
+      return (await worker.fetch(path, { signal: AbortSignal.timeout(20_000) })).json();
     },
     async stop() {
       await worker.stop();
@@ -223,6 +227,18 @@ test('a fresh isolate answers a burst of first calls, each on one connection: on
     assert.deepEqual(same.map((answer) => [answer.status, given(answer).length]), KEYS.map(() => [200, 2]));
     const opened = database.opened - before;
     assert.ok(opened >= KEYS.length && opened <= KEYS.length + 2, `${opened} connections for ${KEYS.length} uses of the same keys at once`);
+  } finally {
+    await vault.stop();
+    await database.close();
+  }
+});
+
+test("`about` is the configuration's alone: answered over the binding with no connection opened, nor the signer asked", { timeout: 120_000 }, async () => {
+  const database = await slowPostgres(5);
+  const vault = await freshVault(database.url, { signer: false });
+  try {
+    assert.deepEqual(await Promise.all([vault.get('/about'), vault.get('/about')]), [prepared.about, prepared.about]);
+    assert.equal(database.opened, 0);
   } finally {
     await vault.stop();
     await database.close();

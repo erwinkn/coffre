@@ -9,7 +9,7 @@ export { KEYS_USAGE, verifyKeys } from './keys.ts';
 /** The checks, in the order they are offered: each one's name, and what it checks. */
 export const CHECKS = [
   ['instance', 'the instance from outside: as no one, then as you, an owner'],
-  ['keys', 'the vault key and app key you keep, against the instance'],
+  ['keys', 'the vault key or signing key you keep, against the instance'],
   ['log', 'the whole audit log, as you, an owner'],
 ] as const;
 

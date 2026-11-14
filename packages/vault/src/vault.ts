@@ -1,4 +1,5 @@
-import { PURPOSES, type Answers, type Asked, type Change, type McpUnasked, type Presented, type Unasked, type UseInput, type Vault, type WorkloadsUnasked } from '@coffre/core/vault';
+import { keyCheckOf } from '@coffre/core/kek';
+import { PURPOSES, type About, type Answers, type Asked, type Change, type McpUnasked, type Presented, type Unasked, type UseInput, type Vault, type WorkloadsUnasked } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
 import type { ResolvedVaultConfig } from './config.ts';
@@ -21,10 +22,17 @@ import { memoryOf, peek, use, type Ask, type Serving } from './use.ts';
  * vault's short memory. Settled values only, never work under way, which on
  * Workers would belong to the call that started it.
  */
-export type PreparedVault = Pick<Serving, 'keys' | 'keks' | 'cap' | 'workloads' | 'memory' | 'refused'> & Pick<Deciding, 'owners'>;
+export type PreparedVault = Pick<Serving, 'keys' | 'keks' | 'cap' | 'workloads' | 'memory' | 'refused'> & Pick<Deciding, 'owners'> & { about: About };
 
 export function prepareVault(config: ResolvedVaultConfig): PreparedVault {
-  return { keys: config.signingKeys.map(keyOf), keks: config.keks, cap: config.bulkLimit, workloads: config.workloads, memory: memoryOf(config.memorySeconds, config.outageSeconds), refused: new Map(), owners: config.owners };
+  const [kek, ...previous] = config.keks.all.map(({ provider, keyId }) => ({ provider, id: keyId }));
+  const about = { kek, previous, checks: config.signingKeys.map(keyCheckOf) };
+  return { keys: config.signingKeys.map(keyOf), keks: config.keks, cap: config.bulkLimit, workloads: config.workloads, memory: memoryOf(config.memorySeconds, config.outageSeconds), refused: new Map(), owners: config.owners, about };
+}
+
+/** `about`, from the configuration alone: a copy each call, so no caller changes what the next is told. */
+export function about(prepared: PreparedVault): About {
+  return structuredClone(prepared.about);
 }
 
 /** What one call runs on: its database, and the signer's wake-up, which never holds the reply nor fails the call. */
@@ -96,6 +104,9 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
     async weigh(input) {
       if (Object.hasOwn(UNASKED, input.op)) throw new TypeError('a change nobody asks is not weighed');
       return weigh(serving, operation(input));
+    },
+    async about() {
+      return about(prepared);
     },
   };
 }
