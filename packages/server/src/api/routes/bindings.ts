@@ -87,8 +87,7 @@ export type BindingPlan = {
  * (`?dryRun=1`), in 0.14.7's shape: the keys, the bindings on the issuer
  * the new ones take the place of, and the places of their scopes that hold
  * a sensitive value the new ones will not read: one an Owner bound,
- * re-keyed by anyone else. Named for the CLI's preview (`coffre trust
- * --replace-keys`); the route answers it once its dry run is served.
+ * re-keyed by anyone else.
  */
 export type KeysPlan = { issuer: string; jwksUri: string; keys: KeySummary[]; replaces: string[]; withheld: string[] };
 
@@ -277,7 +276,6 @@ async function discovered(ctx: ApiContext, issuer: string, workloads: WorkloadsC
   }
 }
 
-const NO_PREVIEW = new ApiError('not_implemented', "a binding's preview (?dryRun=1) is not served yet: the binding is made, and what it reaches is its answer");
 const dryRun = z.object({ dryRun: z.string().optional() }).passthrough();
 
 /** A binding as `POST /members/:member/bindings` takes it. */
@@ -389,16 +387,23 @@ export const bindingRoutes = {
    * The service's bindings on an issuer given new keys, uploaded: each
    * replaced by one the same but for its keys, in one `token.bind`. The
    * answer lists the bindings made in the order of those they replaced.
+   * `?dryRun=1` answers what it would do (`KeysPlan`): the same change,
+   * weighed, one call, and nothing made.
    */
   ...route('POST /members/:member/bindings/keys', {
     input: z.object({ issuer: kept(2048).min(1), jwks }).strict(),
     query: dryRun,
-    run: async (ctx, { params, input, query }): Promise<{ bindings: BindingMade[]; replaced: string[] }> => {
+    run: async (ctx, { params, input, query }): Promise<KeysPlan | { bindings: BindingMade[]; replaced: string[] }> => {
       workloadsOf(ctx);
       const member = serviceIn(params.member);
-      if (query.dryRun !== undefined) throw NO_PREVIEW;
-      await checkedKeys(input.jwks);
-      const bound = await bindingChange<'token.bind'>(ctx, { op: 'token.bind', member, keys: { issuer: input.issuer, jwks: input.jwks } }, member);
+      const carried = await checkedKeys(input.jwks);
+      const change = { op: 'token.bind', member, keys: { issuer: input.issuer, jwks: input.jwks } } as const;
+      if (query.dryRun !== undefined) {
+        const plan = await bindingChange<'token.bind'>(ctx, change, member, 'weigh');
+        const withheld = [...new Set(plan.bindings.flatMap((made) => made.withheld))].sort();
+        return { issuer: input.issuer, jwksUri: `${CARRIED}${carried.digest}`, keys: carried.keys, replaces: plan.replaced, withheld };
+      }
+      const bound = await bindingChange<'token.bind'>(ctx, change, member);
       return { bindings: bound.bindings.map(({ id, scope }) => ({ id, scope })), replaced: bound.replaced };
     },
   }),

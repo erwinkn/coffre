@@ -7,7 +7,7 @@
 // Who may bind, and what a binding reaches, is the vault's
 // (packages/vault/test/bindings.test.ts); here, what the app does around it.
 import assert from 'node:assert/strict';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { after, beforeEach, test } from 'node:test';
 
 import { PERMISSIONS } from '@coffre/core/access';
@@ -204,9 +204,6 @@ test("a preview (`?dryRun=1`) is the binding weighed and not made, as it would b
   fetched.length = 0;
   const [answer, refusedCalls, refusedStatements] = await bind('bo-cli', {}, '?dryRun=1');
   assert.deepEqual([refused(answer), refusedCalls, refusedStatements, fetched], [[403, 'vault_refused', 'no_access'], ['caller'], 1, []]);
-  // The keys' preview is not served yet.
-  const [keysAnswer] = await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: KUBE, jwks: { keys: [] } }));
-  assert.equal(keysAnswer[0], 501);
 });
 
 test("a preview says what the binding replaces: those asked, and those on its issuer under keys other than discovery found, not those under the same", async () => {
@@ -286,6 +283,44 @@ test("an issuer's bindings re-keyed: each replaced by one the same but for its k
   // The same keys again, and an issuer with no binding.
   assert.deepEqual(refused((await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys`, { issuer: KUBE, jwks })))[0]), [409, 'conflict', 'same_keys']);
   assert.deepEqual(refused((await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys`, { issuer: 'https://other.acme.example', jwks })))[0]), [404, 'not_found', 'unknown_binding']);
+});
+
+test("re-keying's preview (`?dryRun=1`) is the same change weighed, one call: the keys as checked, the bindings it replaces, and what it withholds; nothing made", async () => {
+  // Three bindings on the issuer: two made at once, the lower id first, then one a second later. Both environments hold a sensitive value.
+  const scope = (...grants: [string, string][]) => JSON.stringify(grants.map(([environment, role]) => ({ projectId: ids.market, environmentId: ids[environment], role })));
+  const later = new Date(Date.now() - 60_000);
+  const of = (id: string, more: Parameters<typeof binding>[1]) => binding(ci, { id, profile: 'custom', issuer: KUBE, jwksUri: KEYS, claims: JSON.stringify(POD), createdAt: new Date(later.getTime() - 1_000), ...more });
+  const [prodOnly, devOnly, both] = [
+    of('00000000-0000-4000-8000-000000000001', { scope: scope(['prod', 'viewer']) }),
+    of('ffffffff-ffff-4fff-bfff-ffffffffffff', { scope: scope(['dev', 'developer']) }),
+    of('00000000-0000-4000-8000-000000000000', { scope: scope(['dev', 'developer'], ['prod', 'viewer']), createdAt: later }),
+  ];
+  const at = (environment: string) => ({ id: ids[environment]!, projectId: ids.market! });
+  await write(world, ...rows('bindings', prodOnly, devOnly, both), ...rows('secrets', value(world, secret(at('dev'), 'STRIPE'), 'sk_dev', { sensitive: true }), value(world, secret(at('prod'), 'STRIPE'), 'sk_prod', { sensitive: true })));
+  const { publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const jwk = publicKey.export({ format: 'jwk' });
+  const jwks = { keys: [{ ...jwk, kid: 'k2', alg: 'ES256', use: 'sig' }] };
+  // RFC 7638: the SHA-256 of the required members, in lexicographic order, in base64url.
+  const thumbprint = createHash('sha256').update(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y })).digest('base64url');
+  const logged = (await pending()).length;
+  const [[status, body], calls, statements] = await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: KUBE, jwks }));
+  assert.equal(status, 200, JSON.stringify(body));
+  // Where the keys it carries are: their digest, as the bindings made would name them.
+  const { jwksUri, ...rest } = body as { jwksUri: string };
+  assert.match(jwksUri, /^sha256:[0-9a-f]{64}$/);
+  // Those it replaces oldest first, then by id; what each new binding withholds, once each, sorted.
+  assert.deepEqual(rest, { issuer: KUBE, keys: [{ kid: 'k2', alg: 'ES256', thumbprint }], replaces: [prodOnly.id, devOnly.id, both.id], withheld: ['market/dev', 'market/prod'] });
+  assert.deepEqual([calls, statements], [['weigh'], 0]);
+  const live = async () => ((await list('ada-cli'))[0][1] as { bindings: { id: string; jwksUri: string }[] }).bindings;
+  assert.deepEqual([(await pending()).length, (await live()).map((row) => row.id).sort()], [logged, [prodOnly.id, devOnly.id, both.id].sort()], 'nothing made, nothing logged');
+  // Refused as re-keying is: by whoever does not manage the service, on an issuer with no binding, with keys they carry already.
+  assert.deepEqual(refused((await cost(() => call('bo-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: KUBE, jwks })))[0]), [403, 'vault_refused', 'no_access']);
+  assert.deepEqual(refused((await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: 'https://other.acme.example', jwks })))[0]), [404, 'not_found', 'unknown_binding']);
+  // Made, the bindings replace those the preview said, and name the keys where it said.
+  const [made, answer] = await call('ada-cli', 'POST', `/members/${ci}/bindings/keys`, { issuer: KUBE, jwks });
+  assert.deepEqual([made, (answer as { replaced: string[] }).replaced], [200, rest.replaces]);
+  assert.deepEqual((await live()).map((row) => row.jwksUri), [jwksUri, jwksUri, jwksUri]);
+  assert.deepEqual(refused((await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: KUBE, jwks })))[0]), [409, 'conflict', 'same_keys']);
 });
 
 test('removing a binding is one change; one not live is not found, and whoever does not manage the service is refused', async () => {
