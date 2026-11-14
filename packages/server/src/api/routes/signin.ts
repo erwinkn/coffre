@@ -29,19 +29,22 @@ async function ownSession(ctx: ApiContext): Promise<Called> {
  * own calls are paths outside the API, in `signin.ts`.
  */
 export const signinRoutes = {
-  /** The caller's live sessions, browsers' and CLIs', the one last used first; `current` is this request's. One `caller` and one statement. */
+  /**
+   * The caller's live sessions, browsers' and CLIs', the one last used first; `current` is this request's.
+   * The 200 last used (`SESSIONS_LISTED`), `more` when there are others. One `caller` and one statement.
+   */
   ...route('GET /sessions', {
-    run: async (ctx): Promise<{ sessions: SessionRow[] }> => {
+    run: async (ctx): Promise<{ sessions: SessionRow[]; more: boolean }> => {
       const who = await ownSession(ctx);
-      const sessions = await liveSessions(ctx.db, who.principal, new Date());
-      return { sessions: sessions.map((session) => ({ ...session, current: session.id === who.credential.id })) };
+      const { sessions, more } = await liveSessions(ctx.db, who.principal, new Date());
+      return { sessions: sessions.map((session) => ({ ...session, current: session.id === who.credential.id })), more };
     },
   }),
-  /** The caller's linked accounts, the oldest first. One `caller` and one statement. */
+  /** The caller's linked accounts, the oldest first: the 50 oldest (`IDENTITIES_LISTED`), `more` when there are others. One `caller` and one statement. */
   ...route('GET /identities', {
-    run: async (ctx): Promise<{ identities: IdentityRow[] }> => {
+    run: async (ctx): Promise<{ identities: IdentityRow[]; more: boolean }> => {
       const who = await ownSession(ctx);
-      return { identities: await linkedIdentities(ctx.db, who.principal) };
+      return await linkedIdentities(ctx.db, who.principal);
     },
   }),
   /** One of the caller's accounts revoked, and the sessions it opened with it: one `change`, no statement. */

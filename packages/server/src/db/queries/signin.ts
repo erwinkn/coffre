@@ -65,6 +65,11 @@ export type SessionRow = {
 /** An account of the caller's own, as `GET /identities` shows it. */
 export type IdentityRow = { id: string; provider: string; email: string | null; createdAt: string; lastSignInAt: string | null };
 
+/** The most `GET /sessions` lists, the ones last used: a person signing in from a script can hold thousands. */
+export const SESSIONS_LISTED = 200;
+/** The most `GET /identities` lists, the oldest: sign-in sets no bound on the accounts a person links. */
+export const IDENTITIES_LISTED = 50;
+
 const iso = (value: Date | string | null) => (value === null ? null : new Date(value).toISOString());
 
 /**
@@ -74,9 +79,10 @@ const iso = (value: Date | string | null) => (value === null ? null : new Date(v
  * past `at`, never issued by a trust binding, and opened with an account
  * that is still linked where it names one (a browser's always does). Rows
  * as they are, their MACs unchecked: a list decides nothing, and ending
- * one is the vault's (`credential.end`).
+ * one is the vault's (`credential.end`). The `SESSIONS_LISTED` last used,
+ * and whether there are more: the statement reads one past them.
  */
-export async function liveSessions(db: Queryable, principal: string, at: Date): Promise<Omit<SessionRow, 'current'>[]> {
+export async function liveSessions(db: Queryable, principal: string, at: Date): Promise<{ sessions: Omit<SessionRow, 'current'>[]; more: boolean }> {
   const rows = await rowsOf<{
     id: string; kind: 'browser' | 'cli'; label: string | null; token_hint: string | null; provider: string | null;
     created_at: Date | string; expires_at: Date | string; last_used_at: Date | string | null; last_used_ip: string | null;
@@ -91,9 +97,10 @@ export async function liveSessions(db: Queryable, principal: string, at: Date): 
         AND c.revoked_at IS NULL AND c.expires_at > ${at.toISOString()}::timestamptz AND c.frozen_at IS NULL
         AND c.kind IN ('browser', 'cli') AND c.created_by NOT LIKE 'binding:%'
         AND (CASE WHEN c.identity_id IS NULL THEN c.kind = 'cli' ELSE i.id IS NOT NULL AND i.revoked_at IS NULL END)
-      ORDER BY coalesce(c.last_used_at, c.created_at) DESC, c.id`,
+      ORDER BY coalesce(c.last_used_at, c.created_at) DESC, c.id
+      LIMIT ${SESSIONS_LISTED + 1}`,
   );
-  return rows.map((row) => ({
+  const sessions = rows.slice(0, SESSIONS_LISTED).map((row) => ({
     id: row.id,
     kind: row.kind,
     label: row.label,
@@ -104,15 +111,17 @@ export async function liveSessions(db: Queryable, principal: string, at: Date): 
     lastUsedAt: iso(row.last_used_at),
     lastUsedIp: row.last_used_ip,
   }));
+  return { sessions, more: rows.length > SESSIONS_LISTED };
 }
 
 /**
  * A person's linked accounts, the oldest first: one statement, on the
  * identities' member index. Linked: of the person's generation and not
  * revoked. Rows as they are, their MACs unchecked: unlinking one is the
- * vault's (`account.unlink`).
+ * vault's (`account.unlink`). The `IDENTITIES_LISTED` oldest, and whether
+ * there are more: the statement reads one past them.
  */
-export async function linkedIdentities(db: Queryable, principal: string): Promise<IdentityRow[]> {
+export async function linkedIdentities(db: Queryable, principal: string): Promise<{ identities: IdentityRow[]; more: boolean }> {
   const rows = await rowsOf<{ id: string; provider: string; email: string | null; created_at: Date | string; last_sign_in_at: Date | string | null }>(
     db,
     sql`
@@ -120,7 +129,9 @@ export async function linkedIdentities(db: Queryable, principal: string): Promis
       FROM principals m
       JOIN identities i ON i.principal = m.id AND i.generation = m.generation
       WHERE m.id = ${principal} AND m.status = 'active' AND i.revoked_at IS NULL
-      ORDER BY i.created_at, i.id`,
+      ORDER BY i.created_at, i.id
+      LIMIT ${IDENTITIES_LISTED + 1}`,
   );
-  return rows.map((row) => ({ id: row.id, provider: row.provider, email: row.email, createdAt: iso(row.created_at)!, lastSignInAt: iso(row.last_sign_in_at) }));
+  const identities = rows.slice(0, IDENTITIES_LISTED).map((row) => ({ id: row.id, provider: row.provider, email: row.email, createdAt: iso(row.created_at)!, lastSignInAt: iso(row.last_sign_in_at) }));
+  return { identities, more: rows.length > IDENTITIES_LISTED };
 }

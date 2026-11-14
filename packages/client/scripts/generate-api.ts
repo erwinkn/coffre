@@ -19,50 +19,47 @@ const target = fileURLToPath(new URL('../src/api.ts', import.meta.url));
 /**
  * The named types the client re-exports, beside the route map: what callers
  * hold on to and pass around, such as the pages' views of a member. Each is
- * a type a server file exports, or a part of a route's input or output.
- * 0.14's `TokenPlan` comes back with the route that answers it, which
- * 0.16 does not serve yet.
+ * a part of a route's input or output, or a type a file of the 0.16 table
+ * exports, never one of 0.14's that the server's tsconfig excludes. A type
+ * whose route is unserved (`unserved.ts`) has none: it comes back with the
+ * route, as `TokenPlan`, `BindingPlan`, `KeysPlan`, `WorkloadIds`,
+ * `Deletion`, `DeletionResult`, `ApprovalView` and `Decision` will.
  */
 const NAMED = {
-  AccessValue: 'api/access.ts',
-  ApprovalView: 'mcp/approvals.ts',
+  AccessValue: "RouteInput<'PATCH /access/:member'>[string]",
   AuditEntryView: 'api/audit.ts',
   AuthInfo: 'signin.ts',
   AuthorizationView: 'mcp/oauth.ts',
-  BindingPlan: 'api/workloads.ts',
-  BindingView: 'api/workloads.ts',
+  BindingView: 'api/routes/bindings.ts',
   ConnectedApp: 'db/queries/mcp.ts',
-  KeysPlan: 'api/workloads.ts',
   Deletion: 'api/routes/places.ts',
-  Decision: 'mcp/approvals.ts',
   DeletionResult: 'api/routes/places.ts',
-  WorkloadIds: 'api/workloads.ts',
-  DismissedKey: 'api/missing.ts',
+  DismissedKey: "RouteOutput<'GET /projects/:project/:environment/missing'>['dismissed'][number]",
   DryRunOutcome: 'api/routes/secrets.ts',
   DryRunResult: 'api/routes/secrets.ts',
+  EnvironmentView: 'api/routes/places.ts',
   IdentityRow: 'db/queries/signin.ts',
-  InheritResult: 'api/secrets.ts',
+  ImpactLine: 'api/routes/roles.ts',
+  InheritResult: "RouteOutput<'PATCH /secrets/:project/:environment/:key'>",
+  ListedReference: "RouteOutput<'GET /references'>['references'][number]",
   Me: "RouteOutput<'GET /me'>",
   Member: 'api/routes/members.ts',
   MemberAccess: 'api/routes/members.ts',
-  SettingsView: 'api/routes/settings.ts',
-  MissingKey: 'api/missing.ts',
+  MissingKey: "RouteOutput<'GET /projects/:project/:environment/missing'>['missing'][number]",
   OffboardingReport: 'api/routes/members.ts',
   PersonalConfig: "RouteOutput<'GET /personal/:project'>['configs'][number]",
-  ListedReference: 'api/references.ts',
   ProjectSummary: "RouteOutput<'GET /projects'>['projects'][number]",
-  ReferenceView: 'api/references.ts',
+  ReferenceView: 'api/routes/keys.ts',
   RemovedMember: 'api/routes/members.ts',
-  ImpactLine: 'api/routes/roles.ts',
   RoleImpact: 'api/routes/roles.ts',
   RoleView: 'api/routes/roles.ts',
   RolesView: 'api/routes/roles.ts',
-  EnvironmentView: 'api/routes/places.ts',
-  SecretKey: 'api/secrets.ts',
+  SecretKey: "RouteOutput<'GET /secrets/:project/:environment'>['keys'][number]",
+  SecretVersion: "RouteOutput<'GET /secrets/:project/:environment/:key/versions'>['versions'][number]",
   SessionRow: 'db/queries/signin.ts',
-  SecretVersion: 'api/secrets.ts',
-  SetResult: 'api/secrets.ts',
-  TokenRow: 'db/queries/tokens.ts',
+  SetResult: 'api/routes/secrets.ts',
+  SettingsView: 'api/routes/settings.ts',
+  TokenRow: "RouteOutput<'GET /members/:member/tokens'>['tokens'][number]",
 } as const;
 
 const PROBE = `${root}__api_probe.ts`;
@@ -244,7 +241,7 @@ export function generate(): string {
 
   const out = [
     '// Generated from the route table in packages/server/src/api/routes.ts by',
-    '// `pnpm --dir packages/client generate`. Do not edit: a test fails when it',
+    '// `pnpm --filter @coffre/client generate`. Do not edit: a test fails when it',
     '// is out of date.',
     '',
     '/** Every route, by `METHOD /path`: what a caller sends (the body, or the query of a GET) and gets back. */',
@@ -268,7 +265,7 @@ if (import.meta.main) {
   const text = generate();
   if (process.argv.includes('--check')) {
     if (readFileSync(target, 'utf8') !== text) {
-      console.error('packages/client/src/api.ts is out of date: run `pnpm --dir packages/client generate`');
+      console.error('packages/client/src/api.ts is out of date: run `pnpm --filter @coffre/client generate`');
       process.exit(1);
     }
   } else {
