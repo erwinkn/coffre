@@ -91,7 +91,7 @@ const encrypted = new Map<number, { sealed: ReturnType<typeof encrypt>; dek: Buf
  * `restores` another: then as 0.14's restore wrote it, the same ciphertext,
  * IV and tag, and its data key wrapped again.
  */
-async function version(n: number, secret: number, number: number, more: { erased?: boolean; plaintext?: string; sensitive?: boolean; recipe?: string; pair?: [id: number, half: string]; at?: number; restores?: number } = {}): Promise<string> {
+async function version(n: number, secret: number, number: number, more: { erased?: boolean; plaintext?: string; sensitive?: boolean; recipe?: string; pair?: [id: number, half: string]; at?: number; restores?: number; by?: string } = {}): Promise<string> {
   const [project, environment] = secret <= 102 ? [1, 11] : [2, 21];
   const ids = { projectId: id(project), environmentId: id(environment), secretId: id(secret) };
   const source = more.restores === undefined ? undefined : encrypted.get(more.restores)!;
@@ -100,7 +100,7 @@ async function version(n: number, secret: number, number: number, more: { erased
   encrypted.set(n, { sealed, dek });
   const wrapped = await KEK.wrap(dek, { ...ids, ...(more.sensitive ? { sensitive: true } : {}) });
   const [ciphertext, key] = more.erased ? [Buffer.alloc(0), Buffer.alloc(0)] : [sealed.ciphertext, wrapped.bytes];
-  return `(${u(n)}, ${u(secret)}, ${number}, 1, ${bytes(ciphertext)}, ${bytes(sealed.iv)}, ${bytes(sealed.authTag)}, ${bytes(key)}, 'local', 'k', '1', ${stamp(T0 + (more.at ?? 0) * day)}, '${ADA}', ${text(more.plaintext)}, ${more.sensitive ?? false}, ${text(more.recipe)}, ${more.pair === undefined ? 'NULL, NULL' : `${u(more.pair[0])}, '${more.pair[1]}'`})`;
+  return `(${u(n)}, ${u(secret)}, ${number}, 1, ${bytes(ciphertext)}, ${bytes(sealed.iv)}, ${bytes(sealed.authTag)}, ${bytes(key)}, 'local', 'k', '1', ${stamp(T0 + (more.at ?? 0) * day)}, '${more.by ?? 'ada@acme.example'}', ${text(more.plaintext)}, ${more.sensitive ?? false}, ${text(more.recipe)}, ${more.pair === undefined ? 'NULL, NULL' : `${u(more.pair[0])}, '${more.pair[1]}'`})`;
 }
 const stamp = (ms: number) => `to_timestamp(${ms} / 1000.0)`;
 /** An entry 0.14's vault wrote, under its MAC: what the adoption reads of the archive. */
@@ -117,14 +117,29 @@ const API = 'token:api';
 const CI = 'token:ci';
 // Removed twice and brought back: generation 2, which the grant carried over takes.
 const CY = 'user:cy@acme.example';
+// Service accounts named as any non-space text may be: with a colon, exactly as a member's email, and as a column's
+// literals, which the upgrade must not take for them: a binding that issued a credential, the key rotation, sign-in.
+const DEPLOY = 'token:ci:deploy';
+const CY_SERVICE = 'token:cy@acme.example';
+const BINDING_SERVICE = `token:binding:${id(301)}`;
+const COFFRE = 'token:coffre';
+const SIGNIN_SERVICE = 'token:system:signin';
+// And one named as Ada's principal, which must not take the revocation her `token.unbind` gives binding 302.
+const ADA_SERVICE = `token:${ADA}`;
 // Projects 1 and 2; environments 11 (market/prod), 12 (market/dev), 21 (billing/prod); secrets 101 and 102 in market/prod, 103 to 110 in billing/prod.
 const SEED = `
   INSERT INTO vault_members (principal, status, owner, role, scope, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES
-    ('${ADA}', 'active', true, NULL, NULL, 0, ${T0}, 'system:setup', ${T0}, 'system:setup', 1, ${h(9)}),
+    ('${ADA}', 'active', true, NULL, NULL, 0, ${T0}, 'system:vault', ${T0}, 'system:vault', 1, ${h(9)}),
     ('${BO}', 'removed', false, 'member', NULL, 1, ${T0 + 1}, '${ADA}', ${T0 + 5 * day + 123}, '${ADA}', 2, ${h(9)}),
     ('${API}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 3, ${h(9)}),
     ('${CI}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 4, ${h(9)}),
-    ('${CY}', 'active', false, 'member', NULL, 2, ${T0}, '${ADA}', ${T0 + 9}, '${ADA}', 5, ${h(9)});
+    ('${CY}', 'active', false, 'member', NULL, 2, ${T0}, '${ADA}', ${T0 + 9}, '${ADA}', 5, ${h(9)}),
+    ('${DEPLOY}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 6, ${h(9)}),
+    ('${CY_SERVICE}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 7, ${h(9)}),
+    ('${BINDING_SERVICE}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 8, ${h(9)}),
+    ('${COFFRE}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 9, ${h(9)}),
+    ('${SIGNIN_SERVICE}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 10, ${h(9)}),
+    ('${ADA_SERVICE}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 11, ${h(9)});
   INSERT INTO projects (id, slug, name) VALUES (${u(1)}, 'market', 'Market'), (${u(2)}, 'billing', 'Billing');
   INSERT INTO environments (id, project_id, slug, name) VALUES (${u(11)}, ${u(1)}, 'prod', 'Production'), (${u(12)}, ${u(1)}, 'dev', 'Development'), (${u(21)}, ${u(2)}, 'prod', 'Production');
   INSERT INTO secrets (id, project_id, environment_id, key, current_version) VALUES
@@ -136,19 +151,24 @@ const SEED = `
   INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_at, created_by, plaintext, sensitive, recipe, pair_id, pair_half) VALUES
     ${(
       await Promise.all([
+        // Who wrote each, as 0.14.7's app wrote it: a person's bare email, a service account's bare name.
         version(1011, 101, 1, { sensitive: true }),
         // An older version's recipe leaves with the versions' column.
-        version(1021, 102, 1, { recipe: 'bytes:32:hex' }),
-        version(1022, 102, 2, { plaintext: 'pk_live' }),
+        version(1021, 102, 1, { recipe: 'bytes:32:hex', by: 'api' }),
+        // Bo, since removed.
+        version(1022, 102, 2, { plaintext: 'pk_live', by: 'bo@acme.example' }),
         // An erased version, of a place since deleted: 0.14 empties its ciphertext and its wrapped key.
-        version(1061, 106, 1, { erased: true }),
-        version(1062, 106, 2),
-        version(1071, 107, 1),
+        version(1061, 106, 1, { erased: true, by: 'ci:deploy' }),
+        // Someone no row names, left as they are.
+        version(1062, 106, 2, { by: 'ghost@acme.example' }),
+        // Cy, and a service account named as his email: the person.
+        version(1071, 107, 1, { by: 'cy@acme.example' }),
         // A key pair's private half, made by a recipe.
-        version(1091, 109, 1, { recipe: 'ecdsa:p-256', pair: [1099, 'private'] }),
+        version(1091, 109, 1, { recipe: 'ecdsa:p-256', pair: [1099, 'private'], by: 'coffre' }),
         // Written on days 1 and 2; version 3 restores version 1 on day 3, and version 4 restores version 3 on day 4.
         version(1101, 110, 1, { at: 1 }),
-        version(1102, 110, 2, { at: 2 }),
+        // Named whole, as no release wrote it: left as it is.
+        version(1102, 110, 2, { at: 2, by: ADA }),
         version(1103, 110, 3, { at: 3, restores: 1101 }),
         version(1104, 110, 4, { at: 4, restores: 1103 }),
       ])
@@ -157,9 +177,10 @@ const SEED = `
   UPDATE secrets SET current_version_id = ${u(1022)} WHERE id = ${u(102)};
   UPDATE secrets SET current_version_id = ${u(1091)} WHERE id = ${u(109)};
   UPDATE secrets SET current_version_id = ${u(1104)} WHERE id = ${u(110)};
-  INSERT INTO dismissed_keys (environment_id, key, dismissed_by) VALUES (${u(12)}, 'STRIPE_KEY', '${ADA}');
+  INSERT INTO dismissed_keys (environment_id, key, dismissed_by, restored_at, restored_by) VALUES
+    (${u(12)}, 'STRIPE_KEY', 'ada@acme.example', NULL, NULL), (${u(12)}, 'DATABASE_URL', 'api', now(), 'bo@acme.example');
   INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, expires_at, granted_at, granted_by) VALUES
-    ('${ADA}', ${u(1)}, NULL, NULL, 'maintainer', NULL, ${T0 + 7}, 'system:setup'),
+    ('${ADA}', ${u(1)}, NULL, NULL, 'maintainer', NULL, ${T0 + 7}, 'system:vault'),
     ('${API}', NULL, ${u(11)}, NULL, 'viewer', ${T0 + 400 * day + 1}, ${T0 + 8}, '${ADA}'),
     ('${CY}', NULL, ${u(12)}, NULL, 'viewer', NULL, ${T0 + 10}, '${ADA}');
   INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES
@@ -216,28 +237,33 @@ const SEED = `
     (${u(206)}, ${u(2)}, ${u(21)}, ${u(108)}, ${u(1)}, ${u(11)}, ${u(101)}, 17, '${ADA}'),
     (${u(207)}, ${u(2)}, ${u(21)}, ${u(108)}, ${u(1)}, ${u(11)}, ${u(102)}, 18, '${ADA}'),
     (${u(208)}, ${u(2)}, ${u(21)}, ${u(109)}, ${u(1)}, ${u(11)}, ${u(101)}, 25, '${ADA}');
-  INSERT INTO identities (id, provider, auth_mac, subject, issuer_hash, generation, principal, email, created_by, revoked_at) VALUES
-    (${u(601)}, 'github', ${h(4)}, '1001', 'x', 0, '${ADA}', 'ada@acme.example', 'system:setup', NULL),
-    (${u(602)}, 'github', ${h(4)}, '1002', 'x', 0, '${BO}', 'bo@acme.example', '${ADA}', now()),
+  INSERT INTO identities (id, provider, auth_mac, subject, issuer_hash, generation, principal, email, created_by, revoked_at, revoked_by) VALUES
+    (${u(601)}, 'github', ${h(4)}, '1001', 'x', 0, '${ADA}', 'ada@acme.example', 'ada@acme.example', NULL, NULL),
+    (${u(602)}, 'github', ${h(4)}, '1002', 'x', 0, '${BO}', 'bo@acme.example', 'bo@acme.example', now(), 'ada@acme.example'),
     -- Cy's account from before his last removal, which 0.14's second transaction never revoked, and the one he signs in with now.
-    (${u(603)}, 'github', ${h(4)}, '1003', 'x', 1, '${CY}', 'cy@acme.example', '${CY}', NULL),
-    (${u(604)}, 'github', ${h(4)}, '1004', 'x', 2, '${CY}', 'cy@acme.example', '${CY}', NULL);
-  INSERT INTO service_bindings (id, auth_mac, principal, generation, profile, issuer, jwks_uri, claims, created_by) VALUES
-    (${u(301)}, ${h(4)}, '${API}', 0, 'kubernetes', 'https://k8s.example', 'sha256:00', '{}', '${ADA}'),
-    (${u(302)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', '${ADA}'),
-    (${u(303)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', '${ADA}');
+    (${u(603)}, 'github', ${h(4)}, '1003', 'x', 1, '${CY}', 'cy@acme.example', 'cy@acme.example', NULL, NULL),
+    (${u(604)}, 'github', ${h(4)}, '1004', 'x', 2, '${CY}', 'cy@acme.example', 'cy@acme.example', NULL, NULL);
+  INSERT INTO service_bindings (id, auth_mac, principal, generation, profile, issuer, jwks_uri, claims, created_by, revoked_at, revoked_by) VALUES
+    (${u(301)}, ${h(4)}, '${API}', 0, 'kubernetes', 'https://k8s.example', 'sha256:00', '{}', 'ada@acme.example', NULL, NULL),
+    (${u(302)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', 'ada@acme.example', NULL, NULL),
+    (${u(303)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', 'ada@acme.example', NULL, NULL),
+    -- Revoked in 0.14.7's app, which wrote who by their bare id.
+    (${u(304)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', 'ada@acme.example', now(), 'ada@acme.example');
   INSERT INTO enrollments (id, auth_mac, binding_id, code_hash, code_hint, scope, created_by, expires_at) VALUES
     (${u(401)}, ${h(4)}, ${u(301)}, ${h(41)}, 'coffre_enr_…aaaa', '[]', '${CI}', now() + interval '30 days'),
     (${u(402)}, ${h(4)}, ${u(301)}, ${h(42)}, 'coffre_enr_…bbbb', '[]', '${CI}', now() + interval '30 days');
   INSERT INTO credentials (id, kind, auth_mac, token_hash, token_hint, generation, principal, identity_id, label, created_by, expires_at, revoked_at, revoked_by, jkt, enrollment_id) VALUES
-    (${u(501)}, 'cli', ${h(4)}, ${h(51)}, 'coffre_cli_…abcd', 0, '${ADA}', ${u(601)}, 'laptop', '${ADA}', now() + interval '30 days', NULL, NULL, NULL, NULL),
-    (${u(502)}, 'service', ${h(4)}, ${h(52)}, 'coffre_svc_…efgh', 0, '${CI}', NULL, NULL, '${ADA}', now() - interval '2 days', NULL, NULL, NULL, NULL),
+    (${u(501)}, 'cli', ${h(4)}, ${h(51)}, 'coffre_cli_…abcd', 0, '${ADA}', ${u(601)}, 'laptop', 'ada@acme.example', now() + interval '30 days', NULL, NULL, NULL, NULL),
+    (${u(502)}, 'service', ${h(4)}, ${h(52)}, 'coffre_svc_…efgh', 0, '${CI}', NULL, NULL, 'ada@acme.example', now() - interval '2 days', NULL, NULL, NULL, NULL),
     (${u(503)}, 'workload', ${h(4)}, ${h(53)}, 'coffre_wl_…ijkl', 0, '${API}', NULL, NULL, 'binding:${id(301)}', now() + interval '1 hour', NULL, NULL, 'thumb', ${u(401)}),
-    (${u(504)}, 'personal', ${h(4)}, ${h(54)}, 'coffre_pat_…mnop', 0, '${ADA}', NULL, 'scripts', '${ADA}', now() + interval '30 days', now() - interval '1 hour', '${ADA}', NULL, NULL),
-    (${u(505)}, 'browser', ${h(4)}, ${h(55)}, 'coffre_web_…qrst', 0, '${ADA}', ${u(601)}, NULL, '${ADA}', now() - interval '2 hours', NULL, NULL, NULL, NULL);
+    (${u(504)}, 'personal', ${h(4)}, ${h(54)}, 'coffre_pat_…mnop', 0, '${ADA}', NULL, 'scripts', 'ada@acme.example', now() + interval '30 days', now() - interval '1 hour', 'ada@acme.example', NULL, NULL),
+    (${u(505)}, 'browser', ${h(4)}, ${h(55)}, 'coffre_web_…qrst', 0, '${ADA}', ${u(601)}, NULL, 'ada@acme.example', now() - interval '2 hours', NULL, NULL, NULL, NULL),
+    -- Ended by a key rotation, and by a sign-in that found Ada's membership of before: literals, whatever services there are.
+    (${u(506)}, 'cli', ${h(4)}, ${h(56)}, 'coffre_cli_…uvwx', 0, '${ADA}', ${u(601)}, NULL, 'ada@acme.example', now() + interval '30 days', now() - interval '1 hour', 'coffre', NULL, NULL),
+    (${u(507)}, 'cli', ${h(4)}, ${h(57)}, 'coffre_cli_…yzab', 0, '${ADA}', ${u(601)}, NULL, 'ada@acme.example', now() + interval '30 days', now() - interval '1 hour', 'system:signin', NULL, NULL);
   INSERT INTO mcp_connections (id, auth_mac, principal, generation, client_id, client_name, client_host, registration, scopes, redirect_uri, code_hash, code_challenge, code_expires_at, refresh_hash, refresh_previous_hash, expires_at, revoked_at, revoked_by) VALUES
     (${u(701)}, ${h(4)}, '${ADA}', 0, 'https://claude.ai/client.json', 'Claude', 'claude.ai', 'cimd', 'read write', 'https://claude.ai/cb', NULL, NULL, NULL, ${h(71)}, ${h(72)}, now() + interval '30 days', NULL, NULL),
-    (${u(702)}, ${h(4)}, '${ADA}', 0, 'c2', 'Revoked', NULL, 'dcr', 'read', 'https://two.example/cb', NULL, NULL, NULL, ${h(73)}, NULL, now() + interval '30 days', now(), '${ADA}'),
+    (${u(702)}, ${h(4)}, '${ADA}', 0, 'c2', 'Revoked', NULL, 'dcr', 'read', 'https://two.example/cb', NULL, NULL, NULL, ${h(73)}, NULL, now() + interval '30 days', now(), 'ada@acme.example'),
     (${u(703)}, ${h(4)}, '${ADA}', 0, 'c3', 'Unredeemed', NULL, 'dcr', 'read', 'https://three.example/cb', ${h(74)}, 'challenge', now() + interval '1 minute', NULL, NULL, now() + interval '30 days', NULL, NULL);
   INSERT INTO mcp_approvals (id, connection_id, tool, arguments, digest, expires_at) VALUES
     (${u(801)}, ${u(701)}, 'set_secret', '{}', ${h(81)}, now() + interval '5 minutes'),
@@ -273,7 +299,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
 
   // Online, it changes nothing: the migration is one transaction.
   await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /still online.*Set coffre_runtime, coffre_vault_runtime NOLOGIN/.test(String((error as { cause?: unknown }).cause ?? error)));
-  assert.equal(await count('vault_members'), 5);
+  assert.equal(await count('vault_members'), 11);
 
   // A session a runtime login still holds refuses it too.
   const held = await session(urlOf(UPGRADED, { name: 'coffre_runtime', password: 'local-runtime-only' }));
@@ -296,7 +322,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
   await db.query(`INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES ${entry(70, 'vault', 'system:vault', 'vault.tampered', { decision: 'deny', code: 'mac', subject: BO })}`);
   await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /that report stands/.test(String((error as { cause?: unknown }).cause ?? error)) && String((error as { cause?: unknown }).cause).includes(BO));
   await db.query(`INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES ${entry(71, 'vault', ADA, 'member.remove', { subject: BO })}`);
-  assert.equal(await count('vault_members'), 5);
+  assert.equal(await count('vault_members'), 11);
   const archived = await count('audit_log');
 
   await migrateDatabase(urlOf(UPGRADED));
@@ -308,7 +334,13 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
       (await rows(`SELECT id, status, role, generation, status_changed_at, frozen_at IS NOT NULL AS frozen, mac FROM principals ORDER BY id`)).map((row) => ({ ...row, status_changed_at: ms(row.status_changed_at), mac: (row.mac as Buffer).length })),
       [
         { id: API, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: true, mac: 0 },
+        { id: BINDING_SERVICE, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
         { id: CI, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
+        { id: DEPLOY, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
+        { id: COFFRE, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
+        { id: CY_SERVICE, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
+        { id: SIGNIN_SERVICE, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
+        { id: ADA_SERVICE, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
         { id: ADA, status: 'active', role: 'admin', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
         { id: BO, status: 'removed', role: 'member', generation: 1, status_changed_at: T0 + 5 * day + 123, frozen: false, mac: 0 },
         { id: CY, status: 'active', role: 'member', generation: 2, status_changed_at: T0 + 9, frozen: false, mac: 0 },
@@ -365,11 +397,62 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
     assert.deepEqual(first.filter((row) => ![1101, 1102, 1103, 1104].some((n) => row.id === id(n))).filter((row) => ms(row.first_written_at) !== ms(row.created_at)), []);
   });
 
+  await t.test("who a row names is the member 0.16 names: 0.14.7's app wrote the bare id, resolved by membership, and a column's literals stay", async () => {
+    assert.deepEqual(await rows(`SELECT id, created_by FROM secret_versions ORDER BY id`), [
+      // A person; a service account; a removed member; a service with a colon in its name; someone no row names, left alone.
+      { id: id(1011), created_by: ADA },
+      { id: id(1021), created_by: API },
+      { id: id(1022), created_by: BO },
+      { id: id(1061), created_by: DEPLOY },
+      { id: id(1062), created_by: 'ghost@acme.example' },
+      // A person and a service account of the same bare id: the person.
+      { id: id(1071), created_by: CY },
+      // A service account named `coffre` wrote this one.
+      { id: id(1091), created_by: COFFRE },
+      { id: id(1101), created_by: ADA },
+      // Named whole already: as it was.
+      { id: id(1102), created_by: ADA },
+      { id: id(1103), created_by: ADA },
+      { id: id(1104), created_by: ADA },
+    ]);
+    assert.deepEqual(await rows(`SELECT key, dismissed_by, restored_by FROM dismissed_keys ORDER BY key`), [
+      { key: 'DATABASE_URL', dismissed_by: API, restored_by: BO },
+      { key: 'STRIPE_KEY', dismissed_by: ADA, restored_by: null },
+    ]);
+    assert.deepEqual(await rows(`SELECT subject, created_by, revoked_by FROM identities ORDER BY subject`), [
+      { subject: '1001', created_by: ADA, revoked_by: null },
+      { subject: '1002', created_by: BO, revoked_by: ADA },
+      // Revoked by sign-in, as the upgrade does too, though a service is named `system:signin`.
+      { subject: '1003', created_by: CY, revoked_by: 'system:signin' },
+      { subject: '1004', created_by: CY, revoked_by: null },
+    ]);
+    // A binding's tombstone names its revoker as the log does, whole, though a service is named as Ada's principal.
+    assert.deepEqual(await rows(`SELECT id, created_by, revoked_by FROM bindings ORDER BY id`), [
+      { id: id(301), created_by: ADA, revoked_by: null },
+      { id: id(302), created_by: ADA, revoked_by: ADA },
+      { id: id(303), created_by: ADA, revoked_by: null },
+      { id: id(304), created_by: ADA, revoked_by: ADA },
+    ]);
+    // The workload's credential stands on its binding still, though a service is named `binding:<its id>`: a credential
+    // the binding issued does not outlive it. The key rotation's revocation and sign-in's stay theirs; the MCP
+    // connection's maker is its own member.
+    assert.deepEqual(await rows(`SELECT id, created_by, revoked_by FROM credentials ORDER BY id`), [
+      { id: id(501), created_by: ADA, revoked_by: null },
+      { id: id(503), created_by: `binding:${id(301)}`, revoked_by: null },
+      { id: id(504), created_by: ADA, revoked_by: ADA },
+      { id: id(505), created_by: ADA, revoked_by: null },
+      { id: id(506), created_by: ADA, revoked_by: 'coffre' },
+      { id: id(507), created_by: ADA, revoked_by: 'system:signin' },
+      { id: id(701), created_by: ADA, revoked_by: null },
+    ]);
+  });
+
   await t.test('freezes: each is a field of the row it stops', async () => {
     assert.deepEqual(await rows(`SELECT id, frozen_at IS NOT NULL AS frozen, revoked_at IS NOT NULL AS revoked, revoked_by FROM bindings ORDER BY id`), [
       { id: id(301), frozen: false, revoked: false, revoked_by: null },
       { id: id(302), frozen: false, revoked: true, revoked_by: ADA },
       { id: id(303), frozen: true, revoked: false, revoked_by: null },
+      { id: id(304), frozen: false, revoked: true, revoked_by: ADA },
     ]);
     assert.equal(ms((await one(`SELECT frozen_at FROM bindings WHERE id = ${u(303)}`)).frozen_at), T0 + 35_000);
     assert.equal(ms((await one(`SELECT revoked_at FROM bindings WHERE id = ${u(302)}`)).revoked_at), T0 + 20_000);
@@ -387,6 +470,8 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
       { id: id(504), kind: 'personal', label: 'scripts', token_hint: 'coffre_pat_…mnop', frozen: false, revoked: true, run: null, client: null, replaced: false },
       // Expired two hours ago: the upkeep's to delete, a day after.
       { id: id(505), kind: 'browser', label: null, token_hint: 'coffre_web_…qrst', frozen: false, revoked: false, run: null, client: null, replaced: false },
+      { id: id(506), kind: 'cli', label: null, token_hint: 'coffre_cli_…uvwx', frozen: false, revoked: true, run: null, client: null, replaced: false },
+      { id: id(507), kind: 'cli', label: null, token_hint: 'coffre_cli_…yzab', frozen: false, revoked: true, run: null, client: null, replaced: false },
       { id: id(701), kind: 'mcp', label: 'Claude', token_hint: null, frozen: false, revoked: false, run: null, client: '{"id": "https://claude.ai/client.json", "host": "claude.ai", "scopes": "read write", "redirectUri": "https://claude.ai/cb", "registration": "cimd"}', replaced: true },
     ]);
     assert.deepEqual(await rows(`SELECT token_hash = ${h(71)} AS refresh, created_by FROM credentials WHERE kind = 'mcp'`), [{ refresh: true, created_by: ADA }]);
@@ -400,12 +485,12 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
     // An account of a generation before its member's is revoked: it would hold its subject for good.
     assert.deepEqual(await rows(`SELECT subject, revoked_at IS NOT NULL AS revoked, revoked_by FROM identities ORDER BY subject`), [
       { subject: '1001', revoked: false, revoked_by: null },
-      { subject: '1002', revoked: true, revoked_by: null },
+      { subject: '1002', revoked: true, revoked_by: ADA },
       { subject: '1003', revoked: true, revoked_by: 'system:signin' },
       { subject: '1004', revoked: false, revoked_by: null },
     ]);
     assert.equal(await count('oauth_clients'), 1);
-    assert.equal(await count('dismissed_keys'), 1);
+    assert.equal(await count('dismissed_keys'), 2);
   });
 
   await t.test('exposures: who saw which key, and when last, from every read the vault allowed', async () => {

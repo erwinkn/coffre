@@ -456,6 +456,47 @@ ALTER TABLE enrollment_codes RENAME CONSTRAINT enrollments_binding_id_fkey TO en
 -- revoked or has expired, goes, with the approvals it asked for.
 DELETE FROM credentials WHERE expires_at < now() - interval '1 day';
 --> statement-breakpoint
+-- Who a row names, as 0.16 names a member. 0.14.7's app wrote the caller's bare id in every column of its own:
+-- `ada@acme.example` for a person, `ci-deploy` for a service account; its vault, and 0.16, write the principal,
+-- `user:ada@acme.example` or `token:ci-deploy`, which every reader of these columns compares with. Resolved by
+-- membership alone, removed members included: the id as it is if that is a member, which keeps a principal an
+-- older release or a binding's tombstone above wrote whole, though a service be named `user:ada@acme.example`;
+-- else `user:` and the lowercase id if that is one, else `token:` and the id if that is one, else the id as it is.
+-- A service named exactly as a member's email, or as a member's principal, is taken for the member: the member
+-- report then over-asks for the person and under-asks for the service. A column's literals are no member and are never resolved: a service account named
+-- `binding:<id>` must not turn a binding's credential into one that stands without it (`created_by`, which the
+-- vault reads to tell), and one named `coffre` must not claim the key rotation's revocations. Only rows that change
+-- are written. After the expired credentials go, and after a binding's tombstone set who revoked it.
+CREATE FUNCTION pg_temp.member_014(id text) RETURNS text LANGUAGE sql STABLE AS $$
+  SELECT CASE
+    WHEN EXISTS (SELECT 1 FROM principals WHERE principals.id = member_014.id) THEN member_014.id
+    WHEN EXISTS (SELECT 1 FROM principals WHERE principals.id = 'user:' || lower(member_014.id)) THEN 'user:' || lower(member_014.id)
+    WHEN EXISTS (SELECT 1 FROM principals WHERE principals.id = 'token:' || member_014.id) THEN 'token:' || member_014.id
+    ELSE member_014.id
+  END
+$$;
+--> statement-breakpoint
+UPDATE secret_versions SET created_by = pg_temp.member_014(created_by)
+ WHERE pg_temp.member_014(created_by) <> created_by;
+--> statement-breakpoint
+UPDATE dismissed_keys SET dismissed_by = pg_temp.member_014(dismissed_by), restored_by = pg_temp.member_014(restored_by)
+ WHERE pg_temp.member_014(dismissed_by) <> dismissed_by OR pg_temp.member_014(restored_by) IS DISTINCT FROM restored_by;
+--> statement-breakpoint
+UPDATE identities SET created_by = pg_temp.member_014(created_by),
+       revoked_by = CASE WHEN revoked_by LIKE 'system:%' THEN revoked_by ELSE pg_temp.member_014(revoked_by) END
+ WHERE pg_temp.member_014(created_by) <> created_by
+    OR (revoked_by NOT LIKE 'system:%' AND pg_temp.member_014(revoked_by) <> revoked_by);
+--> statement-breakpoint
+UPDATE bindings SET created_by = pg_temp.member_014(created_by), revoked_by = pg_temp.member_014(revoked_by)
+ WHERE pg_temp.member_014(created_by) <> created_by OR pg_temp.member_014(revoked_by) IS DISTINCT FROM revoked_by;
+--> statement-breakpoint
+UPDATE credentials SET created_by = CASE WHEN created_by LIKE 'binding:%' THEN created_by ELSE pg_temp.member_014(created_by) END,
+       revoked_by = CASE WHEN revoked_by = 'coffre' OR revoked_by LIKE 'system:%' THEN revoked_by ELSE pg_temp.member_014(revoked_by) END
+ WHERE (created_by NOT LIKE 'binding:%' AND pg_temp.member_014(created_by) <> created_by)
+    OR (revoked_by <> 'coffre' AND revoked_by NOT LIKE 'system:%' AND pg_temp.member_014(revoked_by) <> revoked_by);
+--> statement-breakpoint
+DROP FUNCTION pg_temp.member_014(text);
+--> statement-breakpoint
 DROP INDEX credentials_principal_idx;
 --> statement-breakpoint
 ALTER TABLE credentials
