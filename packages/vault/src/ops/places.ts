@@ -6,7 +6,7 @@ import type { Answers, EnvironmentCreate, PlacesChanges, Presented, ProjectCreat
 import { environments, projects } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { callerFrom, callerParts, live, type Asking } from '../caller.ts';
+import { callerFrom, callerParts, live, refusedTo, type Asking } from '../caller.ts';
 import { part, put, type Operation, type Parts, type Refusal, type Seen } from '../change.ts';
 import type { Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
@@ -59,6 +59,8 @@ function projectCreate(input: Presented & ProjectCreate, vault: Deciding): Opera
   };
   return {
     read,
+    // The project a refusal was about is the one there under that slug, if any.
+    denied: refusedTo('project.create', shown, vault.workloads, { where: { project: slug }, objects: (seen: Seen<typeof read>) => seen.taken.filter((row) => row.slug === slug && live(row)).map((row) => `project:${row.id}`) }),
     decide(seen: Seen<typeof read>, at: number) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
@@ -107,15 +109,26 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
       ? sql` OR (${environments.parentId} = (SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${named}) AND ${environments.owner} = ${principal} AND strpos(${environments.slug}, '~') = 0)`
       : sql``}`),
   };
+  /** The project named and the environment it inherits from, as far as they are there: undefined for one that is not, null for no parent asked. */
+  const placed = (seen: Seen<typeof read>) => {
+    const place = seen.project.find((row) => row.slug === projectSlug && live(row));
+    return { place, parent: place === undefined || parentSlug === null ? null : seen.chain.find((row) => row.projectId === place.id && row.slug === parentSlug && live(row) && row.owner === null) };
+  };
   return {
     read,
+    // A personal config is named by the environment it is of, its parent; anything else by its own slug, and its parent's if it has one.
+    denied: refusedTo('environment.create', shown, vault.workloads, {
+      where: { project: projectSlug, ...(mine ? {} : { environment: named }), ...(parentSlug === null ? {} : { parent: parentSlug }) },
+      objects: (seen: Seen<typeof read>) => {
+        const { place, parent } = placed(seen);
+        return [...(place === undefined ? [] : [`project:${place.id}`]), ...(parent == null ? [] : [`environment:${parent.id}`])];
+      },
+    }),
     decide(seen: Seen<typeof read>, at: number) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
-      const place = seen.project.find((row) => row.slug === projectSlug && live(row));
-      if (place === undefined) return { refused: 'no_access' };
-      const parent = parentSlug === null ? null : seen.chain.find((row) => row.projectId === place.id && row.slug === parentSlug && live(row) && row.owner === null);
-      if (parent === undefined) return { refused: 'no_access' };
+      const { place, parent } = placed(seen);
+      if (place === undefined || parent === undefined) return { refused: 'no_access' };
       if (mine) {
         // A personal config is a person's, of an environment they read or use: it takes nothing more there.
         if (!caller.principal.startsWith('user:')) return { refused: 'not_a_person' };
