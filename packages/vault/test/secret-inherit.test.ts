@@ -39,6 +39,9 @@ beforeEach(async () => {
       value(world, secret(staging, 'API', { archivedAt }), 'api-staging'), value(world, secret(staging, 'SESSION', { archivedAt }), 'session-staging'),
       // Archived, and no parent holds it: archived as anywhere.
       value(world, secret(staging, 'GONE', { archivedAt }), 'gone-staging'),
+      // A sensitive key overridden by a value that is not, and the other way round.
+      value(world, secret(prod, 'TOKEN'), 'token-prod', { sensitive: true }), value(world, secret(staging, 'TOKEN'), 'token-staging'),
+      value(world, secret(prod, 'PIN'), 'pin-prod'), value(world, secret(staging, 'PIN'), 'pin-staging', { sensitive: true }),
       value(world, secret(old, 'KEY'), 'key-old'), value(world, secret(child, 'KEY'), 'key-child'),
       // Billing reads staging's SHARED.
       secret(there, 'REF', { sourceId: shared.id })),
@@ -92,6 +95,16 @@ test("a key no live parent passes down is not reset, nor is its reset undone: th
   assert.deepEqual(await reset('ada-cli', 'DATABASE_URL', true, { environment: 'prod' }), { refused: 'not_inherited' }, 'an environment that inherits from none');
   assert.deepEqual(await reset('ada-cli', 'KEY', true, { environment: 'child' }), { refused: 'not_inherited' }, 'a parent archived, through which a use reads nothing');
   assert.deepEqual(await reset('ada-cli', 'NOWHERE'), { refused: 'unknown_key' });
+});
+
+test('a reset key is as sensitive as what it then reads, and its undoing as its own value: neither hands a sensitive value back', async () => {
+  assert.deepEqual(await given(['TOKEN', 'PIN']), ['token-staging', 'sensitive']);
+  for (const key of ['TOKEN', 'PIN']) assert.ok('answer' in (await reset('ada-cli', key)));
+  assert.deepEqual(await given(['TOKEN', 'PIN']), ['sensitive', 'pin-prod']);
+  // Undone by a Contributor, who does not read: refused; by one who reads, each serves its own again.
+  assert.deepEqual(await reset('cy-cli', 'PIN', false), { refused: 'no_access' });
+  for (const key of ['TOKEN', 'PIN']) assert.ok('answer' in (await reset('ada-cli', key, false)));
+  assert.deepEqual(await given(['TOKEN', 'PIN']), ['token-staging', 'sensitive']);
 });
 
 test('a key a reference reads is not reset: its readers would read nothing', async () => {

@@ -47,7 +47,10 @@ beforeEach(async () => {
   ...rows('grants', grant(ada, 'developer', { project: market }), grant(bo, 'viewer', { project: market }), grant(cy, 'contributor', { project: market }), grant(api, 'developer', { project: market })),
   ...rows('credentials', credential('ada-cli', ada), credential('bo-cli', bo), credential('cy-cli', cy), credential('eve-cli', eve), credential('api-token', api, { scope: scope('developer') }),
     // A token of Ada's that only reads, and one that writes.
-    credential('ada-viewer', ada, { kind: 'personal', scope: scope('viewer') }), credential('ada-developer', ada, { kind: 'personal', scope: scope('developer') })));
+    credential('ada-viewer', ada, { kind: 'personal', scope: scope('viewer') }), credential('ada-developer', ada, { kind: 'personal', scope: scope('developer') }),
+    // And two that reach one environment each: prod, whose config they write in, and staging.
+    credential('ada-prod', ada, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: prod.id, role: 'developer' }]) }),
+    credential('ada-staging', ada, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: staging.id, role: 'developer' }]) })));
   world.woken.length = 0;
 });
 
@@ -134,6 +137,14 @@ test('a config is written by its owner alone, a person who reads or uses the env
   // And once it is there, a token that only reads still writes nothing in it.
   assert.deepEqual(await vault.change(mine('ada-viewer', typed({ A: '2' }))), { refused: 'no_access' });
   assert.deepEqual(await given('ada-viewer', ['A']), ['1'], 'though it reads it');
+});
+
+test("a credential scoped to one environment writes in its owner's config of that environment, and of no other", async () => {
+  assert.deepEqual(await vault.change(mine('ada-staging', typed({ A: '1' }))), { refused: 'no_access' }, 'a token that reaches staging alone');
+  assert.deepEqual(await configs(), [], 'no config is made');
+  assert.ok('answer' in (await vault.change(mine('ada-prod', typed({ A: '1' })))));
+  assert.deepEqual(await vault.change(mine('ada-staging', typed({ A: '2' }))), { refused: 'no_access' }, 'nor once the config is there');
+  assert.deepEqual(await given('ada-prod', ['A']), ['1']);
 });
 
 test("a config's keys are archived, brought back, filed, restored and refiled as anywhere, by its owner", async () => {
