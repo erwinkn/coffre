@@ -1,6 +1,5 @@
 // What a write does to a key besides its value (src/ops/secrets.ts):
-// archiving it and bringing it back, filing it in a folder, and saying how a
-// value was generated, a key pair's two halves together. Through the
+// archiving it and bringing it back, and filing it in a folder. Through the
 // contract, as the app calls it.
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
@@ -195,54 +194,14 @@ test('a key is filed in a folder, and taken out, by whoever writes it, archived 
   assert.deepEqual(await given(['DATABASE_URL', 'NEW']), ['x', 'v']);
 });
 
-test('a generated value keeps its recipe, a key pair its two halves under one id, and a value typed over one keeps none', async () => {
-  const done = await vault.change(writing('bo-cli', [
-    { key: 'TOKEN', value: 'tok', nature: 'sensitive', generated: { recipe: 'BYTES:32' } },
-    { key: 'JWT_PRIVATE', value: 'priv', nature: 'secret', generated: { recipe: 'ecdsa:P-256', pair: { private: 'JWT_PRIVATE', public: 'JWT_PUBLIC' } } },
-    { key: 'JWT_PUBLIC', value: 'pub', nature: 'secret', generated: { recipe: 'ECDSA:p-256', pair: { private: 'JWT_PRIVATE', public: 'JWT_PUBLIC' } } },
-  ]));
-  assert.deepEqual(done, { answer: { versions: { TOKEN: 1, JWT_PRIVATE: 1, JWT_PUBLIC: 1 } } });
-  const made = await lines();
-  const pair = made[1]!.pair as string;
-  assert.deepEqual(made, [
-    { key: 'TOKEN', version: 1, nature: 'sensitive', recipe: 'bytes:32:base62', made: true },
-    { key: 'JWT_PRIVATE', version: 1, nature: 'secret', recipe: 'ecdsa:p-256', pair, half: 'private', made: true },
-    { key: 'JWT_PUBLIC', version: 1, nature: 'secret', recipe: 'ecdsa:p-256', pair, half: 'public', made: true },
-  ]);
-  const stored = async () => rowsOf<{ key: string; recipe: string | null; pair: string | null; half: string | null }>(world.owner, sql`SELECT s.key, v.recipe, v.pair_id::text AS pair, v.pair_half AS half FROM secret_versions v JOIN secrets s ON s.id = v.secret_id AND s.current_version = v.version WHERE s.environment_id = ${prod.id} AND s.key IN ('TOKEN', 'JWT_PRIVATE', 'JWT_PUBLIC') ORDER BY s.key`);
-  assert.deepEqual(await stored(), [{ key: 'JWT_PRIVATE', recipe: 'ecdsa:p-256', pair, half: 'private' }, { key: 'JWT_PUBLIC', recipe: 'ecdsa:p-256', pair, half: 'public' }, { key: 'TOKEN', recipe: 'bytes:32:base62', pair: null, half: null }]);
-  // Made again, a pair has an id of its own; typed over, a value has no recipe.
-  assert.ok('answer' in (await vault.change(writing('bo-cli', [
-    { key: 'TOKEN', value: 'typed', nature: 'secret' },
-    { key: 'JWT_PUBLIC', value: 'pub2', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair: { private: 'JWT_PRIVATE', public: 'JWT_PUBLIC' } } },
-    { key: 'JWT_PRIVATE', value: 'priv2', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair: { private: 'JWT_PRIVATE', public: 'JWT_PUBLIC' } } },
-  ]))));
-  const again = await stored();
-  assert.deepEqual(again.map((row) => [row.key, row.recipe]), [['JWT_PRIVATE', 'ecdsa:p-256'], ['JWT_PUBLIC', 'ecdsa:p-256'], ['TOKEN', null]]);
-  assert.ok(again[0]!.pair !== pair && again[0]!.pair === again[1]!.pair);
-  assert.deepEqual(await given(['JWT_PRIVATE', 'JWT_PUBLIC']), ['priv2', 'pub2']);
-});
-
 test('an item that is not what the contract says is a fault, before any read', async () => {
-  const pair = { private: 'A', public: 'B' };
   const bad: unknown[][] = [
     [{ key: 'A' }], [{ key: 'A', archived: true, value: 'x', nature: 'secret' }], [{ key: 'A', archived: 'yes' }], [{ key: 'A', nature: 'secret', archived: true }],
-    [{ key: 'A', value: 'x' }], [{ key: 'A', generated: { recipe: 'bytes:32' }, archived: false }],
+    [{ key: 'A', value: 'x' }], [{ key: 'A', value: 'x', nature: 'hidden' }],
     ...['', ' db', 'db ', 'a/b', 'a\nb', 'x'.repeat(65), '\u00a0db', '\u{1f5c2}'.repeat(33), 7, '\ud83d'].map((folder) => [{ key: 'A', folder }]),
-    [{ key: 'A', value: 'x', nature: 'plain', generated: { recipe: 'bytes:32' } }], [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'bytes:0' } }],
-    [{ key: 'A', value: 'x', nature: 'secret', generated: 'bytes:32' }], [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'bytes:32', pair } }],
-    // A pair is written whole: both halves, naming each other, with one recipe.
-    [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'ecdsa:p-256' } }], [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair } }],
-    [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair } }, { key: 'B', value: 'y', nature: 'secret' }],
-    [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair } }, { key: 'B', value: 'y', nature: 'secret', generated: { recipe: 'ecdsa:p-384', pair } }],
-    [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair } }, { key: 'B', value: 'y', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair: { private: 'A', public: 'C' } } }],
-    [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair: { private: 'A', public: 'A' } } }],
-    [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair: { private: 'B', public: 'C' } } }, { key: 'B', value: 'y', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair: { private: 'B', public: 'C' } } }],
-    // A key that is neither half, beside a pair written whole.
-    [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair: { private: 'B', public: 'C' } } }, { key: 'B', value: 'y', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair: { private: 'B', public: 'C' } } }, { key: 'C', value: 'z', nature: 'secret', generated: { recipe: 'ecdsa:p-256', pair: { private: 'B', public: 'C' } } }],
   ];
   for (const keys of bad) await assert.rejects(vault.change(writing('ada-cli', keys as KeyWrite[])), TypeError, JSON.stringify(keys).slice(0, 80));
   assert.equal(world.woken.length, 0);
-  // What the contract does say: a folder of 64 characters, a public half generated as sensitive.
-  assert.ok('answer' in (await vault.change(writing('ada-cli', [{ key: 'A', value: 'x', nature: 'sensitive', generated: { recipe: 'ecdh:p-521', pair } }, { key: 'B', value: 'y', nature: 'secret', generated: { recipe: 'ecdh:p-521', pair }, folder: 'é'.repeat(64) }]))));
+  // What the contract does say: a folder of 64 characters.
+  assert.ok('answer' in (await vault.change(writing('ada-cli', [{ key: 'A', value: 'x', nature: 'secret', folder: 'é'.repeat(64) }]))));
 });

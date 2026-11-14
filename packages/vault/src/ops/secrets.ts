@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Permission } from '@coffre/core/access';
-import { formatRecipe, parseRecipe, recipeProblem } from '@coffre/core/recipe';
 import type { Answers, KeyWrite, Presented, SecretsChanges, SecretWrite } from '@coffre/core/vault';
 import { environments, projects, secrets } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
@@ -25,7 +24,7 @@ const written = (value: unknown): value is string => typeof value === 'string' &
 /** A folder as the app's routes have it (`folderName`), within the table's check: 1 to 64 UTF-16 units, no slash or control character, nothing `trim` takes away. */
 const filed = (value: unknown) => value === null || (typeof value === 'string' && wellFormed(value) && value.length >= 1 && value.length <= 64 && !/[/\p{Cc}]/u.test(value) && value === value.trim());
 
-const wrong = () => new TypeError('a write names a place by its slugs and 1 to 2,000 keys, each once, with a value of well-formed text, 64 Ki characters at most and 1 MiB in all, its nature and how it was generated, an archiving or a folder');
+const wrong = () => new TypeError('a write names a place by its slugs and 1 to 2,000 keys, each once, with a value of well-formed text, 64 Ki characters at most and 1 MiB in all, and its nature, an archiving or a folder');
 
 /** One key's item, on its own: what it does, with what it says it with. */
 function valid(item: KeyWrite): boolean {
@@ -33,43 +32,7 @@ function valid(item: KeyWrite): boolean {
   if (!(item.archived === undefined || typeof item.archived === 'boolean') || !(item.folder === undefined || filed(item.folder))) return false;
   // A key is archived with no value written over it.
   if (item.value !== undefined) return written(item.value) && NATURES.includes(item.nature) && item.archived !== true;
-  return item.nature === undefined && item.generated === undefined && (item.archived !== undefined || item.folder !== undefined);
-}
-
-type Made = { recipe: string; pairId: string | null; pairHalf: 'private' | 'public' | null };
-
-/**
- * How each generated value was made, as its version stores it: its recipe,
- * canonical, and for a key pair the id its two halves share, drawn here,
- * and which half it is. A pair is written whole: each of its two keys
- * names both, with the same recipe. A plain value is never generated.
- */
-function generations(items: readonly KeyWrite[]): Map<string, Made> {
-  const byKey = new Map(items.map((item) => [item.key, item]));
-  const recipeOf = (generated: unknown) => {
-    const recipe = (generated as { recipe?: unknown } | null | undefined)?.recipe;
-    return typeof recipe === 'string' && recipeProblem(recipe) === null ? formatRecipe(parseRecipe(recipe)) : null;
-  };
-  const pairs = new Map<string, string>();
-  const made = new Map<string, Made>();
-  for (const { key, generated, nature } of items) {
-    if (generated === undefined) continue;
-    const recipe = recipeOf(generated);
-    if (recipe === null || nature === 'plain') throw wrong();
-    const { pair } = generated;
-    if (parseRecipe(recipe).kind !== 'pair') {
-      if (pair !== undefined) throw wrong();
-      made.set(key, { recipe, pairId: null, pairHalf: null });
-      continue;
-    }
-    if (typeof pair !== 'object' || pair === null || pair.private === pair.public || (key !== pair.private && key !== pair.public)) throw wrong();
-    const theirs = byKey.get(key === pair.private ? pair.public : pair.private)?.generated;
-    if (recipeOf(theirs) !== recipe || theirs?.pair?.private !== pair.private || theirs.pair.public !== pair.public) throw wrong();
-    const names = `${pair.private}/${pair.public}`;
-    if (!pairs.has(names)) pairs.set(names, randomUUID());
-    made.set(key, { recipe, pairId: pairs.get(names)!, pairHalf: key === pair.private ? 'private' : 'public' });
-  }
-  return made;
+  return item.nature === undefined && (item.archived !== undefined || item.folder !== undefined);
 }
 
 /**
@@ -78,9 +41,13 @@ function generations(items: readonly KeyWrite[]): Map<string, Made> {
  * key made where the environment has none by that name; its archiving, or
  * its return; the folder it is listed in. A value or a folder takes
  * `secret.write` there, an archiving or a return `secret.archive`, and a
- * return `secret.read` too: the value serves again, and only whoever
- * could read it brings it back. A key that was a reference holds its own
- * value from a write on.
+ * return `secret.read` too: the value serves again, to whoever reads the
+ * environment now, granted since it was archived included, so only whoever
+ * could read it brings it back. 0.14 asked that of a secret, `secret.use`
+ * of a sensitive value and nothing more of a plain one or of none; a
+ * change reads only rows under the MAC, and a value's nature is on its
+ * version's row, which has none, so the return asks the most of them. A
+ * key that was a reference holds its own value from a write on.
  */
 function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation<Parts, Answers['secret.write']> {
   const shown = presented(input);
@@ -90,7 +57,6 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
     || items.reduce((sum, item) => sum + Buffer.byteLength(item.value ?? ''), 0) > WRITE_BYTES) {
     throw wrong();
   }
-  const made = generations(items);
   // A key the environment does not have yet is made under an id drawn here: a decision draws nothing.
   const fresh = new Map(items.map((item) => [item.key, { secret: randomUUID(), version: randomUUID() }]));
   const needs = new Set<Permission>(items.flatMap((item): Permission[] => [
@@ -155,14 +121,13 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         const line: Record<string, unknown> = { key, secret: secret.id };
         if (value !== undefined) {
           const version = kept.versions + 1;
-          const how = made.get(key);
           secret = { ...secret, versions: version, currentVersion: version, updatedAt: now, sourceId: null };
           sealed.push({
-            version: { id: ids.version, secretId: secret.id, version, createdAt: now, createdBy: caller.principal, recipe: how?.recipe ?? null, pairId: how?.pairId ?? null, pairHalf: how?.pairHalf ?? null, plaintext: nature === 'plain' ? value : null, sensitive: nature === 'sensitive' },
+            version: { id: ids.version, secretId: secret.id, version, createdAt: now, createdBy: caller.principal, recipe: null, pairId: null, pairHalf: null, plaintext: nature === 'plain' ? value : null, sensitive: nature === 'sensitive' },
             text: Buffer.from(value),
           });
           // `source`: the secret it referred to until now.
-          Object.assign(line, { version, nature }, how === undefined ? {} : { recipe: how.recipe }, how?.pairId == null ? {} : { pair: how.pairId, half: how.pairHalf }, was === null ? { made: true } : {}, was?.sourceId == null ? {} : { source: was.sourceId });
+          Object.assign(line, { version, nature }, was === null ? { made: true } : {}, was?.sourceId == null ? {} : { source: was.sourceId });
         }
         if ((secret.archivedAt === null) !== (kept.archivedAt === null)) line.archived = secret.archivedAt !== null;
         if (secret.folder !== kept.folder) line.folder = secret.folder;
