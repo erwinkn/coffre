@@ -109,6 +109,13 @@ trap cleanup EXIT INT TERM
 log 'starting Postgres'
 ./scripts/ensure-postgres.sh
 
+# Each run starts over: a fresh database, and fresh local storage for every
+# Worker, the vault's signer included, which keeps the log's head beside the
+# database. The seed then fills it through the API.
+log "starting $database over"
+DATABASE_URL="$owner_url" node --conditions=coffre:source dev/reset.mjs
+rm -rf "$state_dir/v3"
+
 log "applying migrations to $database"
 node --conditions=coffre:source scripts/ensure-database.mjs "$database"
 DATABASE_URL="$owner_url" pnpm --dir packages/db run db:migrate >/dev/null
