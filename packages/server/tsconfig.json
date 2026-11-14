@@ -13,7 +13,6 @@
   "exclude": [
     // Secrets' generated values, forks, deletion for good, dismissals (W418).
     "src/api/secrets.ts",
-    "src/api/forks.ts",
     "src/api/projects.ts",
     "src/api/missing.ts",
     "src/api/inheritance.ts",
@@ -21,7 +20,6 @@
     "src/api/references.ts",
     "src/api/personal.ts",
     "test/deletion.test.ts",
-    "test/forks.test.ts",
     "test/forks-properties.test.ts",
     "test/generated-values.test.ts",
     "test/recipes.test.ts",

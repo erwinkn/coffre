@@ -78,16 +78,19 @@ PUT /api/projects/market/staging {"from": "prod", "references": false}
 ```
 
 Forking takes what creating an environment takes, `environment.manage`
-on the project, and read on the environment it copies: copying is
-reading. The vault logs it as one `secret.read` per key, with the purpose
-`copy`, then one write per key, as any write. Each key keeps its folder.
+on the project, and read on the environment it copies and on each
+environment above it a key comes from. Each key keeps its folder. A key
+with no value, a reference broken, is left out.
 
-The environment is created first, then filled, because the vault's
-entries for the new keys name the environment, which must exist by then.
-If filling fails (a refusal, the bulk limit, an outage), the new
-environment stays, empty, and the answer says so. Running the same fork
-again fills it: a `PUT` with `from` on an existing environment that has
-no live secrets fills it, and on one that has secrets answers 409.
+Since 0.16 the fork is one change of the vault's, `environment.create`
+with `copy`: the environment and each of its keys, all or nothing, in one
+entry that names each key made and the secret it was copied from or
+refers to. A copied value is opened and sealed again inside the vault, so
+no value reaches the app and no `secret.read` is logged. A `PUT` with
+`from` of an environment that is there is refused, 409 `exists`, as any
+`PUT` of one. Until 0.14 the environment was made first and then filled,
+a `secret.read` of each value with the purpose `copy` and a write of each;
+a fork that stopped midway left it empty, and the same `PUT` filled it.
 
 Forks stay within one project. Copying into another project is a fork
 followed by references, or an import.
