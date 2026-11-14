@@ -153,7 +153,7 @@ function signin(input: Asked<'signin'>, vault: Deciding): Operation<Parts, Answe
 
       const expiresAt = new Date(at + session.minutes * 60_000);
       writes.push(put(credentials, {
-        id: ids.credential, kind: 'browser', tokenHash: Buffer.from(session.token, 'hex'), tokenHint: null, previousTokenHash: null, generation: who.generation, principal: who.id, identityId,
+        id: ids.credential, kind: 'browser', tokenHash: Buffer.from(session.token, 'hex'), tokenHint: null, previousTokenHash: null, codeHash: null, generation: who.generation, principal: who.id, identityId,
         scope: null, places: null, label: session.label, createdAt: now, createdBy: who.id, expiresAt, lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
         jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
       }));
@@ -650,7 +650,7 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
       const scope = sealedScope(issued);
       return {
         writes: [put(credentials, {
-          id, kind, tokenHash: Buffer.from(token.token, 'hex'), tokenHint: hint, previousTokenHash: null, generation, principal, identityId: null,
+          id, kind, tokenHash: Buffer.from(token.token, 'hex'), tokenHint: hint, previousTokenHash: null, codeHash: null, generation, principal, identityId: null,
           scope: JSON.stringify(scope), places: places === null ? null : JSON.stringify(places), label: token.label, createdAt: now, createdBy: caller.principal, expiresAt,
           lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
           jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
@@ -834,7 +834,7 @@ function deviceRedeem(input: Asked<'device.redeem'>): Operation<Parts, Answers['
         writes: [
           amended(deviceLogins, row, { consumedAt: now }),
           put(credentials, {
-            id, kind: 'cli', tokenHash: Buffer.from(session.token, 'hex'), tokenHint: null, previousTokenHash: null, generation: who.generation, principal: who.id, identityId: null,
+            id, kind: 'cli', tokenHash: Buffer.from(session.token, 'hex'), tokenHint: null, previousTokenHash: null, codeHash: null, generation: who.generation, principal: who.id, identityId: null,
             scope: null, places: null, label: row.clientLabel, createdAt: now, createdBy: who.id, expiresAt, lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
             jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
           }),

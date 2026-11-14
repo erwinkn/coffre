@@ -105,8 +105,8 @@ const who = async (label: string) => {
   return 'refused' in answer ? answer.refused : `${answer.principal} ${answer.credential.kind}`;
 };
 const entries = async () => (await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(world.owner, sql`SELECT kept, body, mac FROM log_pending ORDER BY id`)).map((row) => ({ kept: row.kept, ...entryOf(world.keys, row)! }));
-type Stored = { id: string; token_hash: string; previous_token_hash: string | null; challenge: string | null; expires_at: number; revoked_at: number | null; revoked_by: string | null; ancestors: string | null; client: string; label: string; generation: number };
-const stored = async (id: string) => (await rowsOf<Stored>(world.owner, sql`SELECT id::text, encode(token_hash, 'hex') AS token_hash, encode(previous_token_hash, 'hex') AS previous_token_hash, challenge, (extract(epoch FROM expires_at) * 1000)::float8 AS expires_at, (extract(epoch FROM revoked_at) * 1000)::float8 AS revoked_at, revoked_by, ancestors, client, label, generation FROM credentials WHERE id = ${id}::uuid`))[0]!;
+type Stored = { id: string; token_hash: string; previous_token_hash: string | null; code_hash: string | null; challenge: string | null; expires_at: number; revoked_at: number | null; revoked_by: string | null; ancestors: string | null; client: string; label: string; generation: number };
+const stored = async (id: string) => (await rowsOf<Stored>(world.owner, sql`SELECT id::text, encode(token_hash, 'hex') AS token_hash, encode(previous_token_hash, 'hex') AS previous_token_hash, encode(code_hash, 'hex') AS code_hash, challenge, (extract(epoch FROM expires_at) * 1000)::float8 AS expires_at, (extract(epoch FROM revoked_at) * 1000)::float8 AS revoked_at, revoked_by, ancestors, client, label, generation FROM credentials WHERE id = ${id}::uuid`))[0]!;
 /** Everything the vault told the signer of, signed, and the rows held to its mirror: what it found. */
 async function checked() {
   for (const hash of world.woken.splice(0)) await signer.wake(hash);
@@ -141,7 +141,7 @@ test('Ada connects Claude: a code for a minute, then an access token that is Ada
   const first = await redeemed(byCode('code-1', 'acc-1', 'ref-1'));
   assert.deepEqual(first, { ended: false, principal: ada, connection: connected.connection, credential: first.credential, expiresAt: new Date(world.now() + HOUR).toISOString(), scopes: ['read', 'reveal'] });
   const redeemedRow = await stored(connected.connection);
-  assert.deepEqual([redeemedRow.token_hash, redeemedRow.previous_token_hash, redeemedRow.challenge, redeemedRow.expires_at], [hex('ref-1'), hex('code-1'), null, world.now() + MONTH * MINUTE]);
+  assert.deepEqual([redeemedRow.token_hash, redeemedRow.previous_token_hash, redeemedRow.code_hash, redeemedRow.challenge, redeemedRow.expires_at], [hex('ref-1'), null, hex('code-1'), null, world.now() + MONTH * MINUTE]);
   const access = await stored(first.credential);
   assert.deepEqual([access.ancestors, access.label, JSON.parse(access.client).scopes], [JSON.stringify([connected.connection]), 'Claude', 'read reveal']);
 
@@ -172,9 +172,17 @@ test('Ada connects Claude: a code for a minute, then an access token that is Ada
   // The value it was handed is logged as any read is, on the access token.
   assert.deepEqual(written.map((entry) => [entry.action, entry.actor, entry.kept]), [['mcp.connect', ada, true], ['mcp.token', ada, false], ['secret.read', ada, false], ['mcp.token', ada, false]]);
   assert.equal(written[2]!.credential, first.credential);
-  assert.deepEqual(written[0]!.detail, { connection: connected.connection, client: CLAUDE.id, name: 'Claude', host: 'claude.ai', registration: 'cimd', redirectHost: 'claude.ai', scopes: 'read reveal' });
-  assert.deepEqual(written[3]!.detail, { connection: connected.connection, client: CLAUDE.id, grant: 'refresh_token', credential: second.credential, scopes: 'read' });
+  // Of the client, how it is known and its host: never its name nor a URL, which its maker chose.
+  assert.deepEqual(written[0]!.detail, { connection: connected.connection, registration: 'cimd', client: null, host: 'claude.ai', scopes: 'read reveal' });
+  assert.deepEqual(written[3]!.detail, { connection: connected.connection, registration: 'cimd', client: null, host: 'claude.ai', grant: 'refresh_token', credential: second.credential, scopes: 'read' });
   assert.deepEqual(await checked(), []);
+});
+
+test('an entry keeps no text the client chose: a host that reads as no host is logged as none', async () => {
+  const { connection } = await made(connect('ada-web', 'code-h', ['read'], { ...OTHER, host: 'Other <b>bold</b>' }));
+  const [entry] = (await entries()).filter((one) => one.action === 'mcp.connect');
+  assert.deepEqual(entry!.detail, { connection, registration: 'cimd', client: null, host: null, scopes: 'read' });
+  assert.ok(!JSON.stringify(entry).includes('bold') && !JSON.stringify(entry).includes('Other'));
 });
 
 test('a code is good for its minute, its client, its redirect and its verifier only; refused, it writes nothing', async () => {
@@ -210,7 +218,33 @@ test('a code presented again after it was redeemed ends the connection, and ever
   assert.deepEqual(await vault.change(byRefresh('ref-1', 'acc-2', 'ref-2')), { refused: 'unknown_grant' });
   assert.deepEqual(await vault.change(byCode('code-1', 'acc-y', 'ref-y')), { refused: 'unknown_grant' }, 'ended once');
   const [entry] = (await entries()).filter((one) => one.action === 'mcp.disconnect');
-  assert.deepEqual([entry!.actor, entry!.kept, entry!.detail], [null, true, { connection, client: CLAUDE.id, principal: ada, reason: 'code_reused' }]);
+  assert.deepEqual([entry!.actor, entry!.kept, entry!.detail], [null, true, { connection, registration: 'cimd', client: null, host: 'claude.ai', principal: ada, reason: 'code_reused' }]);
+  assert.deepEqual(await checked(), []);
+});
+
+test('its code stays known for as long as the connection lasts, and the refresh token it last replaced; an older one is unknown and ends nothing', async () => {
+  const { connection } = await made(connect('ada-web', 'code-1'));
+  await redeemed(byCode('code-1', 'acc-1', 'ref-1'));
+  await redeemed(byRefresh('ref-1', 'acc-2', 'ref-2'));
+  await redeemed(byRefresh('ref-2', 'acc-3', 'ref-3'));
+  const row = await stored(connection);
+  assert.deepEqual([row.token_hash, row.previous_token_hash, row.code_hash], [hex('ref-3'), hex('ref-2'), hex('code-1')]);
+  // Two rotations back: whoever holds it got nothing with it, and the client is not told to connect again.
+  assert.deepEqual(await vault.change(byRefresh('ref-1', 'acc-x', 'ref-x')), { refused: 'unknown_grant' });
+  assert.equal(await who('acc-3'), `${ada} mcp`);
+  // Refreshed twice, a day on, its code presented again still ends it.
+  world.tick(DAY);
+  await redeemed(byRefresh('ref-3', 'acc-4', 'ref-4'));
+  assert.deepEqual(await vault.change(byCode('code-1', 'acc-y', 'ref-y')), { answer: { ended: true, connection } });
+  assert.equal(await who('acc-4'), 'unauthenticated');
+
+  const second = await made(connect('ada-web', 'code-2'));
+  await redeemed(byCode('code-2', 'acc-b1', 'ref-b1'));
+  await redeemed(byRefresh('ref-b1', 'acc-b2', 'ref-b2'));
+  await redeemed(byRefresh('ref-b2', 'acc-b3', 'ref-b3'));
+  assert.deepEqual(await vault.change(byRefresh('ref-b2', 'acc-b4', 'ref-b4')), { answer: { ended: true, connection: second.connection } });
+  assert.equal(await who('acc-b3'), 'unauthenticated');
+  assert.deepEqual((await entries()).filter((one) => one.action === 'mcp.disconnect').map((one) => one.detail.reason), ['code_reused', 'refresh_reused']);
   assert.deepEqual(await checked(), []);
 });
 
@@ -379,20 +413,25 @@ test('anyone registers a client, up to the table\'s ceiling; two racing for its 
   const [row] = await rowsOf<{ name: string; redirect_uris: string; created_ip: string }>(world.owner, sql`SELECT name, redirect_uris, created_ip FROM oauth_clients WHERE id = ${client}::uuid`);
   assert.deepEqual(row, { name: 'Zed', redirect_uris: '["http://127.0.0.1/callback","https://zed.dev/cb"]', created_ip: '198.51.100.9' });
   const [entry] = (await entries()).slice(before);
-  assert.deepEqual([entry!.action, entry!.actor, entry!.kept, entry!.objects], ['oauth.register', null, false, [`oauth_client:${client}`]]);
+  assert.deepEqual([entry!.action, entry!.actor, entry!.kept, entry!.objects, entry!.detail], ['oauth.register', null, false, [`oauth_client:${client}`], { client, redirects: 2 }]);
+  // What a stranger wrote stays in its row: a redirect's query, or a name, never reaches the log.
+  const quiet = await made(register('Leaky name', ['https://client.example/cb?token=confidential']));
+  const [leak] = (await entries()).slice(before + 1);
+  assert.deepEqual(leak!.detail, { client: quiet.client, redirects: 1 });
+  assert.ok(!JSON.stringify(leak).includes('confidential') && !JSON.stringify(leak).includes('Leaky'));
   for (const bad of [register('Zed', []), register('Zed', ['cursor://cb']), register('Zed', ['https://a.example/cb', 'https://a.example/cb']), register('Ze‮d'), register('')]) {
     await assert.rejects(vault.change(bad), TypeError);
   }
 
-  // Up to the last place, the vault's rows or not: Cursor and Zed are two.
-  await world.owner.execute(sql`INSERT INTO oauth_clients (id, name, redirect_uris, created_at, mac) SELECT gen_random_uuid(), 'filler', '[]', now(), ''::bytea FROM generate_series(1, ${MAX_CLIENTS - 3})`);
+  // Up to the last place, the vault's rows or not: Cursor, Zed and the leaky one are three.
+  await world.owner.execute(sql`INSERT INTO oauth_clients (id, name, redirect_uris, created_at, mac) SELECT gen_random_uuid(), 'filler', '[]', now(), ''::bytea FROM generate_series(1, ${MAX_CLIENTS - 4})`);
   const raced = await Promise.all([1, 2].map((n) => vault.change(register(`Racer ${n}`))));
   assert.deepEqual(raced.map((answer) => ('refused' in answer ? answer.refused : 'made')).sort(), ['full', 'made']);
   assert.deepEqual(await vault.change(register()), { refused: 'full' });
   const [{ count }] = (await rowsOf<{ count: number }>(world.owner, sql`SELECT count(*)::int AS count FROM oauth_clients`)) as [{ count: number }];
   assert.equal(count, MAX_CLIENTS);
   // Refused, a stranger writes nothing at all.
-  assert.equal((await entries()).length, before + 2);
+  assert.equal((await entries()).length, before + 3);
 
   // Before the vault adopted the database, nobody registers.
   await world.owner.execute(sql`DELETE FROM oauth_clients WHERE name = 'filler'`);

@@ -436,10 +436,11 @@ test('a registered OAuth client no MCP credential names goes a week after it was
   // As the vault writes one, and as 0.14's were carried over, which jsonb wrote with a space after each colon.
   const connection = live('mcp-a', { kind: 'mcp', client: client(named.id) });
   const upgraded = live('mcp-b', { kind: 'mcp', client: `{"id": "${carried.id}", "host": null, "scopes": "read", "redirectUri": "http://127.0.0.1/cb", "registration": "dcr"}` });
-  // A metadata document's client names a URL; a row that is not JSON names nothing, and fails no cast.
+  // A metadata document's client names a URL. A row whose client is not JSON the database refuses: the index the upkeep reads by
+  // (`credentials_client_idx`) reads each row's client as JSON.
   const documented = live('mcp-c', { kind: 'mcp', client: '{"id":"https://claude.ai/oauth/mcp-client.json"}' });
-  const broken = live('mcp-d', { kind: 'mcp', client: `not json ${unused.id}` });
-  await world.write(vault, ...world.rows('principals', world.principal(ada)), ...world.rows('credentials', connection, upgraded, documented, broken), ...world.rows('oauthClients', unused, named, carried, young));
+  await world.write(vault, ...world.rows('principals', world.principal(ada)), ...world.rows('credentials', connection, upgraded, documented), ...world.rows('oauthClients', unused, named, carried, young));
+  await assert.rejects(world.write(vault, ...world.rows('credentials', live('mcp-d', { kind: 'mcp', client: `not json ${unused.id}` }))), /invalid input syntax for type json/);
   const forged = randomUUID();
   await vault.owner.execute(sql`INSERT INTO oauth_clients (id, name, redirect_uris, created_at, mac) VALUES (${forged}, 'Forged', '[]', ${week.toISOString()}, ''::bytea)`);
 

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { ACCESS_TOKEN_MINUTES, CODE_SECONDS, isMcpScope, MAX_CLIENTS, MAX_CONNECTIONS, MCP_SCOPES, redirectHost, redirectKind, redirectMatches, scopeString, supersedes, type McpScope } from '@coffre/core/mcp';
+import { ACCESS_TOKEN_MINUTES, CODE_SECONDS, isMcpScope, MAX_CLIENTS, MAX_CONNECTIONS, MCP_SCOPES, redirectKind, redirectMatches, scopeString, supersedes, type McpScope } from '@coffre/core/mcp';
 import type { Answers, Asked, McpChanges, McpClient, Presented } from '@coffre/core/vault';
 import { credentials, oauthClients, principals } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
@@ -19,10 +19,11 @@ import { adopted, by, instancePart, VAULT } from './signin.ts';
  * MCP connections and the OAuth clients that make them
  * (docs/design/0.16.md, "MCP connections"). A connection is a credential
  * of kind `mcp` with no ancestors: its token is its code until the client
- * redeems it, then its refresh token, and the one it replaced is kept
- * beside it (`previous_token_hash`), so that a copy presented after is
- * known for one. Each access token is a credential of kind `mcp` under it,
- * an hour long (`callerOf` in caller.ts).
+ * redeems it, then its refresh token. The refresh token it replaced is kept
+ * beside it (`previous_token_hash`), and its code for as long as it lasts
+ * (`code_hash`), so that either, presented after, is known for a copy.
+ * Each access token is a credential of kind `mcp` under it, an hour long
+ * (`callerOf` in caller.ts).
  */
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -46,6 +47,19 @@ const redirect = (value: unknown): value is string => {
     return false;
   }
 };
+
+/** A host as a URL's own: letters, digits, dots and dashes, and a port. */
+const HOST = /^[a-z0-9.-]{1,253}(:[0-9]{1,5})?$/;
+
+/**
+ * What an entry says of a client: how it is known, the registration's id,
+ * which the vault drew, and its host if it reads as one. Never its name, a
+ * metadata document's URL nor a redirect: whoever made the client chose
+ * them, and the log takes no free text from a caller (docs/design/0.16.md,
+ * "A refused change is logged"). The connection's row keeps the rest.
+ */
+const logged = (client: Pick<McpClient, 'id' | 'host' | 'registration'>) =>
+  ({ registration: client.registration, client: client.registration === 'dcr' && UUID.test(client.id) ? client.id : null, host: client.host !== null && HOST.test(client.host) ? client.host : null });
 
 /** A name as the app shows it: no control or format character, which could make one look like another. */
 const named = (value: unknown): value is string => long(value, MOST_NAME) && value !== '' && value === value.trim() && !/[\p{Cc}\p{Cf}]/u.test(value);
@@ -74,7 +88,7 @@ const storedClient = (client: Pick<McpClient, 'id' | 'host' | 'registration' | '
   JSON.stringify({ id: client.id, host: client.host, registration: client.registration, redirectUri: client.redirectUri, scopes: scopeString(scopes) });
 
 /** A credential's row, all its columns, with what an MCP one says. */
-function mcpRow(fields: Pick<Fresh<typeof credentials>, 'id' | 'tokenHash' | 'generation' | 'principal' | 'label' | 'createdAt' | 'createdBy' | 'expiresAt' | 'ancestors' | 'client' | 'challenge'>): Fresh<typeof credentials> {
+function mcpRow(fields: Pick<Fresh<typeof credentials>, 'id' | 'tokenHash' | 'codeHash' | 'generation' | 'principal' | 'label' | 'createdAt' | 'createdBy' | 'expiresAt' | 'ancestors' | 'client' | 'challenge'>): Fresh<typeof credentials> {
   return {
     kind: 'mcp', tokenHint: null, previousTokenHash: null, identityId: null, scope: null, places: null, lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
     jkt: null, notAfter: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, ...fields,
@@ -134,7 +148,7 @@ function mcpConnect(input: Presented & McpChanges & { op: 'mcp.connect' }, vault
       const expiresAt = new Date(at + CODE_SECONDS * 1000);
       return {
         writes: [put(credentials, mcpRow({
-          id, tokenHash: Buffer.from(code, 'hex'), generation: caller.credential.generation, principal: caller.principal, label: name, createdAt: now, createdBy: caller.principal,
+          id, tokenHash: Buffer.from(code, 'hex'), codeHash: Buffer.from(code, 'hex'), generation: caller.credential.generation, principal: caller.principal, label: name, createdAt: now, createdBy: caller.principal,
           expiresAt, ancestors: null, client: storedClient(client, scopes), challenge,
         }))],
         entry: {
@@ -142,7 +156,7 @@ function mcpConnect(input: Presented & McpChanges & { op: 'mcp.connect' }, vault
           kept: true,
           action: 'mcp.connect',
           objects: [`principal:${caller.principal}`, `credential:${caller.credential.id}`, `credential:${id}`, ...(client.registration === 'dcr' ? [`oauth_client:${client.id}`] : [])],
-          detail: { connection: id, client: client.id, name, host: client.host, registration: client.registration, redirectHost: redirectHost(client.redirectUri), scopes: scopeString(scopes) },
+          detail: { connection: id, ...logged(client), scopes: scopeString(scopes) },
         },
         answer: { connection: id, expiresAt: expiresAt.toISOString() },
       };
@@ -197,8 +211,9 @@ function mcpToken(input: Asked<'mcp.token'>): Operation<Parts, Answers['mcp.toke
   // Drawn here: a decision draws nothing.
   const access = randomUUID();
   const hash = sql`decode(${held}, 'hex')`;
-  // By either unique index: its token now, or the one it replaced.
-  const found = sql`SELECT c.id FROM credentials c WHERE c.token_hash = ${hash} UNION ALL SELECT c.id FROM credentials c WHERE c.previous_token_hash = ${hash}`;
+  // By its unique index or the index beside each: its token now, the refresh token it replaced, or its code.
+  const found = sql`SELECT c.id FROM credentials c WHERE c.token_hash = ${hash} UNION ALL SELECT c.id FROM credentials c WHERE c.previous_token_hash = ${hash}
+    UNION ALL SELECT c.id FROM credentials c WHERE c.code_hash = ${hash}`;
   const read = {
     connection: part(credentials, sql`${credentials.id} IN (${found})`),
     member: part(principals, sql`${principals.id} IN (SELECT c.principal FROM credentials c WHERE c.id IN (${found}))`),
@@ -227,7 +242,7 @@ function mcpToken(input: Asked<'mcp.token'>): Operation<Parts, Answers['mcp.toke
             kept: true,
             action: 'mcp.disconnect', actor: null, credential: null, request: from.request, ip: from.ip,
             objects: [`credential:${row.id}`, `principal:${row.principal}`],
-            detail: { connection: row.id, client: stored.id, principal: row.principal, reason: grant === 'authorization_code' ? 'code_reused' : 'refresh_reused' },
+            detail: { connection: row.id, ...logged(stored), principal: row.principal, reason: grant === 'authorization_code' ? 'code_reused' : 'refresh_reused' },
           },
           answer: { ended: true, connection: row.id },
         };
@@ -251,7 +266,7 @@ function mcpToken(input: Asked<'mcp.token'>): Operation<Parts, Answers['mcp.toke
         if (stored.redirectUri !== code.redirectUri) return { refused: 'wrong_redirect' };
         if (proof !== row.challenge) return { refused: 'wrong_verifier' };
         ends = new Date(at + code.minutes * 60_000);
-        writes.push(amended(credentials, row, { tokenHash: Buffer.from(tokens.refresh, 'hex'), previousTokenHash: Buffer.from(held, 'hex'), challenge: null, expiresAt: ends }));
+        writes.push(amended(credentials, row, { tokenHash: Buffer.from(tokens.refresh, 'hex'), challenge: null, expiresAt: ends }));
         // A step-up: the client's earlier connections that this one grants all of and more end now, as the consent page said.
         for (const other of seen.others) {
           const theirs = mcpClientOf(other.client);
@@ -268,7 +283,7 @@ function mcpToken(input: Asked<'mcp.token'>): Operation<Parts, Answers['mcp.toke
       const expiresAt = new Date(Math.min(at + ACCESS_TOKEN_MINUTES * 60_000, ends.getTime()));
       writes.push(put(credentials, mcpRow({
         id: access, tokenHash: Buffer.from(tokens.access, 'hex'), generation: row.generation, principal: row.principal, label: row.label, createdAt: now, createdBy: row.principal,
-        expiresAt, ancestors: JSON.stringify([row.id]), client: JSON.stringify({ ...(JSON.parse(row.client!) as object), scopes: scopeString(scopes) }), challenge: null,
+        codeHash: null, expiresAt, ancestors: JSON.stringify([row.id]), client: JSON.stringify({ ...(JSON.parse(row.client!) as object), scopes: scopeString(scopes) }), challenge: null,
       })));
       return {
         writes,
@@ -279,7 +294,7 @@ function mcpToken(input: Asked<'mcp.token'>): Operation<Parts, Answers['mcp.toke
           kept: superseded.length > 0,
           action: 'mcp.token', actor: row.principal, credential: row.id, request: from.request, ip: from.ip,
           objects: [`principal:${row.principal}`, `credential:${row.id}`, `credential:${access}`, ...superseded.map((other) => `credential:${other.id}`)],
-          detail: { connection: row.id, client: stored.id, grant, credential: access, scopes: scopeString(scopes), ...(superseded.length > 0 ? { superseded: superseded.map((other) => other.id) } : {}) },
+          detail: { connection: row.id, ...logged(stored), grant, credential: access, scopes: scopeString(scopes), ...(superseded.length > 0 ? { superseded: superseded.map((other) => other.id) } : {}) },
         },
         answer: { ended: false, principal: row.principal, connection: row.id, credential: access, expiresAt: expiresAt.toISOString(), scopes },
       };
@@ -327,7 +342,8 @@ function oauthRegister(input: Asked<'oauth.register'>): Operation<Parts, Answers
           kept: false,
           action: 'oauth.register', actor: null, credential: null, request: from.request, ip: from.ip,
           objects: [`oauth_client:${id}`],
-          detail: { client: id, name, redirectUris: uris },
+          // Its id and how many redirects; its name and its redirects only its row keeps, as they are a stranger's text.
+          detail: { client: id, redirects: uris.length },
         },
         answer: { client: id, createdAt: now.toISOString() },
       };

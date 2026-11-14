@@ -262,7 +262,7 @@ const SEED = `
     (${u(506)}, 'cli', ${h(4)}, ${h(56)}, 'coffre_cli_…uvwx', 0, '${ADA}', ${u(601)}, NULL, 'ada@acme.example', now() + interval '30 days', now() - interval '1 hour', 'coffre', NULL, NULL),
     (${u(507)}, 'cli', ${h(4)}, ${h(57)}, 'coffre_cli_…yzab', 0, '${ADA}', ${u(601)}, NULL, 'ada@acme.example', now() + interval '30 days', now() - interval '1 hour', 'system:signin', NULL, NULL);
   INSERT INTO mcp_connections (id, auth_mac, principal, generation, client_id, client_name, client_host, registration, scopes, redirect_uri, code_hash, code_challenge, code_expires_at, refresh_hash, refresh_previous_hash, expires_at, revoked_at, revoked_by) VALUES
-    (${u(701)}, ${h(4)}, '${ADA}', 0, 'https://claude.ai/client.json', 'Claude', 'claude.ai', 'cimd', 'read write', 'https://claude.ai/cb', NULL, NULL, NULL, ${h(71)}, ${h(72)}, now() + interval '30 days', NULL, NULL),
+    (${u(701)}, ${h(4)}, '${ADA}', 0, 'https://claude.ai/client.json', 'Claude', 'claude.ai', 'cimd', 'read write', 'https://claude.ai/cb', ${h(75)}, NULL, NULL, ${h(71)}, ${h(72)}, now() + interval '30 days', NULL, NULL),
     (${u(702)}, ${h(4)}, '${ADA}', 0, 'c2', 'Revoked', NULL, 'dcr', 'read', 'https://two.example/cb', NULL, NULL, NULL, ${h(73)}, NULL, now() + interval '30 days', now(), 'ada@acme.example'),
     (${u(703)}, ${h(4)}, '${ADA}', 0, 'c3', 'Unredeemed', NULL, 'dcr', 'read', 'https://three.example/cb', ${h(74)}, 'challenge', now() + interval '1 minute', NULL, NULL, now() + interval '30 days', NULL, NULL);
   INSERT INTO mcp_approvals (id, connection_id, tool, arguments, digest, expires_at) VALUES
@@ -474,7 +474,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
       { id: id(507), kind: 'cli', label: null, token_hint: 'coffre_cli_…yzab', frozen: false, revoked: true, run: null, client: null, replaced: false },
       { id: id(701), kind: 'mcp', label: 'Claude', token_hint: null, frozen: false, revoked: false, run: null, client: '{"id": "https://claude.ai/client.json", "host": "claude.ai", "scopes": "read write", "redirectUri": "https://claude.ai/cb", "registration": "cimd"}', replaced: true },
     ]);
-    assert.deepEqual(await rows(`SELECT token_hash = ${h(71)} AS refresh, created_by FROM credentials WHERE kind = 'mcp'`), [{ refresh: true, created_by: ADA }]);
+    assert.deepEqual(await rows(`SELECT token_hash = ${h(71)} AS refresh, code_hash = ${h(75)} AS code, created_by FROM credentials WHERE kind = 'mcp'`), [{ refresh: true, code: true, created_by: ADA }]);
     assert.deepEqual(await rows(`SELECT id, connection_id FROM mcp_approvals`), [{ id: id(801), connection_id: id(701) }]);
     assert.deepEqual(await rows(`SELECT id, superseded_at IS NOT NULL AS superseded FROM enrollment_codes ORDER BY id`), [
       { id: id(401), superseded: false },

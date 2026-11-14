@@ -111,13 +111,13 @@ function parsed(json: string | null): unknown {
  * over): its id, its redirect and its scopes, or undefined for one that
  * does not read as one.
  */
-export function mcpClientOf(stored: string | null): { id: string; redirectUri: string; scopes: McpScope[] } | undefined {
+export function mcpClientOf(stored: string | null): { id: string; host: string | null; registration: 'cimd' | 'dcr'; redirectUri: string; scopes: McpScope[] } | undefined {
   const client = parsed(stored);
   if (typeof client !== 'object' || client === null || Array.isArray(client)) return undefined;
-  const { id, redirectUri, scopes } = client as Record<string, unknown>;
-  if (typeof id !== 'string' || typeof redirectUri !== 'string' || typeof scopes !== 'string') return undefined;
+  const { id, host, registration, redirectUri, scopes } = client as Record<string, unknown>;
+  if (typeof id !== 'string' || !(host === null || typeof host === 'string') || (registration !== 'cimd' && registration !== 'dcr') || typeof redirectUri !== 'string' || typeof scopes !== 'string') return undefined;
   const read = parseScopes(scopes);
-  return read.unknown.length > 0 ? undefined : { id, redirectUri, scopes: read.scopes };
+  return read.unknown.length > 0 ? undefined : { id, host, registration, redirectUri, scopes: read.scopes };
 }
 
 /** A token's cap: one that does not read as a scope reaches nothing. */

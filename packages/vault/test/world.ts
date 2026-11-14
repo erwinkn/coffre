@@ -46,7 +46,7 @@ export function role(instance: boolean, id: string, permissions: string[], guard
 /** A credential whose token is `tokenOf(label)`: a CLI session unless told. */
 export function credential(label: string, of: string, more: Partial<Fresh<typeof credentials>> = {}): Fresh<typeof credentials> {
   return {
-    id: randomUUID(), kind: of.startsWith('token:') ? 'service' : 'cli', tokenHash: tokenOf(label), tokenHint: null, previousTokenHash: null, generation: 0, principal: of, identityId: null,
+    id: randomUUID(), kind: of.startsWith('token:') ? 'service' : 'cli', tokenHash: tokenOf(label), tokenHint: null, previousTokenHash: null, codeHash: null, generation: 0, principal: of, identityId: null,
     scope: null, places: null, label, createdAt: at, createdBy: of, expiresAt: new Date(Date.UTC(2027, 0, 1)), lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
     jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null, ...more,
   };
