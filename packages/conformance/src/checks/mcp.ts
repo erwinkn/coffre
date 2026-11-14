@@ -9,7 +9,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { CoffreError, type AuditEntryView } from '@coffre/client';
 
 import type { Deployment } from '../harness.ts';
-import { expect, until } from '../report.ts';
+import { expect, until, PUBLISHED_SECONDS } from '../report.ts';
 
 import { bearer } from '../browser.ts';
 import { canary, deviceLogin, DEV, personaOn, PROD, PROJECT, valuesIn, type Canaries, type People, type Person } from './people.ts';
@@ -226,7 +226,7 @@ export async function mcpConnect(deployment: Deployment, people: People): Promis
   await until('the connections, tokens and disconnections on the log', async () => {
     ({ entries } = await people.admin.api.audit.list({ detail: '1', limit: 500 }));
     return done();
-  }, 90).catch(() => undefined);
+  }, PUBLISHED_SECONDS).catch(() => undefined);
   expect(done(), 'the log does not hold each connection, token and disconnection', counts);
   const reasons = mine.filter((entry) => entry.action === 'mcp.disconnect').map((entry) => entry.metadata.reason).sort();
   expect(JSON.stringify(reasons) === JSON.stringify(['code_reused', 'refresh_reused']), 'the disconnections do not say why', reasons);
@@ -330,7 +330,7 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
     ({ entries } = await people.admin.api.audit.list({ actor: people.reader.member, detail: '1', limit: 500 }));
     for (const entry of entries) if (entry.action === 'mcp.connect' && entry.metadata.client === clientId) connections.add(entry.metadata.connection);
     return connections.size > 0;
-  }, 90).catch(() => undefined);
+  }, PUBLISHED_SECONDS).catch(() => undefined);
   expect(connections.size === 1, 'the connection is not in the log under its client', connections.size);
   const mine = entries.filter((entry) => (entry.metadata.client === clientId && entry.action !== 'mcp.connect' && entry.action !== 'mcp.token') || connections.has(entry.metadata.via));
   expect(mine.length === 0, 'a read-only tools/call left an entry under the client', mine.map((entry) => entry.action));
@@ -480,7 +480,7 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   await until('the changes on the log', async () => {
     ({ entries } = await admin.api.audit.list({ actor: changer.member, limit: 500 }));
     return changed();
-  }, 90).catch(() => undefined);
+  }, PUBLISHED_SECONDS).catch(() => undefined);
   expect(changed(), 'the changes are not each made once, via the client and its approval', once);
   const decisions = entries.filter((entry) => entry.action === 'mcp.approve').map((entry) => `${entry.decision} ${entry.reason ?? ''}`.trim()).sort();
   expect(JSON.stringify(decisions) === JSON.stringify(['allow', 'allow', 'allow', 'allow', 'deny approved', 'deny changed']), 'the decisions, and the two refused, are not in the log', decisions);

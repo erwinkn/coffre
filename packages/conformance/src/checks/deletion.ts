@@ -8,7 +8,7 @@ import { CoffreError } from '@coffre/client';
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, until } from '../report.ts';
+import { expect, until, PUBLISHED_SECONDS } from '../report.ts';
 import type { Cli } from './cli.ts';
 import type { Person } from './people.ts';
 import { query } from './storage.ts';
@@ -89,7 +89,7 @@ export async function deletion(deployment: Deployment, cli: Cli, admin: Person):
   await until('the deletion on the log under its tombstone', async () => {
     page = await admin.api.audit.list({ path: tombstone!.slug, limit: 500 }).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
     return page instanceof Error || deleted();
-  }, 90).catch(() => undefined);
+  }, PUBLISHED_SECONDS).catch(() => undefined);
   expect(!(page instanceof Error), 'the log cannot be read under the tombstone\'s slug', page instanceof Error ? page.message : page);
   expect(deleted(), 'the deletion is not in the log under its tombstone', (page as Page | undefined)?.entries.slice(0, 5));
 

@@ -7,7 +7,7 @@ import { CoffreError, type AuditEntryView } from '@coffre/client';
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, refused, until } from '../report.ts';
+import { expect, refused, until, PUBLISHED_SECONDS } from '../report.ts';
 import { canary, DEV, PROD, PROJECT, valuesIn, type Canaries, type People, type Person } from './people.ts';
 import { query } from './storage.ts';
 
@@ -178,14 +178,18 @@ export async function references(deployment: Deployment, { admin, reader, leaver
     const through = (entry: AuditEntryView) => entry.requestId === read.operationId && entry.action === 'secret.read'
       && Array.isArray(entry.metadata.keys) && entry.metadata.keys.some((key: unknown) => typeof key === 'object' && key !== null && 'through' in key);
     const seen: Record<string, boolean> = { [PROD]: false, [DEV]: false, [source]: false };
+    const shown: Record<string, AuditEntryView[]> = {};
     await until('the read through the reference on the logs', async () => {
-      for (const path of Object.keys(seen)) seen[path] ||= (await admin.api.audit.list({ path, limit: 200 })).entries.some(through);
+      for (const path of Object.keys(seen)) seen[path] ||= (shown[path] = (await admin.api.audit.list({ path, limit: 200 })).entries).some(through);
       return Object.values(seen).every(Boolean);
-    }, 90).catch(() => undefined);
-    expect(seen[PROD] && seen[DEV], "the read through the reference is not in both the source's log and the holder's", seen);
+    }, PUBLISHED_SECONDS).catch(() => undefined);
+    expect(seen[PROD] && seen[DEV], "the read through the reference is not in both the source's log and the holder's",
+      { seen, shown: Object.fromEntries(Object.entries(shown).map(([path, entries]) => [path, entries.slice(0, 5).map((entry) => `${entry.seq} ${entry.action} ${entry.requestId}`)])) });
 
     // What it reads cannot be archived while it reads it (D41): not the key, nor its environment. Its
     // project could be, since the reference is held there too, and archiving it stops no one else's read.
+    // 0.16's refusal does not name the holder, as 0.14.7's did: the source's references list does, to whoever
+    // lists or manages access there, and the refusal says so.
     const archives: [string, (archived: boolean) => Promise<unknown>][] = [
       [source, (archived) => admin.api.secrets.update(source, { archived })],
       [PROD, (archived) => admin.api.environments.update(PROD, { archived })],
@@ -193,8 +197,10 @@ export async function references(deployment: Deployment, { admin, reader, leaver
     for (const [what, archive] of archives) {
       const refusal = await archive(true).then(() => null, (error: unknown) => error);
       if (refusal === null) await archive(false);
-      expect(refusal instanceof CoffreError && refusal.status === 409 && refusal.message.includes(`${DEV}/${HELD} reads ${source}`),
-        `${what} was archived, or refused without naming the reference, while a reference read it`, refusal instanceof Error ? refusal.message : refusal);
+      expect(refusal instanceof CoffreError && refusal.status === 409 && refusal.reason === 'referenced',
+        `${what} was archived, or refused other than as referenced, while a reference read it`, refusal instanceof Error ? refusal.message : refusal);
+      const holders = (await admin.api.references.list(what)).references.filter((reference) => reference.source === source).map((reference) => reference.holder);
+      expect(holders.includes(`${DEV}/${HELD}`), `${what}'s references do not name ${DEV}/${HELD}, the reference that blocks its archive`, holders);
     }
     // Unless what holds it is archived (D58): nobody reads through it then, so its source archives. Restored,
     // the holder reads nothing through it until its source is back, and says so.
@@ -278,7 +284,7 @@ export async function loosening({ admin, reader, leaver }: People): Promise<stri
     await until('the loosening on the audit page', async () => {
       logged = (await admin.api.audit.list({ path, limit: 50 })).entries.filter((entry) => entry.action === 'secret.loosen');
       return logged.length > 0;
-    }, 90).catch(() => undefined);
+    }, PUBLISHED_SECONDS).catch(() => undefined);
     const lines = (logged.length === 1 ? logged[0]!.metadata.keys : undefined) as { key?: unknown; was?: unknown; nature?: unknown }[] | undefined;
     expect(lines?.some((line) => line.key === LOOSE && line.was === 'sensitive' && line.nature === 'secret') === true, 'the loosening is not its own entry, saying both levels', logged);
   } finally {

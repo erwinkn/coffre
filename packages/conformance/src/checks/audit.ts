@@ -9,7 +9,7 @@ import { judgeProofs, type AuditEntryView, type CoffreClient, type ProofJudgment
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, until } from '../report.ts';
+import { expect, until, PUBLISHED_SECONDS } from '../report.ts';
 import { LOG_REFUSAL, logBodies, logRefuses, query, type Body } from './storage.ts';
 import { canary, DEV, PROJECT, replaced, valuesIn, type Canaries, type People } from './people.ts';
 
@@ -35,7 +35,7 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
   await until('the read on the audit page', async () => {
     bundle = (await everyAuditEntry(admin.api)).filter((entry) => entry.requestId === operationId);
     return bundle.length > 0;
-  }, 90).catch(() => undefined);
+  }, PUBLISHED_SECONDS).catch(() => undefined);
   expect(bundle.length === 1, 'the read of one place is not logged as one entry', bundle);
   const [entry] = bundle as [AuditEntryView];
   const read = entry.secrets ?? [{ key: entry.key, version: entry.version }];
@@ -82,7 +82,7 @@ export async function auditProven({ admin }: People): Promise<string> {
   await until('a page past the race between its head and its log', async () => {
     judged = judgeProofs(await admin.api.audit.list({ detail: '1', limit: 200 }));
     return !judged.racing;
-  }, 90).catch((error: unknown) => {
+  }, PUBLISHED_SECONDS).catch((error: unknown) => {
     if (judged === undefined) throw error;
   });
   const { head, proven, failed, misplaced, missing } = judged!;
@@ -115,7 +115,7 @@ export async function auditPageProofs({ admin }: People): Promise<string> {
     html = await page.text();
     proofs = [...html.matchAll(/data-proof="([a-z]+)"/g)].map((match) => match[1]);
     return status !== 200 || proofs.length === 0 || proofs.some((proof) => proof !== 'unproven');
-  }, 90);
+  }, PUBLISHED_SECONDS);
   expect(status === 200 && !html.includes('Verifying'), 'the audit page was not sent with its proofs', { status });
   const proven = proofs.filter((proof) => proof === 'proven').length;
   expect(proven > 0, "the audit page's rows say no proof, or none proven", { status, proofs: proofs.slice(0, 10) });

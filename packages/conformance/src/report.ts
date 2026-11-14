@@ -37,6 +37,16 @@ export async function refused(what: string, call: Promise<unknown>): Promise<Cof
   return outcome.error;
 }
 
+/**
+ * How long a check waits for an entry on the audit page, which lists only
+ * what the signer has published (`log`, not `log_pending`). Told of an entry,
+ * the signer signs it within a second; if that word was lost, its minute's
+ * run takes it (`TICK_MS` and `CHECK_MS` in packages/vault/src/signer-host.ts).
+ * So the minute, and half a minute more for a loaded host. An entry still
+ * absent then is a defect, not a timing.
+ */
+export const PUBLISHED_SECONDS = 60 + 30;
+
 export async function until(what: string, probe: () => Promise<boolean>, seconds: number, alive = () => true): Promise<void> {
   for (let i = 0; i < seconds * 10; i++) {
     if (!alive()) throw new Failure(`a process exited while waiting for ${what}`);
