@@ -227,6 +227,8 @@ test('a handle anywhere but its field, a body of another type, too large, malfor
     ['turnstile', 'the field twice, as Go folds the long s', JSON_TYPE, `{"secret":"${handle}","ſecret":"x"}`, 400],
     ['turnstile', 'the field no string', JSON_TYPE, `{"secret":{"value":"${handle}"}}`, 400],
     ['turnstile', 'the handle escaped in another field', JSON_TYPE, `{"secret":"${handle}","response":"\\u0063${handle.slice(1)}"}`, 400],
+    ['turnstile', "the handle in another field's name", JSON_TYPE, JSON.stringify({ secret: handle, [handle]: 1 }), 400],
+    ['turnstile', "the handle escaped in another field's name", JSON_TYPE, `{"secret":"${handle}","\\u0063${handle.slice(1)}":1}`, 400],
     ['turnstile', 'the handle nested', JSON_TYPE, JSON.stringify({ secret: handle, nested: [{ deep: handle }] }), 400],
     ['turnstile', 'nested deeper than 32', JSON_TYPE, `{"secret":"${handle}","x":${'['.repeat(40)}${']'.repeat(40)}}`, 400],
     ['turnstile', 'text/plain', { 'content-type': 'text/plain' }, JSON.stringify({ secret: handle }), 415],

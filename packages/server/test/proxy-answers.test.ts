@@ -114,16 +114,22 @@ const text = (body: string | ReadableStream<Uint8Array>, type = 'application/jso
 /** `body` in parts of `size` bytes, as a network may hand it. */
 const chunked = (body: string, size: number) => new ReadableStream<Uint8Array>({ start(out) { const bytes = Buffer.from(body); for (let at = 0; at < bytes.length; at += size) out.enqueue(bytes.subarray(at, at + size)); out.close(); } });
 const basicOf = (user: string, password: string) => `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}`;
+/** What tells the upstream about coffre's caller, its cookies, its Access sign-in or this hop: none of it goes on. */
+const CALLER = {
+  cookie: 'coffre=1', 'x-forwarded-for': '198.51.100.1', 'x-forwarded-host': 'coffre.example', forwarded: 'for=198.51.100.1', 'x-real-ip': '198.51.100.1', 'true-client-ip': '198.51.100.1',
+  'cf-access-jwt-assertion': 'eyJ.access.jwt', 'cf-connecting-ip': '198.51.100.1', 'cf-ray': '8a0b1c2d3e4f-CDG', 'cdn-loop': 'cloudflare', 'proxy-authorization': 'Basic cHJveHk6cGFzcw==', te: 'trailers',
+};
 const planOf = async (token: string, path = 'market/dev') => app.request(`/use/${path}`, { headers: { authorization: `Bearer ${token}` } });
 
 test("a credential with an egress leaves through it and never the global fetch, as the proxy made the request; its failure is a 502, redacted", async () => {
   const global = mock.method(globalThis, 'fetch', async () => Response.json({ global: true }));
   try {
-    const got = await call('/companies?q=acme', { method: 'POST', headers: { 'content-type': 'application/json', cookie: 'coffre=1', 'x-forwarded-for': '198.51.100.1' }, body: '{"siren":"123"}' });
+    const got = await call('/companies?q=acme', { method: 'POST', headers: { 'content-type': 'application/json', ...CALLER }, body: '{"siren":"123"}' });
     assert.equal(got.status, 200, await got.clone().text());
     const [one] = sent;
     assert.deepEqual([one!.url.href, one!.init.method, one!.init.redirect, one!.body.toString()], ['https://api.schumann.example/v1/companies?q=acme', 'POST', 'manual', '{"siren":"123"}']);
-    assert.deepEqual([one!.headers.get('x-api-key'), one!.headers.get('content-type'), one!.headers.get('cookie'), one!.headers.get('x-forwarded-for')], [KEY, 'application/json', null, null]);
+    assert.deepEqual([one!.headers.get('x-api-key'), one!.headers.get('content-type')], [KEY, 'application/json']);
+    assert.deepEqual(Object.keys(CALLER).filter((name) => one!.headers.has(name)), [], "nothing about coffre's caller or the hop goes on");
     assert.ok(![...one!.headers].some(([, said]) => said.includes(handle)));
     assert.equal(global.mock.callCount(), 0);
     // A credential without one leaves through the global fetch, its redirects not followed either.
@@ -182,7 +188,7 @@ test('every form an honest upstream echoes a secret in is redacted: escapes, ent
   }
   answer = () => redirect(`/v1/x?k=${utf8(ACCENT)}`);
   const relocated = await app.request('/use/accented/x', { headers: { 'x-api-key': handle } });
-  assert.ok(!decodeURIComponent(relocated.headers.get('location')!).includes('0123456789'), relocated.headers.get('location')!);
+  assert.deepEqual([relocated.status, relocated.headers.get('location')], [302, `${PUBLIC_URL}/use/market/dev/accented/x?k=[redacted%20by%20coffre]`]);
   answer = () => text('{}', 'application/json', { headers: { 'x-error-key': utf8(ACCENT) } });
   assert.equal((await app.request('/use/accented/x', { headers: { 'x-api-key': handle } })).headers.get('x-error-key'), REDACTED);
 });
@@ -192,6 +198,12 @@ test("redaction is the same however the answer is split: a password that begins 
   for (let size = 1; size <= said.length; size += 1) {
     answer = () => text(chunked(said, size), 'text/plain');
     assert.equal(await (await app.request('/use/prefixed/x', { headers: { authorization: basicOf(handle, handle) } })).text(), `user ${REDACTED} password ${REDACTED} end, acct_`, `parts of ${size}`);
+  }
+  // Text past ASCII comes back whole, however its characters are cut.
+  const intl = `café 🎉 ${KEY} ñandú`;
+  for (let size = 1; size <= 5; size += 1) {
+    answer = () => text(chunked(intl, size), 'text/plain; charset=utf-8');
+    assert.equal(await (await call('/intl')).text(), `café 🎉 ${REDACTED} ñandú`, `parts of ${size}`);
   }
   let later!: (part: string) => void;
   answer = () => text(new ReadableStream<Uint8Array>({ start(out) { out.enqueue(Buffer.from(': heartbeat\n\n')); later = (part) => { out.enqueue(Buffer.from(part)); out.close(); }; } }), 'text/event-stream');
