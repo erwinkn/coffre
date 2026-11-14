@@ -44,8 +44,10 @@
  * the vault, which decides on its own rows and logs it once a minute per
  * key and credential; the proxy keeps no value. `/use/<credential>` reads
  * the handle's or session's row first, unchecked, for the place it was made
- * for. The plan, presigning, signing, verifying, a cipher's work and
- * tunnels answer 501 until each is moved onto `use`.
+ * for. The plan of an environment is a peek and one use, which opens only
+ * what the app is handed. Presigning, signing, verifying, a cipher's work
+ * and tunnels answer 501 until each is moved onto `use`, and so does the
+ * plan of an environment the deployment generates values for.
  */
 import { createHash } from 'node:crypto';
 
@@ -54,7 +56,7 @@ import { bodyDigest, bodyLine, contentDigest, declaredDigest, MAX_DIGESTED_BODY,
 import { constraintsAllow } from '@coffre/core/identity';
 
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
-import { WorkloadRefused, type CoffrePlugin, type PluginContext, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
+import { WorkloadRefused, type CoffrePlugin, type Exposed, type PluginContext, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import type { Encoding } from './hmac.ts';
 import { signV4 } from './sigv4.ts';
 import type { WorkersSocket } from '../workers-socket.ts';
@@ -510,12 +512,12 @@ type Proxy = {
 type Opened = { values: Record<string, string>; plain: readonly string[] };
 
 /**
- * What the proxy does not serve on 0.16 yet, which 0.14.7 did: `coffre run`'s
- * plan of an environment, a presigned URL, a signature, a verification or a
- * cipher's work, and a tunnel. Each comes back on `use` in a pull request of
- * its own (docs/design/0.16.md, "The proxy").
+ * What the proxy does not serve on 0.16 yet, which 0.14.7 did: a presigned
+ * URL, a signature, a verification or a cipher's work, a tunnel, and the
+ * plan of an environment the deployment generates values for. Each comes
+ * back on `use` in a pull request of its own (docs/design/0.16.md, "The proxy").
  */
-const notYet = (what: string) => failure(501, `${what} is not served by this version of coffre yet: only a request through a credential is`, 'not_implemented');
+const notYet = (what: string) => failure(501, `${what} is not served by this version of coffre yet`, 'not_implemented');
 
 async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Promise<Response> {
   const url = new URL(request.url);
@@ -574,7 +576,7 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   if (raw.length === 2) {
     if (request.method === 'POST') return notYet('a presigned URL, a signature or a cipher\'s work');
     if (request.method !== 'GET') return failure(405, 'GET for the plan, POST to presign or sign');
-    return notYet("`coffre run`'s plan of an environment");
+    return plan(request, coffre, proxy, `${place[0]}/${place[1]}`);
   }
   if (raw.length < 3) return failure(404, 'name /use/<credential>/<path>, or /use/<project>/<environment>/<credential>/<path>');
   const credential = proxy.credentials.get(place[2]!);
@@ -584,6 +586,158 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   if (credential === undefined && proxy.ciphers.has(place[2]!)) return failure(404, `${place[2]} is a cipher, which reaches no upstream: credential(${JSON.stringify(place[2])}).encrypt(plaintext)`);
   if (credential === undefined) return failure(404, `this instance has no credential ${JSON.stringify(place[2])}: its deployment's credentialProxy names them`);
   return forward(request, coffre, proxy, `${place[0]}/${place[1]}`, credential, raw.slice(3), url.search, peeked.get(credential));
+}
+
+/** A plan's bearer, a handle whole: a person's session or token reads its own values through the API, never here. */
+const WHOLE_HANDLE = new RegExp(`^${HANDLE.source}$`);
+
+/**
+ * What `coffre run` gives the app for an environment (docs/design/credential-proxy.md,
+ * section 2): each credential whose keys the environment holds, its keys as
+ * the handle, or the placeholder its client checks; the values its person
+ * reads, plain ones and secrets as they are, never a sensitive one, and
+ * never one a credential covers but a plain one its rule leaves no slot of
+ * the handle in; each signer's, verifier's and cipher's key as the handle,
+ * and its name where `credential(name)` finds it; each tunnel, for its key,
+ * the URL `coffre run`'s listener stands in for; and every key the
+ * environment holds that none of these covers, a sensitive one, or one its
+ * person only uses, in `left`, for `coffre run` to say.
+ *
+ * Two calls to the vault and no statement (docs/design/0.16.md, "The
+ * proxy"): `held`, a peek, which says each key the handle may use and its
+ * nature and opens nothing; then one `expose` of the keys the app is
+ * handed, which opens and logs them alone, so a covered secret is never
+ * opened. Each value is placed by the nature the use opened it under, not
+ * the peek's: a key the peek saw plain that opens a secret, under a
+ * credential, stays its placeholder, its value dropped. A credential with a
+ * JWT placeholder adds its own use and the handle's row (`shaped`).
+ */
+async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
+  // A workload's proof signs the request's content as every request under /use does: here, no body.
+  const caller = await workloadOf(request, coffre, { place: path, body: await bodyDigest(new Uint8Array(0)) });
+  if (caller instanceof Response) return caller;
+  if (caller !== null) return answering(caller, () => workloadPlan(coffre, proxy, caller, caller.path ?? path));
+  // The personal config's recipes, which a plan names for `coffre run` to make, come with that config's writes (W418).
+  if (proxy.generate.has(path.replace(/@me$/, ''))) return notYet(`the plan of ${path}, an environment the deployment generates values for (\`generate\`),`);
+  const handle = bearer(request);
+  if (handle === null || !WHOLE_HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
+  const held = await coffre.held(handle, path);
+  // What the handle may use, by the nature its rows say: what chooses which keys to open, and nothing more.
+  const usable = new Map(held.flatMap((item) => ('refused' in item ? [] : [[item.key, item.nature] as const])));
+  const holds = (key: string) => usable.has(key);
+  const using = [...proxy.credentials.values()].filter((credential) => credential.keys.every(holds));
+  const signers = keyed(proxy).filter(([, signer]) => holds(signer.key));
+  const tunnels = [...proxy.tunnels].filter(([, tunnel]) => holds(tunnel.key));
+  const covered = new Set([...using.flatMap((credential) => credential.keys), ...signers.map(([, signer]) => signer.key), ...tunnels.map(([, tunnel]) => tunnel.key)]);
+  // What the proxy fills in itself, never the value the environment holds: a tunnel's URL, a signer's handle, and a
+  // credential's plain keys where giving them would leave the handle nowhere the proxy finds it (S3's access key id, which
+  // the SDK sends as `Credential=`, or every key of a header's). Those stay placeholders, as secrets do.
+  const plain = new Set([...usable].filter(([, nature]) => nature === 'plain').map(([key]) => key));
+  const filled = new Set([...signers.map(([, signer]) => signer.key), ...tunnels.map(([, tunnel]) => tunnel.key), ...using.filter((credential) => !carriesHandle(credential.inject, plain)).flatMap((credential) => credential.keys)]);
+  // A plain value is no secret, wherever it is held; a secret no credential covers, its person reads where it is held.
+  const asked = [...usable].filter(([key, nature]) => (nature === 'plain' && !filled.has(key)) || (nature !== 'sensitive' && !covered.has(key))).map(([key]) => key);
+  // A person who only uses the environment, a Developer's protected prod, reads none of it: every value is left.
+  const exposed = asked.length === 0 ? null : await coffre.expose(handle, { path, keys: asked }).catch((error: unknown) => {
+    if (error instanceof CoffreError && error.reason === 'no_access') return null;
+    throw error;
+  });
+  const env: Record<string, string> = Object.create(null);
+  const credentials: Record<string, string> = {};
+  const placed = new Set<string>();
+  for (const credential of using) {
+    // The environment's URL, which a run of several environments tells apart.
+    credentials[credential.name] = `${coffre.publicUrl}/use/${path}/${credential.name}`;
+    const placeholder = credential.placeholder === undefined ? handle : await shaped(coffre, credential, handle, path);
+    for (const key of credential.keys) {
+      env[key] = placeholder;
+      placed.add(key);
+    }
+  }
+  for (const [key, value] of Object.entries(exposed?.values ?? {})) {
+    // As the use opened it: a covered key is given only plain, and never one the proxy fills in.
+    if (filled.has(key) || (covered.has(key) && !exposed!.plain.includes(key))) continue;
+    env[key] = value;
+    placed.add(key);
+  }
+  // A signer's, verifier's or cipher's key the handle, and its name where `credential(name)` finds it: the key never leaves coffre.
+  for (const [name, signer] of signers) {
+    credentials[name] = `${coffre.publicUrl}/use/${path}/${name}`;
+    env[signer.key] = handle;
+    placed.add(signer.key);
+  }
+  // A database's URL is `coffre run`'s to make, its listener's, with the handle as the password: never the real one.
+  const listeners: Record<string, { key: string; url: string }> = {};
+  for (const [name, tunnel] of tunnels) {
+    listeners[name] = { key: tunnel.key, url: `${coffre.publicUrl.replace(/^http/, 'ws')}/use/${path}/${name}` };
+    delete env[tunnel.key];
+    placed.add(tunnel.key);
+  }
+  return answer({ environment: path, env: { ...env }, credentials, tunnels: listeners, left: held.map((item) => item.key).filter((key) => !placed.has(key)) });
+}
+
+/**
+ * What a workload's environment holds for it (docs/design/workload-access.md,
+ * section 6.2): the values it reads, plain ones and those its binding lists
+ * in `reads`, as the vault hands them; the names of the credentials and
+ * signers it uses through coffre, and its tunnels, each with the key whose
+ * URL the local listener stands in for, as a handle's plan has them; and
+ * every key it holds but is not handed, `useOnly`. No placeholder: its
+ * requests carry its proof, never a value in a slot. One `expose` of every
+ * key, after its gate.
+ */
+async function workloadPlan(coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, path: string): Promise<Response> {
+  const exposed: Exposed = await coffre.expose(caller, { path, keys: null });
+  const keys = [...Object.keys(exposed.values), ...Object.keys(exposed.refused)].sort();
+  const holds = (wanted: readonly string[]) => wanted.every((key) => keys.includes(key));
+  return answer({
+    environment: path,
+    values: { ...exposed.values },
+    credentials: [...[...proxy.credentials.values()].filter((credential) => holds(credential.keys)).map((credential) => credential.name), ...keyed(proxy).filter(([, signer]) => holds([signer.key])).map(([name]) => name)],
+    tunnels: Object.fromEntries([...proxy.tunnels].filter(([, tunnel]) => holds([tunnel.key])).map(([name, tunnel]) => [name, { key: tunnel.key, url: `${coffre.publicUrl.replace(/^http/, 'ws')}/use/${path}/${name}` }])),
+    useOnly: keys.filter((key) => !Object.hasOwn(exposed.values, key)),
+    mints: [],
+  });
+}
+
+/**
+ * A credential's placeholder in the shape its client checks: the handle behind
+ * a prefix, or a JWT of the real token's named claims, which are opened for
+ * it as a use of the credential, logged under its name, and go no further
+ * than those; it ends when the handle does, which its row says.
+ */
+async function shaped(coffre: PluginContext, credential: Resolved, handle: string, path: string): Promise<string> {
+  const placeholder = credential.placeholder!;
+  if (placeholder.kind === 'prefix') return `${placeholder.prefix}${handle}`;
+  const key = credential.keys[0]!;
+  const used = await coffre.use(handle, { path, keys: [key], purpose: 'use', upstream: credential.name });
+  const real = claimsOf(used.values[key]);
+  if (real === null) throw new CoffreError(409, 'conflict', `${path}'s ${key} is no JWT, which ${credential.name}'s placeholder copies its claims from`);
+  const { expiresAt } = await coffre.handle(handle);
+  const claims = Object.fromEntries(placeholder.claims.filter((claim) => Object.hasOwn(real, claim)).map((claim) => [claim, real[claim]]));
+  return `${UNSIGNED}.${base64url(new TextEncoder().encode(JSON.stringify({ ...claims, exp: Math.floor(Date.parse(expiresAt) / 1000) })))}.${handle}`;
+}
+
+/** A JWT's claims, its middle part read as base64url JSON: null if it is no JWT. */
+function claimsOf(token: string | undefined): Record<string, unknown> | null {
+  const parts = token?.split('.') ?? [];
+  if (parts.length !== 3) return null;
+  try {
+    const claims: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(parts[1]!.replace(/-/g, '+').replace(/_/g, '/')), (char) => char.charCodeAt(0))));
+    return typeof claims === 'object' && claims !== null && !Array.isArray(claims) ? (claims as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The signers, verifiers and ciphers, by name: each a key the app holds the handle for, which coffre computes with. */
+function keyed(proxy: Proxy): [string, Signer | Cipher][] {
+  return [...proxy.signers, ...proxy.verifiers, ...proxy.ciphers];
+}
+
+/** Whether a credential's rule still has a slot for the handle once its plain keys are given as they are: a key in it that is not plain. */
+function carriesHandle(inject: Inject, plain: ReadonlySet<string>): boolean {
+  const slots = inject.kind === 'basic' ? [inject.user, inject.password] : inject.kind === 'sigv4' ? [inject.accessKeyId] : [inject.template];
+  return slots.some((slot) => [...slot.matchAll(TEMPLATE_KEY)].some((match) => !plain.has(match[1]!)));
 }
 
 function base64url(bytes: Uint8Array): string {

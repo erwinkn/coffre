@@ -261,7 +261,7 @@ test('a handle on a session route, or a session token as a bearer, is no session
 test("what the proxy does not serve on 0.16 yet answers 501, and the root says the credentials", async () => {
   const root = await app.request('/use');
   assert.deepEqual(await root.json(), { proxy: 'coffre', credentials: ['twilio', 'stripe', 's3'] });
-  assert.deepEqual(await failed(await app.request('/use/market/prod', { headers: { authorization: `Bearer ${handle}` } })), [501, 'not_implemented']);
+  // The plan is served (proxy-plan.test.ts); a presigned URL, a signature or a cipher's work is not yet.
   assert.deepEqual(await failed(await app.request('/use/market/prod', { method: 'POST', headers: { authorization: `Bearer ${handle}` } })), [501, 'not_implemented']);
 });
 

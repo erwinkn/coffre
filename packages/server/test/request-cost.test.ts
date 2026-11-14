@@ -28,6 +28,7 @@ import { propertySettings } from '../../../scripts/property-settings.ts';
 import '../src/api/router.ts';
 import { routes } from '../src/api/routes.ts';
 import { unservedRoutes } from '../src/api/routes/unserved.ts';
+import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { openApp, PUBLIC_URL, SESSION } from './app-fixture.ts';
@@ -68,7 +69,9 @@ const transport: WorkloadTransport = {
 const workloads = { limits: processLimits({ perSource: 100_000, total: 100_000 }) };
 // And for MCP's OAuth endpoints, which anyone may call.
 const mcp = { limits: processLimits({ perSource: 100_000, perConnection: 100_000, total: 100_000 }) };
-const app = await openApp({ auth: signin({ providers: [acme], workloads, mcp }), transport, workloads: {} });
+// The credential proxy, for `coffre run`'s plan: one credential of dev's keys, the rest handed back as they are.
+const proxy = credentialProxy({ credentials: { cloudflare: { upstream: 'https://api.cloudflare.example/client/v4', inject: header('authorization', 'Bearer {CLOUDFLARE_API_TOKEN}') } } });
+const app = await openApp({ auth: signin({ providers: [acme], workloads, mcp }), transport, workloads: {}, plugins: [proxy] });
 const { world } = app;
 
 const [ada, bo, cy, dee, eve] = [user('ada'), user('bo'), user('cy'), user('dee'), user('eve')];
@@ -148,6 +151,7 @@ let browser = '';
 let personal = '';
 let serviceToken = '';
 let handle = '';
+let handleToken = '';
 let bound = '';
 /** The round's MCP client, as it registered, its PKCE verifier, and what it holds. */
 let oauth = { client: '', verifier: '', code: '', access: '', refresh: '', connection: '' };
@@ -395,7 +399,9 @@ const requests: Record<string, Entry> = {
   },
   'DELETE /members/:member/tokens/:id': { request: () => api('bo-cli', 'DELETE', `/members/${ci}/tokens/${serviceToken}`), calls: ['change'], statements: 0 },
   'DELETE /sessions/:id': { request: () => api('bo-cli', 'DELETE', `/sessions/${personal}`), calls: ['change'], statements: 0 },
-  'POST /handles': { request: () => take<{ id: string }>(api('ada-cli', 'POST', '/handles', { label: 'run', paths: ['market/dev'] }), (body) => (handle = body.id)), calls: ['change'], statements: 0 },
+  'POST /handles': { request: () => take<{ id: string; token: string }>(api('ada-cli', 'POST', '/handles', { label: 'run', paths: ['market/dev'] }), (body) => ([handle, handleToken] = [body.id, body.token])), calls: ['change'], statements: 0 },
+  // `coffre run`'s plan, through the handle: a peek of what it may use, then one use of what the app is handed (the credential proxy, plugins/credential-proxy.ts).
+  'GET /use/:project/:environment': { request: () => app.request('/use/market/dev', { headers: { authorization: `Bearer ${handleToken}` } }), calls: ['peek', 'use'], statements: 0, fixed: true },
   'DELETE /handles/:id': { request: () => api('ada-cli', 'DELETE', `/handles/${handle}`), calls: ['change'], statements: 0 },
   // A service account's trust bindings. Making one is weighed as the change first, `caller` and one statement, before its
   // issuer is asked where its keys are. A CI run's exchange is one statement, which bindings to verify under, and one

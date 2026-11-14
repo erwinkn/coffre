@@ -205,6 +205,18 @@ else is needed.
   `cloudflare` binding (`workloadFromBinding`), and it takes no handle,
   token or session. No plugin can name a principal.
 
+**Added in 0.16, for `coffre run`'s plan** (`packages/server/src/plugins.ts`,
+[0.16.md](0.16.md), "The proxy"):
+
+- `held(handle, path)`: what a handle may use at a place, each key with
+  the nature its rows say or why not, opening and logging nothing: the
+  vault's `peek`. The plan picks the keys it hands back by it, and never
+  places a value by it.
+- `expose(caller, { path, keys })`: values handed back to the caller's own
+  app, key by key, the vault's `use` with purpose `expose`: those given,
+  which of them opened plain, and why each other is not given, which the
+  caller does without.
+
 **Capabilities to add later**, each when its first plugin needs it (none is
 built):
 
