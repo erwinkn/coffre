@@ -34,16 +34,18 @@ export function placeAt(project: { id: string }, environment: EnvironmentRow, en
 
 /**
  * What an environment inherits from, nearest first, as a use follows it:
- * three parents at most above an environment, four above a personal config.
- * Null for a chain a use refuses as broken: a parent not there, archived,
- * in another project, or one too many. b4 → b3 → b2 → b1 → prod inherits
- * nothing, and neither does a fork of an archived environment.
+ * three parents at most, four above a personal config read as `dev@me`
+ * (`mine`), not when named by its own slug. Null for a chain a use refuses
+ * as broken: a parent not there, archived, in another project, or one too
+ * many. b4 → b3 → b2 → b1 → prod inherits nothing, and neither does a fork
+ * of an archived environment; Cy's config of b3 inherits prod's keys as
+ * `b3@me`, and nothing as `b3-cy`.
  */
-export function parentsOf(first: EnvironmentRow, environments: ReadonlyMap<string, EnvironmentRow>): EnvironmentRow[] | null {
+export function parentsOf(first: EnvironmentRow, environments: ReadonlyMap<string, EnvironmentRow>, mine: boolean): EnvironmentRow[] | null {
   const parents: EnvironmentRow[] = [];
   for (let id = first.parentId; id !== null; id = parents.at(-1)!.parentId) {
     const parent = environments.get(id);
-    if (parent === undefined || !live(parent) || parent.projectId !== first.projectId || parents.length >= MAX_PARENTS + (first.owner === null ? 0 : 1)) return null;
+    if (parent === undefined || !live(parent) || parent.projectId !== first.projectId || parents.length >= MAX_PARENTS + (mine ? 1 : 0)) return null;
     parents.push(parent);
   }
   return parents;
@@ -73,7 +75,7 @@ export function decideRead(who: Called, read: ChainRead, mine: boolean): Decided
   if (!may(first)) return { refused: 'no_access' };
 
   // The environment, then what it inherits from, nearest first: a key is the nearest one's.
-  const parents = parentsOf(first, environments);
+  const parents = parentsOf(first, environments, first !== base);
   if (parents === null) return { refused: 'broken_chain' };
   const layers = [first, ...parents];
 

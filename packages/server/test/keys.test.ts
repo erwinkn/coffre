@@ -371,6 +371,8 @@ test('the rules of a use, edge by edge: a chain too long or cut, references that
   }
   const refusals = [
     ['cy-cli', 'billing/b4', 409, 'broken_chain'], ['cy-cli', 'market/orphan', 409, 'broken_chain'], ['cy-cli', 'billing/b2@me', 409, 'unreadable'], ['cy-cli', 'billing/c-personal', 409, 'unreadable'],
+    // Cy's config of b3 named by its own slug: no `@me`, so no fourth parent.
+    ['cy-cli', 'billing/b3-cy', 409, 'broken_chain'],
     ['cy-cli', 'billing/c-old', 409, 'unreadable'], ['cy-cli', 'billing/c-shelf', 409, 'unreadable'], ['ed-cli', 'market/dev2', 403, 'parent_unreadable'], ['ed-cli', 'billing/b-ed', 403, 'parent_unreadable'], ['bo-cli', 'market/dev2', 409, 'unreadable'],
   ] as const;
   for (const [label, path, status, reason] of refusals) {
@@ -380,6 +382,9 @@ test('the rules of a use, edge by edge: a chain too long or cut, references that
 
   // The list: a chain too long is cut, a config of the deepest is no Owner's to unprotect, Bo's config is protected as staging is.
   assert.deepEqual(refused(await call('cy-cli', 'GET', '/secrets/billing/b4')), [409, 'conflict', 'broken_chain']);
+  assert.deepEqual(refused(await call('cy-cli', 'GET', '/secrets/billing/b3-cy')), [409, 'conflict', 'broken_chain']);
+  // A reference held in a personal config reads nothing, as a use refuses it.
+  assert.deepEqual((await list('cy-cli', 'billing/b2@me')).keys.filter((key) => key.key === 'REF').map((key) => [key.reference!.state, key.reference!.version, key.readable]), [['broken', null, false]]);
   const cys = await list('cy-cli', 'billing/b3@me');
   assert.deepEqual([cys.personal, cys.parents, cys.unprotectable, cys.keys.map((key) => key.key)], [{ of: 'b3', fallback: false }, ['b3', 'b2', 'b1', 'prod'], false, ['CYS', 'G', 'LINK']]);
   assert.deepEqual([(await list('bo-cli', 'market/staging@me')).protected, (await list('bo-cli', 'market/staging@me')).personal], [true, { of: 'staging', fallback: false }]);
@@ -394,7 +399,7 @@ test('the rules of a use, edge by edge: a chain too long or cut, references that
   const [, billed] = await call('cy-cli', 'GET', '/references?path=billing');
   assert.deepEqual((billed.references as { holder: string; state: string; holderArchived: boolean }[]).map(({ holder, state, holderArchived }) => [holder, state, holderArchived]), [
     ['billing/b-ed/AREF', 'source_archived', false],
-    ['billing/b2-cy/REF', 'live', false],
+    ['billing/b2-cy/REF', 'broken', false],
     ['billing/c-old/REFO', 'source_archived', false],
     ['billing/c-personal/REFP', 'broken', false],
     ['billing/c-shelf/REFS', 'source_archived', false],

@@ -127,21 +127,22 @@ function pathIn(places: { projects: ReadonlyMap<string, ProjectRow>; environment
   return `${places.projects.get(secret.projectId)?.slug ?? '?'}/${places.environments.get(secret.environmentId)?.slug ?? '?'}/${secret.key}`;
 }
 
-/** Whether a reference reads its source, and why not: as a use would read it, but for a holder in a personal config, which its row says nothing of. */
-function stateOf(places: { projects: ReadonlyMap<string, ProjectRow>; environments: ReadonlyMap<string, EnvironmentRow> }, source: SecretRow | undefined): ReferenceState {
+/** Whether a reference reads its source, and why not, as a use would read it. */
+function stateOf(places: { projects: ReadonlyMap<string, ProjectRow>; environments: ReadonlyMap<string, EnvironmentRow> }, holder: SecretRow, source: SecretRow | undefined): ReferenceState {
   const where = source && places.environments.get(source.environmentId);
   const whose = source && places.projects.get(source.projectId);
   if (source === undefined || where === undefined || whose === undefined || where.deleted || whose.deleted) return 'source_deleted';
   if (source.archived || where.archived || whose.archived) return 'source_archived';
   if (source.sourceId !== null) return 'source_is_reference';
-  // A personal config's values are its owner's alone: nothing reads one from elsewhere.
-  if (where.owner !== null) return 'broken';
+  // A personal config's values are its owner's alone: nothing reads one from elsewhere, and a reference held in one reads nothing.
+  const held = places.environments.get(holder.environmentId);
+  if (where.owner !== null || (held !== undefined && held.owner !== null)) return 'broken';
   if (source.currentVersion === null) return 'source_empty';
   return 'live';
 }
 
 function referenceView(places: Parameters<typeof stateOf>[0], holder: SecretRow, source: SecretRow | undefined): ReferenceView {
-  const state = stateOf(places, source);
+  const state = stateOf(places, holder, source);
   return {
     id: holder.id,
     holder: pathIn(places, holder),
@@ -174,7 +175,8 @@ function resolveKeys(
   const resolve = (environment: EnvironmentRow): Map<string, string | null> => {
     const found = new Map(own.get(environment.id));
     const without = new Set(removed.get(environment.id));
-    for (const parent of parentsOf(environment, byId) ?? []) {
+    // A personal config is a missing-key page's only through `dev@me`: its slug names no place there.
+    for (const parent of parentsOf(environment, byId, environment.owner !== null) ?? []) {
       for (const [key, folder] of own.get(parent.id) ?? []) if (!found.has(key) && !without.has(key)) found.set(key, folder);
       for (const key of removed.get(parent.id) ?? []) without.add(key);
     }
@@ -225,7 +227,7 @@ export const keyRoutes = {
       const parents: EnvironmentRow[] = [];
       for (let id = here.parentId; id !== null; ) {
         const parent = environments.get(id);
-        if (parent === undefined || parents.includes(parent) || parent.projectId !== project.id || parents.length >= MAX_PARENTS + (here.owner === null ? 0 : 1)) throw refusal('broken_chain', path);
+        if (parent === undefined || parents.includes(parent) || parent.projectId !== project.id || parents.length >= MAX_PARENTS + (here === base ? 0 : 1)) throw refusal('broken_chain', path);
         parents.push(parent);
         id = parent.parentId;
       }
@@ -266,7 +268,7 @@ export const keyRoutes = {
       const sourceOf = (row: SecretRow) => (row.sourceId === null ? undefined : read.secrets.get(row.sourceId));
       const liveSource = (row: SecretRow) => {
         const source = sourceOf(row);
-        return row.sourceId !== null && stateOf(read, source) === 'live' ? source! : null;
+        return row.sourceId !== null && stateOf(read, row, source) === 'live' ? source! : null;
       };
       const writtenAt = (row: SecretRow): string | null => row.current?.createdAt ?? liveSource(row)?.current?.createdAt ?? null;
       const view = (row: SecretRow): Omit<ListedKey, 'parent' | 'readable'> => {
