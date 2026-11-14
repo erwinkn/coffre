@@ -155,6 +155,16 @@ test('a role granted on an environment takes nothing only a project has; one gra
   await nothingWritten(async () => assert.deepEqual(await edit('ada-cli', { role: 'maintainer', definition: maintainer, was: maintainer }), { refused: 'invalid' }));
 });
 
+test('a grant naming a role, edited around the vault, refuses its deletion and its widening as tampered, though a genuine one stands behind it', async () => {
+  assert.deepEqual(await edit('ada-cli', { role: 'release', definition: release, was: null }), { answer: { role: release } });
+  // A genuine grant on an environment, and in front of it, the first by id, one whose row the vault did not write.
+  await write(world, ...rows('grants', grant(fay, 'release', { environment: prod }), grant(bo, 'release', { environment: prod })));
+  await world.owner.execute(sql`UPDATE grants SET id = '00000000-0000-0000-0000-000000000000' WHERE principal = ${bo} AND role = 'release'`);
+  await nothingWritten(async () => assert.deepEqual(await edit('ada-cli', { role: 'release', definition: null, was: release }), { refused: 'tampered' }));
+  const wider: RoleDefinition = { ...release, permissions: [...release.permissions, 'environment.manage'] };
+  await nothingWritten(async () => assert.deepEqual(await edit('ada-cli', { role: 'release', definition: wider, was: release }), { refused: 'tampered' }));
+});
+
 test('a role that ships, its row deleted around the vault, is put back; an edited one is not written over; one changed since it was seen is refused', async () => {
   await world.owner.execute(sql`DELETE FROM roles WHERE NOT instance AND id = 'viewer'`);
   world.tick(2000);

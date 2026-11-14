@@ -494,9 +494,11 @@ function seenAs(value: unknown): RoleDefinition | null | undefined {
  * whose row was deleted is written again.
  *
  * A grant is read only to refuse: deleting a role one names, or giving a
- * role one names on an environment what only a project has. Hidden from
- * the read, it is left naming a role there is not, or holding there what
- * only a project has, and so reaches nothing (`covers`).
+ * role one names on an environment what only a project has. The read takes
+ * the first such grant, and one the vault did not write refuses as
+ * `tampered`: it may stand in front of a genuine one. A grant deleted around
+ * the vault and put back after is not seen (PR notes: the engine binds a
+ * grant to neither its role's lifetime nor what an environment may hold).
  */
 function roleEdit(input: Presented & RoleEdit, vault: Deciding): Operation<Parts, AccessAnswers['policy.change']> {
   const shown = presented(input);
@@ -533,6 +535,8 @@ function roleEdit(input: Presented & RoleEdit, vault: Deciding): Operation<Parts
       const [row] = seen.edited;
       if (!says(row, was)) return { refused: 'policy_changed' };
       if (row === undefined && next === null) return { refused: 'invalid' };
+      // The first grant naming it, unreadable, may hide a genuine one behind it.
+      if (unsealed.naming > 0) return { refused: 'tampered' };
       if (seen.naming.length > 0) return { refused: next === null ? 'role_granted' : 'invalid' };
       const detail = { role, instance, definition: next, was: row === undefined ? null : definitionIn(row) };
       if (says(row, next)) return { writes: [], entry: said('policy.change', caller, shown, [object], { ...detail, unchanged: true }), answer: { role: next } };
