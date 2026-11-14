@@ -5,6 +5,7 @@ import {
   assignableToEnvironment,
   definitionOf,
   delegable,
+  DEVICE_TTL_SECONDS,
   heldColumns,
   holds as holdsAt,
   isScope,
@@ -20,6 +21,7 @@ import {
   ROLES,
   runsInstance,
   scopeDefinition,
+  USER_CODE,
   type Holdings,
   type Permission,
   type Place,
@@ -29,12 +31,12 @@ import {
   type ScopeGrant,
   type ServiceAccount,
 } from '@coffre/core/access';
-import type { Account, AccountLink, AccountUnlink, Answers, Asked, CredentialEnd, Presented, SigninChanges, TokenCreate } from '@coffre/core/vault';
-import { credentials, environments, grants, identities, policy, principals, projects, roles } from '@coffre/db/schema';
+import type { Account, AccountLink, AccountUnlink, Answers, Asked, CredentialEnd, DeviceDecide, Presented, SigninChanges, TokenCreate } from '@coffre/core/vault';
+import { credentials, deviceLogins, environments, grants, identities, policy, principals, projects, roles } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, refusedTo, type Asking } from '../caller.ts';
-import { amended, part, put, type Operation, type Parts, type Refusal, type Seen, type Unsealed, type Write } from '../change.ts';
+import { amended, part, put, WRITE_MS, type Operation, type Parts, type Refusal, type Seen, type Unsealed, type Write } from '../change.ts';
 import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
@@ -779,5 +781,199 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
   };
 }
 
+/** The longest a CLI's session lasts, whatever the app asks: the most a deployment's `cliSessionDays` says. */
+const CLI_MINUTES = 365 * 24 * 60;
+
+/**
+ * The instance's one row, which the vault's adoption of the database
+ * writes. A change nobody asks reads it, as a sign-in does: on a database
+ * not adopted yet it would begin the log, and the adoption would never run.
+ */
+const instancePart = () => part(policy, sql`${policy.onlyRow}`);
+
+/** `adopting` before the adoption, `tampered` for an instance's row that is not the vault's; else nothing. */
+const adopted = (rows: readonly unknown[], unsealed: number): Refusal | undefined => (rows.length === 0 ? { refused: unsealed > 0 ? 'tampered' : 'adopting' } : undefined);
+
+/**
+ * A CLI asks to be signed in from a browser (`DeviceStart`): one row
+ * written, the device login, with both codes the app drew. Nobody asks it,
+ * and nothing it reads decides access: a row that holds either code, there
+ * or written behind the vault, is refused alike, since the table's unique
+ * keys would refuse the write too; a row deleted for the decision lets the
+ * one write through. How many wait at once is the app's to count, before
+ * it asks (docs/design/0.16.md, "A cap on strangers is the app's").
+ */
+function deviceStart(input: Asked<'device.start'>): Operation<Parts, Answers['device.start']> {
+  const from = traced(input);
+  const { code, userCode, label } = input;
+  if (!text(code) || !HASH.test(code) || !text(userCode) || !USER_CODE.test(userCode) || !(label === null || labelled(label))) {
+    throw new TypeError("a device login starts with its device code's SHA-256, a user code of eight letters, BCDF-GHJK, and the CLI's label or none");
+  }
+  // Drawn here: a decision draws nothing.
+  const id = randomUUID();
+  const read = {
+    // Either code held: one row at most by each unique key.
+    taken: part(deviceLogins, sql`${deviceLogins.deviceCodeHash} = decode(${code}, 'hex') OR ${deviceLogins.userCode} = ${userCode}`),
+    instance: instancePart(),
+  };
+  return {
+    read,
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+      const before = adopted(seen.instance, unsealed.instance);
+      if (before !== undefined) return before;
+      if (seen.taken.length > 0 || unsealed.taken > 0) return { refused: 'taken' };
+      const now = new Date(at);
+      const expiresAt = new Date(at + DEVICE_TTL_SECONDS * 1000);
+      return {
+        writes: [put(deviceLogins, {
+          id, deviceCodeHash: Buffer.from(code, 'hex'), userCode, clientLabel: label, clientIp: from.ip, createdAt: now, expiresAt,
+          decidedAt: null, decision: null, generation: 0, principal: null, consumedAt: null,
+        })],
+        entry: {
+          // Asked by nobody yet: whoever approves it is named by the next.
+          kept: false,
+          action: 'device.start', actor: null, credential: null, request: from.request, ip: from.ip,
+          objects: [`device_login:${id}`],
+          detail: { deviceLogin: id, userCode, label, expiresAt: expiresAt.toISOString() },
+        },
+        answer: { deviceLogin: id, expiresAt: expiresAt.toISOString() },
+      };
+    },
+  };
+}
+
+/**
+ * A person, on a session of theirs, approves or denies a device login by
+ * its user code (`DeviceDecide`): its row written, decided. Only one that
+ * waits for a decision, before its 10 minutes are up: of two people
+ * deciding at once, the second finds it decided. A row written behind the
+ * vault is refused, `tampered`: what the person approves is what its row
+ * says, and its device code is whoever wrote it.
+ */
+function deviceDecide(input: Presented & DeviceDecide, vault: Deciding): Operation<Parts, Answers['device.decide']> {
+  const shown = presented(input);
+  const { userCode, approve } = input;
+  if (!text(userCode) || !USER_CODE.test(userCode) || typeof approve !== 'boolean') throw new TypeError('a device login is approved or denied by its user code, BCDF-GHJK');
+  const action = approve ? 'device.approve' : 'device.deny';
+  const read = {
+    ...callerParts(shown.token, NO_PROJECT),
+    login: part(deviceLogins, sql`${deviceLogins.userCode} = ${userCode}`),
+  };
+  return {
+    read,
+    denied: refusedTo(action, shown, vault.workloads, { objects: (seen: Seen<typeof read>) => seen.login.map((row) => `device_login:${row.id}`) }),
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+      const caller = asking(seen, shown, vault, at);
+      if ('refused' in caller) return caller;
+      // A person, as themselves, on a session: a token approving one would make a session with all its person holds (0.14.7).
+      if (!onSession(caller)) return { refused: 'no_access' };
+      if (unsealed.login > 0) return { refused: 'tampered' };
+      // Decided only with a write's time left before it expires (`WRITE_MS`): a write that starts by `until` may wait on a lock that long.
+      const row = seen.login.find((other) => other.decidedAt === null && heldUntil(other) > at);
+      if (row === undefined) return { refused: 'unknown_code' };
+      const now = new Date(at);
+      return {
+        writes: [amended(deviceLogins, row, approve
+          ? { decidedAt: now, decision: 'approved', principal: caller.principal, generation: caller.credential.generation }
+          : { decidedAt: now, decision: 'denied' })],
+        // Decided while it waits: a write that would start too late to land within its 10 minutes is decided again, and refused.
+        until: heldUntil(row),
+        entry: {
+          ...by(caller, shown),
+          // Part of a session's coming, which ages out (D231).
+          kept: false,
+          action,
+          objects: [`principal:${caller.principal}`, `credential:${caller.credential.id}`, `device_login:${row.id}`],
+          detail: { deviceLogin: row.id, label: row.clientLabel, clientIp: row.clientIp },
+        },
+        answer: { deviceLogin: row.id },
+      };
+    },
+  };
+}
+
+/**
+ * The last instant a change of a device login may start its write and still
+ * land before the login expires: its expiry, less the time a write is given
+ * (`WRITE_MS`, change.ts), which a row lock may take whole.
+ */
+function heldUntil(login: { expiresAt: Date }): number {
+  return login.expiresAt.getTime() - WRITE_MS;
+}
+
+/**
+ * The CLI collects its session (`DeviceRedeem`): the device login written
+ * consumed, and a CLI session of its approver's, in one statement. Nobody
+ * asks it but whoever holds the device code. Of two collecting at once,
+ * the second finds it consumed.
+ *
+ * Its decision rests on two rows, the device login and its approver's:
+ * either written behind the vault refuses it, `tampered`, since a row that
+ * says someone approved it would become their session. One deleted for
+ * the decision is not there, and only refuses.
+ */
+function deviceRedeem(input: Asked<'device.redeem'>): Operation<Parts, Answers['device.redeem']> {
+  const from = traced(input);
+  const { code, session } = input;
+  if (!text(code) || !HASH.test(code) || !text(session?.token) || !HASH.test(session.token) || !Number.isInteger(session.minutes) || session.minutes < 1 || session.minutes > CLI_MINUTES) {
+    throw new TypeError("a device login is collected by its device code's SHA-256, for a session by its token's SHA-256, of 365 days at most");
+  }
+  // Drawn here: a decision draws nothing.
+  const id = randomUUID();
+  const of = sql`d.device_code_hash = decode(${code}, 'hex')`;
+  const read = {
+    login: part(deviceLogins, sql`${deviceLogins.deviceCodeHash} = decode(${code}, 'hex')`),
+    approver: part(principals, sql`${principals.id} IN (SELECT d.principal FROM device_logins d WHERE ${of})`),
+    instance: instancePart(),
+  };
+  return {
+    read,
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+      const before = adopted(seen.instance, unsealed.instance);
+      if (before !== undefined) return before;
+      if (unsealed.login + unsealed.approver > 0) return { refused: 'tampered' };
+      const [row] = seen.login;
+      // Approved or not, one past its 10 minutes is good for nothing: one the CLI never collected stays no key to a session.
+      // As for a decision, a write's time before it expires is already past it.
+      if (row === undefined || row.consumedAt !== null || heldUntil(row) <= at) return { refused: 'expired' };
+      if (row.decision === null) return { refused: 'pending' };
+      // Approved before its approver was last removed: they were let back in with nothing from before.
+      const who = seen.approver.find((other) => other.id === row.principal);
+      if (row.decision !== 'approved' || who === undefined || who.status !== 'active' || who.generation !== row.generation) return { refused: 'denied' };
+      const now = new Date(at);
+      const expiresAt = new Date(at + session.minutes * 60_000);
+      return {
+        writes: [
+          amended(deviceLogins, row, { consumedAt: now }),
+          put(credentials, {
+            id, kind: 'cli', tokenHash: Buffer.from(session.token, 'hex'), tokenHint: null, previousTokenHash: null, generation: who.generation, principal: who.id, identityId: null,
+            scope: null, places: null, label: row.clientLabel, createdAt: now, createdBy: who.id, expiresAt, lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
+            jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
+          }),
+        ],
+        // Collected while its code is good, the write's own time included.
+        until: heldUntil(row),
+        entry: {
+          // A session's coming ages out with the uses (D231).
+          kept: false,
+          action: 'sign_in', actor: who.id, credential: id, request: from.request, ip: from.ip,
+          objects: [`principal:${who.id}`, `credential:${id}`, `device_login:${row.id}`],
+          detail: { kind: 'cli', deviceLogin: row.id, label: row.clientLabel, clientIp: row.clientIp },
+        },
+        answer: { principal: who.id, credential: id, expiresAt: expiresAt.toISOString() },
+      };
+    },
+  };
+}
+
 /** The changes of sign-in and of credentials (docs/design/0.16.md, "Signing in"). */
-export const signinOperations: Operations<SigninChanges> = { signin, 'credential.end': credentialEnd, 'account.link': accountLink, 'account.unlink': accountUnlink, 'token.create': tokenCreate };
+export const signinOperations: Operations<SigninChanges> = {
+  signin,
+  'credential.end': credentialEnd,
+  'account.link': accountLink,
+  'account.unlink': accountUnlink,
+  'token.create': tokenCreate,
+  'device.start': deviceStart,
+  'device.decide': deviceDecide,
+  'device.redeem': deviceRedeem,
+};

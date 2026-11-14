@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets } from '@coffre/db/schema';
+import { bindings, credentials, deviceLogins, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets } from '@coffre/db/schema';
 import { eq, sql, type SQL } from 'drizzle-orm';
 
 import { change, put, part, type Value, type Write } from '../src/change.ts';
@@ -78,7 +78,7 @@ export function dismissed(of: { id: string }, key: string): Fresh<typeof dismiss
   return { environmentId: of.id, key, dismissedAt: at, dismissedBy: root, restoredAt: null, restoredBy: null };
 }
 
-export const TABLES = { projects, environments, secrets, principals, grants, roles, credentials, identities, dismissedKeys, bindings, policy };
+export const TABLES = { projects, environments, secrets, principals, grants, roles, credentials, identities, dismissedKeys, bindings, policy, deviceLogins };
 
 /** Rows of one table, as writes of a change. */
 export const rows = <K extends keyof typeof TABLES>(table: K, ...of: Fresh<(typeof TABLES)[K]>[]): Write[] => of.map((row) => put(TABLES[table], row as never));

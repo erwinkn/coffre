@@ -583,6 +583,13 @@ export const MAX_PERSONAL_TOKEN_MINUTES = 7 * 24 * 60;
 export const DEVICE_TTL_SECONDS = 10 * 60;
 
 /**
+ * A device login's user code, as the app draws it and the vault takes it:
+ * eight letters in two fours, `BCDF-GHJK`, of an alphabet with no vowel, so
+ * that a code never spells a word, and no letter that reads as a digit.
+ */
+export const USER_CODE = /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/;
+
+/**
  * A credential's scope, by path as the API names it, in words, each role
  * with its places: `developer on market/dev, api/dev; viewer on market/prod`.
  */
