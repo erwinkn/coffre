@@ -10,7 +10,7 @@ import { and, eq, is, not, sql, type SQL } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
 
 import { failureOf } from '../src/failure.ts';
-import { Busy, CHANGE_LOCK, change, commit, drop, part, prepare, put, type Operation, type Parts, type Refusal, type Seen, type Write } from '../src/change.ts';
+import { Busy, CHANGE_LOCK, change, commit, drop, part, prepare, put, written, type Operation, type Parts, type Refusal, type Seen, type Write } from '../src/change.ts';
 import { entryOf, type Said } from '../src/entry.ts';
 import { keyOf, nameOf, sealedBy, shapeOf, type Fresh, type Row, type Sealed } from '../src/rows.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
@@ -290,6 +290,92 @@ test('a change leaves what only says when a row was last used, and nothing else:
   assert.equal((await seenOf(identities)).length, 1);
   await vault.owner.update(identities).set({ lastSignInAt: at }).where(sql`id = ${id}`);
   assert.deepEqual(await seenOf(identities), []);
+});
+
+test('a change that spends a proof is made once: a second is refused `replayed` and writes nothing, and one that starts over does not find its own', async () => {
+  await done(writing(put(principals, member(ada, 'owner'))));
+  const proof = randomBytes(32);
+  const read = { who: part(principals, eq(principals.id, ada)) };
+  const promote = (to: string, once: Buffer): Operation<typeof read, string> => ({
+    read,
+    decide: ({ who: [found] }) => ({ writes: [put(principals, member(ada, to), found!)], once, entry: said(`role.${to}`, ada), answer: to }),
+  });
+  const spent = async () => (await rowsOf<{ hash: Buffer }>(vault.owner, sql`SELECT hash FROM spent_id_tokens`)).map((row) => row.hash.toString('hex'));
+  const entries = async () => (await rowsOf<{ n: number }>(vault.owner, sql`SELECT count(*)::int AS n FROM log_pending`))[0]!.n;
+
+  // Decided, then a row it read moves before it writes: nothing is written, the proof not spent.
+  const first = await prepare(vault, promote('admin', proof));
+  await done({ read, decide: ({ who: [found] }) => ({ writes: [put(principals, member(ada, 'auditor'), found!)], entry: said('role.auditor', ada), answer: null }) });
+  const before = await entries();
+  vault.woken.length = 0;
+  assert.equal(await commit(vault, first as never), false);
+  assert.deepEqual([await spent(), await entries(), vault.woken.length], [[], before, 0]);
+  // Started over, it is made, and its proof spent with it, dated by the vault.
+  assert.deepEqual(await change(vault, promote('admin', proof)), { answer: 'admin' });
+  assert.deepEqual([await spent(), await entries(), vault.woken.length, (await seenOf(principals))[0]!.role], [[proof.toString('hex')], before + 1, 1, 'admin']);
+  const [{ at: dated }] = await rowsOf<{ at: Date }>(vault.owner, sql`SELECT spent_at AS at FROM spent_id_tokens`) as [{ at: Date }];
+  assert.equal(new Date(dated).getTime(), vault.now());
+  // The same proof again: refused, with no row moved, no entry and no word to the signer. Another proof is another change.
+  assert.deepEqual(await change(vault, promote('member', proof)), { refused: 'replayed' });
+  assert.deepEqual([await entries(), vault.woken.length, (await seenOf(principals))[0]!.role], [before + 1, 1, 'admin']);
+  assert.deepEqual(await change(vault, promote('member', randomBytes(32))), { answer: 'member' });
+  // Two at once on one proof, each on rows of its own, so that nothing but the proof sets them apart: one is made.
+  await done(writing(put(principals, member(bo))));
+  const twin = randomBytes(32);
+  const others = { who: part(principals, eq(principals.id, bo)) };
+  const [left, right] = await Promise.all([
+    prepare(vault, promote('admin', twin)),
+    prepare(vault, { read: others, decide: ({ who: [found] }: Seen<typeof others>) => ({ writes: [put(principals, member(bo, 'admin'), found!)], once: twin, entry: said('role.admin', bo), answer: 'admin' }) }),
+  ]);
+  assert.deepEqual([await written(vault, left as never), await written(vault, right as never)], ['made', 'spent']);
+  assert.equal((await seenOf(principals)).find((row) => row.id === bo)!.role, 'member');
+  // A row that moved is told before a proof that was spent: the change starts over, and is made, its proof spent once.
+  const later = randomBytes(32);
+  let moved = false;
+  const racing: Operation<typeof read, string> = {
+    ...promote('auditor', later),
+    async check() {
+      if (!moved) {
+        moved = true;
+        await done({ read, decide: ({ who: [found] }) => ({ writes: [put(principals, member(ada, 'owner'), found!)], entry: said('role.owner', ada), answer: null }) });
+      }
+      return undefined;
+    },
+  };
+  assert.deepEqual(await change(vault, racing), { answer: 'auditor' });
+  assert.equal((await spent()).filter((hash) => hash === later.toString('hex')).length, 1);
+  // A proof is its hash's 32 bytes, as a Buffer: anything else is told before a write.
+  await assert.rejects(change(vault, promote('admin', randomBytes(16))), /32 bytes/);
+  await assert.rejects(change(vault, promote('admin', new Uint8Array(32) as Buffer)), /32 bytes/);
+});
+
+test('a check runs between a change\'s read and its decision, on the rows read, and again each time the change starts over', async () => {
+  await done(writing(put(principals, member(ada, 'owner'))));
+  const read = { who: part(principals, eq(principals.id, ada)) };
+  const checks: string[] = [];
+  let moved = false;
+  const operation: Operation<typeof read, string, string> = {
+    read,
+    async check({ who: [found] }, unsealed) {
+      checks.push(`${found!.role} ${unsealed.who}`);
+      // Another change lands after the first check, before the write.
+      if (!moved) {
+        moved = true;
+        await done({ read, decide: ({ who: [row] }) => ({ writes: [put(principals, member(ada, 'admin'), row!)], entry: said('role.admin', ada), answer: null }) });
+      }
+      return `checked as ${found!.role}`;
+    },
+    decide: ({ who: [found] }, _at, _unsealed, checked) => ({ writes: [put(principals, member(ada, 'member'), found!)], entry: said('role.member', ada), answer: checked }),
+  };
+  // The decision is handed what the check of the same rows found: the second one's, once the change started over.
+  assert.deepEqual(await change(vault, operation), { answer: 'checked as admin' });
+  assert.deepEqual(checks, ['owner 0', 'admin 0']);
+  // A check that fails, fails the change, which writes nothing.
+  const logged = async () => (await rowsOf<{ n: number }>(vault.owner, sql`SELECT count(*)::int AS n FROM log_pending`))[0]!.n;
+  const before = await logged();
+  const failing: Operation<typeof read, string, string> = { ...operation, check: () => Promise.reject(new Error('no such key')), decide: ({ who: [found] }) => ({ writes: [put(principals, member(ada, 'auditor'), found!)], entry: said('role.auditor', ada), answer: 'x' }) };
+  await assert.rejects(change(vault, failing), /no such key/);
+  assert.deepEqual([(await seenOf(principals))[0]!.role, await logged()], ['member', before]);
 });
 
 test('a row is dropped only as it was read', async () => {

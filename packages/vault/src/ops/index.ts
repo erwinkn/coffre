@@ -12,7 +12,7 @@ import { signinOperations } from './signin.ts';
  * decision (change.ts). An operation checks its own input, and is given
  * nothing of the vault but what a decision needs of its configuration.
  */
-export type Operations<C extends Change> = { [K in C['op']]: (input: Asked<K>, vault: Deciding) => Operation<Parts, Answers[K]> };
+export type Operations<C extends Change> = { [K in C['op']]: (input: Asked<K>, vault: Deciding) => Operation<Parts, Answers[K], unknown> };
 
 /** Every change the vault makes: each area's are in a file of its own. */
 export const OPERATIONS: Operations<Change> = { ...secretOperations, ...placeOperations, ...accessOperations, ...signinOperations };
