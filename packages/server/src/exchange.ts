@@ -1,10 +1,16 @@
 import {
+  audiencesOf,
   CARRIED,
   decodeWorkloadToken,
   differingClaims,
   generateToken,
   hashToken,
   MAX_BINDINGS,
+  OIDC_PROFILES,
+  PROFILE_URNS,
+  REPEATING_PROFILES,
+  soleAudience,
+  verifyProof,
   WorkloadTokenRefused,
   type BindingClaims,
   type DecodedToken,
@@ -13,14 +19,19 @@ import {
   type WorkloadsConfig,
 } from '@coffre/core/identity';
 import { isServiceMember, shownMember } from '@coffre/core/schemas';
+import type { WorkloadProof } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { unknownKeyAlert } from './alerts.ts';
 import { ApiError, noteTampered, notFound, refusal, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
+import { presented } from './auth.ts';
 import { issuerBindings, type IssuerBinding } from './db/queries/bindings.ts';
+import { environmentPaths } from './db/queries/places.ts';
 import { errorResponse, jsonResponse, readLimitedJson } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
+import { dpopToken, provenSession, SessionRefused, sessionStopped, signedUrl, withNonce } from './sessions.ts';
+import { checkAwsRequest, readStsAnswer, stsFetch, StsUnavailable } from './workloads/aws.ts';
 import { IssuerUnavailable, verifyWithKeys } from './workloads/keys.ts';
 
 /**
@@ -129,7 +140,7 @@ async function exchanged(request: Request, runtime: CoffreRuntime, workloads: Wo
     decoded = decodeWorkloadToken(body.token);
   } catch (error) {
     if (error instanceof WorkloadTokenRefused) {
-      if (isServiceMember(body.service)) logRefusal(error.reason, body.service, sourceIp, {});
+      if (isServiceMember(body.service)) logRefusal(RUN, error.reason, body.service, sourceIp, {});
       return refuse(error.reason, error.message);
     }
     throw error;
@@ -137,7 +148,7 @@ async function exchanged(request: Request, runtime: CoffreRuntime, workloads: Wo
   const service = body.service;
   const issuer = decoded.claims.iss;
   const unbound = () => {
-    logRefusal('no_match', service, sourceIp, {});
+    logRefusal(RUN, 'no_match', service, sourceIp, {});
     return refuse('no_match', `no binding of ${shownMember(service)} trusts tokens from ${issuer}`);
   };
   if (!isServiceMember(service)) return unbound();
@@ -158,7 +169,7 @@ async function exchanged(request: Request, runtime: CoffreRuntime, workloads: Wo
       // Its keys are not fetched again for a minute (`workloads/keys.ts`): no sooner is any use.
       if (error instanceof IssuerUnavailable) return refuse('issuer_unavailable', error.message, 503, '60');
       if (error instanceof WorkloadTokenRefused) {
-        logRefusal(error.reason, service, sourceIp, {});
+        logRefusal(RUN, error.reason, service, sourceIp, {});
         return refuse(error.reason, error.message);
       }
       throw error;
@@ -178,18 +189,219 @@ async function exchanged(request: Request, runtime: CoffreRuntime, workloads: Wo
   });
   if (!('refused' in answer)) return jsonResponse({ token, expiresAt: answer.answer.expiresAt });
   const reason = answer.refused;
-  logRefusal(reason, service, sourceIp, reason === 'unknown_signer' ? { issuer, kid: shownKid(decoded.header) } : {});
+  logRefusal(RUN, reason, service, sourceIp, reason === 'unknown_signer' ? { issuer, kid: shownKid(decoded.header) } : {});
   if (reason === 'unknown_signer') await unknownKeyAlert(workloads, runtime.gates, { service, binding: newest, issuer, kid: shownKid(decoded.header) }, sourceIp, track);
   if (reason === 'no_match') {
     // Which claims differ from the closest binding, by name, never the values it expects: told only of a token whose signature the app verified.
     const differ = claims === null ? null : closest(taking.filter((binding) => binding.jwksUri === newest.jwksUri), claims);
     return refuse('no_match', differ === null || differ.length === 0 ? `no binding of ${shownMember(service)} trusts this token` : `no binding of ${shownMember(service)} trusts these claims: ${differ.join(', ')} differ`);
   }
-  if (Object.hasOwn(WORDS, reason)) return refuse(SAID[reason] ?? reason, WORDS[reason]!);
-  // A fault, `tampered` or `adopting`: answered as the API answers it.
+  return vaultRefused(reason, WORDS, 'POST /api/auth/oidc', requestId);
+}
+
+/** A refusal of the vault's, in `words` where they have it; a fault, `tampered` or `adopting`, as the API answers it. */
+function vaultRefused(reason: string, words: Record<string, string>, route: string, requestId: string): Response {
+  if (Object.hasOwn(words, reason)) return refuse(SAID[reason] ?? reason, words[reason]!);
   const error = refusal(reason);
-  noteTampered(error, 'POST /api/auth/oidc', requestId);
+  noteTampered(error, route, requestId);
   return error instanceof ApiError && error.code === 'vault_refused' ? refuse(reason, error.message) : errorResponse(error);
+}
+
+/** A workload's sign-in's body: the service, by its name or `token:<name>`, and one proof by its kind. */
+const sessionBody = z.object({
+  service: z.string().max(256),
+  proof: z.record(z.string().max(32), z.unknown()).refine((proof) => Object.keys(proof).length === 1, 'a proof names one kind: { "oidc": "<token>" }'),
+}).strict();
+
+/** How far a sign-in's DPoP proof's `iat` may be from now: it carries no nonce, so its clock bounds it. */
+const SIGNIN_SKEW_SECONDS = 60;
+
+/** What each of the vault's refusals tells a workload signing in: a CI run's words, and a freeze, as 0.14.7 told it. */
+const SESSION_WORDS: Record<string, string> = {
+  ...WORDS,
+  frozen: 'frozen: a manager stopped this service, its binding or every workload, and no session is made until they lift it',
+};
+
+/**
+ * POST /api/auth/workload: a workload's proof, a platform's ID token or a
+ * signed `GetCallerIdentity`, for a session bound to the key its DPoP proof
+ * names (docs/design/0.16.md, "A workload signing in"). `{ service, proof:
+ * { oidc: "<token>" } }` or `{ …, proof: { aws: { url, headers, body } } }`
+ * answers `{ token, tokenType: 'DPoP', expiresAt, notAfter, places }`, the
+ * places by path, with the gate's nonce (`DPoP-Nonce`) for its first
+ * request.
+ *
+ * As at `/api/auth/oidc`, the app does what only it can, and decides
+ * nothing:
+ *
+ * 1. admission, then the body, read only to its limit;
+ * 2. the `DPoP` header: signed by the key, for this method and URL, within
+ *    a minute; no nonce and no `ath`, since the platform's proof names the
+ *    key or is spent;
+ * 3. the service's live bindings on the proof's issuer, one statement: a
+ *    proof none can take costs that read, and no call out or to the vault;
+ * 4. an ID token's signature under the newest one's keys, fetched, and its
+ *    audience, the key's where a binding names it (`audiencesOf`); or STS,
+ *    asked whose credentials signed the AWS request (`workloads/aws.ts`);
+ * 5. one `workload.signin`, which reads the bindings again and decides;
+ * 6. the places, named by path, one statement, and the gate's nonce.
+ */
+export async function signInWorkload(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): Promise<Response> {
+  const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
+  if (workloads === null) return errorResponse(notFound('this instance trusts no workloads'));
+  // No gate, no session that could be used: nothing is spent for one.
+  if (runtime.gates === null) return errorResponse(new ApiError('unavailable', 'this deployment runs no workload gate, so it takes no workload session', 'no_gate'));
+  const refused = await admission(workloads, sourceIp);
+  if (refused !== null) return refused;
+  if (inFlight >= MAX_IN_FLIGHT) return refuse('busy', 'too many exchanges under way: try again shortly', 429);
+  inFlight++;
+  try {
+    return await signedIn(request, runtime, workloads, sourceIp, track);
+  } catch (error) {
+    return errorResponse(error);
+  } finally {
+    inFlight--;
+  }
+}
+
+async function signedIn(request: Request, runtime: CoffreRuntime, workloads: WorkloadsConfig, sourceIp: string | null, track: (work: Promise<unknown>) => void): Promise<Response> {
+  const body = sessionBody.parse(await readLimitedJson(request, EXCHANGE_BODY_BYTES));
+  const header = request.headers.get('dpop');
+  if (header === null) return refuse('dpop', 'a DPoP header, a proof signed by the key the session will be bound to, comes with the sign-in');
+  const dpop = await verifyProof(header, { method: request.method, url: signedUrl(request, runtime.publicUrl), skewSeconds: SIGNIN_SKEW_SECONDS });
+  if (!dpop.ok) return refuse('dpop', `the DPoP proof does not hold: ${dpop.message}`);
+  const key = dpop.jkt;
+  const service = body.service.startsWith('token:') ? body.service : `token:${body.service}`;
+  const [kind] = Object.keys(body.proof) as [string];
+  const given = body.proof[kind];
+  const said = (reason: string, message: string, status?: 401 | 503) => {
+    if (isServiceMember(service)) logRefusal(SIGNIN, reason, service, sourceIp, {});
+    return refuse(reason, message, status);
+  };
+  if (kind !== 'oidc' && kind !== 'aws') return said('malformed', 'a proof is oidc or aws, by its kind: { "proof": { "oidc": "<token>" } }');
+  const unbound = (why = `no workload binding of ${shownMember(service)} takes this proof`) => said('no_match', why);
+  if (!isServiceMember(service)) return unbound();
+
+  let proof: WorkloadProof;
+  let signer: { binding: IssuerBinding; issuer: string; decoded: DecodedToken } | null = null;
+  if (kind === 'oidc') {
+    if (typeof given !== 'string' || given.length > 8 * 1024) return said('malformed', "an oidc proof is the platform's ID token");
+    let decoded: DecodedToken;
+    try {
+      decoded = decodeWorkloadToken(given);
+    } catch (error) {
+      if (error instanceof WorkloadTokenRefused) return said(error.reason, error.message);
+      throw error;
+    }
+    const issuer = decoded.claims.iss;
+    // The rows the vault's sign-in reads, in its order: a workload's bindings, of an ID token's profiles; past `MAX_BINDINGS`, none.
+    const live = await issuerBindings(runtime.db, service, issuer, MAX_BINDINGS + 1);
+    const taking = live.length > MAX_BINDINGS ? [] : live.filter((binding) => binding.policy !== null && OIDC_PROFILES.includes(binding.profile as WorkloadProfile));
+    const newest = taking.at(-1);
+    if (newest === undefined) return unbound(`no workload binding of ${shownMember(service)} trusts tokens from ${issuer}`);
+    if (!newest.jwksUri.startsWith(CARRIED)) {
+      // The audience the token names, where a binding under these keys takes it (the key's, `#jkt=`); else the instance's, which then refuses it.
+      const sharing = taking.filter((binding) => binding.jwksUri === newest.jwksUri);
+      const wanted = { kind: 'session', jkt: key } as const;
+      const named = soleAudience(decoded.claims.aud);
+      const audience = named !== null && sharing.some((binding) => audiencesOf(binding, runtime.publicUrl, wanted).includes(named)) ? named : runtime.publicUrl;
+      const taken = sharing.filter((binding) => audiencesOf(binding, runtime.publicUrl, wanted).includes(audience));
+      // A token its platform hands out again is as old as its platform's cache: the vault holds it to its own `exp`.
+      const repeats = taken.some((binding) => REPEATING_PROFILES.includes(binding.profile as WorkloadProfile));
+      try {
+        await verifyWithKeys(runtime.transport, newest.jwksUri, given, { issuer, audience, now: new Date(), ...(repeats ? { maxAge: null } : {}) });
+      } catch (error) {
+        if (error instanceof IssuerUnavailable) return refuse('issuer_unavailable', error.message, 503, '60');
+        if (error instanceof WorkloadTokenRefused) return said(error.reason, error.message);
+        throw error;
+      }
+      // Its signature holds, and no binding takes its audience: as 0.14.7 told it, with no vault call.
+      if (taken.length === 0) return said('audience', `the token is for ${audience}, which no workload binding of ${shownMember(service)} on ${issuer} takes: a platform that lets its caller choose names the session's key, ${runtime.publicUrl}#jkt=<thumbprint>`);
+    }
+    proof = { oidc: { token: given, under: { issuer, jwksUri: newest.jwksUri } } };
+    signer = { binding: newest, issuer, decoded };
+  } else {
+    const checked = checkAwsRequest(given, { publicUrl: runtime.publicUrl, jkt: key, now: Date.now() });
+    if ('refused' in checked) return said(checked.refused, checked.message);
+    // A proof no binding could take asks STS nothing.
+    const live = await issuerBindings(runtime.db, service, PROFILE_URNS.aws, MAX_BINDINGS + 1);
+    if (live.length > MAX_BINDINGS || !live.some((binding) => binding.policy !== null && binding.profile === 'aws')) return unbound(`${shownMember(service)} has no aws binding`);
+    let answer: ReturnType<typeof readStsAnswer>;
+    try {
+      answer = readStsAnswer(await (runtime.transport.sts ?? stsFetch())(checked));
+    } catch (error) {
+      if (!(error instanceof StsUnavailable)) throw error;
+      console.error({ event: 'sts_unavailable', region: checked.region, error: error.message }, 'STS could not check an aws proof');
+      return refuse('issuer_unavailable', 'STS could not be asked about the aws proof: try again', 503);
+    }
+    if ('refused' in answer) return said(answer.refused, answer.message);
+    proof = { aws: answer };
+  }
+
+  const token = generateToken('workload');
+  const requestId = crypto.randomUUID();
+  const answer = await runtime.vault.change<'workload.signin'>({
+    op: 'workload.signin',
+    request: requestId,
+    ip: sourceIp,
+    service,
+    proof,
+    key,
+    publicUrl: runtime.publicUrl,
+    credential: hashToken(token).toString('hex'),
+  });
+  if ('refused' in answer) {
+    const reason = answer.refused;
+    logRefusal(SIGNIN, reason, service, sourceIp, reason === 'unknown_signer' && signer !== null ? { issuer: signer.issuer, kid: shownKid(signer.decoded.header) } : {});
+    if (reason === 'unknown_signer' && signer !== null) await unknownKeyAlert(workloads, runtime.gates, { service, binding: signer.binding, issuer: signer.issuer, kid: shownKid(signer.decoded.header) }, sourceIp, track);
+    if (reason === 'no_match') return unbound();
+    return vaultRefused(reason, SESSION_WORDS, 'POST /api/auth/workload', requestId);
+  }
+  const made = answer.answer;
+  const places = await environmentPaths(runtime.db, made.places);
+  const nonce = await gateNonce(runtime, service);
+  return jsonResponse({ token, tokenType: 'DPoP', expiresAt: made.expiresAt, notAfter: made.notAfter, places }, 200, nonce === null ? {} : { 'dpop-nonce': nonce });
+}
+
+/** The gate's current nonce, for an answer that admits no proof; null when it cannot say, which costs the workload one retry. */
+async function gateNonce(runtime: CoffreRuntime, service: string): Promise<string | null> {
+  try {
+    return await runtime.gates!(service).nonce();
+  } catch (error) {
+    console.error('the workload gate failed', logged(error));
+    return null;
+  }
+}
+
+/**
+ * POST /api/auth/workload/renew: a session's expiry moved on, an hour from
+ * now and never past its hard end, by a proof of its key: `{ expiresAt }`,
+ * with the gate's nonce. The request is held to its session as any of its
+ * requests is (`provenSession`: one statement and its gate), then one
+ * `workload.renew`, which decides. A frozen session renews, so that lifting
+ * the freeze restores it; a narrowed one does not, as it ends with its
+ * parent; one within five seconds of its end is `expired`.
+ */
+export async function renewWorkload(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response> {
+  // Behind Access a workload's session is a machine's credential, which the API refuses.
+  const token = runtime.auth.mode === 'cloudflare' ? null : dpopToken(request);
+  if (token === null) return errorResponse(new ApiError('unauthenticated', "this takes a workload's session, Authorization: DPoP coffre_wl_…, with its key's proof"));
+  let nonce: string | null = null;
+  try {
+    const proven = await provenSession(request, runtime, token);
+    nonce = proven.nonce;
+    const shown = presented(token, sourceIp, proven.proof);
+    const renewed = await runtime.vault.change<'workload.renew'>({ ...shown, op: 'workload.renew' });
+    if (!('refused' in renewed)) return jsonResponse(renewed.answer, 200, { 'dpop-nonce': nonce });
+    if (renewed.refused === 'expired') return withNonce(refuse('expired', 'this session ends within seconds, or has: sign in again'), nonce);
+    const error = refusal(renewed.refused);
+    noteTampered(error, 'POST /api/auth/workload/renew', shown.request);
+    throw error;
+  } catch (error) {
+    if (error instanceof SessionRefused) return error.response;
+    const response = errorResponse(sessionStopped(error, sourceIp));
+    return nonce === null ? response : withNonce(response, nonce);
+  }
 }
 
 /** The claims that differ from the binding that comes closest, by name. */
@@ -213,15 +425,19 @@ const refusalsLogged = new Map<string, number>();
 const REFUSAL_LOG_MS = 60 * 1000;
 const MAX_LOGGED = 1_000;
 
-/** One line per reason and service a minute, in this isolate, as 0.14.7 logged them: enough to see a refusal, not a flood. */
-function logRefusal(reason: string, service: string, sourceIp: string | null, named: { issuer?: string; kid?: string | null }): void {
-  const key = `${reason} ${service}`;
+/** What a refusal's log line says was refused. */
+const RUN = "a CI run's exchange";
+const SIGNIN = "a workload's sign-in";
+
+/** One line per route, reason and service a minute, in this isolate, as 0.14.7 logged them: enough to see a refusal, not a flood. */
+function logRefusal(what: typeof RUN | typeof SIGNIN, reason: string, service: string, sourceIp: string | null, named: { issuer?: string; kid?: string | null }): void {
+  const key = `${what} ${reason} ${service}`;
   const now = Date.now();
   if (now - (refusalsLogged.get(key) ?? -Infinity) < REFUSAL_LOG_MS) return;
   refusalsLogged.delete(key);
   refusalsLogged.set(key, now);
   while (refusalsLogged.size > MAX_LOGGED) refusalsLogged.delete(refusalsLogged.keys().next().value!);
-  console.error({ event: 'workload_exchange_refused', reason, service, sourceIp, ...named }, `a CI run's exchange for ${shownMember(service)} was refused: ${reason}`);
+  console.error({ event: 'workload_exchange_refused', reason, service, sourceIp, ...named }, `${what} for ${shownMember(service)} was refused: ${reason}`);
 }
 
 /** The kid a token names, as an alert shows it: at most 64 characters a kid uses. */

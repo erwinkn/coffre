@@ -9,7 +9,7 @@ import { bearerToken, presented, sessionCookie, sessionCookieName } from './auth
 import { BROWSERS_ONLY, machineCredential, unadmitted, unregisteredMe, type Admission } from './behind-access.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
-import { dpopToken, provenSession, SessionRefused, sessionStopped } from './sessions.ts';
+import { dpopToken, provenSession, SessionRefused, sessionStopped, withNonce } from './sessions.ts';
 import { describeSignin } from './signin.ts';
 
 /**
@@ -133,13 +133,6 @@ export async function fetchApi(request: Request, runtime: CoffreRuntime, options
   // Behind Access, a session the vault no longer finds: the browser signs in again on its next request.
   if (response.status === 401 && access?.session != null) access.ended();
   return response;
-}
-
-/** An answer to a workload, with the nonce its next proof signs: a response of its own, since another's headers may be immutable. */
-function withNonce(response: Response, nonce: string): Response {
-  const headers = new Headers(response.headers);
-  headers.set('dpop-nonce', nonce);
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 /**
