@@ -132,8 +132,10 @@ const count = async (table: 'log_pending') => (await rowsOf<{ n: number }>(world
 
 // First, while the signer has never been told of an entry and runs nothing of its own: every connection counted is a request's.
 test("a page's read: the vault asked once who is asking, on one connection, the app's query on another; nothing more within the vault's memory", { timeout: 120_000 }, async () => {
-  // The app's first request asks whether its database is migrated, once an isolate.
+  // The app's first request asks whether its database is migrated, once an isolate; the vault's first call, whether the
+  // database is adopted, of the signer, which signs what the instance was written with on a connection of its own.
   assert.equal((await ask('/api/me')).status, 401);
+  assert.equal((await ask('/api/me', bearer('nobody'))).status, 401);
   const [me, mine, theirs] = await opened(() => ask('/api/me', bearer('ada-cli')));
   assert.equal(me.status, 200, JSON.stringify(me.body));
   assert.deepEqual([(me.body.principal as { id: string }).id, me.body.environments], ['ada@acme.example', ['apis', 'data', 'prod'].map((environment) => ({ project: 'market', environment, permissions: ['secret.read', 'secret.use'] }))]);

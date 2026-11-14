@@ -10,8 +10,8 @@ import { and, desc, eq, inArray, not, notInArray, sql } from 'drizzle-orm';
 import type { ResolvedVaultConfig } from './config.ts';
 import { CHANGE_LOCK, type Running } from './change.ts';
 import { pending } from './entry.ts';
-import { fromWire, seal, shapeOf, toWire, type Wire } from './rows.ts';
-import { ADOPTION, MIRRORED, type Signer } from './signer.ts';
+import { checked, fromWire, seal, shapeOf, toWire, type Key, type Wire } from './rows.ts';
+import { ADOPTION, HEAD_SIGNED, MIRRORED, type Signer } from './signer.ts';
 import { natureOf } from './value.ts';
 
 /**
@@ -35,25 +35,27 @@ import { natureOf } from './value.ts';
  * Then the signer, taking that first entry, fills its mirror from the rows
  * (`sign` in signer.ts). Until it has, the database is not `adopted`.
  *
- * The signer's object calls it, for the signer: what says the database is
- * new is that signer, which has signed nothing, and not the database, whose
- * writer could empty its log and have rows they planted adopted.
+ * The signer's object calls it, for the signer, at the vault's first call
+ * (`adopt` in signer-host.ts): what says the database is new is that signer,
+ * which has signed nothing, and not the database, whose writer could empty
+ * its log and have rows they planted adopted.
  */
 
 /** Who wrote what the vault writes of itself, as 0.14 named it. */
 const VAULT = 'system:vault';
 
 /** What the adoption needs of the vault's configuration: its keys, and its Owners. */
-type Config = Pick<ResolvedVaultConfig, 'keks' | 'owners' | 'signingKeys'>;
+export type Adopting = Pick<ResolvedVaultConfig, 'keks' | 'owners' | 'signingKeys'>;
 
 /**
  * Adopt the database for `signer`, unless it began a log already: then
- * nothing is done. Whether it adopted it now. Taken under the change lock,
+ * nothing is done, and the answer is false. Otherwise how many rows it found
+ * there, which it did not write: none on a fresh install. Taken under the change lock,
  * so two calls at once adopt once: the second waits, then finds the first's
  * entry. Throws, having written nothing, on anything it cannot vouch for,
  * and on a database that shows no log to a signer that has signed one.
  */
-export async function adopt(signer: Signer, vault: Pick<Running, 'db' | 'keys' | 'now'>, config: Config): Promise<boolean> {
+export async function adopt(signer: Signer, vault: Pick<Running, 'db' | 'keys' | 'now'>, config: Adopting): Promise<number | false> {
   const entry = await vault.db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
     // An entry waiting is a log begun, as much as a head that holds one: one adopted and not yet signed. A head
@@ -75,7 +77,8 @@ export async function adopt(signer: Signer, vault: Pick<Running, 'db' | 'keys' |
     const wrapped = await wrapAgain(tx, config.keks);
 
     const at = new Date(vault.now());
-    await tx.insert(roles).values([...roleRows(false, { ...ROLES, ...edits.roles }), ...roleRows(true, { ...INSTANCE_ROLES, ...edits.instanceRoles })]);
+    const written = [...roleRows(false, { ...ROLES, ...edits.roles }), ...roleRows(true, { ...INSTANCE_ROLES, ...edits.instanceRoles })];
+    await tx.insert(roles).values(written);
     await tx.insert(policy).values({ onlyRow: true, serviceAccounts: JSON.stringify(settings), workloadsFrozenAt: freeze?.action === 'workload.freeze' ? new Date(freeze.at) : null, changedAt: at, changedBy: VAULT });
     // One deleted, or in a project deleted, stays as 0.14 held it: protecting nothing.
     if (edits.protected.length > 0) {
@@ -110,17 +113,23 @@ export async function adopt(signer: Signer, vault: Pick<Running, 'db' | 'keys' |
       [],
     );
     await tx.execute(sql`INSERT INTO log_pending (kept, body, mac) VALUES (true, ${first.body}, decode(${first.mac.toString('hex')}, 'hex'))`);
-    return first;
+    // What it counts and did not write: the roles, the policy row and the Owners are its own.
+    const all = Object.values(counts).reduce((sum, n) => sum + n, 0);
+    return { first, found: all - written.length - 1 - config.owners.length };
   });
   if (entry === null) return false;
-  await signer.wake(entry.hash);
-  return true;
+  await signer.wake(entry.first.hash);
+  return entry.found;
 }
 
-/** Whether the vault may serve: the adoption's entry is signed, and the signer's mirror filled. */
-export async function adopted(db: Database): Promise<boolean> {
-  const [{ signed }] = await rowsOf<{ signed: boolean }>(db, sql`SELECT EXISTS (SELECT FROM log_head WHERE kept_size > 0) AS signed`);
-  return signed;
+/**
+ * Whether the vault may serve: the adoption's entry is signed, and the
+ * signer's mirror filled. Its head says so, under the MAC of one of `keys`:
+ * a head a writer of the database planted is no word of the vault's.
+ */
+export async function adopted(db: Database, keys: readonly Key[]): Promise<boolean> {
+  const [head] = await rowsOf<{ signed: unknown[]; mac: Uint8Array }>(db, sql`SELECT ${HEAD_SIGNED} AS signed, mac FROM log_head WHERE kept_size > 0`);
+  return head !== undefined && checked(keys, (key) => key.entries, `head\n${JSON.stringify(head.signed)}`, head.mac) !== undefined;
 }
 
 /** What the adoption writes on each row of a table as it seals it: those columns, by name, as `row` gives them. */
@@ -159,7 +168,7 @@ async function sealAll(tx: Transaction, key: Running['keys'][number], table: (ty
  * each, its nature as it opened, which its secret's row takes when it is
  * the current one.
  */
-async function wrapAgain(tx: Transaction, keks: Config['keks']) {
+async function wrapAgain(tx: Transaction, keks: Adopting['keks']) {
   const versions = await tx
     .select({ version: secretVersions, projectId: secrets.projectId, environmentId: secrets.environmentId, owner: environments.owner })
     .from(secretVersions)

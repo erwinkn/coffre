@@ -13,8 +13,9 @@ import { sql } from 'drizzle-orm';
 import { adopt, adopted } from '../src/adopt.ts';
 import { keyOf, sealedBy, shapeOf, type Fresh } from '../src/rows.ts';
 import { MIRRORED, Signer, type Finding } from '../src/signer.ts';
+import { ADOPT_AGAIN_MS, SignerHost } from '../src/signer-host.ts';
 import { use, type Value } from '../src/use.ts';
-import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
+import { emptyDatabase, memoryStore, objectStorage, openTestVault } from './database.ts';
 import { amend, ask, credential, environment, grant, principal, project, rows, secret, user, value, write } from './world.ts';
 
 /**
@@ -125,7 +126,8 @@ async function reveal(label: string, place: string, keys: string[], mine = false
 
 test('a database as the upgrade leaves it is adopted: policy from the archive, every key wrapped again, every row sealed, then served', async () => {
   const w = await upgraded();
-  assert.equal(await adopting(), true);
+  // The rows 0.14 left, which it did not write: its signer says it took them as they stood.
+  assert.equal(await adopting(), 20);
 
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT id, name FROM roles WHERE NOT instance AND id = 'viewer'`), [{ id: 'viewer', name: 'Reader' }]);
   assert.equal(await count('roles'), Object.keys(ROLES).length + Object.keys(INSTANCE_ROLES).length);
@@ -144,9 +146,9 @@ test('a database as the upgrade leaves it is adopted: policy from the archive, e
   assert.deepEqual(first!.body.detail.rows, { secret_versions: 5, projects: 2, environments: 5, secrets: 5, dismissed_keys: 0, principals: 2, grants: 1, roles: 12, policy: 1, identities: 0, bindings: 0, credentials: 1, device_logins: 0, enrollment_codes: 0, oauth_clients: 0 });
 
   // Not served before the signer has its mirror.
-  assert.equal(await adopted(vault.db), false);
+  assert.equal(await adopted(vault.db, vault.keys), false);
   assert.deepEqual(await signed(), []);
-  assert.equal(await adopted(vault.db), true);
+  assert.equal(await adopted(vault.db, vault.keys), true);
 
   assert.deepEqual(await reveal('ada', 'market/prod', ['DATABASE_URL', 'FLAG', 'STRIPE_KEY', 'ERASED']), {
     DATABASE_URL: 'postgres://prod',
@@ -176,7 +178,7 @@ test("a secret's row says what its current value opened as, whatever the rows sa
   await vault.owner.execute(sql`UPDATE secret_versions SET envelope_version = 2 WHERE secret_id = ${w.own.id}`);
   // And an older version of another nature than the current one, which is the one the row takes: plain, as its column is its value.
   await vault.owner.execute(sql`UPDATE secret_versions SET plaintext = 'postgres://old' WHERE secret_id = ${w.database.id} AND version = 1`);
-  assert.equal(await adopting(), true);
+  assert.notEqual(await adopting(), false);
   assert.deepEqual(await natures(), { 'prod DATABASE_URL': 'secret', 'prod FLAG': 'plain', 'prod STRIPE_KEY': 'sensitive', 'prod ERASED': 'sensitive', 'prod-ada DATABASE_URL': 'sensitive' });
   assert.equal(await unsealed(), 0);
 });
@@ -189,7 +191,7 @@ test("a secret's row says what its current value opened as, whatever the rows sa
 async function racing(hold: (tx: Transaction) => Promise<unknown>, then: (tx: Transaction) => Promise<unknown>): Promise<boolean> {
   const [running] = await vault.owner.transaction(async (tx) => {
     await hold(tx);
-    const adoption = adopting();
+    const adoption = adopting().then((found) => found !== false);
     let settled = false;
     adoption.then(() => (settled = true), () => (settled = true));
     for (;;) {
@@ -242,7 +244,8 @@ test("a row a writer changes while the adoption runs is sealed with its current 
 });
 
 test('a fresh database is adopted with the roles as they ship and the Owners the configuration names, then served', async () => {
-  assert.equal(await adopting(), true);
+  // Nothing it did not write: its signer has nothing to say of having taken a database as it stood.
+  assert.equal(await adopting(), 0);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT id, role, status FROM principals`), [{ id: root, role: 'owner', status: 'active' }]);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT service_accounts, workloads_frozen_at FROM policy`), [{ service_accounts: '{"projects":"all","environments":"all"}', workloads_frozen_at: null }]);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT id, name FROM roles WHERE NOT instance AND id = 'viewer'`), [{ id: 'viewer', name: ROLES.viewer.name }]);
@@ -302,9 +305,84 @@ test('a value marked plain that is not its plaintext column stops the adoption, 
   await untouched();
 });
 
+test("an adoption cut off by a reset of the signer's object is said by the next host, in the log and the status, has written nothing, and is done once it fits", async (t) => {
+  await upgraded();
+  const logged = t.mock.method(console, 'error', () => {});
+  // A key service too slow for the object's call: its wraps answer only when told.
+  let slow = true;
+  let stuck: ((error: Error) => void) | undefined;
+  let wrapping!: () => void;
+  const reached = new Promise<void>((resolve) => (wrapping = resolve));
+  const keks = new Proxy(vault.keks, {
+    get(keks, key) {
+      const own = Reflect.get(keks, key) as unknown;
+      if (typeof own !== 'function') return own;
+      if (key !== 'wrap' || !slow) return own.bind(keks) as unknown;
+      return () => {
+        wrapping();
+        return new Promise((_, reject) => (stuck ??= reject));
+      };
+    },
+  });
+  const host = (storage: ReturnType<typeof objectStorage>) => new SignerHost({ storage, alone: (run) => run(), keys: vault.keys, db: vault.db, now: vault.now, keepUsesDays: 90, adopting: { ...config, keks } });
+  const started = new Date(vault.now()).toISOString();
+  const storage = objectStorage();
+  const cut = host(storage).adopt();
+  await reached;
+  // The reset: the object's storage stays as it is on disk, and its transaction is rolled back.
+  const kept = objectStorage();
+  for (const [key, value] of storage.kept) kept.kept.set(key, structuredClone(value));
+  stuck!(new Error('reset'));
+  await cut;
+  await untouched();
+
+  slow = false;
+  vault.tick(1000);
+  const next = host(kept);
+  assert.equal(await next.adopt(), false);
+  const said = `the adoption started at ${started} never returned: Cloudflare resets the signer's call past 30 s, and 0.16.0 adopts what fits in one call (docs/design/0.16.md, "The adoption")`;
+  assert.deepEqual((await next.status()).adoption, { at: Date.parse(started), error: said });
+  const lines = () => logged.mock.calls.filter((call) => String(call.arguments[0]).includes('never returned'));
+  assert.deepEqual(lines().map((call) => call.arguments[0]), [`coffre: ${said}`]);
+  // Once: a call before it is tried again says nothing more.
+  assert.equal(await next.adopt(), false);
+  assert.equal(lines().length, 1);
+  await untouched();
+
+  vault.tick(ADOPT_AGAIN_MS);
+  assert.equal(await next.adopt(), true);
+  assert.deepEqual(await rowsOf(vault.owner, sql`SELECT envelope_version AS format, count(*)::int AS n FROM secret_versions GROUP BY 1 ORDER BY 1`), [{ format: 1, n: 1 }, { format: 2, n: 5 }]);
+  assert.equal(kept.kept.has('adopting since'), false);
+});
+
+test("an adoption cut off after its entry was signed is said once, by whichever call opens the signer first, an alarm included", async (t) => {
+  await upgraded();
+  const logged = t.mock.method(console, 'error', () => {});
+  const host = (storage: ReturnType<typeof objectStorage>) => new SignerHost({ storage, alone: (run) => run(), keys: vault.keys, db: vault.db, now: vault.now, keepUsesDays: 90, adopting: config });
+  const storage = objectStorage();
+  assert.equal(await host(storage).adopt(), true);
+  // The reset, after the signature was on disk and before the mark was taken off.
+  const started = vault.now() - 40_000;
+  storage.kv.put('adopting since', started);
+  const lines = () => logged.mock.calls.filter((call) => String(call.arguments[0]).includes('never returned'));
+
+  const next = host(storage);
+  await next.alarm();
+  assert.deepEqual(
+    lines().map((call) => call.arguments[0]),
+    [`coffre: the adoption started at ${new Date(started).toISOString()} never returned: Cloudflare resets the signer's call past 30 s, and 0.16.0 adopts what fits in one call (docs/design/0.16.md, "The adoption")`],
+  );
+  assert.equal(storage.kept.has('adopting since'), false);
+  // Adopted all the same: the vault serves, and the line is not said again.
+  assert.equal(await next.adopt(), true);
+  assert.equal((await next.status()).adoption, null);
+  assert.equal((await host(storage).adopt()), true);
+  assert.equal(lines().length, 1);
+});
+
 test('a database is adopted once: again, it changes nothing, and two vaults at once adopt it once', async () => {
   await upgraded();
-  assert.equal(await adopting(), true);
+  assert.notEqual(await adopting(), false);
   const before = await rowsOf(vault.owner, sql`SELECT body FROM log_pending`);
   assert.equal(await adopting(), false);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT body FROM log_pending`), before);
@@ -314,26 +392,26 @@ test('a database is adopted once: again, it changes nothing, and two vaults at o
   await emptyDatabase(vault.owner);
   store = memoryStore();
   await upgraded();
-  assert.deepEqual((await Promise.all([adopting(), adopting()])).sort(), [false, true]);
+  assert.deepEqual((await Promise.all([adopting(), adopting()])).map((found) => found !== false).sort(), [false, true]);
   assert.equal(await count('log_pending'), 1);
   assert.deepEqual(await signed(), []);
 });
 
 test('a signer that died before signing the adoption finds its entry, and only fills its mirror and signs it', async () => {
   await upgraded();
-  assert.equal(await adopting(), true);
+  assert.notEqual(await adopting(), false);
   const dying = await signer();
   store.down = true;
   await assert.rejects(dying.run(false), /storage is down/);
   store.down = false;
-  assert.equal(await adopted(vault.db), false);
+  assert.equal(await adopted(vault.db, vault.keys), false);
   // Signed by a read without the rows, the mirror would hold none of them.
   const quick = await signer();
   await assert.rejects(quick.sign(await quick.read(false)), /signed by a run that reads the rows it sealed/);
 
   const next = await signer();
   assert.deepEqual(await signed(next), []);
-  assert.equal(await adopted(vault.db), true);
+  assert.equal(await adopted(vault.db, vault.keys), true);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT body::jsonb ->> 'action' AS action FROM log`), [{ action: 'vault.adopt' }]);
   await amend(vault, 'principals', sql`id = ${ada}`, { role: 'auditor' });
   assert.deepEqual(await signed(next), []);
@@ -349,7 +427,7 @@ const emptied = () => vault.owner.execute(sql`TRUNCATE log, log_pending, log_hea
 
 test('a database whose log was emptied behind its signer is not adopted again, and what was planted in it stays unsealed', async () => {
   await upgraded();
-  assert.equal(await adopting(), true);
+  assert.notEqual(await adopting(), false);
   const running = await signer();
   assert.deepEqual(await signed(running), []);
   // The writer plants an Owner and their session, then makes the database look as the upgrade leaves it.
@@ -362,13 +440,13 @@ test('a database whose log was emptied behind its signer is not adopted again, a
   await assert.rejects(adopting(), /someone emptied it/);
   assert.equal(await count('principals', sql`id = ${mallory} AND octet_length(mac) = 0`), 1);
   assert.equal(await count('roles'), 0);
-  assert.equal(await adopted(vault.db), false);
+  assert.equal(await adopted(vault.db, vault.keys), false);
 
   // Emptied between the commit and the signature: the signer was told of the entry.
   await emptyDatabase(vault.owner);
   store = memoryStore();
   await upgraded();
-  assert.equal(await adopting(), true);
+  assert.notEqual(await adopting(), false);
   await emptied();
   await assert.rejects(adopting(), /someone emptied it/);
 
@@ -377,7 +455,7 @@ test('a database whose log was emptied behind its signer is not adopted again, a
   store = memoryStore();
   await upgraded();
   const told = await signer();
-  assert.equal(await adopting(told), true);
+  assert.notEqual(await adopting(told), false);
   await emptied();
   await vault.owner.execute(sql`DELETE FROM roles; DELETE FROM policy`);
   await vault.owner.insert(principals).values(principal(mallory, { role: 'owner' }));
@@ -386,7 +464,7 @@ test('a database whose log was emptied behind its signer is not adopted again, a
   await assert.rejects(adopting(told), /someone emptied it/);
   await assert.rejects(adopting(), /someone emptied it/);
   assert.equal(await count('principals', sql`id = ${mallory} AND octet_length(mac) = 0`), 1);
-  assert.equal(await adopted(vault.db), false);
+  assert.equal(await adopted(vault.db, vault.keys), false);
 });
 
 test('an entry that waited before the adoption is refused, and the adoption follows', async () => {
@@ -398,22 +476,22 @@ test('an entry that waited before the adoption is refused, and the adoption foll
   assert.deepEqual((await signed(running)).map((each) => each.found), ['forged']);
   // Its refusal leaves a head of no entry, which is no adoption.
   assert.equal(await count('log_head'), 1);
-  assert.equal(await adopted(vault.db), false);
-  assert.equal(await adopting(running), true);
+  assert.equal(await adopted(vault.db, vault.keys), false);
+  assert.notEqual(await adopting(running), false);
   assert.deepEqual(await signed(running), []);
-  assert.equal(await adopted(vault.db), true);
+  assert.equal(await adopted(vault.db, vault.keys), true);
 });
 
 test('a full read that fails with the adoption waiting fails the run with its own error, and the next run signs it', async () => {
   await upgraded();
   const running = await signer();
-  assert.equal(await adopting(running), true);
+  assert.notEqual(await adopting(running), false);
   const read = running.read.bind(running);
   running.read = (full) => (full ? Promise.reject(new Error('a table flooded')) : read(full));
   await assert.rejects(running.run(true), /a table flooded/);
   assert.equal(running.dead, false);
-  assert.equal(await adopted(vault.db), false);
+  assert.equal(await adopted(vault.db, vault.keys), false);
   running.read = read;
   assert.deepEqual(await signed(running), []);
-  assert.equal(await adopted(vault.db), true);
+  assert.equal(await adopted(vault.db, vault.keys), true);
 });

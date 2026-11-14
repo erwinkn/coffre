@@ -116,8 +116,10 @@ const ENDS = sql`SELECT 'end', encode(${leafOf('last.body')}, 'hex'), to_jsonb(c
   FROM (VALUES (true), (false)) tree(kept) LEFT JOIN LATERAL (SELECT leaf, body FROM log WHERE log.kept = tree.kept ORDER BY leaf DESC LIMIT 1) last ON true`;
 // The head as the database holds it, every column (`headRow`): no entry writes it, so the mirror has no row for it.
 // A date with no number, `infinity`, reads as null: not the one signed, like any other, and never a read that fails.
-const HEAD = sql`SELECT 'head', NULL, jsonb_build_array(size, kept_size, encode(kept_root, 'hex'), aging_size, encode(aging_root, 'hex'), aging_from,
-  CASE WHEN isfinite(signed_at) THEN round(extract(epoch FROM signed_at) * 1000)::bigint END), NULL, NULL, mac FROM log_head`;
+/** What the head's MAC covers (`headText`), as the database holds it. */
+export const HEAD_SIGNED = sql`jsonb_build_array(size, kept_size, encode(kept_root, 'hex'), aging_size, encode(aging_root, 'hex'), aging_from,
+  CASE WHEN isfinite(signed_at) THEN round(extract(epoch FROM signed_at) * 1000)::bigint END)`;
+const HEAD = sql`SELECT 'head', NULL, ${HEAD_SIGNED}, NULL, NULL, mac FROM log_head`;
 /** What a finding names when the head is not the one last signed, as it names a row. */
 export const HEAD_ROW = JSON.stringify(['log_head']);
 
@@ -278,6 +280,15 @@ export class Signer {
   get blank(): boolean {
     this.#alive();
     return this.#trees.kept.size + this.#trees.aging.size === 0 && this.#moving === null && !this.#told;
+  }
+
+  /**
+   * Whether it has signed an entry. The first is the adoption's, with the
+   * rows it sealed (adopt.ts): the vault serves nothing before it.
+   */
+  get adopted(): boolean {
+    this.#alive();
+    return this.#trees.kept.size + this.#trees.aging.size > 0;
   }
 
   /** The rows and the trees the last check found wrong. */

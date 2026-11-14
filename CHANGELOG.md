@@ -48,6 +48,25 @@
   again, it says the same. A key service of a deployment's own throws
   `KekRefusedError` (`@coffre/vault`) for what asking again does not mend,
   and `KekUnavailableError` for the rest.
+
+- **The vault adopts its database by itself.** At the vault Worker's
+  first call, its signer's Durable Object adopts the database, a fresh
+  one or one upgraded from 0.14.7, and signs the log's first entry; every
+  call is answered 503 `adopting` until then, and a fresh install's first
+  sign-in waits for it. Nothing to configure: `CoffreSigner` takes the
+  vault's keys and Owners from the same `vault(env => …)`. An adoption
+  that fails writes nothing, says why in the Worker's log, and is tried
+  again by a call 10 seconds on. It must fit in one call of the object,
+  which Cloudflare resets past 30 seconds (5 seconds at 10,000 versions on
+  the local key): one cut off says so in the log and in `status` at the
+  next try, and an instance it does not fit waits for 0.16.x. A signer
+  whose storage was empty and adopted a database that was not says so
+  once in the log and in `status` (`took`), though not when it signs an
+  adoption entry it found pending: the upgrade does at its adoption,
+  and at any other time it means the storage was lost, and the database
+  is taken as it stands. Keep the vault down and restore a backup taken
+  before the loss (`docs/restore.md`, "If the signer's storage is lost").
+
 - **A restored version comes back as typed.** Restoring a version a recipe
   made, or one half of a key pair, writes it as a value typed by hand:
   Regenerate no longer makes its next one by that recipe, and the pair's

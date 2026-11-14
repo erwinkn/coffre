@@ -15,11 +15,14 @@
  * It exports its signer too, and binds it (`CoffreSigner`, below): the
  * vault tells it of each entry it writes.
  *
+ * Until its signer has adopted the database, it answers every call
+ * `adopting` (`#call`).
+ *
  * Any number of isolates run it side by side. A use takes no lock, and a
  * change takes one in the database, so they share one log and one bulk
  * limit.
  */
-import type { Asked, Change, McpUnasked, Presented, Unasked, UseInput, Vault, WorkloadsUnasked } from '@coffre/core/vault';
+import type { Asked, Change, McpUnasked, Presented, Refused, Unasked, UseInput, Vault, WorkloadsUnasked } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
@@ -40,9 +43,19 @@ let configure: ((env: never) => WorkersVaultConfig) | null = null;
 
 /**
  * The configuration, checked and made ready once per `env`, which the
- * isolate keeps with the vault's short memory (vault.ts, `PreparedVault`).
+ * isolate keeps with the vault's short memory (vault.ts, `PreparedVault`),
+ * and that the signer said the database is adopted, once it has.
  */
-const ready = new WeakMap<object, { database: PostgresDatabase; prepared: PreparedVault }>();
+const ready = new WeakMap<object, { database: PostgresDatabase; prepared: PreparedVault; adopted: boolean }>();
+
+/**
+ * How long a call waits for the signer to adopt the database. An empty one
+ * is adopted well within it, so a fresh install's first sign-in is
+ * answered; an upgrade's adoption can take seconds, and its callers are
+ * answered `adopting` meanwhile, for the app's 503 and its Retry-After.
+ */
+const ADOPTION_WAIT_MS = 2000;
+const ADOPTING: Refused = { refused: 'adopting' };
 
 /**
  * What the app's `VAULT` service binding calls. Each call gets a database of
@@ -51,10 +64,23 @@ const ready = new WeakMap<object, { database: PostgresDatabase; prepared: Prepar
  * call is done. The signer's stub is the call's own too.
  */
 export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
-  async #call<T>(run: (vault: Vault) => Promise<T>): Promise<T> {
-    const { prepared, database } = this.#ready();
+  /**
+   * Nothing is served before the database is adopted, its first entry
+   * signed (docs/design/0.16.md, "Upgrade from 0.14", step 4): until the
+   * signer has said it is, each call asks it, which adopts it if not, and
+   * is answered `adopting` unless it hears yes in time. Once it has, no
+   * call of the isolate asks again.
+   */
+  async #call<T>(run: (vault: Vault) => Promise<T>): Promise<T | Refused> {
+    const entry = this.#ready();
+    const { prepared, database } = entry;
     const { SIGNER } = this.env as { SIGNER?: SignerNamespace };
     if (SIGNER === undefined) throw new Error('the vault Worker binds its signer: a durable_objects binding SIGNER to CoffreSigner, which it exports (docs/design/0.16.md, "The signer")');
+    if (!entry.adopted) {
+      // A call that hears no in time leaves alone the yes another heard meanwhile.
+      if (!(await this.#adopted(SIGNER))) return ADOPTING;
+      entry.adopted = true;
+    }
     const pool = new HyperdrivePool(database.hyperdrive.connectionString);
     // The reply does not wait for the signer, and the call lives on until it has heard. One that fails costs the entry
     // its announcement, never the caller their answer: the minute's run signs it all the same.
@@ -76,13 +102,31 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     }
   }
 
-  #ready(): { database: PostgresDatabase; prepared: PreparedVault } {
+  /** Whether the signer says the database is adopted, within `ADOPTION_WAIT_MS`. The call lives on until it has answered. */
+  async #adopted(SIGNER: SignerNamespace): Promise<boolean> {
+    // Its failure logged once, whether it comes before the wait is over or after.
+    const asked = signerOf(SIGNER)
+      .adopt()
+      .catch((error: unknown) => {
+        console.error('coffre: the signer did not say whether the database is adopted', error);
+        return false;
+      });
+    this.ctx.waitUntil(asked);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([asked, new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), ADOPTION_WAIT_MS)))]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  #ready(): { database: PostgresDatabase; prepared: PreparedVault; adopted: boolean } {
     const env = this.env as object;
     let entry = ready.get(env);
     if (entry === undefined) {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
-      entry = { database: config.database, prepared: prepareVault(resolveVaultConfig(config)) };
+      entry = { database: config.database, prepared: prepareVault(resolveVaultConfig(config)), adopted: false };
       ready.set(env, entry);
     }
     return entry;
@@ -115,8 +159,8 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
 export const CoffreSigner = signerObject((env: object) => {
   if (configure === null) throw new Error('the vault Worker must export default vault(…)');
   const config = configure(env as never);
-  const { signingKeys, keepUsesDays } = resolveVaultConfig(config);
-  return { database: config.database, signingKeys, keepUsesDays, alert: config.alert };
+  const { signingKeys, keks, owners, keepUsesDays } = resolveVaultConfig(config);
+  return { database: config.database, signingKeys, keks, owners, keepUsesDays, alert: config.alert };
 });
 
 /** The vault Worker's default export, `VaultEntrypoint`, configured from its `env`. */
