@@ -65,11 +65,20 @@ export async function settingsRow(db: Queryable): Promise<{ serviceAccounts: str
 }
 
 /**
- * Where people set up service accounts themselves, as the policy row keeps
- * it (JSON, projects by id); null when the instance has no policy row. One
- * statement, of one row.
+ * What weighs whether someone sets up a service account (`setsUpServices`):
+ * where people set them up themselves, as the policy row keeps it (JSON,
+ * projects by id; null when the instance has no policy row), and every
+ * project role's row, any of which may be one they could give one, as the
+ * vault reads them for `member.put`. One statement, of one row.
  */
-export async function serviceAccountsSetting(db: Queryable): Promise<string | null> {
-  const [row] = await rowsOf<{ service_accounts: string }>(db, sql`SELECT service_accounts FROM policy WHERE only_row`);
-  return row?.service_accounts ?? null;
+export async function serviceSetup(db: Queryable): Promise<{ setting: string | null; roles: RoleRow[] }> {
+  const [row] = await rowsOf<{ service_accounts: string | null; roles: RoleRow[] | null }>(
+    db,
+    sql`
+      SELECT
+        (SELECT service_accounts FROM policy WHERE only_row) AS service_accounts,
+        (SELECT json_agg(json_build_object('instance', r.instance, 'id', r.id, 'name', r.name, 'description', r.description, 'permissions', r.permissions, 'protected', r.protected)
+          ORDER BY r.id) FROM roles r WHERE NOT r.instance) AS roles`,
+  );
+  return { setting: row?.service_accounts ?? null, roles: row?.roles ?? [] };
 }

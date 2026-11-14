@@ -278,3 +278,36 @@ test('GitHub down, or refusing the app, says so, and neither the key nor a token
     assert.ok(!shown.includes('ghs_'), shown);
   }
 });
+
+test("one installation failing fails the listing, after the others' requests are ended, and says its own reason", async () => {
+  /** Two installations: `fails`' page is a 503 at once, `hangs`' never answers until it is ended. Every request still going. */
+  const going = new Set<string>();
+  const ended: string[] = [];
+  let start = () => {};
+  const started = new Promise<void>((resolve) => (start = resolve));
+  const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  const app = new GitHubApp({ appId: idp.githubApp.appId, apiUrl: 'https://api.github.example', pkcs8: pkcs8Of(idp.githubApp.privateKey) }, {
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const token = new Headers(init?.headers).get('authorization');
+      if (path === '/app') return json({ name: 'Coffre', html_url: 'https://github.example/apps/coffre' });
+      if (path === '/app/installations') return json([{ id: 1, account: { login: 'fails' } }, { id: 2, account: { login: 'hangs' } }]);
+      const issued = /^\/app\/installations\/(\d)\/access_tokens$/.exec(path);
+      if (issued !== null) return json({ token: `ghs_${issued[1]}`, expires_at: new Date(Date.now() + 3_600_000).toISOString() });
+      // `fails` answers once `hangs` is going, so that there is one to end.
+      if (token === 'Bearer ghs_1') return started.then(() => new Response('{}', { status: 503 }));
+      going.add(path);
+      start();
+      return new Promise((_, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          going.delete(path);
+          ended.push(path);
+          reject(init.signal!.reason);
+        });
+      });
+    },
+  });
+  // Without a deadline of the caller's: the listing ends its own.
+  await assert.rejects(app.repositories(), (error: Error) => error instanceof GitHubAppUnavailable && /GitHub answered \/installation\/repositories with 503/.test(error.message));
+  assert.deepEqual([[...going], ended], [[], ['/installation/repositories']]);
+});

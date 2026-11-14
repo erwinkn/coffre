@@ -42,13 +42,15 @@ after(async () => {
   await idp.stop();
 });
 
-const [root, ada, bo, dee] = [user('root'), user('ada'), user('bo'), user('dee')];
+const [root, ada, bo, dee, al, ivy] = [user('root'), user('ada'), user('bo'), user('dee'), user('al'), user('ivy')];
 
 /**
  * Root owns the instance. Ada owns market by a grant, so manages its
  * access; Bo is a Developer of market/dev, inside the instance's setting,
  * so gives a service account what he holds there; Dee holds nothing, and
- * `ci` is a service account. `ada-token` is Ada's personal token, scoped
+ * `ci` is a service account. Al and Ivy hold no grant, which the vault
+ * names no role of: Al is an Admin scoped to market, so manages its
+ * access; Ivy a Developer of the instance, so gives developer anywhere. `ada-token` is Ada's personal token, scoped
  * to market. The policy row lets people set service accounts up anywhere.
  */
 async function seed(setting = '{"projects":"all","environments":"all"}'): Promise<void> {
@@ -58,13 +60,15 @@ async function seed(setting = '{"projects":"all","environments":"all"}'): Promis
   const dev = environment(market, 'dev');
   await write(
     world,
-    ...rows('roles', role(true, 'owner', [...PERMISSIONS]), role(true, 'member', []), role(false, 'owner', [...PERMISSIONS]), role(false, 'developer', ['secret.read', 'secret.use', 'secret.write'])),
-    ...rows('principals', principal(root, { role: 'owner' }), principal(ada), principal(bo), principal(dee), principal('token:ci')),
+    ...rows('roles', role(true, 'owner', [...PERMISSIONS]), role(true, 'member', []), role(true, 'admin', ['secret.read', 'secret.write', 'environment.manage', 'project.manage', 'grant.manage']),
+      role(true, 'developer', ['secret.read', 'secret.use', 'secret.write']), role(false, 'owner', [...PERMISSIONS]), role(false, 'developer', ['secret.read', 'secret.use', 'secret.write'])),
+    ...rows('principals', principal(root, { role: 'owner' }), principal(ada), principal(bo), principal(dee), principal('token:ci'),
+      principal(al, { role: 'admin', scope: JSON.stringify({ projects: { only: [market.id] }, environments: 'all' }) }), principal(ivy, { role: 'developer' })),
     ...rows('projects', market),
     ...rows('environments', dev),
     ...rows('grants', grant(ada, 'owner', { project: market }), grant(bo, 'developer', { environment: dev }), grant('token:ci', 'developer', { environment: dev })),
     ...rows('policy', instance({ serviceAccounts: setting })),
-    ...rows('credentials', credential('root-cli', root), credential('ada-cli', ada), credential('bo-cli', bo), credential('dee-cli', dee), credential('ci-cli', 'token:ci'),
+    ...rows('credentials', credential('root-cli', root), credential('ada-cli', ada), credential('bo-cli', bo), credential('dee-cli', dee), credential('ci-cli', 'token:ci'), credential('al-cli', al), credential('ivy-cli', ivy),
       credential('ada-token', ada, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'owner' }]) })),
   );
   // The schema's check, made once: no request below pays it.
@@ -207,7 +211,8 @@ test("past the deadline, all of a call's requests to the App end, and it is 503 
 
 test('only those who set up service accounts may: whoever runs the instance, for one call to the vault; a person who gives one a grant somewhere, for two statements more', async () => {
   documents.set('https://api.github.com/users/acme', { id: 9919, login: 'acme' });
-  for (const [label, statements] of [['root-cli', 0], ['ada-cli', 2], ['bo-cli', 2]] as const) {
+  // Al and Ivy by their instance roles alone, holding no grant.
+  for (const [label, statements] of [['root-cli', 0], ['ada-cli', 2], ['bo-cli', 2], ['al-cli', 2], ['ivy-cli', 2]] as const) {
     for (const path of ['/workloads/lookup?github=acme', '/workloads/repositories']) {
       const got = await get(label, path);
       assert.deepEqual([got.status, got.calls, got.statements], [200, ['caller'], statements], `${label} ${path}`);
@@ -228,8 +233,10 @@ test("the instance's setting decides for whoever does not manage access: outside
   await seed('{"projects":{"only":[]},"environments":"all"}');
   try {
     assert.equal((await get('bo-cli', '/workloads/repositories')).status, 403);
-    // Ada manages market's access, which the setting does not narrow.
+    assert.equal((await get('ivy-cli', '/workloads/repositories')).status, 403);
+    // Ada manages market's access, which the setting does not narrow; Al too, by his instance role.
     assert.equal((await get('ada-cli', '/workloads/repositories')).status, 200);
+    assert.equal((await get('al-cli', '/workloads/repositories')).status, 200);
   } finally {
     await seed();
   }

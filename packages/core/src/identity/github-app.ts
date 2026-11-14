@@ -120,7 +120,9 @@ export class GitHubApp {
    * deadline for the whole of it, beside each request's own.
    */
   async repositories(options: { signal?: AbortSignal } = {}): Promise<GitHubAppRepositories> {
-    const { signal } = options;
+    // One installation's failure fails the listing, and ends its siblings' requests, settled before it answers.
+    const failed = new AbortController();
+    const signal = options.signal === undefined ? failed.signal : AbortSignal.any([options.signal, failed.signal]);
     // Every request the listing makes spends from it, tokens and retries included.
     const budget: Budget = { left: MAX_LISTING_REQUESTS };
     this.#app ??= await this.#appInfo(budget, signal);
@@ -160,7 +162,15 @@ export class GitHubApp {
         break;
       }
       rest = rest.slice(wave.length);
-      listed.push(...(await Promise.all(wave.map(({ installation, own }) => list(installation, own)))));
+      // The first to fail says why, once every other has settled: those it ended fail only for it.
+      const failures: unknown[] = [];
+      const pages = await Promise.all(wave.map(({ installation, own }) => list(installation, own).catch((error: unknown) => {
+        failures.push(error);
+        failed.abort();
+        return [];
+      })));
+      if (failures.length > 0) throw failures[0];
+      listed.push(...pages);
       for (const { own } of wave) budget.left += own.left;
     }
     const byId = new Map(listed.flat().map((each) => [each.repositoryId, each]));

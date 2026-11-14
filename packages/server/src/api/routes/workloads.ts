@@ -1,9 +1,9 @@
-import { isScope, runsInstance, setsUpServices, type Place, type ServiceSetting } from '@coffre/core/access';
+import { isScope, runsInstance, setsUpServices, type Permission, type Place, type RoleDefinition, type ServiceSetting } from '@coffre/core/access';
 import { BindingInvalid, checkFetchUrl, GITLAB_ISSUER, GitHubAppUnavailable, type GitHubAppRepositories } from '@coffre/core/identity';
 import { z } from 'zod';
 
 import { places } from '../../db/queries/places.ts';
-import { serviceAccountsSetting } from '../../db/queries/policy.ts';
+import { serviceSetup } from '../../db/queries/policy.ts';
 import { FetchRefused } from '../../workloads/transport.ts';
 import { placeOf, projectsReached } from '../caller.ts';
 import type { ApiContext } from '../context.ts';
@@ -60,7 +60,8 @@ const GITLAB_PROJECT = /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+){1,20}$/;
  * account, as 0.14.7 weighed it (`setsUpServices`): whoever runs the
  * instance, one `caller`; or a person on a session who could give one a
  * grant somewhere they reach, one `caller` and two statements, the
- * instance's setting and those places. Anyone else would only spend the
+ * instance's setting with every project role, and those places. Anyone
+ * else would only spend the
  * hour's lookups GitHub allows the deployment's address.
  */
 async function setsUp(ctx: ApiContext): Promise<void> {
@@ -68,7 +69,7 @@ async function setsUp(ctx: ApiContext): Promise<void> {
   if (runsInstance(who.holds)) return;
   // A service account, or a credential with a scope, sets none up (`givesService`): refused before any statement.
   if (who.principal.startsWith('user:') && who.holds.credentialScope == null) {
-    const setting = settingOf(await serviceAccountsSetting(ctx.db));
+    const { setting, roles } = await serviceSetup(ctx.db);
     const reached: Place[] = [];
     for (const project of await places(ctx.db, projectsReached(who))) {
       if (project.archived) continue;
@@ -76,7 +77,12 @@ async function setsUp(ctx: ApiContext): Promise<void> {
       // A personal config is its owner's alone: no service account is given anything there.
       for (const environment of project.environments) if (!environment.archived && environment.owner === null) reached.push(placeOf(project, environment));
     }
-    if (setsUpServices(who.holds, setting, reached)) return;
+    // The vault names only the roles the caller holds; any role may be one they could give, as the vault weighs it
+    // (`member.put`): every one the rows define, under the vault's definitions of their own. The rows are read as they
+    // are: they decide only whether to ask outside, and the vault decides every service account set up.
+    const defined = Object.fromEntries(roles.map((row): [string, RoleDefinition] => [row.id, { name: row.name, description: row.description, permissions: row.permissions as Permission[], protected: row.protected as Permission[] }]));
+    const holder = { ...who.holds, policy: { ...who.holds.policy, roles: { ...defined, ...who.holds.policy.roles } } };
+    if (setsUpServices(holder, settingOf(setting), reached)) return;
   }
   throw forbidden('only those who set up service accounts may trust workloads');
 }
