@@ -374,7 +374,7 @@ test("a plain key stays a placeholder where the handle would go nowhere else, a 
   assert.equal(sent.at(-1)!.headers.get('authorization'), basicOf('legacy-user', 'legacy-password'));
 });
 
-test("a use's log entry names the host the value went to and whether through the deployment's egress", { todo: '0.16 logs the credential alone (vault/src/use.ts detail: purpose, credential, keys); 0.14.7 logged host and egress, and docs/design/0.16.md, "The proxy", row `logged`, keeps them' }, async () => {
+test("a use's log entry names the host the value went to and whether through the deployment's egress", async () => {
   assert.equal((await call('/companies')).status, 200);
   const entries = (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`)).map((row) => JSON.parse(row.body) as { detail: Record<string, unknown> });
   const used = entries.find((entry) => entry.detail.credential === 'schumann')!;

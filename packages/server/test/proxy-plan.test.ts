@@ -223,7 +223,7 @@ test('the plan: placeholders for what the proxy covers, and as they are the valu
   const [peeked, exposed, claimed2] = app.inputs.slice(-3) as { keys: string[] | null; purpose: string; upstream: string | null }[];
   assert.deepEqual([peeked!.keys, peeked!.purpose, peeked!.upstream], [null, 'use', null]);
   assert.deepEqual([exposed!.keys, exposed!.purpose, exposed!.upstream], [['APP_NAME', 'TWILIO_SID', 'WEBHOOK_SECRET'], 'expose', null]);
-  assert.deepEqual([claimed2!.keys, claimed2!.purpose, claimed2!.upstream], [['SUPA_KEY'], 'use', 'supa']);
+  assert.deepEqual([claimed2!.keys, claimed2!.purpose, claimed2!.upstream], [['SUPA_KEY'], 'use', { credential: 'supa' }]);
 });
 
 test('a covered secret is never opened: no log entry and no exposure names it, and the values handed back are logged as exposed, as 0.14.7 logged them', async () => {

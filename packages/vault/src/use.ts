@@ -1,4 +1,4 @@
-import type { Nature, Peeked } from '@coffre/core/vault';
+import type { Nature, Peeked, Upstream } from '@coffre/core/vault';
 import { allows, readsSensitive, useOnly, withinCredential, type Place } from '@coffre/core/access';
 import { open } from '@coffre/core/envelope';
 import { KekUnavailableError } from '@coffre/core/kek';
@@ -50,8 +50,8 @@ export type Ask = {
   keys: readonly string[] | null;
   /** `use`: the value is used for the caller, by the credential proxy, and never handed back. Any other, `reveal` or `run`, hands it back. */
   purpose: string;
-  /** The upstream credential the values are used for, by its name in the deployment's configuration: a freeze names it, and a narrowed session's limits. Null for none. */
-  upstream: string | null;
+  /** What the values are used for (`Upstream`): a freeze names its credential, and a narrowed session's limits; its entry says where they went. Null for none. */
+  upstream: Upstream | null;
   /** The thumbprint of the key that signed the request's proof, which the app held to the request: a workload's session is its key's alone. Null with no proof. */
   proof: string | null;
   /** The app's request, for the log, and the address it came from, which a workload's binding may name. */
@@ -281,7 +281,7 @@ export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): 
   if (workload?.stop != null) return { refused: workload.stop };
   // A narrowed session uses values, within the places and credentials it was narrowed to, and is handed none.
   const within = (list: readonly string[] | undefined, name: string | null) => list === undefined || (name !== null && list.includes(name));
-  if (workload?.narrowed === true && (handed || !within(workload.constraints?.places, `${ask.project}/${ask.environment}${ask.mine ? '@me' : ''}`) || !within(workload.constraints?.credentials, ask.upstream))) return { refused: 'narrowed' };
+  if (workload?.narrowed === true && (handed || !within(workload.constraints?.places, `${ask.project}/${ask.environment}${ask.mine ? '@me' : ''}`) || !within(workload.constraints?.credentials, ask.upstream?.credential ?? null))) return { refused: 'narrowed' };
   const permission = handed ? 'secret.read' : 'secret.use';
   const environment = new Map(seen.environment.map((row) => [row.id, row]));
   const place = (row: Row<typeof environments>): Place => ({ projectId: row.projectId, environmentId: row.id, environmentSlug: row.slug });
@@ -306,7 +306,7 @@ export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): 
   const first = (ask.mine ? seen.environment.find((row) => row.parentId === base.id && row.owner === caller.principal && live(row)) : undefined) ?? base;
   if (!may(first)) return NO_ACCESS;
   // An upstream credential frozen in this environment is used by nobody, until an Owner of the project lifts it.
-  if (ask.upstream !== null && base.frozenCredentials.includes(ask.upstream)) return { refused: 'frozen' };
+  if (ask.upstream !== null && base.frozenCredentials.includes(ask.upstream.credential)) return { refused: 'frozen' };
 
   // The environment, then what it inherits from, nearest first: a key is the nearest one's.
   const layers = [first];
@@ -403,8 +403,8 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
     read.push(item);
   }
 
-  // What this credential has not been logged reading in the last minute.
-  const mark = ({ held, version }: Given) => `${caller.credential.id} ${ask.purpose} ${held.id} ${version.version}`;
+  // What this credential has not been logged reading in the last minute, for this upstream credential and host: an entry stands for every use it marks.
+  const mark = ({ held, version }: Given) => JSON.stringify([caller.credential.id, ask.purpose, held.id, version.version, ask.upstream?.credential ?? null, ask.upstream?.host ?? null]);
   const fresh = read.filter((item) => (memory.logged.get(mark(item))?.at ?? -Infinity) + LOGGED_MS <= at);
   const { workload } = caller;
   const answered: Answer = { principal: caller.principal, credential: caller.credential.id, expiresAt: new Date(endOf(caller.credential, found.seen.ancestor)).toISOString(), values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
@@ -428,7 +428,7 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
       ip: ask.ip,
       objects: [...new Set([`project:${project.id}`, `environment:${environment.id}`, `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...fresh.flatMap((item) => [`secret:${item.held.id}`, `secret:${item.asked.id}`])])],
       // After an outage, this credential's proxied uses that no entry says: since when, and how many (`use`).
-      detail: { purpose: ask.purpose, ...(ask.upstream === null ? {} : { credential: ask.upstream }), ...(unlogged === undefined ? {} : { unlogged: { since: new Date(unlogged.at).toISOString(), uses: unlogged.uses } }), keys: fresh.map(({ key, held, asked, version }) => ({ key, secret: held.id, version: version.version, ...(asked === held ? {} : { through: asked.id }) })) },
+      detail: { purpose: ask.purpose, ...ask.upstream, ...(unlogged === undefined ? {} : { unlogged: { since: new Date(unlogged.at).toISOString(), uses: unlogged.uses } }), keys: fresh.map(({ key, held, asked, version }) => ({ key, secret: held.id, version: version.version, ...(asked === held ? {} : { through: asked.id }) })) },
     }, written, []);
     const time = sql`${new Date(written).toISOString()}::timestamptz`;
     const since = sql`${new Date(written - vault.cap.windowMs).toISOString()}::timestamptz`;

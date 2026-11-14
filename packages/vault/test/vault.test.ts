@@ -69,7 +69,8 @@ test('a use that is not what the contract says is a fault, before any read', asy
   const bad: Partial<Record<keyof UseInput, unknown>>[] = [
     { token: 'ada-cli' }, { token: tokenOf('ada-cli').toString('hex').toUpperCase() }, { project: 7 }, { environment: 'x'.repeat(257) }, { mine: 'yes' },
     { keys: ['A', 7] }, { keys: sparse }, { keys: 'A' }, { keys: Array.from({ length: 1001 }, (_, i) => `K${i}`) }, { keys: ['A\0'] },
-    { purpose: 'copy' }, { purpose: 7 }, { ip: 7 }, { request: {} }, { proof: 7 }, { upstream: 'x'.repeat(257) },
+    { purpose: 'copy' }, { purpose: 7 }, { ip: 7 }, { request: {} }, { proof: 7 }, { upstream: 'stripe' }, { upstream: { credential: 'x'.repeat(257) } },
+    { upstream: { credential: 'stripe', host: 'API.stripe.com' } }, { upstream: { credential: 'stripe', host: `${'a'.repeat(250)}.com` } }, { upstream: { credential: 'stripe', egress: false } }, { upstream: { credential: 'stripe', path: '/v1' } },
   ];
   for (const more of bad) {
     await assert.rejects(vault.use(reveal('ada-cli', ['DATABASE_URL'], more as Partial<UseInput>)), TypeError, JSON.stringify(more).slice(0, 60));

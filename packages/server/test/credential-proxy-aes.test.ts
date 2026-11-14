@@ -349,7 +349,7 @@ test("each encrypt and decrypt is one use, the cipher named, and logged by the v
     // Nothing is kept: every request asks the vault again, each time naming the cipher.
     assert.deepEqual(app.calls.slice(before), Array.from({ length: 12 }, () => 'use'));
     const inputs = app.inputs.slice(before) as { keys: string[]; purpose: string; upstream: string }[];
-    for (const input of inputs) assert.deepEqual([input.keys, input.purpose, input.upstream], [['PAYER_SESSION_KEY'], 'use', 'payer-session']);
+    for (const input of inputs) assert.deepEqual([input.keys, input.purpose, input.upstream], [['PAYER_SESSION_KEY'], 'use', { credential: 'payer-session' }]);
     // Twelve uses, one entry: the vault's once a minute.
     const entries = (await pending()).filter((entry) => entry.action === 'secret.read' && entry.detail.purpose === 'use');
     assert.deepEqual(entries.map((entry) => [entry.detail.credential, entry.detail.keys!.map((key) => key.key)]), [['payer-session', ['PAYER_SESSION_KEY']]]);

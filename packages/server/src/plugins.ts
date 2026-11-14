@@ -7,7 +7,7 @@
 // and decides nothing on"), and the vault decides on its own rows.
 import { CoffreError } from '@coffre/client';
 import { hashToken, type BindingPolicy, type Constraints, type GateCount } from '@coffre/core/identity';
-import type { Peeked, Presented, Used as VaultUsed } from '@coffre/core/vault';
+import type { Peeked, Presented, Upstream, Used as VaultUsed } from '@coffre/core/vault';
 import { isUnreachable } from '@coffre/db/dialect';
 
 import { ApiError, refusal, toErrorBody } from './api/errors.ts';
@@ -152,8 +152,8 @@ export class WorkloadRefused extends CoffreError {
   }
 }
 
-/** What a plugin opens values for (`PluginContext.use`): the keys by name, why, and the name of what they are used for, which the log says. */
-export type UseAsked = { path: string; keys: readonly string[]; purpose: 'use' | 'expose'; upstream: string };
+/** What a plugin opens values for (`PluginContext.use`): the keys by name, why, and what they are used for and where they go, which the log says (`Upstream`). */
+export type UseAsked = { path: string; keys: readonly string[]; purpose: 'use' | 'expose'; upstream: Upstream };
 
 /**
  * Values a plugin opened, by key; those that are plain, no secret, which an
@@ -363,7 +363,7 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
     stands: async (caller, asked) => {
       const [place, shown] = askedAs(caller, asked.path);
       // Read now: a check that answers from the vault's memory could miss a revocation made within it (`UseInput.fresh`).
-      const answer = await runtime.vault.peek({ ...shown, ...place, keys: [...asked.keys], purpose: 'use', upstream: asked.upstream, fresh: true });
+      const answer = await runtime.vault.peek({ ...shown, ...place, keys: [...asked.keys], purpose: 'use', upstream: { credential: asked.upstream }, fresh: true });
       return !('refused' in answer) && asked.keys.every((key) => answer.items.some((item) => item.key === key && !('refused' in item)));
     },
   };
@@ -402,7 +402,7 @@ function usedOf(answer: VaultUsed, asked: UseAsked, mine: boolean, word: (error:
     values[item.key] = item.value;
     if (item.nature === 'plain') plain.push(item.key);
   }
-  if (missing.length > 0) throw thrown(new ApiError('conflict', `${asked.path} holds no ${missing.join(', ')}, which ${asked.upstream} needs`));
+  if (missing.length > 0) throw thrown(new ApiError('conflict', `${asked.path} holds no ${missing.join(', ')}, which ${asked.upstream.credential} needs`));
   return {
     values,
     plain,

@@ -247,8 +247,8 @@ test("queries through the tunnel run as the real login: one use opens the URL, o
     assert.deepEqual(calls, ['use', 'peek']);
     assert.equal(statements, 1, "the handle's row, read to route it");
     const [use, peek] = app.inputs.slice(-2) as { purpose: string; upstream: string; keys: string[]; fresh?: boolean }[];
-    assert.deepEqual([use!.purpose, use!.upstream, use!.keys, use!.fresh], ['use', 'db', ['DATABASE_URL'], undefined]);
-    assert.deepEqual([peek!.purpose, peek!.upstream, peek!.keys, peek!.fresh], ['use', 'db', ['DATABASE_URL'], true]);
+    assert.deepEqual([use!.purpose, use!.upstream, use!.keys, use!.fresh], ['use', { credential: 'db' }, ['DATABASE_URL'], undefined]);
+    assert.deepEqual([peek!.purpose, peek!.upstream, peek!.keys, peek!.fresh], ['use', { credential: 'db' }, ['DATABASE_URL'], true]);
     // An extended-protocol query with parameters, as drivers send them: on the session, nothing more asked.
     const [joined, more] = await cost(async () => [...(await client.unsafe('SELECT $1::text || $2::text AS joined', ['a', 'b']))]);
     assert.deepEqual(joined, [{ joined: 'ab' }]);
