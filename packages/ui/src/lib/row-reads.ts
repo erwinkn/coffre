@@ -70,7 +70,7 @@ export function revealToggleDisabled(state: RowReads, shown: Reveal | null): boo
  * whose reason the row says. It always opens: writing a value takes no read
  * of the one it replaces.
  */
-export async function valueToEdit(row: { value: string | null; readable: boolean }, read: () => Promise<string | null>): Promise<string | null> {
-  if (row.value !== null) return row.value;
+export async function valueToEdit<T>(row: { value: string | null; readable: boolean }, read: () => Promise<T | null>, listed: (value: string) => T): Promise<T | null> {
+  if (row.value !== null) return listed(row.value);
   return row.readable ? read() : null;
 }
