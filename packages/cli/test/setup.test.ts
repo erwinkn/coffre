@@ -349,11 +349,11 @@ function membership(name: string) {
   );
 }
 
-/** The log's entries, by action, as `url`'s login sees them. */
+/** The log's entries, as `url`'s login sees them. */
 async function logEntries(url: string): Promise<string[]> {
   const client = postgresClient(url, { max: 1 });
   try {
-    return (await client.unsafe<{ action: string }[]>('SELECT action FROM audit_log ORDER BY seq')).map(({ action }) => action);
+    return (await client.unsafe<{ body: string }[]>('SELECT body FROM log ORDER BY seq')).map(({ body }) => body);
   } finally {
     await client.end();
   }
@@ -375,7 +375,7 @@ for (const as of ['superuser', 'owner'] as const) {
     assert.match(first.stderr, /\n\s+coffre_backup_login is a member of coffre_backup, which reads every row and writes none\n/);
     assert.match(
       first.stderr,
-      /coffre_runtime\s+can read the log; cannot write members, delete log entries or create tables\n\s+coffre_vault_runtime\s+can read the log and write members; cannot delete log entries or create tables\n\s+coffre_backup_login\s+can read the log; cannot write members, delete log entries or create tables\n/,
+      /coffre_runtime\s+can read the log; cannot write members, write the log or create tables\n\s+coffre_vault_runtime\s+can read the log, write members and write the log; cannot create tables\n\s+coffre_backup_login\s+can read the log; cannot write members, write the log or create tables\n/,
     );
     assert.deepEqual(shown.logins, {
       coffre_runtime: { login: 'coffre_runtime', password: 'created' },
@@ -485,15 +485,15 @@ test('a database that holds data gets new passwords but no keys: its keys are th
   const url = await database('setup_used', 'superuser');
   const first = json(setup(['--json'], { stdin: `${url}\n` }));
   const vault = postgresClient(first.vault.DATABASE_URL!, { max: 1 });
-  await vault.unsafe(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
-    VALUES (0, 'vault', 'vault:probe', 0, 'system:vault', 'key.check', 'allow', '{}', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'))`);
+  // An entry the signer numbered: a database in use, as 0.16 leaves it.
+  await vault.unsafe(`INSERT INTO log (seq, kept, leaf, body) VALUES (0, true, 0, '{"action":"key.check"}')`);
   await vault.end();
   const after = json(setup(['--reset-passwords', '--json'], { stdin: `${url}\n` }));
   assert.deepEqual(Object.keys(after.app), ['DATABASE_URL']);
   assert.deepEqual(Object.keys(after.vault), ['DATABASE_URL']);
   assert.ok(await connects(after.vault.DATABASE_URL!));
-  // The backup login reads the vault's entry, through coffre_backup's policy on the log.
-  assert.deepEqual(await logEntries(after.backup.DATABASE_URL!), ['key.check']);
+  // The backup login reads the vault's entry.
+  assert.deepEqual(await logEntries(after.backup.DATABASE_URL!), ['{"action":"key.check"}']);
 });
 
 test('a deployment set up before setup made the backup login: a rerun makes it, or takes one made by hand, and grants it its group, the others kept', needsCluster, async () => {
@@ -527,7 +527,7 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
   });
   const byHand = setup(['--json'], { stdin: `${url}\n` });
   assert.equal(json(byHand).logins.coffre_backup_login!.password, 'kept');
-  assert.match(byHand.stderr, /coffre_backup_login\s+can read the log; cannot write members, delete log entries or create tables\n/);
+  assert.match(byHand.stderr, /coffre_backup_login\s+can read the log; cannot write members, write the log or create tables\n/);
   const login = new URL(url);
   login.username = 'coffre_backup_login';
   login.password = 'by-hand-p4ss';
@@ -546,7 +546,7 @@ test('a deployment set up before setup made the backup login: a rerun makes it, 
 test('a boundary that is not what coffre needs fails, and shows nothing', needsCluster, async () => {
   const url = await database('setup_loose', 'superuser');
   json(setup(['--json'], { stdin: `${url}\n` }));
-  await asSuperuser('setup_loose', (client) => client.unsafe('GRANT INSERT ON vault_members TO coffre_app'));
+  await asSuperuser('setup_loose', (client) => client.unsafe('GRANT INSERT ON principals TO coffre_app'));
   for (const args of [['--reset-passwords', '--json'], ['--json']]) {
     const run = setup(args, { stdin: `${url}\n` });
     assert.equal(run.status, 1);

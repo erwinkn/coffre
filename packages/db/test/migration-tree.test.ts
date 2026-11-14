@@ -10,7 +10,7 @@ import * as schema from '../src/schema.ts';
 // A table added, renamed or dropped changes this list in the same change, on purpose.
 test('the schema has exactly its tables', () => {
   const names = Object.values(schema).filter((value) => is(value, Table)).map((table) => getTableName(table as Table)).sort();
-  assert.deepEqual(names, ['audit_chain_head', 'audit_log', 'capped_alerts', 'consumed_tokens', 'credentials', 'device_authorizations', 'dismissed_keys', 'enrollments', 'environments', 'identities', 'mcp_approvals', 'mcp_connections', 'oauth_clients', 'projects', 'secret_references', 'secret_versions', 'secrets', 'service_bindings', 'vault_grants', 'vault_members', 'vault_releases']);
+  assert.deepEqual(names, ['audit_archive', 'bindings', 'credentials', 'device_logins', 'dismissed_keys', 'enrollment_codes', 'environments', 'exposures', 'grants', 'identities', 'log', 'log_head', 'log_index', 'log_pending', 'log_tiles', 'mcp_approvals', 'oauth_clients', 'policy', 'principals', 'projects', 'roles', 'secret_versions', 'secrets', 'spent_id_tokens']);
 });
 
 // A schema change fails this test until `pnpm db:generate` has appended its migration.

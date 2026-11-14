@@ -1,125 +1,115 @@
--- Adversarial checks through the same login used by the API tests.
+-- Adversarial checks through the app's login, coffre_runtime, a member of
+-- coffre_app.
 --
--- Every block below asserts that something the application must NOT be able to
--- do actually fails. A passing run prints only 'PASS' lines.
+-- In 0.16 the app's login only reads (docs/design/0.16.md, "Four rules"):
+-- the vault writes every row, and 0022_smaller_vault.sql grants coffre_app
+-- SELECT and nothing else. Every block below asserts that something the app
+-- must NOT be able to do fails. A passing run prints only 'PASS' lines.
 
 \set ON_ERROR_STOP on
 \set QUIET on
 
-\echo '--- running through restricted runtime login ---'
+\echo '--- running through the app login ---'
 
--- 1. The application may append to the audit log.
-INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-VALUES (1, 'app', 'app:fixture', 0, 'user:admin@acme.example', 'secret.read', 'allow',
-        decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('bb', 32), 'hex'));
-\echo 'PASS: coffre_app can append to audit_log'
-
--- 2. The application may NOT rewrite an audit row.
-DO $$
-BEGIN
-    UPDATE audit_log SET actor = 'user:someone.else@acme.example' WHERE seq = 0;
-    RAISE EXCEPTION 'FAIL: coffre_app was able to UPDATE audit_log';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_app cannot UPDATE audit_log';
-END
-$$;
-
--- 3. The application may not delete or truncate any application table.
+-- 1. Every table reads, and holds no other privilege: not on the table, not
+-- on a column of it. A table added without its grant fails here too.
 DO $$
 DECLARE
-    unsafe_table text;
+    relation record;
 BEGIN
-    SELECT c.relname INTO unsafe_table
-      FROM pg_class c
-      JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE n.nspname = 'public'
-       AND c.relkind = 'r'
-       AND (
-           has_table_privilege(current_user, c.oid, 'DELETE')
-           OR has_table_privilege(current_user, c.oid, 'TRUNCATE')
-       )
-     LIMIT 1;
-
-    IF unsafe_table IS NOT NULL THEN
-        RAISE EXCEPTION 'FAIL: runtime login can delete or truncate %', unsafe_table;
-    END IF;
-
-    RAISE NOTICE 'PASS: runtime login cannot DELETE or TRUNCATE application tables';
+    FOR relation IN
+        SELECT c.oid::regclass AS name
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    LOOP
+        IF NOT has_table_privilege(relation.name, 'SELECT') THEN
+            RAISE EXCEPTION 'FAIL: coffre_app cannot read %', relation.name;
+        END IF;
+        EXECUTE format('SELECT count(*) FROM %s', relation.name);
+        IF has_table_privilege(relation.name, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+           OR has_any_column_privilege(relation.name, 'INSERT, UPDATE, REFERENCES') THEN
+            RAISE EXCEPTION 'FAIL: coffre_app holds more than SELECT on %', relation.name;
+        END IF;
+    END LOOP;
+    RAISE NOTICE 'PASS: coffre_app reads every table and holds nothing else on any';
 END
 $$;
 
--- 4. Direct attempts fail as well as the privilege introspection above.
-DO $$
-BEGIN
-    DELETE FROM projects WHERE id = '11111111-1111-1111-1111-111111111111';
-    RAISE EXCEPTION 'FAIL: runtime login was able to DELETE';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: runtime login cannot DELETE';
-END
-$$;
-
--- 5. Secret versions are immutable but for being erased: their ciphertext and
--- wrapped key emptied, and a plain one's plaintext cleared, nothing else. Each block writes a version of its own and
--- rolls it back, so the checks below see the fixture as it was.
+-- 2. And every write, tried, is refused: an insert, an update of a column to
+-- itself, a delete and a truncate, on every table.
 DO $$
 DECLARE
-    version_id uuid := gen_random_uuid();
-    secret_id uuid := gen_random_uuid();
+    relation record;
     attempt text;
 BEGIN
-    FOREACH attempt IN ARRAY ARRAY[
-        'UPDATE secret_versions SET ciphertext = ''\x00''::bytea WHERE id = $1',
-        'UPDATE secret_versions SET ciphertext = ''''::bytea, wrapped_dek = ''\x01''::bytea WHERE id = $1',
-        'UPDATE secret_versions SET iv = iv WHERE id = $1',
-        'UPDATE secret_versions SET version = 2 WHERE id = $1',
-        'UPDATE secret_versions SET plaintext = ''other'' WHERE id = $1',
-        'UPDATE secret_versions SET sensitive = true WHERE id = $1',
-        'UPDATE secret_versions SET ciphertext = ''''::bytea, wrapped_dek = ''''::bytea WHERE id = $1'
-    ] LOOP
+    FOR relation IN
+        SELECT c.oid::regclass AS name,
+               (SELECT quote_ident(attname) FROM pg_attribute
+                 WHERE attrelid = c.oid AND attnum > 0 AND NOT attisdropped AND attgenerated = '' AND attidentity = ''
+                 ORDER BY attnum LIMIT 1) AS col
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind = 'r'
+    LOOP
+        FOREACH attempt IN ARRAY ARRAY[
+            format('INSERT INTO %s DEFAULT VALUES', relation.name),
+            format('UPDATE %s SET %s = %s', relation.name, relation.col, relation.col),
+            format('DELETE FROM %s', relation.name),
+            format('TRUNCATE %s', relation.name)
+        ] LOOP
+            BEGIN
+                EXECUTE attempt;
+                RAISE EXCEPTION 'FAIL: coffre_app ran %', attempt;
+            EXCEPTION
+                WHEN insufficient_privilege THEN NULL;
+            END;
+        END LOOP;
+    END LOOP;
+    RAISE NOTICE 'PASS: coffre_app inserts, updates, deletes and truncates nothing';
+END
+$$;
+
+-- 3. Nor through a sequence, or a function that runs as its owner.
+DO $$
+DECLARE
+    sequence record;
+BEGIN
+    FOR sequence IN
+        SELECT c.oid::regclass AS name
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind = 'S'
+    LOOP
+        IF has_sequence_privilege(sequence.name, 'USAGE, UPDATE') THEN
+            RAISE EXCEPTION 'FAIL: coffre_app may advance %', sequence.name;
+        END IF;
         BEGIN
-            INSERT INTO secrets (id, project_id, environment_id, key)
-            VALUES (secret_id, '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'ERASE_PROBE');
-            INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek,
-                                         kek_provider, kek_id, kek_version, created_by, plaintext)
-            VALUES (version_id, secret_id, 1, 1, '\x00', decode(repeat('00', 12), 'hex'), decode(repeat('00', 16), 'hex'),
-                    '\x00', 'local', 'k', '1', 'user:admin@acme.example', 'acct_123');
-            EXECUTE attempt USING version_id;
-            RAISE EXCEPTION 'FAIL: coffre_app could %', attempt;
+            PERFORM nextval(sequence.name);
+            RAISE EXCEPTION 'FAIL: coffre_app advanced %', sequence.name;
         EXCEPTION
             WHEN insufficient_privilege THEN NULL;
         END;
     END LOOP;
-    RAISE NOTICE 'PASS: coffre_app cannot rewrite a secret version';
-
-    BEGIN
-        INSERT INTO secrets (id, project_id, environment_id, key)
-        VALUES (secret_id, '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', 'ERASE_PROBE');
-        INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek,
-                                     kek_provider, kek_id, kek_version, created_by, plaintext)
-        VALUES (version_id, secret_id, 1, 1, '\x00', decode(repeat('00', 12), 'hex'), decode(repeat('00', 16), 'hex'),
-                '\x00', 'local', 'k', '1', 'user:admin@acme.example', 'acct_123');
-        UPDATE secret_versions SET ciphertext = ''::bytea, wrapped_dek = ''::bytea, plaintext = NULL WHERE id = version_id;
-        RAISE EXCEPTION 'erased' USING ERRCODE = 'raise_exception';
-    EXCEPTION
-        WHEN raise_exception THEN
-            RAISE NOTICE 'PASS: coffre_app can erase a secret version';
-    END;
+    IF EXISTS (
+        SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname IN ('public', 'drizzle') AND p.prosecdef AND has_function_privilege(p.oid, 'EXECUTE')
+    ) THEN
+        RAISE EXCEPTION 'FAIL: coffre_app may run a SECURITY DEFINER function';
+    END IF;
+    RAISE NOTICE 'PASS: coffre_app advances no sequence and runs no function as its owner';
 END
 $$;
 
+-- 4. It reads which migrations ran, to answer 503 below them, and writes none.
 DO $$
 BEGIN
-    DELETE FROM secret_versions;
-    RAISE EXCEPTION 'FAIL: coffre_app was able to DELETE from secret_versions';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_app cannot DELETE from secret_versions';
+    PERFORM count(*) FROM drizzle.__drizzle_migrations;
+    IF has_table_privilege('drizzle.__drizzle_migrations', 'INSERT, UPDATE, DELETE, TRUNCATE') THEN
+        RAISE EXCEPTION 'FAIL: coffre_app may write the migrations table';
+    END IF;
+    RAISE NOTICE 'PASS: coffre_app reads the migrations it runs on, and writes none';
 END
 $$;
 
--- 6. The runtime login cannot create database objects.
+-- 5. The runtime login cannot create database objects.
 DO $$
 BEGIN
     CREATE TABLE runtime_must_not_create_objects (id integer);
@@ -140,152 +130,12 @@ EXCEPTION
 END
 $$;
 
--- 7. A secret cannot claim an environment that belongs to another project.
-DO $$
-DECLARE
-    other_project uuid;
-BEGIN
-    INSERT INTO projects (slug, name) VALUES ('other', 'Other') RETURNING id INTO other_project;
-
-    INSERT INTO secrets (project_id, environment_id, key)
-    VALUES (other_project, '22222222-2222-2222-2222-222222222222', 'DATABASE_URL');
-
-    RAISE EXCEPTION 'FAIL: a secret referenced an environment outside its project';
-EXCEPTION
-    WHEN foreign_key_violation THEN
-        RAISE NOTICE 'PASS: environment must belong to the secret''s project';
-END
-$$;
-
--- 8. Duplicate seq values are rejected, so a forked chain cannot be stored.
-DO $$
-BEGIN
-    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-    VALUES (1, 'app', 'app:fixture', 0, 'user:x@acme.example', 'secret.read', 'allow',
-            decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('cc', 32), 'hex'));
-    RAISE EXCEPTION 'FAIL: duplicate audit seq was accepted';
-EXCEPTION
-    WHEN unique_violation THEN
-        RAISE NOTICE 'PASS: duplicate audit seq is rejected';
-END
-$$;
-
--- 9. A malformed hash length is rejected.
-DO $$
-BEGIN
-    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-    VALUES (2, 'app', 'app:fixture', 0, 'user:x@acme.example', 'secret.read', 'allow',
-            decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode('deadbeef', 'hex'));
-    RAISE EXCEPTION 'FAIL: a short chain hash was accepted';
-EXCEPTION
-    WHEN check_violation THEN
-        RAISE NOTICE 'PASS: a malformed chain hash is rejected';
-END
-$$;
-
--- 10. An actor that is not a principal is rejected.
-DO $$
-BEGIN
-    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-    VALUES (3, 'app', 'app:fixture', 0, 'anonymous', 'secret.read', 'allow',
-            decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('dd', 32), 'hex'));
-    RAISE EXCEPTION 'FAIL: an actor with no kind was accepted';
-EXCEPTION
-    WHEN check_violation THEN
-        RAISE NOTICE 'PASS: an actor with no kind is rejected';
-END
-$$;
-
--- 11. An unknown author is rejected: for a login, by row-level security
--- before the table's check, which holds for the owner, who passes it.
-DO $$
-BEGIN
-    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-    VALUES (3, 'nobody', 'app:fixture', 0, 'user:x@acme.example', 'secret.read', 'allow',
-            decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('dd', 32), 'hex'));
-    RAISE EXCEPTION 'FAIL: an unknown author was accepted';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: unknown author is rejected';
-END
-$$;
-
--- 12. The application appends only as itself: the vault's entries are the vault's.
-DO $$
-BEGIN
-    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-    VALUES (4, 'vault', 'vault:fixture', 0, 'user:x@acme.example', 'secret.read', 'allow',
-            decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('ee', 32), 'hex'));
-    RAISE EXCEPTION 'FAIL: coffre_app appended an entry as the vault';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_app cannot append as the vault';
-END
-$$;
-
--- 13. The application reads members and grants, and writes neither.
-SELECT count(*) FROM vault_members;
-SELECT count(*) FROM vault_grants;
-DO $$
-BEGIN
-    INSERT INTO vault_members (principal, status, created_at, created_by, status_changed_at, status_changed_by)
-    VALUES ('user:x@acme.example', 'active', 0, 'user:x@acme.example', 0, 'user:x@acme.example');
-    RAISE EXCEPTION 'FAIL: coffre_app was able to add a member';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_app cannot add a member';
-END
-$$;
-
-DO $$
-BEGIN
-    UPDATE vault_members SET owner = true;
-    RAISE EXCEPTION 'FAIL: coffre_app was able to change a member';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_app cannot change a member';
-END
-$$;
-
-DO $$
-BEGIN
-    UPDATE vault_members SET role = 'owner', scope = NULL;
-    RAISE EXCEPTION 'FAIL: coffre_app was able to change an instance role';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_app cannot change an instance role';
-END
-$$;
-
-DO $$
-BEGIN
-    INSERT INTO vault_grants (principal, project_id, role, granted_at, granted_by)
-    VALUES ('user:x@acme.example', '11111111-1111-1111-1111-111111111111', 'owner', 0, 'user:x@acme.example');
-    RAISE EXCEPTION 'FAIL: coffre_app was able to grant';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_app cannot grant';
-END
-$$;
-
--- 14. Nor delete or empty them, nor become the vault.
+-- 6. Nor become the vault, or the backups.
 DO $$
 DECLARE
     statement text;
 BEGIN
-    FOREACH statement IN ARRAY ARRAY[
-        'DELETE FROM vault_members',
-        'TRUNCATE vault_members',
-        'DELETE FROM vault_grants',
-        'TRUNCATE vault_grants',
-        'UPDATE vault_grants SET role = role',
-        'INSERT INTO vault_releases VALUES (''user:admin@acme.example'', ''forged'', 0)',
-        'UPDATE vault_releases SET released_at = 0',
-        'DELETE FROM vault_releases',
-        'TRUNCATE vault_releases',
-        'SELECT prune_vault_releases(1000)',
-        'SET ROLE coffre_vault'
-    ] LOOP
+    FOREACH statement IN ARRAY ARRAY['SET ROLE coffre_vault', 'SET ROLE coffre_backup'] LOOP
         BEGIN
             EXECUTE statement;
             RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
@@ -293,247 +143,7 @@ BEGIN
             WHEN insufficient_privilege THEN NULL;
         END;
     END LOOP;
-    RAISE NOTICE 'PASS: coffre_app cannot delete, empty or update members, grants and releases, nor act as the vault';
-END
-$$;
-
--- 15. A trust binding is never changed in place: only its label, last use and
--- revocation, with the MAC that covers them. Nor deleted.
-DO $$
-DECLARE
-    statement text;
-BEGIN
-    FOREACH statement IN ARRAY ARRAY[
-        'UPDATE service_bindings SET claims = claims',
-        'UPDATE service_bindings SET issuer = issuer',
-        'UPDATE service_bindings SET jwks_uri = jwks_uri',
-        'UPDATE service_bindings SET jwks = jwks',
-        'UPDATE service_bindings SET profile = profile',
-        'UPDATE service_bindings SET principal = principal',
-        'UPDATE service_bindings SET generation = generation',
-        'UPDATE service_bindings SET policy = policy',
-        'UPDATE service_bindings SET id = id',
-        'DELETE FROM service_bindings',
-        'TRUNCATE service_bindings'
-    ] LOOP
-        BEGIN
-            EXECUTE statement;
-            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
-        EXCEPTION
-            WHEN insufficient_privilege THEN NULL;
-        END;
-    END LOOP;
-    UPDATE service_bindings SET label = label, scope = scope, last_used_at = last_used_at, revoked_at = revoked_at, revoked_by = revoked_by, auth_mac = auth_mac;
-    RAISE NOTICE 'PASS: coffre_app changes a binding only where its MAC allows, and never deletes one';
-END
-$$;
-
--- 16. A token once exchanged stays spent: its record is never changed or deleted.
-DO $$
-DECLARE
-    statement text;
-BEGIN
-    FOREACH statement IN ARRAY ARRAY[
-        'UPDATE consumed_tokens SET hash = hash',
-        'UPDATE consumed_tokens SET consumed_at = consumed_at',
-        'DELETE FROM consumed_tokens',
-        'TRUNCATE consumed_tokens'
-    ] LOOP
-        BEGIN
-            EXECUTE statement;
-            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
-        EXCEPTION
-            WHEN insufficient_privilege THEN NULL;
-        END;
-    END LOOP;
-    RAISE NOTICE 'PASS: coffre_app records a spent token and never unspends one';
-END
-$$;
-
--- 16c. A capped alert's row only moves its time on: the app renames or deletes none.
-DO $$
-DECLARE
-    statement text;
-BEGIN
-    FOREACH statement IN ARRAY ARRAY[
-        'UPDATE capped_alerts SET service = service',
-        'UPDATE capped_alerts SET kind = kind',
-        'DELETE FROM capped_alerts',
-        'TRUNCATE capped_alerts'
-    ] LOOP
-        BEGIN
-            EXECUTE statement;
-            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
-        EXCEPTION
-            WHEN insufficient_privilege THEN NULL;
-        END;
-    END LOOP;
-    UPDATE capped_alerts SET raised_at = raised_at;
-    RAISE NOTICE 'PASS: coffre_app moves a capped alert on and never deletes one';
-END
-$$;
-
--- 16b. Its record goes only through prune_consumed_tokens, two hours after
--- the token was spent, when no exchange could take it again; checked in a
--- block of its own, rolled back.
-DO $$
-BEGIN
-    BEGIN
-        INSERT INTO consumed_tokens (hash, consumed_at) VALUES
-            (decode(repeat('a1', 32), 'hex'), now() - interval '2 hours 1 minute'),
-            (decode(repeat('a2', 32), 'hex'), now() - interval '1 hour 59 minutes');
-        PERFORM prune_consumed_tokens(1000);
-        IF EXISTS (SELECT 1 FROM consumed_tokens WHERE hash = decode(repeat('a1', 32), 'hex')) THEN
-            RAISE EXCEPTION 'FAIL: prune_consumed_tokens kept a token spent over two hours ago';
-        END IF;
-        IF NOT EXISTS (SELECT 1 FROM consumed_tokens WHERE hash = decode(repeat('a2', 32), 'hex')) THEN
-            RAISE EXCEPTION 'FAIL: prune_consumed_tokens forgot a token spent within two hours';
-        END IF;
-        RAISE EXCEPTION 'checked' USING ERRCODE = 'C0FFE';
-    EXCEPTION
-        WHEN SQLSTATE 'C0FFE' THEN NULL;
-    END;
-    RAISE NOTICE 'PASS: coffre_app forgets a spent token only two hours after, through prune_consumed_tokens';
-END
-$$;
-
--- 17. A folder is a label on a project or a secret, which coffre_app moves.
-DO $$
-BEGIN
-    UPDATE projects SET folder = folder;
-    UPDATE secrets SET folder = folder;
-    RAISE NOTICE 'PASS: coffre_app moves projects and secrets between folders';
-END
-$$;
-
--- 18. A reference is only ever added: its end is the vault's to log.
-DO $$
-DECLARE
-    statement text;
-BEGIN
-    FOREACH statement IN ARRAY ARRAY[
-        'UPDATE secret_references SET source_secret_id = source_secret_id',
-        'UPDATE secret_references SET created_seq = created_seq',
-        'DELETE FROM secret_references',
-        'TRUNCATE secret_references'
-    ] LOOP
-        BEGIN
-            EXECUTE statement;
-            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
-        EXCEPTION
-            WHEN insufficient_privilege THEN NULL;
-        END;
-    END LOOP;
-    RAISE NOTICE 'PASS: coffre_app adds references and never changes or removes one';
-END
-$$;
-
--- 19. A dismissal changes only who dismissed or restored it, and when: its key and environment stay, and none is deleted.
-DO $$
-DECLARE
-    statement text;
-BEGIN
-    FOREACH statement IN ARRAY ARRAY[
-        'UPDATE dismissed_keys SET key = key',
-        'UPDATE dismissed_keys SET environment_id = environment_id',
-        'DELETE FROM dismissed_keys',
-        'TRUNCATE dismissed_keys'
-    ] LOOP
-        BEGIN
-            EXECUTE statement;
-            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
-        EXCEPTION
-            WHEN insufficient_privilege THEN NULL;
-        END;
-    END LOOP;
-    UPDATE dismissed_keys SET dismissed_at = dismissed_at, dismissed_by = dismissed_by, restored_at = restored_at, restored_by = restored_by;
-    RAISE NOTICE 'PASS: coffre_app dismisses and restores keys, and deletes none';
-END
-$$;
-
--- 20. A registered client's redirects, and what a connection was approved
--- for, never change; a connection only moves through its code, refresh
--- token, use and revocation, and neither is ever deleted. An approval's
--- change is what its person is shown: only what became of it is written.
-DO $$
-DECLARE
-    statement text;
-BEGIN
-    FOREACH statement IN ARRAY ARRAY[
-        'UPDATE oauth_clients SET redirect_uris = redirect_uris',
-        'UPDATE oauth_clients SET id = id',
-        'UPDATE oauth_clients SET name = name',
-        'DELETE FROM oauth_clients',
-        'TRUNCATE oauth_clients',
-        'UPDATE mcp_connections SET principal = principal',
-        'UPDATE mcp_connections SET generation = generation',
-        'UPDATE mcp_connections SET client_id = client_id',
-        'UPDATE mcp_connections SET scopes = scopes',
-        'UPDATE mcp_connections SET redirect_uri = redirect_uri',
-        'UPDATE mcp_connections SET expires_at = expires_at',
-        -- A redeemed code keeps its hash: presented again, it ends its connection.
-        'UPDATE mcp_connections SET code_hash = code_hash',
-        'UPDATE mcp_connections SET id = id',
-        'DELETE FROM mcp_connections',
-        'TRUNCATE mcp_connections',
-        'UPDATE mcp_approvals SET connection_id = connection_id',
-        'UPDATE mcp_approvals SET tool = tool',
-        'UPDATE mcp_approvals SET arguments = arguments',
-        'UPDATE mcp_approvals SET digest = digest',
-        'UPDATE mcp_approvals SET expires_at = expires_at',
-        'UPDATE mcp_approvals SET id = id',
-        'DELETE FROM mcp_approvals',
-        'TRUNCATE mcp_approvals'
-    ] LOOP
-        BEGIN
-            EXECUTE statement;
-            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
-        EXCEPTION
-            WHEN insufficient_privilege THEN NULL;
-        END;
-    END LOOP;
-    UPDATE oauth_clients SET revoked_at = revoked_at, auth_mac = auth_mac;
-    UPDATE mcp_connections SET code_challenge = code_challenge, code_expires_at = code_expires_at,
-        refresh_hash = refresh_hash, refresh_previous_hash = refresh_previous_hash, last_used_at = last_used_at,
-        last_used_ip = last_used_ip, revoked_at = revoked_at, revoked_by = revoked_by, auth_mac = auth_mac;
-    UPDATE mcp_approvals SET status = status, outcome = outcome, decided_at = decided_at, reported_at = reported_at;
-    RAISE NOTICE 'PASS: coffre_app changes clients and connections only where their MACs allow, approvals only in what became of them, and never deletes one';
-END
-$$;
-
--- 21. A workload's session keeps what binds it: its key, hard end,
--- ancestors, limits and code. Renewal moves its expiry, an approval names
--- who; an enrollment code is only ever added, and signed again by the app
--- key's rotation, which changes nothing it says.
-DO $$
-DECLARE
-    statement text;
-BEGIN
-    FOREACH statement IN ARRAY ARRAY[
-        'UPDATE credentials SET jkt = jkt',
-        'UPDATE credentials SET not_after = not_after',
-        'UPDATE credentials SET ancestors = ancestors',
-        'UPDATE credentials SET constraints = constraints',
-        'UPDATE credentials SET enrollment_id = enrollment_id',
-        'UPDATE credentials SET kind = kind',
-        'UPDATE credentials SET created_by = created_by',
-        'UPDATE enrollments SET scope = scope',
-        'UPDATE enrollments SET expires_at = expires_at',
-        'UPDATE enrollments SET code_hash = code_hash',
-        'DELETE FROM enrollments',
-        'TRUNCATE enrollments'
-    ] LOOP
-        BEGIN
-            EXECUTE statement;
-            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
-        EXCEPTION
-            WHEN insufficient_privilege THEN NULL;
-        END;
-    END LOOP;
-    UPDATE credentials SET expires_at = expires_at, approved_at = approved_at, approved_by = approved_by, auth_mac = auth_mac;
-    UPDATE enrollments SET auth_mac = auth_mac;
-    PERFORM count(*) FROM enrollments;
-    RAISE NOTICE 'PASS: coffre_app renews and approves a session, and never rebinds one or changes a code';
+    RAISE NOTICE 'PASS: coffre_app acts as no one else';
 END
 $$;
 

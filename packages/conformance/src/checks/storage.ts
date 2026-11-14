@@ -4,8 +4,8 @@ import type { Sql } from '../database.ts';
 import { expect } from '../report.ts';
 
 export const TABLES = [
-  'projects', 'environments', 'secrets', 'secret_versions', 'vault_members', 'vault_grants',
-  'audit_log', 'audit_chain_head', 'identities', 'credentials', 'device_authorizations',
+  'projects', 'environments', 'secrets', 'secret_versions', 'principals', 'grants',
+  'log_pending', 'log', 'log_head', 'identities', 'credentials', 'device_logins',
 ] as const;
 
 /** Inspect every table, including any a deployment added. Missing shared tables fail. */

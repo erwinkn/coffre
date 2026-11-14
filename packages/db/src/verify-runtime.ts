@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { getTableName, is, Table } from 'drizzle-orm';
 import { postgresClient } from './postgres.ts';
+import * as schema from './schema.ts';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -58,52 +60,49 @@ try {
   );
   assert.equal(ownership[0]?.object_count, 0, 'runtime role owns database objects');
 
+  // In 0.16 the app's login only reads: coffre's tables, and which migrations ran (docs/design/0.16.md, "Four rules").
+  // It must read each of coffre's tables and write none in the schema: another role's table there may stay
+  // unreadable to it (0022 leaves those alone), but never writable, whatever its kind: a write granted on a
+  // partitioned table's parent writes its partitions, and one on a view or a foreign table writes through it.
+  const tables = Object.values(schema).filter((value) => is(value, Table)).map((table) => getTableName(table as Table));
   const privileges = await client.unsafe<{
-    audit_delete: boolean;
-    audit_truncate: boolean;
-    audit_update: boolean;
     database_create: boolean;
     database_temporary: boolean;
-    head_next_seq_update: boolean;
-    head_hash_update: boolean;
     migrations_select: boolean;
     schema_create: boolean;
+    unreadable: string[];
+    writable: string[];
   }[]>(
     `SELECT has_database_privilege(current_user, current_database(), 'CREATE') AS database_create,
             has_database_privilege(current_user, current_database(), 'TEMPORARY') AS database_temporary,
             has_schema_privilege(current_user, 'public', 'CREATE') AS schema_create,
-            has_table_privilege(current_user, 'public.audit_log', 'UPDATE') AS audit_update,
-            has_table_privilege(current_user, 'public.audit_log', 'DELETE') AS audit_delete,
-            has_table_privilege(current_user, 'public.audit_log', 'TRUNCATE') AS audit_truncate,
-            has_column_privilege(
-              current_user, 'public.audit_chain_head', 'next_seq', 'UPDATE'
-            ) AS head_next_seq_update,
-            has_column_privilege(
-              current_user, 'public.audit_chain_head', 'head_hash', 'UPDATE'
-            ) AS head_hash_update,
             has_table_privilege(
               current_user, 'drizzle.__drizzle_migrations', 'SELECT'
-            ) AS migrations_select`,
+            ) AS migrations_select,
+            ARRAY(
+              SELECT name FROM unnest($1::text[]) AS name
+               WHERE to_regclass(format('public.%I', name)) IS NULL
+                  OR NOT has_table_privilege(current_user, to_regclass(format('public.%I', name)), 'SELECT')
+               ORDER BY name
+            )::text[] AS unreadable,
+            ARRAY(
+              SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+                 AND (CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(current_user, c.oid, 'USAGE, UPDATE')
+                      ELSE has_table_privilege(current_user, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+                        OR has_any_column_privilege(current_user, c.oid, 'INSERT, UPDATE, REFERENCES') END)
+               ORDER BY c.relname
+            )::text[] AS writable`,
+    [tables],
   );
   assert.deepEqual([...privileges], [{
-    audit_delete: false,
-    audit_truncate: false,
-    audit_update: false,
     database_create: false,
     database_temporary: false,
-    head_next_seq_update: true,
-    head_hash_update: true,
     migrations_select: true,
     schema_create: false,
+    unreadable: [],
+    writable: [],
   }]);
-
-  // What every append does to the log's head, rolled back.
-  const rolledBack = new Error('rolled back');
-  await assert.rejects(client.begin(async (tx) => {
-    const head = await tx.unsafe(`UPDATE audit_chain_head SET next_seq = next_seq, head_hash = head_hash WHERE only_row`);
-    assert.equal(head.count, 1, 'runtime head update did not affect the singleton');
-    throw rolledBack;
-  }), (error) => error === rolledBack);
 
   console.log(`runtime database role ${expectedRole} passed privilege verification`);
 } finally {

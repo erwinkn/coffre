@@ -687,8 +687,15 @@ ALTER TABLE secrets ALTER COLUMN versions DROP DEFAULT;
 ALTER TABLE secret_versions ALTER COLUMN sensitive DROP DEFAULT;
 --> statement-breakpoint
 
--- 9. Privileges: the vault's login writes, and the app's reads. What a privilege held of 0.14's goes with it.
-REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM coffre_app, coffre_vault, coffre_backup;
+-- 9. Privileges: the vault's login writes, and the app's reads. What a privilege held of 0.14's goes with it. coffre's tables by name, as 0019 grants them: public may hold a database's other tables (FOREIGN_OWNERS in migrate.ts), which are not coffre's to revoke, and on which a login holding nothing is refused.
+REVOKE ALL PRIVILEGES ON
+    projects, environments, secrets, secret_versions, dismissed_keys,
+    principals, grants, roles, policy,
+    identities, bindings, credentials,
+    device_logins, enrollment_codes, spent_id_tokens, oauth_clients, mcp_approvals,
+    log_pending, log, log_index, log_tiles, log_head, exposures,
+    audit_archive
+FROM coffre_app, coffre_vault, coffre_backup;
 --> statement-breakpoint
 GRANT SELECT ON
     projects, environments, secrets, secret_versions, dismissed_keys,

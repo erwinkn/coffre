@@ -24,7 +24,7 @@ export async function asSuperuser<T>(database: string, work: (client: PostgresCl
 export async function connects(url: string): Promise<boolean> {
   const client = postgresClient(url, { max: 1 });
   try {
-    await client.unsafe('SELECT count(*) FROM vault_members');
+    await client.unsafe('SELECT count(*) FROM principals');
     return true;
   } catch {
     return false;

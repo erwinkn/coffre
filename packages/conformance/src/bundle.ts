@@ -13,21 +13,18 @@ import { join, relative } from 'node:path';
  * A test holds this to the schema (@coffre/db).
  */
 export const SERVER_TABLES = [
-  'audit_chain_head',
-  'audit_log',
-  'capped_alerts',
-  'consumed_tokens',
-  'device_authorizations',
+  'audit_archive',
+  'device_logins',
   'dismissed_keys',
+  'enrollment_codes',
+  'log_head',
+  'log_index',
+  'log_pending',
+  'log_tiles',
   'mcp_approvals',
-  'mcp_connections',
   'oauth_clients',
-  'secret_references',
   'secret_versions',
-  'service_bindings',
-  'vault_grants',
-  'vault_members',
-  'vault_releases',
+  'spent_id_tokens',
 ];
 
 /** What only server code carries. */

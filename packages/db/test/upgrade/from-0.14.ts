@@ -52,7 +52,7 @@ const day = 86_400_000;
 
 /** A copy of the migrations up to the one before 0.16's: what 0.14.7 ships. */
 function before(dir: string): string {
-  const from = migrationsFolder('postgres');
+  const from = migrationsFolder();
   const folder = join(dir, 'migrations');
   cpSync(from, folder, { recursive: true, filter: (path) => !path.includes('_snapshot.json') });
   const journal = JSON.parse(readFileSync(join(folder, 'meta/_journal.json'), 'utf8')) as { entries: { tag: string }[] };
