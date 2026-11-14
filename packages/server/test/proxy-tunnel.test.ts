@@ -568,17 +568,19 @@ test("a workload's tunnels are grouped by session: a freeze of one session ends 
 // --- 0.14.7's wire cases, on 0.16's tunnel ---
 
 test('LISTEN and NOTIFY across two tunnelled connections', async () => {
-  const [listening, notifying] = [await rawSession(), await rawSession()];
+  const listening = await rawSession();
+  let notifying: RawSession | undefined;
   try {
+    notifying = await rawSession();
     await listening.query('LISTEN coffre_tunnel');
     await notifying.query("SELECT pg_notify('coffre_tunnel', 'through the tunnel')");
     // NotificationResponse: the notifier's pid, the channel, the payload.
-    const heard = await Promise.race([listening.until('A'), sleep(3_000).then(() => assert.fail('no notification within 3 s'))]);
+    const heard = await listening.until('A');
     const [channel, payload] = heard.body.subarray(4).toString().split('\0');
     assert.deepEqual([channel, payload], ['coffre_tunnel', 'through the tunnel']);
   } finally {
     listening.close();
-    notifying.close();
+    notifying?.close();
   }
 });
 
@@ -708,12 +710,13 @@ test('a database that ends SCRAM without its signature is no database the URL na
 });
 
 test('a database that asks for more SCRAM iterations than any needs is refused before the work begins', async () => {
-  const fake = await fakeDatabase(scramFake(2147483647));
+  // One past the tunnel's most (100,000): computed, it costs milliseconds, so a broken limit fails here, and never hangs.
+  let proved = false;
+  const fake = await fakeDatabase(scramFake(100_001, () => void (proved = true)));
   const client = appClientOf();
   try {
-    const started = Date.now();
-    await assert.rejects(client.unsafe('SELECT 1'), /SCRAM iterations/);
-    assert.ok(Date.now() - started < 2000, `${Date.now() - started} ms`);
+    await assert.rejects(Promise.race([client.unsafe('SELECT 1'), sleep(3_000).then(() => assert.fail('neither refused nor logged in within 3 s'))]), /SCRAM iterations/);
+    assert.equal(proved, false, 'the tunnel sent the database its proof: it did the work');
   } finally {
     // The fake first: a query it holds would keep the client's end waiting.
     fake.close();
@@ -839,18 +842,40 @@ test('a dial through a network binding still under way when the app leaves is gi
   assert.ok(closed, 'the late socket was closed');
 });
 
+type RawSession = Awaited<ReturnType<typeof rawSession>>;
+
+/** How long a raw session waits for the tunnel's next message before it fails: a regression fails its test, never hangs the file. */
+const RAW_READ_MS = 5_000;
+
 /** A raw session on the listener, as psql's wire is: the simple query protocol, COPY included. */
 async function rawSession() {
   const socket = tcp({ host: '127.0.0.1', port });
   await once(socket, 'connect');
   let buffered = Buffer.alloc(0);
+  /** Why no more will come: the connection ended or failed. */
+  let gone: Error | undefined;
   const waiting: (() => void)[] = [];
+  const wakeAll = () => waiting.splice(0).forEach((wake) => wake());
   socket.on('data', (chunk: Buffer) => {
     buffered = Buffer.concat([buffered, chunk]);
-    waiting.splice(0).forEach((wake) => wake());
+    wakeAll();
+  });
+  socket.on('error', (error) => void (gone ??= error));
+  socket.on('close', () => {
+    gone ??= new Error('the tunnel closed the connection');
+    wakeAll();
   });
   const next = async (): Promise<{ type: string; body: Buffer }> => {
-    while (buffered.length < 5 || buffered.length < 1 + buffered.readInt32BE(1)) await new Promise<void>((resolve) => waiting.push(resolve));
+    const deadline = Date.now() + RAW_READ_MS;
+    while (buffered.length < 5 || buffered.length < 1 + buffered.readInt32BE(1)) {
+      if (gone !== undefined) throw gone;
+      const left = deadline - Date.now();
+      if (left <= 0) throw new Error(`no message from the tunnel within ${RAW_READ_MS} ms`);
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, left);
+        waiting.push(() => (clearTimeout(timer), resolve()));
+      });
+    }
     const length = buffered.readInt32BE(1);
     const out = { type: String.fromCharCode(buffered[0]!), body: buffered.subarray(5, 1 + length) };
     buffered = buffered.subarray(1 + length);
@@ -863,10 +888,15 @@ async function rawSession() {
       if (got.type === type) return got;
     }
   };
-  await write(startup());
-  await until('R');
-  await write(message('p', cstring(handle)));
-  await until('Z');
+  try {
+    await write(startup());
+    await until('R');
+    await write(message('p', cstring(handle)));
+    await until('Z');
+  } catch (error) {
+    socket.destroy();
+    throw error;
+  }
   return {
     write,
     until,

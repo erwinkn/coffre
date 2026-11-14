@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { github, signin } from '@coffre/core/identity';
+import { HyperdrivePool } from '@coffre/db/hyperdrive';
 
 import { createCoffre, postgres, type CoffreContext, type SocketsNamespace, type WorkersConfig } from '../src/cloudflare.ts';
 import { credentialProxy, postgres as tunnel } from '../src/plugins/credential-proxy.ts';
@@ -37,14 +38,24 @@ test('a refusal answers at once, though its body never ends: nothing waits on wh
   assert.match((answered as Response).headers.get('content-security-policy') ?? '', /script-src 'self' 'nonce-/);
 });
 
-test("a request's database client is closed through waitUntil once coffre's work for it is done, and not before it begins", async () => {
+test("a request's database client is closed through waitUntil once coffre's work for it is done, and not before", async (t) => {
+  // Each `end` asked of a request's pool, in turn: no database answers here, so none has a connection to close.
+  const ended: string[] = [];
+  t.mock.method(HyperdrivePool.prototype, 'end', async () => void ended.push('end'));
   const left: Promise<unknown>[] = [];
   const context = worker.request({}, { waitUntil: (promise) => void left.push(promise) });
   assert.equal(left.length, 0);
-  const response = await start(new Request('https://coffre.test/livez'), context);
-  assert.equal(response.status, 200);
+  // The page's render, held: coffre's work for the request is not done until it answers.
+  let render!: (response: Response) => void;
+  const rendered = new Promise<Response>((resolve) => (render = resolve));
+  const answer = context.coffre.respond(new Request('https://coffre.test/livez'), () => rendered);
   assert.ok(left.length > 0, 'nothing was left to close the database');
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(ended, [], 'closed while the render was still under way');
+  render(new Response('rendered'));
+  assert.equal(await (await answer).text(), 'rendered');
   await Promise.all(left);
+  assert.deepEqual(ended, ['end']);
 });
 
 test("coffre's server routes, without its middleware or without coffre in the context, say which is missing", () => {
