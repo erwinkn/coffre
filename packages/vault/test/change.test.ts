@@ -412,6 +412,11 @@ test('a change that is a use of a binding moves its last use on, to its entry\'s
   assert.equal(await written(vault, mine as never), 'made');
   assert.deepEqual([await lastUse(), (await seenOf(bindings)).length], [await entryAt(), 2]);
   assert.equal(await lastUse(), vault.now() - 1000, 'dated as its entry, not as it landed');
+  // Late for the time its decision held until: not made either, its proof not spent and the binding not used again.
+  const [overdue, usedAt] = [randomBytes(32), await lastUse()];
+  const tardy = await prepare(vault, { read, decide: ({ binding: [found], who: [was] }: Seen<typeof read>, at: number) => ({ writes: [put(principals, member(ada, 'owner'), was!)], once: overdue, used: found!, until: at + 40, entry: said('token.exchange', api), answer: 'owner' }) });
+  await wait(80);
+  assert.deepEqual([await written(vault, tardy as never), await lastUse(), await rowsOf(vault.owner, sql`SELECT 1 FROM spent_id_tokens WHERE hash = decode(${overdue.toString('hex')}, 'hex')`)], ['moved', usedAt, []]);
   // One that read the binding before a use of it is not stopped by that use.
   const beside = await prepare(vault, { read: { binding: read.binding }, decide: ({ binding: [found] }: Pick<Seen<typeof read>, 'binding'>) => ({ writes: [], used: found!, entry: said('token.renew', api), answer: null }) });
   vault.tick(1000);
