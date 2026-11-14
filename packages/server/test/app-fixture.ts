@@ -13,8 +13,9 @@ import type { PageContext } from '../src/scope.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime } from '../src/runtime.ts';
 import type { Gates } from '../src/gate.ts';
-import type { CoffrePlugin } from '../src/plugins.ts';
+import type { CoffrePlugin, SocketSession } from '../src/plugins.ts';
 import { requestScope } from '../src/scope.ts';
+import { admitSocket } from '../src/socket-admission.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { watched } from './db/postgres-pool.ts';
 
@@ -49,6 +50,12 @@ export type TestApp = {
   readonly sent: { readonly statements: number; readonly rows: number };
   /** A request, as a deployment's Start app answers one: coffre's middleware around coffre's route. */
   request(path: string, init?: RequestInit): Promise<Response>;
+  /**
+   * A WebSocket asked for, as a Durable Object admits one on Workers
+   * (`admitSocket`): the plugin's refusal, or the session that carries its
+   * bytes.
+   */
+  socket(path: string, init?: RequestInit): Promise<Response | SocketSession>;
   /** A page's render for a request, with what coffre hands it. */
   render<T>(init: RequestInit, page: (context: PageContext) => Promise<T>): Promise<Response>;
   close(): Promise<void>;
@@ -117,7 +124,8 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
     ...(plugins === undefined ? {} : { plugins }),
   });
   const tracked: Promise<unknown>[] = [];
-  const scope = requestScope(createRuntime(config, counted, recorded, { transport: transport ?? FETCHES_NOTHING, gates }), () => '192.0.2.7', (work) => tracked.push(work));
+  const runtime = createRuntime(config, counted, recorded, { transport: transport ?? FETCHES_NOTHING, gates });
+  const scope = requestScope(runtime, () => '192.0.2.7', (work) => tracked.push(work));
   return {
     world,
     vault,
@@ -135,6 +143,9 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
       const request = new Request(`${PUBLIC_URL}${path}`, init);
       // As Start answers it: the middleware, then the route it hands the context on to.
       return scope.respond(request, (page) => page.coffre.route(request));
+    },
+    socket(path, init) {
+      return admitSocket(new Request(`${PUBLIC_URL}${path}`, init), runtime, '192.0.2.7');
     },
     render(init, page) {
       return scope.respond(new Request(`${PUBLIC_URL}/projects`, init), async (context) => Response.json(await page(context)));

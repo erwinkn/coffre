@@ -22,7 +22,7 @@
  *
  *   export default {
  *     fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
- *       handler.fetch(request, { context: coffre.request(env, ctx) }),
+ *       coffre.upgrade(request, env) ?? handler.fetch(request, { context: coffre.request(env, ctx) }),
  *   };
  *
  * coffre's server routes (`@coffre/server/routes`) and pages (`@coffre/ui`)
@@ -31,5 +31,6 @@
  */
 export { createCoffre, postgres, type CoffreWorker, type PostgresDatabase, type WaitUntil, type WorkersConfig } from './cloudflare-handler.ts';
 export type { GatesNamespace } from './cloudflare-gates.ts';
+export type { SocketsNamespace } from './cloudflare-sockets.ts';
 export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './scope.ts';
 export * from './index.ts';

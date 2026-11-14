@@ -45,9 +45,10 @@
  * key and credential; the proxy keeps no value. `/use/<credential>` reads
  * the handle's or session's row first, unchecked, for the place it was made
  * for. The plan of an environment is a peek and one use, which opens only
- * what the app is handed. Presigning, signing, verifying, a cipher's work
- * and tunnels answer 501 until each is moved onto `use`, and so does the
- * plan of an environment the deployment generates values for.
+ * what the app is handed. A tunnel's connection is one `use`, which opens
+ * the database's URL, and its group of connections is asked again on a
+ * timer, a `peek` that opens nothing. Presigning, signing, verifying and a
+ * cipher's work answer 501 until each is moved onto `use`.
  */
 import { createHash } from 'node:crypto';
 
@@ -57,10 +58,11 @@ import { constraintsAllow } from '@coffre/core/identity';
 import { parseRecipe } from '@coffre/core/recipe';
 
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
-import { WorkloadRefused, type CoffrePlugin, type Exposed, type PluginContext, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
+import { WorkloadRefused, type CoffrePlugin, type Connect, type Exposed, type PluginContext, type SocketSession, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import type { Encoding } from './hmac.ts';
+import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { signV4 } from './sigv4.ts';
-import type { WorkersSocket } from '../workers-socket.ts';
+import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
 
 /** How a credential's values reach its upstream: in a header, a query parameter, a field of a form or JSON body, a segment of the path, Basic authentication, or an AWS signature. */
 export type Inject =
@@ -324,9 +326,10 @@ export type CredentialProxyOptions = {
   /** AES-256-GCM keys, by name as credentials are, that coffre encrypts and decrypts with for the app: `{ 'billing-tokens': aesGcm('BILLING_TOKEN_KEY', { keyEncoding: 'hex' }) }`. */
   ciphers?: Record<string, Cipher>;
   /**
-   * How often an open tunnel checks its handle still stands, ending when it
-   * does not: 60 seconds unless set. Checked, and unused until tunnels are
-   * served on 0.16.
+   * How often an open tunnel asks the vault whether its handle still
+   * stands, ending when it does not: 60 seconds unless set. A workload's
+   * tunnel asks every two thirds of this or of 15 seconds, whichever is
+   * less, so a freeze or a revocation ends it within 15.
    */
   recheckSeconds?: number;
   /**
@@ -481,7 +484,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   // Read and ignored through 0.16 (docs/design/0.16.md, "The proxy"): the vault's memory is the only one.
   const cacheMs = (options.cacheSeconds ?? 60) * 1000;
   if (!Number.isFinite(cacheMs) || cacheMs < 0 || cacheMs > 3_600_000) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
-  const proxy: Proxy = { credentials, tunnels, signers, verifiers, ciphers, insecure: options.insecureUpstreams === true, generate };
+  const proxy: Proxy = { credentials, tunnels, signers, verifiers, ciphers, insecure: options.insecureUpstreams === true, generate, recheckMs, groups: new Map() };
   return {
     name: 'credential-proxy',
     routes: {
@@ -489,6 +492,14 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       fetch: async (request, coffre) => {
         try {
           return await serve(request, coffre, proxy);
+        } catch (error) {
+          if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
+          throw error;
+        }
+      },
+      socket: async (request, coffre) => {
+        try {
+          return await open(request, coffre, proxy);
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code);
           throw error;
@@ -507,6 +518,13 @@ type Proxy = {
   ciphers: Map<string, Cipher>;
   insecure: boolean;
   generate: Map<string, 'all' | readonly string[]>;
+  recheckMs: number;
+  /**
+   * The open tunnel sessions, by handle or workload session, environment
+   * and tunnel, each group checked as one (`watch`): the plugin's, so an
+   * object's or a process's. Settled values and timers only.
+   */
+  groups: Map<string, Group>;
 };
 
 /** A credential's values, opened, and which keys of it are plain, no secret: what the answer's redaction leaves as it is. */
@@ -514,9 +532,8 @@ type Opened = { values: Record<string, string>; plain: readonly string[] };
 
 /**
  * What the proxy does not serve on 0.16 yet, which 0.14.7 did: a presigned
- * URL, a signature, a verification or a cipher's work, a tunnel, and the
- * plan of an environment the deployment generates values for. Each comes
- * back on `use` in a pull request of its own (docs/design/0.16.md, "The proxy").
+ * URL, a signature, a verification or a cipher's work. Each comes back on
+ * `use` in a pull request of its own (docs/design/0.16.md, "The proxy").
  */
 const notYet = (what: string) => failure(501, `${what} is not served by this version of coffre yet`, 'not_implemented');
 
@@ -581,7 +598,7 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   }
   if (raw.length < 3) return failure(404, 'name /use/<credential>/<path>, or /use/<project>/<environment>/<credential>/<path>');
   const credential = proxy.credentials.get(place[2]!);
-  if (credential === undefined && proxy.tunnels.has(place[2]!)) return notYet('a tunnel');
+  if (credential === undefined && proxy.tunnels.has(place[2]!)) return failure(426, `${place[2]} is a tunnel, a WebSocket \`coffre run\` opens for the app's database driver`);
   if (credential === undefined && proxy.signers.has(place[2]!)) return failure(404, `${place[2]} is a signer, which reaches no upstream: credential(${JSON.stringify(place[2])}).sign(message)`);
   if (credential === undefined && proxy.verifiers.has(place[2]!)) return failure(404, `${place[2]} is a verifier, which reaches no upstream: credential(${JSON.stringify(place[2])}).verify(message, signature)`);
   if (credential === undefined && proxy.ciphers.has(place[2]!)) return failure(404, `${place[2]} is a cipher, which reaches no upstream: credential(${JSON.stringify(place[2])}).encrypt(plaintext)`);
@@ -1773,6 +1790,201 @@ function placeholderShape(name: string, placeholder: Placeholder | undefined, in
   const token = placeholder === undefined ? handle : placeholder.kind === 'jwt' ? `[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.${handle}` : `${escape(placeholder.prefix)}${handle}`;
   const [before, after] = inject.template.split(TEMPLATE_KEY).filter((_, at) => at % 2 === 0);
   return new RegExp(`^${escape(before!)}${token}${escape(after!)}$`);
+}
+
+/**
+ * A tunnel asked for, `/use/<project>/<env>/<name>` as a WebSocket, by
+ * `coffre run`'s listener with the handle as its bearer token, or by a
+ * workload with its session and a proof (`htm` GET, `htu` the URL's https
+ * form), its gate taking the proof once: then one `use` of the vault, which
+ * decides on its own rows, opens the database's URL and logs it; the URL
+ * checked against the tunnel's hosts; and the session that logs in with it.
+ * Each connection asks again, a cancel request's own included. The URL lives
+ * in the session, and goes with it.
+ */
+async function open(request: Request, coffre: PluginContext, proxy: Proxy): Promise<Response | SocketSession> {
+  const raw = new URL(request.url).pathname.slice('/use/'.length).split('/');
+  if (raw.length !== 3) return failure(404, 'a tunnel is /use/<project>/<environment>/<name>');
+  let place: string[];
+  try {
+    place = raw.map(decodeURIComponent);
+  } catch {
+    return failure(400, 'the path is not valid percent-encoding');
+  }
+  const name = place[2]!;
+  const tunnel = proxy.tunnels.get(name);
+  if (tunnel === undefined) return failure(404, `this instance has no tunnel ${JSON.stringify(name)}: its deployment's credentialProxy names them`);
+  const path = `${place[0]}/${place[1]}`;
+  const caller = await workloadOf(request, coffre, { place: path });
+  if (caller instanceof Response) return caller;
+  if (caller !== null) return workloadTunnel(request, coffre, proxy, caller, name, tunnel);
+  const handle = bearer(request);
+  if (handle === null || !WHOLE_HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
+  // The row, unchecked: where the handle's run ends, and which of its environments `@me` reads. The vault decides the rest.
+  const { expiresAt } = await coffre.handle(handle);
+  const read = readOf(proxy, path);
+  const used = await coffre.use(handle, { path: read, keys: [tunnel.key], purpose: 'use', upstream: name });
+  const db = dialled(proxy, path, name, tunnel, used.values[tunnel.key]!);
+  if (db instanceof Response) return db;
+  const key = groupKey(handle, path, name);
+  const stands = () => coffre.stands(handle, { path: read, keys: [tunnel.key], upstream: name });
+  return session(tunnel, {
+    handle,
+    group: key,
+    database: db,
+    // Just before a login: the vault's word afresh, opening nothing, and the group's last.
+    stands: async () => (proxy.groups.get(key)?.stands ?? true) && (await stands().catch(() => false)),
+    watch: (end) => watch(proxy, key, { check: { every: proxy.recheckMs, run: stands }, bound: proxy.recheckMs + Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS), until: Date.parse(expiresAt) }, end),
+  });
+}
+
+/**
+ * A workload's tunnel (docs/design/workload-access.md, section 7.1): its
+ * Durable Object named by its session (`forwardSocket`), the database's URL
+ * opened for the session as a credential's values are, and the app's login
+ * asked for no password: the signed upgrade authenticated it (section 9.3).
+ * It carries bytes while its last good check is less than `recheckSeconds`
+ * old, 15 at most (section 8.2): every two thirds of that, the vault's
+ * decision again, its freezes, its revocations and its grants, with a third
+ * of it to answer; so a freeze or a revocation ends it within one.
+ */
+async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, name: string, tunnel: Tunnel): Promise<Response | SocketSession> {
+  const token = sessionToken(request);
+  if (token === null || caller.path === null) return nonced(failure(403, "a tunnel is a session's, which names its environment"), caller);
+  const path = caller.path;
+  let used;
+  try {
+    used = await coffre.use(caller, { path, keys: [tunnel.key], purpose: 'use', upstream: name });
+  } catch (error) {
+    if (!(error instanceof CoffreError)) throw error;
+    return nonced(failure(error.status, error.message, error.reason ?? error.code), caller);
+  }
+  if (!constraintsAllow(used.workload?.constraints ?? null, { place: path, credential: name })) return nonced(failure(403, `this narrowed session may not open ${name}`, 'narrowed'), caller);
+  const db = dialled(proxy, path, name, tunnel, used.values[tunnel.key]!);
+  if (db instanceof Response) return nonced(db, caller);
+  const key = groupKey(`dpop\n${token}`, path, name);
+  const bound = Math.min(proxy.recheckMs, WORKLOAD_RECHECK_MS);
+  const stands = () => coffre.stands(caller, { path, keys: [tunnel.key], upstream: name });
+  return session(tunnel, {
+    handle: null,
+    group: key,
+    database: db,
+    stands: async () => (proxy.groups.get(key)?.stands ?? true) && (await stands().catch(() => false)),
+    watch: (end) => watch(proxy, key, { check: { every: (bound * 2) / 3, run: stands }, bound, until: null }, end),
+  });
+}
+
+/** What a tunnel group is kept under: the handle, or the workload's session, with the environment and the tunnel. */
+const groupKey = (credential: string, path: string, name: string) => `${credential}\0${path}\0${name}`;
+
+/** How long a handle's group has, past its check's interval, for the vault to answer before its bytes stop: the bound is the two together. */
+const RECHECK_DEADLINE_MS = 10_000;
+/** How long a workload's tunnel runs past a freeze or a revocation at most (section 8.2): the vault is asked again within it. */
+const WORKLOAD_RECHECK_MS = 15_000;
+
+/** The database a tunnel's URL names, as it is dialled, or why it is not: its hosts, TLS and private addresses as the tunnel allows. */
+function dialled(proxy: Proxy, path: string, name: string, tunnel: Tunnel, url: string): Database | Response {
+  let db: Database;
+  try {
+    db = database(url);
+  } catch {
+    // The value is a secret: what is wrong with it is said, never what it is.
+    return failure(409, `${path}'s ${tunnel.key} is no postgres:// URL`);
+  }
+  if (tunnel.hosts !== undefined && !tunnel.hosts.includes(canonicalHost(db.host))) return failure(403, `${path}'s ${tunnel.key} names a host the tunnel ${name} does not reach`);
+  if (tunnel.connect !== undefined) {
+    // Inside the binding's private network, plaintext: TLS through it is no option yet.
+    if (db.tls !== 'disable') return failure(409, `${path}'s ${tunnel.key} asks for TLS, which the tunnel ${name}'s network binding does not carry: sslmode=disable, for a database inside that network`);
+  } else if (!proxy.insecure && (privateHost(db.host) || db.tls === 'disable')) {
+    return failure(403, `${path}'s ${tunnel.key} names a private address or turns TLS off, which only insecureUpstreams, for a local database, or the tunnel's network binding (connect), allows`);
+  } else if (!proxy.insecure && tunnel.hosts === undefined && !address(db.host)) {
+    // Whoever writes the value picks the name, and a name may resolve to a private address: only the deployment's are dialled by name.
+    return failure(403, `${path}'s ${tunnel.key} names its host by name, which the tunnel ${name} dials only when its hosts list it: a name may resolve to a private address`);
+  }
+  return db;
+}
+
+/** The session a tunnel's connection runs: through its network binding, if it has one, or the platform's TCP. */
+function session(tunnel: Tunnel, given: Omit<Parameters<typeof tunnelPostgres>[1], 'connect'>): SocketSession {
+  const network = tunnel.connect;
+  return (client, connect) => tunnelPostgres(client, { ...given, connect: network === undefined ? connect : through(network) });
+}
+
+/** TCP out through a network binding: `host:port`, a v6 address in brackets. */
+function through(network: Network): Connect {
+  return async (host, port, signal) => {
+    if (signal?.aborted) throw new Error('the session ended');
+    // Not awaited here: a dial the binding has not answered when the session ends is given up, and closed if it comes.
+    return workersSocket(network.connect(`${host.includes(':') ? `[${host}]` : host}:${port}`), signal);
+  };
+}
+
+/** A group of tunnel sessions: how to end each, its last answer (settled, never pending), and its timers: its check's, the one its bytes stop by, and its end's. */
+type Group = {
+  ends: Set<() => void>;
+  stands: boolean;
+  timer: ReturnType<typeof setInterval> | undefined;
+  watchdog: ReturnType<typeof setTimeout> | undefined;
+  expiry: ReturnType<typeof setTimeout> | undefined;
+};
+
+/** A tunnel group's check: how often it runs, and what it asks. */
+type Check = { every: number; run: () => Promise<boolean> };
+
+/**
+ * A tunnel's sessions of one caller, environment and tunnel, as one: its
+ * check on its timer, and the first answer that is no ends every session
+ * at once, as does `until`, the handle's end. The group's bytes flow only
+ * while its last good check is under `bound` old, even if no check ran
+ * since (formal/Workload.tla, `TunnelByte`): a check that never comes back
+ * keeps nothing open. It lives as long as its sessions, and goes with the
+ * last.
+ */
+function watch(proxy: Proxy, key: string, tunnel: { check: Check; bound: number; until: number | null }, end: () => void): () => void {
+  let group = proxy.groups.get(key);
+  if (group === undefined) {
+    const made: Group = { ends: new Set(), stands: true, timer: undefined, watchdog: undefined, expiry: undefined };
+    const close = () => {
+      made.stands = false;
+      for (const ending of [...made.ends]) ending();
+    };
+    const arm = (from: number) => {
+      clearTimeout(made.watchdog);
+      made.watchdog = setTimeout(close, Math.max(0, from + tunnel.bound - Date.now()));
+    };
+    const { check } = tunnel;
+    // One at a time for the group, however many sessions it holds. One that has not answered by the bound has the
+    // watchdog end the group: the bound is its deadline, and a late yes, after that, opens nothing again.
+    let checking = false;
+    const recheck = async () => {
+      if (checking || !made.stands) return;
+      checking = true;
+      const started = Date.now();
+      const stands = await check.run().catch(() => false);
+      checking = false;
+      if (!made.stands) return;
+      if (!stands) return close();
+      arm(started);
+    };
+    made.timer = setInterval(() => void recheck(), check.every);
+    // Let in just now, on the admission's own use.
+    arm(Date.now());
+    if (tunnel.until !== null) made.expiry = setTimeout(close, Math.max(0, tunnel.until - Date.now()));
+    group = made;
+    proxy.groups.set(key, group);
+  }
+  const mine = group;
+  mine.ends.add(end);
+  return () => {
+    mine.ends.delete(end);
+    if (mine.ends.size > 0) return;
+    // Retired before its timers go: a check still out when the last session left, answering yes, arms nothing again.
+    mine.stands = false;
+    clearInterval(mine.timer);
+    clearTimeout(mine.watchdog);
+    clearTimeout(mine.expiry);
+    if (proxy.groups.get(key) === mine) proxy.groups.delete(key);
+  };
 }
 
 function checkTunnel(name: string, tunnel: Tunnel, credentials: Map<string, Resolved>, insecure: boolean): Tunnel {

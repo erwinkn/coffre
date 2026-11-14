@@ -28,8 +28,20 @@ export type CoffrePlugin = {
   routes?: {
     prefix: string;
     fetch: (request: Request, coffre: PluginContext) => Promise<Response>;
+    /**
+     * A WebSocket asked for under `prefix`: a refusal, or what carries the
+     * connection's bytes once it is open (`SocketSession`). On Workers the
+     * Worker sends it to a Durable Object (`cloudflare-sockets.ts`), which
+     * paces its bytes by credit: a socket's client is coffre's own, `coffre
+     * run`'s listener. A browser's WebSocket can neither ask for that nor
+     * count, and is refused before this is asked.
+     */
+    socket?: (request: Request, coffre: PluginContext) => Promise<Response | SocketSession>;
   };
 };
+
+/** What runs a plugin's WebSocket once it is open: its bytes, and TCP out. Ends when the connection does. */
+export type SocketSession = (client: Pipe, connect: Connect) => Promise<void>;
 
 /** A connection's bytes both ways, a WebSocket's or a TCP socket's, and when it ends, whichever side ends it. */
 export type Pipe = { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array>; close(): void; closed: Promise<void> };
@@ -73,6 +85,15 @@ export type PluginContext = {
    * caller does without. A `CoffreError` for a refusal of the whole use.
    */
   expose(caller: string | WorkloadUse, asked: { path: string; keys: readonly string[] | null }): Promise<Exposed>;
+  /**
+   * Whether `caller` may still use every key named at `path` for
+   * `upstream`, as the vault decides a use (its `peek`): nothing opened,
+   * nothing logged, the rows read now. What an open tunnel asks before a
+   * login and on its timer, its socket authenticated already, so a
+   * workload's asks without a new proof or its gate. False for any refusal,
+   * of the place or of a key.
+   */
+  stands(caller: string | WorkloadUse, asked: { path: string; keys: readonly string[]; upstream: string }): Promise<boolean>;
   /**
    * The environments a handle was made for, by path as they are named now
    * (`market/dev@me`), or null where one was deleted, and when it ends: the
@@ -182,6 +203,23 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
   const { pathname } = new URL(request.url);
   const routes = runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
   return routes === undefined ? null : routes.fetch(request, pluginContext(request, runtime, sourceIp));
+}
+
+/** The plugin's answer to a WebSocket asked for under its prefix; null when no plugin takes it. */
+export function pluginSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | SocketSession> | null {
+  const routes = socketRoutes(request, runtime.plugins);
+  return routes === undefined ? null : routes.socket!(request, pluginContext(request, runtime, sourceIp));
+}
+
+/** Whether a plugin takes WebSockets at `request`'s path, deciding nothing about the request itself. */
+export function takesSocket(request: Request, plugins: readonly CoffrePlugin[]): boolean {
+  return socketRoutes(request, plugins) !== undefined;
+}
+
+function socketRoutes(request: Request, plugins: readonly CoffrePlugin[]): NonNullable<CoffrePlugin['routes']> | undefined {
+  const { pathname } = new URL(request.url);
+  const routes = plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
+  return routes?.socket === undefined ? undefined : routes;
 }
 
 /** A refusal as a plugin throws it: the API's error, its status and words. */
@@ -319,6 +357,12 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
         }
       }
       return exposed;
+    },
+    stands: async (caller, asked) => {
+      const [place, shown] = askedAs(caller, asked.path);
+      // Read now: a check that answers from the vault's memory could miss a revocation made within it (`UseInput.fresh`).
+      const answer = await runtime.vault.peek({ ...shown, ...place, keys: [...asked.keys], purpose: 'use', upstream: asked.upstream, fresh: true });
+      return !('refused' in answer) && asked.keys.every((key) => answer.items.some((item) => item.key === key && !('refused' in item)));
     },
   };
 

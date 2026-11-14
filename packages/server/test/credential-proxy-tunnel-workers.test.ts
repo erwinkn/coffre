@@ -116,7 +116,7 @@ function cancelRequest({ pid, secret }: { pid: number; secret: number }): Buffer
 
 test("a revoked handle's session ends at the object's recheck", { timeout: 60_000 }, async () => {
   const client = appClient(await listen('db', REVOKED), REVOKED);
-  // Live, until the worker's stand-in refuses the handle, from its fourth use: its admission's, then a recheck each half second.
+  // Live, until the worker's stand-in refuses the handle, at its fourth asking: its admission's use, its login's peek, then a check each half second.
   assert.deepEqual([...await client.unsafe('SELECT 1 AS one')], [{ one: 1 }]);
   const started = Date.now();
   await client.ended;
