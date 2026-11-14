@@ -1,5 +1,6 @@
 import type { Queryable } from '@coffre/db';
 import { administers, EVERYWHERE, inScope, isScope, normalScope, runsInstance, type Filter, type InstanceRole, type Permission, type Policy, type Role, type RoleDefinition, type Scope } from '@coffre/core/access';
+import type { McpScope } from '@coffre/core/mcp';
 import { instanceRole, roleId, scopeInput, slug } from '@coffre/core/schemas';
 import type { AccessChange, Called } from '@coffre/core/vault';
 import { z } from 'zod';
@@ -11,6 +12,8 @@ import { changed } from '../change.ts';
 import { ApiError, badRequest, refusal } from '../errors.ts';
 import { formatPath, parsePath, type Path } from '../paths.ts';
 import { route } from '../route.ts';
+import type { ReferenceView } from './keys.ts';
+import type { TokenView } from './tokens.ts';
 
 /**
  * Members and what they hold (docs/design/0.16.md, "The server"): the
@@ -47,8 +50,6 @@ const idOf = (member: string) => member.slice(member.indexOf(':') + 1);
 /** By code unit, as 0.14.7 sorted a report. */
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
-const notServed = (what: string) => new ApiError('not_implemented', `${what} is not served yet`);
-
 /** A grant as a member's lists show it. */
 export type MemberGrant = {
   /** Its member and place, `user:ada@acme.example/market/prod`: one grant per member per place. */
@@ -80,6 +81,133 @@ export type Member = {
   /** Whether the deployment names them an Owner: the app is not told, and false (the vault refuses `configured_owner` all the same). */
   declared: boolean;
   grants: MemberGrant[];
+};
+
+/** Someone removed, as the directory lists them, so they can be found and let back in. */
+export type RemovedMember = {
+  principalType: 'user' | 'service';
+  principalId: string;
+  /** How many keys they still know the value of: the length of their report's `exposed`. */
+  toRotate: number;
+};
+
+/**
+ * Whether a member is active or removed, as their row says. `tampered` is
+ * 0.14's finding of the vault's, which 0.16 never answers: the rows are
+ * shown as stored. It stays in the type, as `tampered: false` stays in
+ * `Member`, for the pages that still tell it apart.
+ */
+export type MemberStatus = 'active' | 'removed' | 'tampered';
+
+/** One member's access, for their page. */
+export type MemberAccess = {
+  member: string;
+  principalType: 'user' | 'service';
+  principalId: string;
+  status: MemberStatus;
+  instanceRole: InstanceRole;
+  /** As in `Member`: null unless the caller runs the instance. */
+  scope: Scope | null;
+  managed: boolean;
+  grants: MemberGrant[];
+};
+
+/** A key whose current value someone read or wrote. */
+export type ExposedSecret = {
+  project: string;
+  environment: string;
+  key: string;
+  version: number;
+  /** `wrote` when they set this value themselves. */
+  how: 'read' | 'wrote';
+  /** The last time they read or wrote it. */
+  at: string;
+};
+
+/** A service account's token someone issued that still works, as 0.14.7 listed it in their report. */
+export type IssuedServiceToken = {
+  id: string;
+  service: string;
+  label: string | null;
+  hint: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  /** What it reaches, each place by path and its role there; null for one that reaches all its account holds. */
+  scope: Record<string, string> | null;
+};
+
+/**
+ * A reference someone made, live ones first, as their report lists it: who made it and when are what the list is by.
+ * The report lists ended references too, so a state may also be `replaced`, which no live reference has.
+ */
+export type MadeReference = Omit<ReferenceView, 'state' | 'createdBy' | 'createdAt' | 'endedBy' | 'endedAt'> & {
+  state: ReferenceView['state'] | 'replaced';
+  createdBy: string;
+  createdAt: string;
+  endedBy: string | null;
+  endedAt: string | null;
+};
+
+/** A person's connected MCP app, as 0.14.7 listed it in their report. */
+export type ConnectedApp = {
+  id: string;
+  /** The client's name and host, as the consent page showed them. */
+  name: string;
+  host: string | null;
+  /** `dcr`: a registration, whose name is the app's own claim. */
+  registration: 'cimd' | 'dcr';
+  scopes: McpScope[];
+  createdAt: string;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+  expiresAt: string;
+};
+
+/** What still lets someone in: live grants, sign-in accounts, and credentials by kind. */
+export type WaysIn = { grants: number; sessions: number; tokens: number; identities: number; apps: number };
+
+/** Someone's report, for offboarding them (`GET /members/:member`). */
+export type OffboardingReport = {
+  principalType: 'user' | 'service';
+  principalId: string;
+  status: MemberStatus;
+  instanceRole: InstanceRole;
+  scope: Scope;
+  /** As in `Member`. */
+  declared: boolean;
+  removedAt: string | null;
+  removedBy: string | null;
+  live: WaysIn;
+  /** Current values they read or wrote, by project, environment and key. */
+  exposed: ExposedSecret[];
+  /** Keys they saw that have had a new value since. */
+  rotated: number;
+  /**
+   * The service tokens they issued that still work, their connected apps,
+   * their personal tokens and the references they made: each null where
+   * the report does not list them, which is not the same as none.
+   */
+  issuedTokens: IssuedServiceToken[] | null;
+  apps: ConnectedApp[] | null;
+  personalTokens: TokenView[] | null;
+  references: MadeReference[] | null;
+  /** Their personal configs, by project, the environment each is a config of, and the slug that deletes it. */
+  personal: { project: string; of: string; slug: string }[];
+};
+
+/** Someone as a change of members leaves them: their instance role and its scope, and, for a service account made with its grants, what became of each place. */
+export type MemberStanding = {
+  member: string;
+  instanceRole: InstanceRole;
+  scope: Scope;
+  created: boolean;
+  changes?: Record<string, AccessChange>;
+};
+
+/** What removing someone revoked, each way in counted, or null where the change ends them without counting; and their report, null until the offboarding design. */
+export type MemberRemoval = {
+  revoked: { grants: number; sessions: number | null; tokens: number | null; identities: number | null; apps: number | null };
+  report: OffboardingReport | null;
 };
 
 /** What a member's row says of where they stand. */
@@ -242,7 +370,7 @@ export const memberRoutes = {
    */
   ...route('GET /members', {
     input: z.object({ path: z.string().max(200).refine((path) => !path.includes('\0') && wellFormed(path), 'a path is well-formed text, with no NUL').optional() }),
-    run: async (ctx, { input }) => {
+    run: async (ctx, { input }): Promise<{ members: Member[]; removed: RemovedMember[] }> => {
       const who = await ctx.caller();
       const path: Path | undefined = input.path === undefined ? undefined : parsePath(input.path, [1, 2]);
       if (!administrator(who) && !canAnywhere(who, 'grant.manage')) throw refusal('no_access');
@@ -290,7 +418,7 @@ export const memberRoutes = {
       }
       listed.sort((a, b) => a.principalType.localeCompare(b.principalType) || a.principalId.localeCompare(b.principalId));
       // Those removed, so they can be found and let back in, each with how many keys they still know the value of (`seenBy`).
-      const removed = rows.filter((row) => row.status === 'removed').map((row) => ({ principalType: typeOf(row.id), principalId: idOf(row.id), toRotate: row.toRotate ?? 0 }));
+      const removed = rows.filter((row) => row.status === 'removed').map((row): RemovedMember => ({ principalType: typeOf(row.id), principalId: idOf(row.id), toRotate: row.toRotate ?? 0 }));
       return { members: listed, removed };
     },
   }),
@@ -307,13 +435,13 @@ export const memberRoutes = {
    * keeps nowhere: each null, "not listed", which the client's type allows.
    */
   ...route('GET /members/:member', {
-    run: async (ctx, { params }) => {
+    run: async (ctx, { params }): Promise<OffboardingReport> => {
       const principal = memberOf(params.member);
       const who = await ctx.caller();
       if (!runsInstance(who.holds)) throw refusal('no_access');
       const row = await reportOf(ctx.db, principal, new Date());
       if (row === null) throw new ApiError('not_found', 'no such member');
-      const exposed = row.keys.filter((key) => key.rotate)
+      const exposed: ExposedSecret[] = row.keys.filter((key) => key.rotate)
         .sort((a, b) => compare(a.project, b.project) || compare(a.environment, b.environment) || compare(a.key, b.key))
         .map((key) => ({ project: key.project, environment: key.environment, key: key.key, version: key.version, how: key.wrote ? 'wrote' as const : 'read' as const, at: key.at! }));
       const removed = row.status === 'removed';
@@ -345,7 +473,7 @@ export const memberRoutes = {
    * statement.
    */
   ...route('GET /members/:member/access', {
-    run: async (ctx, { params }) => {
+    run: async (ctx, { params }): Promise<MemberAccess> => {
       const principal = memberOf(params.member);
       const who = await ctx.caller();
       if (!administrator(who) && !canAnywhere(who, 'grant.manage')) throw refusal('no_access');
@@ -385,7 +513,7 @@ export const memberRoutes = {
    */
   ...route('PUT /members/:member', {
     input: z.object({ role: instanceRole.optional(), scope: scopeInput.optional(), access: accessPatch.refine((access) => Object.keys(access).length > 0, 'name a place to grant').optional() }).strict(),
-    run: async (ctx, { params, input }) => {
+    run: async (ctx, { params, input }): Promise<MemberStanding> => {
       const principal = memberOf(params.member);
       const service = typeOf(principal) === 'service';
       if (input.access !== undefined) {
@@ -393,7 +521,7 @@ export const memberRoutes = {
         // Admitted, or brought back, with its grants, in one change of the vault's: all of it or none.
         const wanted = grantsAsked(input.access);
         const { changes, created } = await changed(ctx, { op: 'access.grant', principal, changes: wanted.map(({ path: _, ...change }) => change), admit: true }, principal);
-        return { member: principal, instanceRole: 'member' as const, scope: EVERYWHERE, created: created ?? false, changes: byPath(wanted, changes) };
+        return { member: principal, instanceRole: 'member', scope: EVERYWHERE, created: created ?? false, changes: byPath(wanted, changes) };
       }
       if (input.scope !== undefined && input.role === undefined) throw badRequest('a scope goes with a role: name the role too');
       if (input.scope !== undefined && input.role === 'member') throw badRequest('a member holds nothing by their role: it takes no scope');
@@ -422,7 +550,7 @@ export const memberRoutes = {
    * report comes with the offboarding design: null until then.
    */
   ...route('DELETE /members/:member', {
-    run: async (ctx, { params }) => {
+    run: async (ctx, { params }): Promise<MemberRemoval> => {
       const principal = memberOf(params.member);
       const { revoked } = await changed(ctx, { op: 'member.remove', principal }, principal);
       return { revoked: { grants: revoked, sessions: null, tokens: null, identities: null, apps: null }, report: null };
@@ -441,7 +569,7 @@ export const memberRoutes = {
    */
   ...route('PATCH /access/:member', {
     input: accessPatch,
-    run: async (ctx, { params, input }) => {
+    run: async (ctx, { params, input }): Promise<{ changes: Record<string, AccessChange> }> => {
       const principal = memberOf(params.member);
       const wanted = grantsAsked(input);
       if (wanted.length === 0) return { changes: {} };

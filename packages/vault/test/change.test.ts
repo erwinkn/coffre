@@ -106,12 +106,12 @@ test('every sealed table has a row that reads back as the vault sealed it', asyn
     }],
     [enrollmentCodes, { id: code, bindingId: binding, codeHash: randomBytes(32), codeHint: 'coffre_enr_ab', scope: '[]', createdAt: at, createdBy: service, createdWith: randomUUID(), expiresAt: at, supersededAt: at }],
     [credentials, {
-      id: randomUUID(), kind: 'workload', tokenHash: randomBytes(32), tokenHint: 'ab12', previousTokenHash: randomBytes(32), generation: 0, principal: service, identityId: null, scope: '[]',
+      id: randomUUID(), kind: 'workload', tokenHash: randomBytes(32), tokenHint: 'ab12', previousTokenHash: randomBytes(32), codeHash: null, generation: 0, principal: service, identityId: null, scope: '[]',
       places: null, label: 'pod', createdAt: at, createdBy: service, expiresAt: at, lastUsedAt: at, lastUsedIp: '2001:db8::1', frozenAt: at, revokedAt: at, revokedBy: ada, jkt: 'thumb', notAfter: at,
       ancestors: '[]', constraints: '{}', enrollmentId: code, approvedAt: at, approvedBy: ada, run: '{"run_id":"7"}', client: null, challenge: null,
     }],
     [credentials, {
-      id: randomUUID(), kind: 'browser', tokenHash: randomBytes(32), tokenHint: null, previousTokenHash: null, generation: 0, principal: ada, identityId: identity, scope: null,
+      id: randomUUID(), kind: 'browser', tokenHash: randomBytes(32), tokenHint: null, previousTokenHash: null, codeHash: null, generation: 0, principal: ada, identityId: identity, scope: null,
       places: null, label: null, createdAt: at, createdBy: ada, expiresAt: at, lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null, jkt: null, notAfter: null,
       ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
     }],
