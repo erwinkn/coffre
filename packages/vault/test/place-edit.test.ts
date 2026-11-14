@@ -461,7 +461,7 @@ test('an upstream credential frozen in an environment by whoever writes there, u
 });
 
 test('an edit decided on the same rows as another change: whichever commits second finds the first, and starts over', async () => {
-  const deciding = { workloads: world.workloads };
+  const deciding = { workloads: world.workloads, owners: world.owners };
   const prepared = async (input: Presented & Change) => {
     const one = await prepare(world, OPERATIONS[input.op](input as never, deciding) as Operation<Parts, unknown>);
     assert.ok(!('refused' in one), 'refused' in one ? one.refused : '');
@@ -514,10 +514,10 @@ test('an edit that is not what the contract says is a fault, before any read', a
 
 test('an edit holds each row it uses to what it is used for, not only to the conditions it was read by', async () => {
   const sealed = <T extends object>(row: T) => ({ ...row, mac: Buffer.alloc(36) }) as never;
-  const deciding = { workloads: world.workloads };
+  const deciding = { workloads: world.workloads, owners: world.owners };
   const seeing = async (input: Presented & Change, more: (seen: Seen<Parts>) => Seen<Parts>) => {
     const operation = OPERATIONS[input.op](input as never, deciding) as Operation<Parts, { id: string }>;
-    return change(world, { read: operation.read, decide: (seen, at) => operation.decide(more(seen), at) });
+    return change(world, { read: operation.read, decide: (seen, at, unsealed) => operation.decide(more(seen), at, unsealed) });
   };
   const by = (label: string, op: string, more: object) => ({ ...shown(label), op, project: 'market', ...more }) as Presented & Change;
   // Billing, live, before market: Ada does not rename billing's prod by naming market's.
@@ -586,7 +586,7 @@ test('a folder of projects renamed, or emptied, whole: by whoever manages every 
 
 test('a folder renamed as a project is filed into it or out of it, or its manager loses a grant: the rename commits second, writes nothing, and starts over', async () => {
   const prepared = async (input: Presented & Change) => {
-    const one = await prepare(world, OPERATIONS[input.op](input as never, { workloads: world.workloads }) as Operation<Parts, unknown>);
+    const one = await prepare(world, OPERATIONS[input.op](input as never, { workloads: world.workloads, owners: world.owners }) as Operation<Parts, unknown>);
     assert.ok(!('refused' in one), 'refused' in one ? one.refused : '');
     return one;
   };

@@ -280,7 +280,7 @@ test('a personal config is made by one who only uses the environment, and again 
 });
 
 test('two makings of one place decided on the same rows: the second finds the first, and makes nothing', async () => {
-  const deciding = { workloads: world.workloads };
+  const deciding = { workloads: world.workloads, owners: world.owners };
   const race = async (inputs: (Presented & (ProjectCreate | EnvironmentCreate))[]) => {
     const prepared = await Promise.all(inputs.map((input) => prepare(world, OPERATIONS[input.op](input as never, deciding))));
     assert.deepEqual(prepared.map((one) => ('refused' in one ? one.refused : 'prepared')), ['prepared', 'prepared']);
@@ -336,10 +336,10 @@ test('a decision holds each row it uses to what it is used for, not only to the 
   // Rows the read's conditions would never give, put before the right ones in what the decision sees: none of them is taken for what it is not.
   const sealed = <T extends object>(row: T) => ({ ...row, mac: Buffer.alloc(36) });
   const theirs = environment(billing, 'prod');
-  const deciding = { workloads: world.workloads };
+  const deciding = { workloads: world.workloads, owners: world.owners };
   const seeing = async (input: Presented & EnvironmentCreate, more: (seen: Seen<Parts>) => Seen<Parts>) => {
     const operation = OPERATIONS['environment.create'](input, deciding) as Operation<Parts, { id: string }>;
-    return change(world, { read: operation.read, decide: (seen, at) => operation.decide(more(seen), at) });
+    return change(world, { read: operation.read, decide: (seen, at, unsealed) => operation.decide(more(seen), at, unsealed) });
   };
   // Another project, live, beside the one named.
   const there = answered(await seeing(adding('ada-cli', 'dev'), (seen) => ({ ...seen, project: [sealed(billing) as never, ...seen.project] })));
