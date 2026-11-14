@@ -314,13 +314,13 @@ function frozen({ entry }: Facts): Part[] {
   return [target.startsWith('binding:') ? 'the workloads of a trust binding of ' : 'a workload session of ', ...subject(entry)];
 }
 
-/** A write that wrote no key: a nature asked of keys that had it already. The entry does not say why. */
+/** A write that wrote no key: asked of keys as they were already (a nature they had, archived already, filed where they are). The entry records none of what was asked. */
 const empty = ({ metadata }: AuditEntry) => Array.isArray(metadata.keys) && metadata.keys.length === 0;
 
 /** A write's sentence, and a loosening's: one key as what was done to it; a batch as what was done to every key, or as written. */
 const writeSentence: Template = {
   did: ({ entry, batch }) => {
-    if (empty(entry)) return 'marked keys in';
+    if (empty(entry)) return 'wrote to';
     const kinds = new Set(batch.map(written));
     if (batch.length === 1 || (kinds.size === 1 && !kinds.has('reference') && !kinds.has('own'))) return WRITTEN[written(entry)];
     return [...kinds].every((kind) => kind === 'add' || kind === 'change') ? 'wrote' : 'changed';

@@ -360,6 +360,10 @@ test('what an entry says follows what its detail recorded, not what was asked', 
   await ok('cy-cli', 'PATCH', '/projects/market', { folder: 'apps' });
   await ok('cy-cli', 'PATCH', '/projects/market', { folder: 'apps' });
   await ok('cy-cli', 'PATCH', '/folders/apps', { name: 'apps' });
+  // A key archived, then archived again, and a key filed in the folder it is in: the entry records none of what was asked.
+  await keys({ key: 'B', archived: true });
+  await keys({ key: 'B', archived: true });
+  await keys({ key: 'Z', folder: 'three' });
   // A binding is said by its profile: a CI run's, or a platform's workloads.
   const bind = (profile: string, issuer: string, claims: Record<string, unknown>, policy: Record<string, unknown> | null) =>
     made(app.vault.change({ ...as('cy-cli'), op: 'token.bind', member: 'token:ci', binding: { profile, issuer, claims, keys: { uri: `${issuer}/jwks` }, policy, scope: null, label: profile, replaces: [] } }));
@@ -384,14 +388,17 @@ test('what an entry says follows what its detail recorded, not what was asked', 
     'secret.write: changed market/dev: 2 secrets',
     'secret.write: moved market/dev: 2 secrets to the folder three',
     'secret.rename: renamed market/dev/A to Z',
-    'secret.write: marked keys in market/dev, unchanged',
+    'secret.write: wrote to market/dev, unchanged',
     'secret.write: added market/dev/P, in their personal config',
-    'secret.write: marked keys in market/dev, in their personal config, unchanged',
+    'secret.write: wrote to market/dev, in their personal config, unchanged',
     'secret.rename: renamed market/dev/Z to Z, unchanged',
     'secret.refile: moved B and Z in market/dev to the folder three, unchanged',
     'project.move: moved project market to the folder apps',
     'project.move: moved project market to the folder apps, unchanged',
     'folder.refile: renamed the folder apps to apps, 1 project, unchanged',
+    'secret.write: archived market/dev/B',
+    'secret.write: wrote to market/dev, unchanged',
+    'secret.write: wrote to market/dev, unchanged',
     'token.bind: trusted CI runs to sign in as service:ci, reaching viewer on 1 place',
     'token.bind: trusted kubernetes workloads to sign in as service:ci, reaching viewer on 1 place',
   ]);
