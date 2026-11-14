@@ -1,4 +1,4 @@
-import type { Peeked } from '@coffre/core/vault';
+import type { Nature, Peeked } from '@coffre/core/vault';
 import { allows, readsSensitive, useOnly, withinCredential, type Place } from '@coffre/core/access';
 import { open } from '@coffre/core/envelope';
 import { KekUnavailableError } from '@coffre/core/kek';
@@ -59,7 +59,7 @@ export type Ask = {
 };
 
 /** One key's value, or why this caller is not given it. `secret` is where the value is held: a reference's source. */
-export type Value = { key: string; secret: string; version: number; sensitive: boolean; value: Buffer } | { key: string; refused: string };
+export type Value = { key: string; secret: string; version: number; nature: Nature; value: Buffer } | { key: string; refused: string };
 
 export type Answer = {
   principal: string;
@@ -374,7 +374,7 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
     }
     found.opened.set(version.id, value);
     // A copy: the caller may wipe what it is given, and the memory answers the next use from its own.
-    values.push({ key: item.key, secret: held.id, version: version.version, sensitive: version.sensitive, value: Buffer.from(value) });
+    values.push({ key: item.key, secret: held.id, version: version.version, nature: natureOf(version), value: Buffer.from(value) });
     read.push(item);
   }
 

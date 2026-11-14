@@ -71,8 +71,6 @@
     "src/db/workloads.ts",
     "src/node.ts",
     "src/node-sockets.ts",
-    "src/plugins.ts",
-    "src/plugins/credential-proxy.ts",
     "src/plugins/postgres-tunnel.ts",
     "src/plugins/vault-kv.ts",
     "src/socket-admission.ts",

@@ -17,10 +17,10 @@
 // no vault call; a proof replayed is refused before it can make a change
 // twice. A row edited behind the vault can send a proof to the wrong gate,
 // which never issued its nonce, or name a key the vault's row does not.
-import { hashToken, parseProof, tokenKind, verifyProof } from '@coffre/core/identity';
+import { hashToken, parseProof, tokenKind, verifyProof, type GateCount, type ParsedProof } from '@coffre/core/identity';
 
 import { ApiError } from './api/errors.ts';
-import { routedSession } from './db/queries/sessions.ts';
+import { routedSession, type RoutedSession } from './db/queries/sessions.ts';
 import { errorResponse, jsonResponse } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
@@ -54,7 +54,7 @@ export class SessionRefused extends Error {
 const refused = (error: ApiError, headers: HeadersInit = {}) => new SessionRefused(errorResponse(error, headers));
 
 /** The vault's own answer for a credential that does not stand, so that the app's says no more. */
-const unknown = () => refused(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'));
+export const unknown = () => refused(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'));
 
 /** A proof refused (RFC 9449, section 7.1): 401, `invalid_dpop_proof`, and why. */
 const proofRefused = (reason: string, message: string) => refused(new ApiError('unauthenticated', message, reason), { 'www-authenticate': 'DPoP error="invalid_dpop_proof"' });
@@ -97,6 +97,18 @@ export type ProvenSession = { proof: string; nonce: string };
  * the gate; nothing of the vault's.
  */
 export async function provenSession(request: Request, runtime: Pick<CoffreRuntime, 'db' | 'auth' | 'publicUrl' | 'gates'>, token: string): Promise<ProvenSession> {
+  const parsed = sessionProof(request, runtime, token);
+  const row = await routedSession(runtime.db, hashToken(token));
+  if (row === null) throw unknown();
+  return (await gated(request, runtime, token, parsed, row)).proven;
+}
+
+/**
+ * The checks before any I/O, for a request `token` came with as a
+ * workload's session: a deployment that takes sessions, with a gate, and a
+ * proof of the right shape. Throws `SessionRefused`.
+ */
+export function sessionProof(request: Request, runtime: Pick<CoffreRuntime, 'auth' | 'gates'>, token: string): ParsedProof {
   const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
   if (workloads === null || tokenKind(token) !== 'workload') throw unknown();
   // A deployment that runs no gate takes no session: nothing would stop a replay.
@@ -105,17 +117,32 @@ export async function provenSession(request: Request, runtime: Pick<CoffreRuntim
   if (header === null) throw proofRefused('dpop', "a DPoP proof, signed by the session's key, comes with every request");
   const parsed = parseProof(header);
   if (!parsed.ok) throw proofRefused(parsed.reason, parsed.message);
+  return parsed;
+}
 
-  const row = await routedSession(runtime.db, hashToken(token));
-  if (row === null) throw unknown();
-  const verified = await verifyProof(parsed, { method: request.method, url: signedUrl(request, runtime.publicUrl), jkt: row.jkt, token });
+/**
+ * The proof `sessionProof` parsed, held to the request and to the session
+ * the app routed it by (`row`, read unchecked), then taken by that
+ * service's gate, with `counts` in the same call. `content`: the request's
+ * headers and its body's line, which a proxied request's proof signs
+ * (`hdr`, `req`). Throws `SessionRefused`; a count refused is 429 `limit`.
+ */
+export async function gated(
+  request: Request,
+  runtime: Pick<CoffreRuntime, 'publicUrl' | 'gates'>,
+  token: string,
+  parsed: ParsedProof,
+  row: RoutedSession,
+  more: { content?: { headers: Headers; body: string }; counts?: readonly GateCount[] } = {},
+): Promise<{ proven: ProvenSession; hdr: readonly string[] | null }> {
+  const verified = await verifyProof(parsed, { method: request.method, url: signedUrl(request, runtime.publicUrl), jkt: row.jkt, token, ...(more.content === undefined ? {} : { content: more.content }) });
   if (!verified.ok) throw proofRefused(verified.reason, verified.message);
 
   try {
-    const gate = runtime.gates(row.principal);
+    const gate = runtime.gates!(row.principal);
     if (verified.nonce === null) throw useNonce(await gate.nonce());
-    const admitted = await gate.admit({ replay: { session: row.id, jti: verified.jti, nonce: verified.nonce } });
-    if (admitted.ok) return { proof: verified.jkt, nonce: admitted.nonce };
+    const admitted = await gate.admit({ replay: { session: row.id, jti: verified.jti, nonce: verified.nonce }, ...(more.counts === undefined || more.counts.length === 0 ? {} : { counts: more.counts }) });
+    if (admitted.ok) return { proven: { proof: verified.jkt, nonce: admitted.nonce }, hdr: verified.hdr };
     switch (admitted.reason) {
       case 'use_dpop_nonce':
         throw useNonce(admitted.nonce);
@@ -124,8 +151,8 @@ export async function provenSession(request: Request, runtime: Pick<CoffreRuntim
       case 'overloaded':
         throw refused(new ApiError('too_many_requests', 'this workload sends more requests than its gate takes: try again shortly', 'overloaded'), { 'retry-after': '1' });
       case 'limit':
-        // A session's API call asks the gate to count nothing, so no count refuses it.
-        throw new Error(`the workload gate refused a count it was not asked for: ${admitted.key}`);
+        if (more.counts === undefined || more.counts.length === 0) throw new Error(`the workload gate refused a count it was not asked for: ${admitted.key}`);
+        throw refused(new ApiError('too_many_requests', `past this workload's limit for ${admitted.key}`, 'limit'), { 'retry-after': String(Math.ceil(admitted.retryAfterMs / 1000)) });
     }
   } catch (error) {
     if (error instanceof SessionRefused) throw error;
