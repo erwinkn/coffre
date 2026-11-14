@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
+import type { Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
@@ -335,7 +336,7 @@ test("holes by the trees' counts: uses below the first not pruned are not missin
   assert.deepEqual(holesOf(head, null, all.slice(2), false), []);
 });
 
-test("a stretch by many objects reads twice its rows in index rows and one more per object, and no object's past its newest", async () => {
+test('a stretch by many objects streams them, reading twice its rows in index rows and one more per object, and any plan shows the same', async () => {
   // 60,000 entries, each about one of 200 environments, 20 to each of 10 projects, and so in the index under both: 120,000 rows.
   await world.owner.execute(sql`INSERT INTO log (seq, kept, leaf, body) SELECT g, true, g, '{}' FROM generate_series(1000000, 1059999) g`);
   await world.owner.execute(sql`INSERT INTO log_index (object, seq) SELECT o, g FROM generate_series(1000000, 1059999) g, LATERAL (VALUES ('environment:e' || g % 200), ('project:p' || g % 200 / 20)) objects(o)`);
@@ -354,6 +355,20 @@ test("a stretch by many objects reads twice its rows in index rows and one more 
   const tenRead = indexRows(tenPlan!['QUERY PLAN'][0].Plan);
   assert.ok(tenRead <= 10 * 300, `${tenRead} index rows`);
   assert.deepEqual(await logStretch(world.owner, ten).then(({ rows, more }) => [rows.length, rows[0]!.seq, rows.at(-1)!.seq, more]), [1000, 1059809, 1040000, true]);
+  // Ten projects of 6,000 entries each, more than the merge takes: streamed, whatever their count.
+  const projects = { objects: objects.slice(0, 10), below: null, rows: 1000 };
+  const shownBy = (tx: Queryable) => logStretch(tx, projects).then(({ rows, more }) => [rows.length, rows[0]!.seq, rows.at(-1)!.seq, more]);
+  const [projectPlan] = await rowsOf<{ 'QUERY PLAN': [{ Plan: Node }] }>(world.owner, sql`EXPLAIN (ANALYZE, FORMAT JSON) ${stretchOf(projects)}`);
+  assert.ok(indexRows(projectPlan!['QUERY PLAN'][0].Plan) <= 2 * 1000 + 10, `${indexRows(projectPlan!['QUERY PLAN'][0].Plan)} index rows`);
+  assert.deepEqual(await shownBy(world.owner), [1000, 1059999, 1059000, true]);
+  // A sort, forced, reads every entry they hold, and shows the same page: the bound on what it reads is the plan's, not the statement's.
+  await world.owner.transaction(async (tx) => {
+    await tx.execute(sql`SET LOCAL enable_indexscan = off`);
+    await tx.execute(sql`SET LOCAL enable_indexonlyscan = off`);
+    const [sorted] = await rowsOf<{ 'QUERY PLAN': [{ Plan: Node }] }>(tx, sql`EXPLAIN (ANALYZE, FORMAT JSON) ${stretchOf(projects)}`);
+    assert.equal(indexRows(sorted!['QUERY PLAN'][0].Plan), 60000);
+    assert.deepEqual(await shownBy(tx), [1000, 1059999, 1059000, true]);
+  });
   // The newest thousand, each once, and more below.
   const stretch = await logStretch(world.owner, at);
   assert.deepEqual([stretch.rows.length, stretch.rows[0]!.seq, stretch.rows.at(-1)!.seq, stretch.more], [1000, 1059999, 1059000, true]);
