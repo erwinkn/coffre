@@ -115,7 +115,7 @@ function marks(output: string): Record<string, string> {
   return Object.fromEntries(lines.map(([, mark, name]) => [name!.trim(), mark!]));
 }
 
-/** The token's run, from CI: as no one, then as the token, which is no owner and skips verification. */
+/** The token's run, from CI: as no one, then as the token, which reads no audit log but its project's, so holds none to its head. */
 export async function verifyWithToken(cli: Cli, live: { token: string; canary: Canary }): Promise<string> {
   const { canary } = live;
   // As a CI step does: the token piped to `coffre login --token`, then the canary's value to the check.
@@ -124,10 +124,10 @@ export async function verifyWithToken(cli: Cli, live: { token: string; canary: C
   const run = await cli.run(['verify', 'instance', cli.origin, '--canary', `${canary.project}/${canary.environment}/${canary.key}`], {}, `${canary.value}\n`);
   const seen = marks(run.output);
   expect(run.code === 0, `coffre verify instance with a token exited ${run.code}`, run.output);
-  expect(seen['token verification'] === '–', 'a token that is no owner did not skip verification', run.output);
+  expect(!('owner log proofs' in seen), "a token's run held the log to its head, which only an owner's reads whole", run.output);
   expect(!run.output.includes(live.token) && !run.output.includes(canary.value), 'the run printed its token or its canary', run.output);
   const ok = Object.values(seen).filter((mark) => mark === '✓').length;
-  return `${ok} checks ok as no one and as the token, its verification skipped; neither the token nor the canary shown`;
+  return `${ok} checks ok as no one and as the token; neither the token nor the canary shown`;
 }
 
 /** What a run as an owner must leave as it was: every member and their grants, but its service; every project and environment. */
@@ -163,7 +163,8 @@ export async function verifyAsOwner(cli: Cli): Promise<{ detail: string; value: 
   const run = await cli.run(['verify', 'instance']);
   const seen = marks(run.output);
   expect(run.code === 0, `coffre verify instance as the admin exited ${run.code}`, run.output);
-  // Signed in, nothing is out of reach: a check skipped, such as the token's verification, would only be noise.
+  // Signed in, nothing is out of reach: a check skipped would only be noise.
+  expect(seen['owner log proofs'] === '✓', "the run did not hold the log's newest entries to the head the vault signed", run.output);
   const skipped = Object.entries(seen).filter(([, mark]) => mark !== '✓').map(([name]) => name);
   expect(skipped.length === 0, `the run skipped ${skipped.join(', ')}`, run.output);
   expect(!SHOWN.test(run.output) && !run.output.includes(session), 'the run printed a credential, the session or its canary', SHOWN.exec(run.output)?.[0]);

@@ -58,6 +58,7 @@ export type {
 export { ageInDays, olderThan } from './age.ts';
 export { byFolder, foldersOf } from './folders.ts';
 export { apiMember, serviceName, shownMember } from './members.ts';
+export { judgeProofs, type ProofJudgment } from './proofs.ts';
 export { unreachable, Unreachable } from './reach.ts';
 
 export type RouteKey = keyof Api;

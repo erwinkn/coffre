@@ -13,7 +13,7 @@
 import { randomBytes } from 'node:crypto';
 import { parseArgs } from 'node:util';
 
-import { CoffreError, shownMember, type CoffreClient } from '@coffre/client';
+import { CoffreError, judgeProofs, shownMember, type CoffreClient, type ProofJudgment } from '@coffre/client';
 
 import { readSecret } from '../secret.ts';
 import { browsersOnly, credentialHeaders, instanceOrigin, resolveTarget, SIGN_IN_HINT, signInError, type Local, type SessionFlags, type Store } from '../instance.ts';
@@ -42,9 +42,10 @@ Checks an instance from outside, the current one unless <url> names another:
   as an owner      with your \`coffre login\` session, as an owner or a root
                    admin: finds or makes conformance/live and
                    service:conformance-probe, issues it a credential, writes a
-                   fresh canary, and runs the token's checks below. The
-                   credential is revoked
-                   however the run ends, and your session stays signed in
+                   fresh canary, and runs the token's checks below; then
+                   holds the audit log's newest entries to the head the vault
+                   signed. The credential is revoked however the run ends,
+                   and your session stays signed in
   with a token     signed in with a bearer token, \`coffre login <url> --token\`,
                    as CI is: one that reads the canary's environment and
                    holds auditor on its project. Its value nowhere but its
@@ -134,10 +135,10 @@ export async function verifyInstance(
 
   // The session `coffre login` made, and none other: no second sign-in.
   if (store.instances[origin] === undefined) stop(1, `coffre: ${signInError(`not signed in: run \`coffre login ${origin}\` first`)}`);
-  let api: CoffreClient;
+  let headers: () => Record<string, string>;
   try {
     const to = resolveTarget({ ...session, url: origin }, store);
-    api = client(origin, () => credentialHeaders(to.credential), send);
+    headers = () => credentialHeaders(to.credential);
   } catch (error) {
     stop(1, `coffre: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -149,15 +150,16 @@ export async function verifyInstance(
   );
   // Behind Access, as the checks found, the session is not sent.
   if (await anonymousChecks(report, origin, send)) stop(1, `coffre: ${browsersOnly(origin)}`);
-  await ownerChecks(report, origin, api, send);
+  await ownerChecks(report, origin, headers, send);
   finish(out, report);
 }
 
 /**
- * As the signed-in owner: who they are, set up, the token's checks; and, however it ends, a Ctrl-C included, the credential
+ * As the signed-in owner: who they are, set up, the token's checks, the log's newest proofs; and, however it ends, a Ctrl-C included, the credential
  * revoked. The session stays as it was.
  */
-export async function ownerChecks(report: Checks, origin: string, api: CoffreClient, send: typeof fetch): Promise<void> {
+export async function ownerChecks(report: Checks, origin: string, headers: () => Record<string, string>, send: typeof fetch): Promise<void> {
+  const api = client(origin, headers, send);
   const owner = await report.check('owner', {}, () => signedIn(api, origin));
   if (owner === undefined) return;
   const issued: Issued[] = [];
@@ -172,6 +174,7 @@ export async function ownerChecks(report: Checks, origin: string, api: CoffreCli
   try {
     const live = await report.check('setup', {}, () => setUp(api, issued));
     await tokenChecks(report, origin, live ?? {}, send);
+    await report.check('owner log proofs', {}, () => logProofs(origin, headers, send));
   } finally {
     process.off('SIGINT', onInt);
     process.off('SIGTERM', onTerm);
@@ -226,6 +229,46 @@ async function setUp(api: CoffreClient, issued: Issued[]): Promise<{ detail: str
     detail: `${made.length === 0 ? 'all found' : `made ${made.join(', ')}`}; a fresh ${place}/${PROBE.key} and a fresh credential for ${shownMember(PROBE.service)}`,
     value: { token: credential.token, canary: { project: PROBE.project, environment: PROBE.environment, key: PROBE.key, value } },
   };
+}
+
+/** How long a page racing its head is asked again: the signer publishes a batch within its minute. */
+const PROOF_WAIT = { seconds: 90, every: 2 };
+
+/**
+ * The newest page of the whole log, held to the head the vault vouched for in the page's own call, as conformance
+ * holds it (`judgeProofs`): entries the head numbers proven, those past it not, and the stretch lacking none. One read
+ * of at most 200 entries, whatever the log's length; the whole log is the signer's re-check, and `--full`'s.
+ */
+async function logProofs(origin: string, headers: () => Record<string, string>, send: typeof fetch): Promise<string> {
+  const wait = PROOF_WAIT;
+  // Every request is held to the wait too, its body included: a page that stalls ends this check, not the clean-up.
+  const deadline = AbortSignal.timeout(wait.seconds * 1000);
+  const api = client(origin, headers, (input, init) => send(input, { ...init, signal: deadline }));
+  let judged: ProofJudgment | undefined;
+  let listed = 0;
+  // A page racing its head (a batch signed, or a pruning committed, between the vault reading its head and the app
+  // reading the log) is asked again, and judged as it last read if it still races at the deadline.
+  while (!deadline.aborted) {
+    const page = await api.audit.list({ detail: '1', limit: 200 }).catch((error: unknown) => {
+      if (deadline.aborted) return null;
+      throw error;
+    });
+    if (page === null || deadline.aborted) break;
+    judged = judgeProofs(page);
+    listed = page.entries.length;
+    if (!judged.racing) break;
+    await new Promise((resolve) => setTimeout(resolve, wait.every * 1000));
+  }
+  expect(judged !== undefined, `no page of the audit log came in ${wait.seconds} s`);
+  const { head, proven, numbered, failed, misplaced, missing } = judged;
+  expect(head !== null, `the vault has signed no head of the audit log in ${wait.seconds} s: is its signer running?`);
+  expect(failed.length === 0, 'entries the head numbers do not prove against it: the log was changed after it was signed', failed.slice(0, 5));
+  expect(misplaced.length === 0, 'an entry the head numbers is not proven, or one past it is', { head, misplaced: misplaced.slice(0, 5) });
+  expect(missing !== null, 'the page is not of the whole log, so it cannot say what it lacks', { head });
+  expect(missing.length === 0, 'the newest stretch of the audit log lacks entries the head counts', { head, missing: missing.slice(0, 5) });
+  expect(proven > 0, `no entry is proven against the head of ${head.size} after ${wait.seconds} s`, { head });
+  const past = listed - numbered;
+  return `${proven} ${proven === 1 ? 'entry' : 'entries'} of the newest page proven against the vault's head of ${head.size}, signed at ${head.signedAt}; ${past} past it, none missing`;
 }
 
 /** Revoke what the run issued, and say what stays: the session among it. */

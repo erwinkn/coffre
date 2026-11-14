@@ -113,8 +113,9 @@
   proves each entry it shows against the head the signer signed, marking any
   past it as not proven. `coffre verify log` says so; a walk of the whole
   log, `coffre verify --full`, is designed, not built. `coffre verify
-  instance` no longer verifies the log as its last step, as the owner or the
-  token.
+  instance`, as the owner, holds the log's newest page, 200 entries, to the
+  head the signer signed (`owner log proofs`), where 0.14.7 walked the whole
+  log; as a token, it no longer checks the log.
 - **A restored version comes back as typed.** Restoring a version a recipe
   made, or one half of a key pair, writes it as a value typed by hand:
   Regenerate no longer makes its next one by that recipe, and the pair's
