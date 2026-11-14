@@ -1,11 +1,10 @@
 // The checks, in the order they build on each other: people first, then
-// what they may do, then what was written down, and last the tampering,
-// which leaves the audit log broken for good.
+// what they may do, then what was written down, and last the tampering.
 import type { Deployment } from './harness.ts';
 import { Report } from './report.ts';
+import { UNSERVED } from './unserved.ts';
 import { bulkLimit, crossSite, grantScoping, instanceRoles, membersOnly, offboarding } from './checks/access.ts';
-import { checkpoints, deletedTail, forgedVaultEntry, missingEntry, noAuditNoValue, revealAudited, rewrittenEntry, verification, writesAgree } from './checks/audit.ts';
-import { earlierCheckpoint } from './checks/checkpoints.ts';
+import { noAuditNoValue, revealAudited, writesAgree } from './checks/audit.ts';
 import { deletion } from './checks/deletion.ts';
 import { folders, forks, inheritance, loosening, missingKeys, personalConfigs, references } from './checks/environments.ts';
 import { appLogin, vaultLogin } from './checks/logins.ts';
@@ -22,7 +21,7 @@ import { cliSignsIn, exchangesLimited, keysUploaded, runSignsIn, runsRefused, ru
 
 /** The names of the checks that failed. */
 export async function conform(deployment: Deployment, options: { bulkLimit: number; browser: string | null }): Promise<string[]> {
-  const report = new Report();
+  const report = new Report(undefined, UNSERVED);
   await report.check('health', {}, () => health(deployment));
   await report.check('browser bundle', {}, () => browserBundle(deployment));
   const admin = await report.check('sign-in', {}, () => signInAdmin(deployment));
@@ -89,13 +88,11 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('exchanges limited', { binding }, () => exchangesLimited(deployment));
   await report.check('tokens unlogged', { binding }, () => tokensUnlogged(deployment));
 
-  await report.check('checkpoints', { people }, ({ people }) => checkpoints(deployment, people));
   await report.check('keys behind writes', { people }, ({ people }) => writesAgree(deployment));
   await report.check('no audit, no value', all, ({ people, canaries }) => noAuditNoValue(deployment, people, canaries));
 
   await report.check('access authorship', { people }, ({ people }) => accessAuthorship(deployment, people));
   await report.check('no audit, no access', { people }, ({ people }) => noAuditNoAccess(deployment, people));
-  await report.check('full verification', { people }, ({ people }) => verification(deployment, people));
   await report.check('checkpoint refused', {}, () => refusedCheckpoint(deployment));
   await report.check('checkpoint missing', {}, () => missingCheckpoint(deployment));
   await report.check('app login', {}, () => appLogin(deployment));
@@ -109,15 +106,6 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('forged approval', { people }, ({ people }) => forgedApproval(deployment, people));
   await report.check('edited generation', { people }, ({ people }) => editedGeneration(deployment, people));
   await report.check('canary scan', all, ({ people, canaries }) => canaryScan(deployment, people, canaries));
-  for (const author of ['app', 'vault'] as const) {
-    await report.check(`${author} rewritten`, { people }, ({ people }) => rewrittenEntry(deployment, people, author));
-  }
-  await report.check('vault forged', { people }, ({ people }) => forgedVaultEntry(deployment, people));
-  await report.check('middle gap', { people }, ({ people }) => missingEntry(deployment, people, 'middle'));
-  await report.check('middle cut', { people }, ({ people }) => middleCut(deployment, people));
-  await report.check('first gap', { people }, ({ people }) => missingEntry(deployment, people, 'first'));
-  await report.check('batch gap', { people }, ({ people }) => missingEntry(deployment, people, 'batch'));
-  await report.check('earlier checkpoint', { people }, ({ people }) => earlierCheckpoint(deployment, people));
-  await report.check('tail deleted', { people }, ({ people }) => deletedTail(deployment, people));
+  await report.check('middle cut', {}, () => middleCut(deployment));
   return report.failed;
 }

@@ -57,8 +57,6 @@ export async function memberTampering(deployment: Deployment, people: People, ki
         AND subject_principal = $1 AND code = $2`, [person.member, kind === 'stale' ? 'stale' : 'mac']);
       expect(reports.length > 0, 'the tampering was not logged at use', reports);
       expect((await admin.api.members.get(person.member)).status === 'tampered', 'the refused member is not marked tampered');
-      const verified = await admin.api.audit.verify();
-      expect(!verified.ok && verified.author === 'vault' && verified.failedAtSeq === null, 'the tampered member verifies', verified);
     } finally {
       await restoreRow(sql, 'vault_members', restored, 'principal');
       await query(sql, 'DELETE FROM vault_grants WHERE principal = $1', [person.member]);
@@ -66,7 +64,6 @@ export async function memberTampering(deployment: Deployment, people: People, ki
     }
   });
   expect((await person.api.secrets.reveal(DEV)).values.API_KEY !== undefined, 'restoring the member did not restore legitimate use');
-  expect((await admin.api.audit.verify()).ok, 'the restored member did not verify');
   return `${kind === 'stale' ? 'a genuine older member row, put back,' : `a forged ${kind}`} refused at use as tampered, logged, then restored`;
 }
 
@@ -162,6 +159,5 @@ export async function sealingRace(deployment: Deployment, people: People): Promi
     // Removal recovers this disposable member even if a broken build sealed the forged grant.
     await admin.api.members.remove(person.member);
   }
-  expect((await admin.api.audit.verify()).ok, 'the log did not verify after recovering the sealing-race member');
   return 'a grant inserted while the vault waited on the head was refused as tampered and logged; removal recovered the member';
 }

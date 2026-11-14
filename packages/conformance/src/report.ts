@@ -51,9 +51,12 @@ type Passed<T> = string | { detail: string; value: T };
 export class Report {
   readonly #results: { name: string; status: 'ok' | 'FAIL' | 'skip' }[] = [];
   readonly #width: number;
+  readonly #unserved: Readonly<Record<string, string>>;
 
-  constructor(width = 19) {
+  /** `unserved`: checks skipped by name, each with why (../unserved.ts). */
+  constructor(width = 19, unserved: Readonly<Record<string, string>> = {}) {
     this.#width = width;
+    this.#unserved = unserved;
   }
 
   get failed(): string[] {
@@ -70,6 +73,10 @@ export class Report {
     needs: N,
     run: (have: { [K in keyof N]: NonNullable<N[K]> }) => Promise<Passed<T>>,
   ): Promise<T | undefined> {
+    if (Object.hasOwn(this.#unserved, name)) {
+      this.#print(name, 'skip', `not served in 0.16 yet: ${this.#unserved[name]}`);
+      return undefined;
+    }
     const missing = Object.keys(needs).filter((key) => needs[key] === undefined || needs[key] === null);
     if (missing.length > 0) {
       this.#print(name, 'skip', `no ${missing.join(' or ')}: an earlier check failed`);

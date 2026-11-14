@@ -8,7 +8,7 @@ import { CoffreError } from '@coffre/client';
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, refused } from '../report.ts';
-import { canary, DEV, PROD, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
+import { canary, DEV, PROD, PROJECT, valuesIn, type Canaries, type People, type Person } from './people.ts';
 import { query } from './storage.ts';
 
 /** Where the fork check copies dev to; archived once checked. */
@@ -255,10 +255,14 @@ export async function loosening({ admin, reader, leaver }: People): Promise<stri
   try {
     await refused('a viewer read a sensitive value', reader.api.secrets.reveal(path));
     expect((await leaver.api.secrets.list(DEV)).loosenable === false, 'a developer on dev is told they make a sensitive value a secret in place');
-    await refused('a developer on dev made a sensitive value a secret in place', leaver.api.secrets.set(DEV, { [LOOSE]: { sensitivity: 'secret' } }));
+    const theirs = await loosen(leaver);
+    expect(theirs.status >= 400 && theirs.status < 500, `a developer on dev made a sensitive value a secret in place, answered ${theirs.status}`, await theirs.text());
     expect((await admin.api.secrets.list(DEV)).loosenable === true, 'the admin, an Owner of the whole instance, is told they do not loosen');
-    const marked = await admin.api.secrets.set(DEV, { [LOOSE]: { sensitivity: 'secret' } });
-    expect(!JSON.stringify(marked).includes(value), "the admin's loosening answered the value", marked);
+    const answer = await loosen(admin);
+    const text = await answer.text();
+    expect(answer.ok, `the admin's loosening answered ${answer.status}`, text);
+    expect(!text.includes(value), "the admin's loosening answered the value", text);
+    const marked = JSON.parse(text) as { keys: Record<string, unknown> };
     expect(JSON.stringify(marked.keys[LOOSE]) === JSON.stringify({ version: 2, sensitivity: 'secret' }), 'the loosening made no new secret version', marked.keys);
     const read = await reader.api.secrets.reveal(path);
     expect(read.values[LOOSE] === value, "the reader did not read the loosened value as dev's secret");
@@ -270,6 +274,15 @@ export async function loosening({ admin, reader, leaver }: People): Promise<stri
     await admin.api.secrets.set(DEV, { [LOOSE]: null });
   }
   return 'the admin makes a sensitive value a secret in place, answered no value, as a new version, logged as secret.loosen; a developer on dev may not';
+}
+
+/**
+ * `{ sensitivity }` alone, a nature changed in place, as the page sends it:
+ * the client's types carry it again once 0.16 serves it (UNSERVED, in
+ * ../unserved.ts).
+ */
+function loosen(person: Person): Promise<Response> {
+  return person.browser.send('PATCH', `/api/secrets/${DEV}`, { [LOOSE]: { sensitivity: 'secret' } });
 }
 
 /**
