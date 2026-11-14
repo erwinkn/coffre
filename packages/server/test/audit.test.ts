@@ -27,7 +27,7 @@ after(() => app.close());
 
 const [ada, al, aud, bo, cy, ed] = ['ada', 'al', 'aud', 'bo', 'cy', 'ed'].map(user) as [string, string, string, string, string, string];
 
-type Entry = { seq: number; action: string; decision: string; reason: string | null; actorId: string; project: string | null; environment: string | null; key: string | null; version: number | null; detail: boolean; proof: string; token: { id: string; label: string } | null; secrets: { key: string | null; version: number | null }[] | null };
+type Entry = { seq: number; action: string; decision: string; reason: string | null; actorId: string; project: string | null; environment: string | null; key: string | null; version: number | null; detail: boolean; proof: string; token: { id: string; label: string } | null; operationId: string | null; requestId: string | null; secrets: { key: string | null; version: number | null }[] | null };
 type Page = { entries: Entry[]; more: boolean; next: number | null; hidden?: { action: string; count: number }[]; head: { size: number; signedAt: string } | null; holes: { above: number | null; below: number | null; kept: number; aging: number }[] | null };
 type Body = { error?: string; reason?: string; message?: string } & Record<string, unknown>;
 
@@ -363,6 +363,17 @@ test('an audit.read grant on an archived environment still reads its log, and /m
   // No environment Ed may work in is left; the log they may read is.
   const [status, me] = await call('ed-cli', 'GET', '/me');
   assert.deepEqual([status, me.canReadAudit, me.environments], [200, true, []]);
+});
+
+test("an entry's operation is the request that wrote it, the one the read's or the change's answer names", async () => {
+  const [, wrote] = await call('cy-cli', 'PATCH', '/secrets/market/dev', { API_KEY: 'v2' });
+  const [, read] = await call('ed-cli', 'POST', '/reveals', { path: 'market/dev/API_KEY' });
+  assert.ok(typeof wrote.operationId === 'string' && typeof read.operationId === 'string' && wrote.operationId !== read.operationId);
+  await sign();
+  const [newest] = await page('aud-cli', '?path=market/dev/API_KEY');
+  const [reveal, write] = newest.entries;
+  assert.deepEqual([reveal!.action, reveal!.operationId, reveal!.requestId], ['secret.read', read.operationId, read.operationId]);
+  assert.deepEqual([write!.action, write!.operationId, write!.requestId], ['secret.write', wrote.operationId, wrote.operationId]);
 });
 
 test("an entry a personal token wrote names the token, by its id and label, a read's and a change's; its person's own session names none", async () => {

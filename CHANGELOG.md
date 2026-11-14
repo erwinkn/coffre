@@ -41,6 +41,13 @@
   can still take away their role and grants. The deployment's configured
   Owner is refused 409 `configured_owner` where 0.14.7 said 403
   `not_allowed`.
+- **An audit entry's operation again.** `GET /api/audit` gives each entry
+  an `operationId` again, the request that wrote it: the one a reveal's
+  or a change's answer names, so `coffre verify instance` finds its
+  reveal's entry, which it waits up to 90 s for the signer to publish.
+  Entries one request wrote share it, and the audit page shows them as
+  one line, as 0.14.7 did. `coffre grant` to someone never admitted, 404
+  `not_a_member` since 0.16 (0.14: 409), says to admit them first again.
 - **The Vault KV adapter is back** (`vaultKv()`, `docs/vault.md`): External
   Secrets Operator, `vault kv get` and the rest read through `/v1` as on
   0.14, a read the API's reveal as the token's holder (one vault `use`),

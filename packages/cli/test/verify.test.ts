@@ -21,6 +21,7 @@ import { LOG_GONE } from '../src/backup-help.ts';
 import { browsersOnly, signInError } from '../src/instance.ts';
 import { Failure, Skip } from '../src/verify/checks.ts';
 import { keyVerdict, type KeyMaterial } from '../src/verify/keys.ts';
+import { tokenReveal } from '../src/verify/token.ts';
 import { inTerminal, ptySkip, visible } from './pty.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
@@ -315,3 +316,49 @@ test('coffre verify keys, on a terminal, asks for the key without showing it', {
 function cleanEnv(): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('COFFRE_')));
 }
+
+// --- the token's reveal, found in the log once the signer publishes it -----------
+
+const CANARY = { project: 'conformance', environment: 'live', key: 'CANARY', value: 'coffre-canary-1' };
+
+/** A coffre whose reveal is request `r-1`, and whose log lists `pages`, one a read, the last again after. */
+function revealing(pages: unknown[][]): { send: typeof fetch; reads: () => number } {
+  let reads = 0;
+  const send = (async (input: Request) => {
+    const { pathname } = new URL(input.url);
+    if (pathname === '/api/reveals') return Response.json({ operationId: 'r-1', values: { CANARY: CANARY.value } });
+    assert.equal(pathname, '/api/audit');
+    return Response.json({ entries: pages[Math.min(reads++, pages.length - 1)], more: false, next: null, head: null, holes: null });
+  }) as typeof fetch;
+  return { send, reads: () => reads };
+}
+
+const read = (operationId: string) => ({ seq: 7, action: 'secret.read', decision: 'allow', key: 'CANARY', operationId, requestId: operationId });
+
+test("the token's reveal is looked for again until the signer has published it, and found by its operation", async () => {
+  const coffre = revealing([[], [read('r-0')], [read('r-0'), read('r-1')]]);
+  const said = await tokenReveal('http://coffre.test', 'coffre_svc_x', coffre.send, CANARY, { member: 'token:live' }, { seconds: 5, every: 0.01 });
+  assert.equal(said, 'one secret.read of CANARY, entry 7, under request r-1');
+  assert.equal(coffre.reads(), 3);
+});
+
+test("a reveal the log never lists fails at the wait's end, and a read that stalls ends with it", async () => {
+  const never = revealing([[read('r-0')]]);
+  await assert.rejects(
+    tokenReveal('http://coffre.test', 'coffre_svc_x', never.send, CANARY, { member: 'token:live' }, { seconds: 0.2, every: 0.01 }),
+    (error: unknown) => error instanceof Failure && error.message === 'the reveal is logged 0 times, not once, in 0.2 s',
+  );
+  assert.ok(never.reads() > 1);
+  // A read that never answers: the wait's deadline aborts it, and the reveal is judged on what was read before.
+  const stalled = (async (input: Request, init?: RequestInit) => {
+    if (new URL(input.url).pathname === '/api/reveals') return Response.json({ operationId: 'r-1', values: { CANARY: CANARY.value } });
+    const signal = init?.signal ?? input.signal;
+    return new Promise<Response>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason)));
+  }) as typeof fetch;
+  const started = Date.now();
+  await assert.rejects(
+    tokenReveal('http://coffre.test', 'coffre_svc_x', stalled, CANARY, { member: 'token:live' }, { seconds: 0.2, every: 0.01 }),
+    (error: unknown) => error instanceof Failure && /^the reveal is logged 0 times/.test(error.message),
+  );
+  assert.ok(Date.now() - started < 2000);
+});

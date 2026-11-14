@@ -361,7 +361,7 @@ async function headersFor(to: Target): Promise<Record<string, string>> {
 }
 
 /** What to do next, for a refusal a command expects: its status and message, to a line, or null. */
-/** What to suggest after a refusal, by its status and the server's reason for it (`principal_not_registered`), never its words. */
+/** What to suggest after a refusal, by its status and the server's reason for it (`not_a_member`), never its words. */
 type Hint = (status: number, reason: string | null) => string | null;
 
 /**
@@ -1719,7 +1719,8 @@ async function grantAccess(args: string[]): Promise<void> {
   const who = memberOf(principalId, values.service);
   // A member is admitted before they hold anything: grant does not make one.
   const admit = `coffre admit ${shownMember(who).replace(/^user:/, '')}`;
-  const hint: Hint = (status, reason) => (status === 409 && reason === 'principal_not_registered' ? `admit them first, \`${admit}\`` : null);
+  // 0.16 answers 404 `not_a_member` for someone never admitted, where 0.14 answered 409 `principal_not_registered`.
+  const hint: Hint = (status, reason) => (status === 404 && reason === 'not_a_member' ? `admit them first, \`${admit}\`` : null);
   // Declarative: this place gets this role, replacing any other role there.
   await client(target(), hint).access.set(who, {
     [scope]: values.expires ? { role, until: values.expires } : role,

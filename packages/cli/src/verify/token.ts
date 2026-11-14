@@ -2,7 +2,7 @@
 // audits its project: its value nowhere but its reveal, the reveal audited,
 // nothing else in reach. The token is the operator's, from CI, or the one
 // `coffre verify instance` issues for the run when an owner is signed in.
-import { CoffreError, shownMember, type AuthInfo, type CoffreClient } from '@coffre/client';
+import { CoffreError, shownMember, type AuditEntryView, type AuthInfo, type CoffreClient } from '@coffre/client';
 import { getCalls, getUrls } from '@coffre/client/routes';
 
 import { CLOSED_PAGES, NOBODY, NOWHERE, OPEN_PAGES } from './anonymous.ts';
@@ -39,7 +39,7 @@ export async function tokenChecks(
   const api = setup.token === undefined ? undefined : bearer(origin, setup.token, send);
   const token = await report.check(`${prefix}token`, { api, canary: setup.canary }, ({ api, canary }) => whoIsToken(origin, api, canary, send));
   const needs = { api, canary: setup.canary, token, secret: setup.token };
-  await report.check(`${prefix}token reveal`, needs, ({ api, canary, token }) => tokenReveal(api, canary, token));
+  await report.check(`${prefix}token reveal`, needs, ({ canary, token, secret }) => tokenReveal(origin, secret, send, canary, token));
   await report.check(`${prefix}token scan`, needs, ({ canary, secret }) => tokenScan(origin, secret, canary, send));
   await report.check(`${prefix}token scope`, needs, ({ api, canary }) => tokenScope(api, canary));
 }
@@ -63,22 +63,43 @@ async function whoIsToken(origin: string, api: CoffreClient, canary: Canary, sen
   return { detail: `${shownMember(member)}, reading ${place}`, value: { member } };
 }
 
-/** Reveal the canary once, and find its `secret.read` in the audit log, by the reveal's request. */
-async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Promise<string> {
+/** How long the reveal's entry is looked for: the signer publishes what the vault logged within its minute. */
+const ENTRY_WAIT = { seconds: 90, every: 2 };
+
+/**
+ * Reveal the canary once, and find its `secret.read` in the audit log, by the reveal's operation. The log lists it
+ * once the signer has published it, so the log is read again until the wait's end, each read held to it too.
+ */
+export async function tokenReveal(
+  origin: string,
+  secret: string,
+  send: typeof fetch,
+  canary: Canary,
+  token: Token,
+  wait: { seconds: number; every: number } = ENTRY_WAIT,
+): Promise<string> {
   const path = `${canary.project}/${canary.environment}`;
-  const { operationId, values } = await api.secrets.reveal(`${path}/${canary.key}`);
+  const { operationId, values } = await bearer(origin, secret, send).secrets.reveal(`${path}/${canary.key}`);
   expect(values[canary.key] === canary.value, `${path}/${canary.key} is not the value given as the canary`);
-  let entries;
-  try {
-    ({ entries } = await api.audit.list({ path, actor: token.member, limit: 50 }));
-  } catch (error) {
-    if (error instanceof CoffreError && error.status === 403) {
-      throw new Skip(`the token holds no audit.read on ${canary.project}, so the reveal's entry cannot be looked for`);
-    }
-    throw error;
+  const deadline = AbortSignal.timeout(wait.seconds * 1000);
+  const api = bearer(origin, secret, (input, init) => send(input, { ...init, signal: deadline }));
+  let entries: AuditEntryView[] = [];
+  let read: AuditEntryView[] = [];
+  while (!deadline.aborted) {
+    const page = await api.audit.list({ path, actor: token.member, limit: 50 }).catch((error: unknown) => {
+      if (error instanceof CoffreError && error.status === 403) {
+        throw new Skip(`the token holds no audit.read on ${canary.project}, so the reveal's entry cannot be looked for`);
+      }
+      if (deadline.aborted) return null;
+      throw error;
+    });
+    if (page === null) break;
+    entries = page.entries;
+    read = entries.filter((entry) => entry.operationId === operationId);
+    if (read.length > 0) break;
+    await new Promise((resolve) => setTimeout(resolve, wait.every * 1000));
   }
-  const read = entries.filter((entry) => entry.operationId === operationId);
-  expect(read.length === 1, `the reveal is logged ${read.length} times, not once`, entries.slice(0, 5));
+  expect(read.length === 1, `the reveal is logged ${read.length} times, not once, in ${wait.seconds} s`, entries.slice(0, 5));
   const [entry] = read as [(typeof read)[number]];
   expect(
     entry.action === 'secret.read' && entry.decision === 'allow' && entry.key === canary.key && entry.requestId !== null,
