@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { allows, useOnly, withinCredential, type Permission } from '@coffre/core/access';
+import { formatRecipe, parseRecipe, recipeProblem } from '@coffre/core/recipe';
 import type { Answers, KeyOutcome, KeyWrite, Nature, Presented, ReferenceBreak, SecretPath, SecretRefile, SecretRename, SecretsChanges, SecretWrite } from '@coffre/core/vault';
 import { dismissedKeys, environments, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
@@ -76,6 +77,24 @@ function deniedIn(caller: Asking, environment: Row<typeof environments>, mine: b
   return owns ? undefined : { refused: 'no_access' };
 }
 
+/** A version by its id, as Postgres writes a UUID. */
+const VERSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Whether a key's value is said made as a client makes one: by a recipe as
+ * `formatRecipe` writes it, which is how it is kept, and for a key pair's
+ * recipe, as one of the pair it names, two keys of two names.
+ */
+function generatedBy(key: string, generated: unknown): boolean {
+  if (typeof generated !== 'object' || generated === null) return false;
+  const { recipe, pair } = generated as { recipe: unknown; pair: unknown };
+  if (typeof recipe !== 'string' || recipeProblem(recipe) !== null || formatRecipe(parseRecipe(recipe)) !== recipe) return false;
+  if (parseRecipe(recipe).kind !== 'pair') return pair === undefined;
+  if (typeof pair !== 'object' || pair === null) return false;
+  const { private: privately, public: publicly } = pair as { private: unknown; public: unknown };
+  return typeof privately === 'string' && typeof publicly === 'string' && KEY.test(privately) && KEY.test(publicly) && privately !== publicly && (key === privately || key === publicly);
+}
+
 /** A key named where it is held: its project's and environment's slugs, and its name. */
 const located = (path: unknown): path is SecretPath =>
   typeof path === 'object' && path !== null && text((path as SecretPath).project) && text((path as SecretPath).environment) && typeof (path as SecretPath).key === 'string' && KEY.test((path as SecretPath).key);
@@ -85,11 +104,18 @@ function valid(item: KeyWrite): boolean {
   if (typeof item !== 'object' || item === null || typeof item.key !== 'string' || !KEY.test(item.key)) return false;
   // A reset goes alone.
   if (item.inherit !== undefined) {
-    return typeof item.inherit === 'boolean' && [item.value, item.nature, item.restore, item.ref, item.archived, item.folder].every((said) => said === undefined);
+    return typeof item.inherit === 'boolean' && [item.value, item.nature, item.generated, item.replaces, item.restore, item.ref, item.archived, item.folder].every((said) => said === undefined);
   }
   if (!(item.archived === undefined || typeof item.archived === 'boolean') || !(item.folder === undefined || filed(item.folder))) return false;
   // A key is archived with no value written over it or restored, and made no reference.
-  if (item.value !== undefined) return written(item.value) && (item.nature === undefined || NATURES.includes(item.nature)) && item.ref === undefined && item.restore === undefined && item.archived !== true;
+  if (item.value !== undefined) {
+    return written(item.value) && (item.nature === undefined || NATURES.includes(item.nature)) && item.ref === undefined && item.restore === undefined && item.archived !== true
+      // A value a client generated is never plain.
+      && (item.generated === undefined || (generatedBy(item.key, item.generated) && item.nature !== 'plain'))
+      && (item.replaces === undefined || (typeof item.replaces === 'string' && VERSION_ID.test(item.replaces)));
+  }
+  // Only a value is generated, or replaces the version listed.
+  if (item.generated !== undefined || item.replaces !== undefined) return false;
   if (item.restore !== undefined) return Number.isSafeInteger(item.restore) && item.restore >= 1 && item.restore <= MOST_VERSION && item.nature === undefined && item.ref === undefined && item.archived !== true;
   if (item.ref !== undefined) return located(item.ref) && item.nature === undefined && item.archived !== true;
   return item.nature === undefined && (item.archived !== undefined || item.folder !== undefined);
@@ -125,6 +151,21 @@ function valid(item: KeyWrite): boolean {
  * Made by a recipe or in a pair, it comes back as typed: Regenerate would
  * make a value of another kind of what the row says, and a half would pair
  * with a half it no longer matches.
+ *
+ * A value a client generated (0.14's `generated`) is written with the
+ * recipe it was made by, which Regenerate makes the next one by, on the
+ * key's sealed row: a writer who could shorten it there would have the next
+ * value made one byte long. A key pair's two halves are written together,
+ * under one id drawn here, each its half; a value typed over either, or
+ * either archived, leaves the other a half of a pair that is no more,
+ * which a listing shows as typed (`routes/keys.ts`). A generated value is
+ * never plain, nor kept plain over a plain one: a secret, or sensitive
+ * over a sensitive one. A value that says the version it `replaces` (a
+ * regenerate, 0.14's `regenerated`) is written only over that version,
+ * the one the key reads now, its own live one or, where it holds none
+ * live, the one it inherits, as their sealed rows say: anything else is
+ * `stale`, and the decision, made again under the lock when a row it read
+ * moved, finds it so too.
  *
  * A key made a reference (0.14's `referenceTargets` and the vault's
  * `referenceRefusal`) takes `secret.write` here, and `secret.read` where its
@@ -190,10 +231,19 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
     || items.reduce((sum, item) => sum + (item.restore === undefined ? Buffer.byteLength(item.value ?? '') : VALUE_BYTES), 0) > WRITE_BYTES) {
     throw wrong();
   }
+  // A key pair is written whole: each half's other is in the write too, of the same recipe and pair.
+  const byKey = new Map(items.map((item) => [item.key, item]));
+  for (const { key, generated } of items) {
+    const pair = generated?.pair;
+    if (pair === undefined) continue;
+    const other = byKey.get(key === pair.private ? pair.public : pair.private)?.generated;
+    if (other?.recipe !== generated!.recipe || other.pair?.private !== pair.private || other.pair.public !== pair.public) throw wrong();
+  }
   // A key the environment does not have yet is made under an id drawn here: a decision draws nothing.
   const fresh = new Map(items.map((item) => [item.key, { secret: randomUUID(), version: randomUUID() }]));
-  // And the caller's personal config, where they have none and a value makes it.
+  // And the caller's personal config, where they have none and a value makes it; and the id each key pair's halves share.
   const config = { id: randomUUID(), slug: configSlug(environmentSlug) };
+  const pairs = new Map(items.flatMap((item) => (item.generated?.pair === undefined ? [] : [[item.generated.pair.private, randomUUID()] as const])));
   const needs = new Set<Permission>(items.flatMap((item): Permission[] => [
     ...(item.value !== undefined || item.restore !== undefined || item.ref !== undefined || item.folder !== undefined || item.inherit !== undefined ? ['secret.write' as const] : []),
     ...(item.archived === undefined ? [] : ['secret.archive' as const]),
@@ -206,6 +256,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
   // The keys whose parents decide: one reset, or made live (a reset one written over stops being one), whose dismissal ends.
   const inheriting = items.flatMap((item) => ([item.value, item.restore, item.ref, item.inherit].some((said) => said !== undefined) || item.archived === false ? [item.key] : []));
   const restores = items.flatMap((item) => (item.restore === undefined ? [] : [{ key: item.key, version: item.restore }]));
+  const replacing = items.flatMap((item) => (item.replaces === undefined ? [] : [item.replaces]));
   const refs = items.flatMap((item) => (item.ref === undefined ? [] : [{ key: item.key, to: item.ref }]));
   // The keys whose readers decide: one archived stops them, and one made a reference would be a second hop for them.
   const stopping = [...archiving, ...refs.map((ref) => ref.key)];
@@ -247,6 +298,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       JOIN unnest(${sql.param(restores.map((each) => each.key))}::text[], ${sql.param(restores.map((each) => each.version))}::int[]) AS r (key, version) ON r.key = s.key
       WHERE s.project_id = ${project} AND s.environment_id = ${here}
       UNION SELECT s.id, s.versions FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(restores.map((each) => each.key))}::text[]))`),
+    // Each version a value replaces, by its id: the decision holds it to the sealed row of what the key reads now.
+    replaced: part(secretVersions, sql`${secretVersions.id} = ANY(${sql.param(replacing)}::uuid[])`),
   };
   /** The place asked about, as far as it is there: the environment named, and the personal config of it the read found, if any. */
   const placed = (seen: Seen<typeof read>) => {
@@ -347,7 +400,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       const outcomes: [string, KeyOutcome][] = [];
       const referring = new Set<string>();
       const versions = new Map(seen.version.map((row) => [`${row.secretId} ${row.version}`, row]));
-      for (const { key, value, nature: asked, restore, ref, archived, folder, inherit } of items) {
+      for (const { key, value, nature: asked, generated, replaces, restore, ref, archived, folder, inherit } of items) {
         const was = held.get(key) ?? null;
         // Only a value or a reference makes a key: there is nothing else to archive, file, restore or reset.
         if (was === null && value === undefined && ref === undefined) return { refused: 'unknown_key' };
@@ -369,6 +422,14 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           const newest = restore === undefined ? undefined : versions.get(`${kept.id} ${kept.versions}`);
           if (restore !== undefined && restore > kept.versions) return { refused: 'unknown_version' };
           if (restore !== undefined && (from === undefined || newest === undefined)) return { refused: 'unreadable' };
+          if (replaces !== undefined) {
+            // What the key reads now, as a listing found it: its own live value, or where it holds none live, what it inherits.
+            const now = was !== null && was.archivedAt === null ? was : passedDown(key);
+            if (now === undefined) return { refused: 'unreadable' };
+            const listed = seen.replaced.find((row) => row.id === replaces);
+            // A reference, holding no version of its own, holds none listed.
+            if (now === null || listed?.secretId !== now.id || listed.version !== now.currentVersion) return { refused: 'stale' };
+          }
           // What the key's value is now: its own, or what it inherits, and either one's source's: a source is never deleted while referred to.
           // An archived key read what it inherits, and is brought back as its own: it is as sensitive as either.
           const current = asked !== undefined ? [] : was === null ? [passedDown(key)] : was.archivedAt === null ? [kept] : [kept, passedDown(key)];
@@ -380,11 +441,13 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           if (unsaid !== undefined && unsaid !== from) vouched.push(unsaid);
           const sticks = natures.some((row) => row?.nature === 'sensitive') || unsaid?.sensitive === true;
           // In a personal config, a value typed over a plain one, its own or the one it reads now, stays plain: nobody but its owner lists it (0.14.7's `bareLevel`).
-          const plain = environment.owner !== null && natures.at(-1)?.nature === 'plain';
+          // A generated one is a secret.
+          const plain = generated === undefined && environment.owner !== null && natures.at(-1)?.nature === 'plain';
           const nature: Nature = asked ?? (sticks ? 'sensitive' : from !== undefined ? natureOf(from) : plain ? 'plain' : 'secret');
           const version = kept.versions + 1;
-          // Typed or restored, not generated: no recipe for Regenerate, and in no pair.
-          secret = { ...secret, versions: version, currentVersion: version, updatedAt: now, sourceId: null, nature, recipe: null, pairId: null, pairHalf: null };
+          // Typed or restored, it has no recipe for Regenerate, and is in no pair; generated, the recipe it was made by, and its half of its pair.
+          const pair = generated?.pair === undefined ? null : { id: pairs.get(generated.pair.private)!, half: key === generated.pair.private ? 'private' : 'public' };
+          secret = { ...secret, versions: version, currentVersion: version, updatedAt: now, sourceId: null, nature, recipe: generated?.recipe ?? null, pairId: pair?.id ?? null, pairHalf: pair?.half ?? null };
           const row = { id: ids.version, secretId: secret.id, version, createdAt: now, createdBy: caller.principal, sensitive: nature === 'sensitive' };
           sealed.push(from === undefined
             ? { version: { ...row, firstWrittenAt: now, plaintext: nature === 'plain' ? value! : null }, text: Buffer.from(value!) }
@@ -392,7 +455,9 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
             : { version: { ...row, firstWrittenAt: from.firstWrittenAt, plaintext: nature === 'plain' ? from.plaintext : null }, copy: from });
           answered.push([key, { version, nature }]);
           // `restored`: the version whose value it is; `source`: the secret it referred to until now.
-          Object.assign(line, { version, nature }, was === null ? { made: true } : {}, restore === undefined ? {} : { restored: restore }, was?.sourceId == null ? {} : { source: was.sourceId });
+          // `recipe`, `pair` and `half`: how a client made it.
+          Object.assign(line, { version, nature }, was === null ? { made: true } : {}, restore === undefined ? {} : { restored: restore }, was?.sourceId == null ? {} : { source: was.sourceId },
+            generated === undefined ? {} : { recipe: generated.recipe }, pair === null ? {} : { pair: pair.id, half: pair.half });
         }
         const target = ref === undefined ? undefined : targets.get(key)!.row;
         // A key that reads that source already is left as it is.
@@ -415,7 +480,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         }
         // What the write does to the key, as a dry run tells it. A value typed over a value of the key's own, typed and kept as
         // it is written, is the same or not only by opening that version, if nothing else changes: the line says only its next
-        // version and nature, no return (`archived`), no reference ended (`source`), no folder and no dismissal.
+        // version and nature, no recipe (a value generated is new by its making, as 0.14's dry run said), no return (`archived`),
+        // no reference ended (`source`), no folder and no dismissal.
         const same = value !== undefined && was !== null && was.currentVersion !== null && was.recipe === null && was.pairId === null
           && was.nature === secret.nature && Object.keys(line).length === 4;
         outcomes.push([key, was === null ? 'added' : same ? { compare: { secret: was.id, version: was.currentVersion! } }

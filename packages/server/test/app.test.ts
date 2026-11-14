@@ -9,6 +9,7 @@ import { after, beforeEach, test } from 'node:test';
 import { CoffreError, createClient, planImport } from '@coffre/client';
 import { DEFAULT_POLICY } from '@coffre/core/access';
 import { cloudflareAccess } from '@coffre/core/identity';
+import { generateWrite, parseRecipe, regenerateWrite, type Generation } from '@coffre/core/recipe';
 import type { Called } from '@coffre/core/vault';
 import { rowsOf } from '@coffre/db/dialect';
 import { credential, emptyDatabase, environment, grant, identity, principal, project, role, rows, secret, user, value, write } from '@coffre/vault/testing';
@@ -218,6 +219,47 @@ test('a write is one change of the vault and no statement of the app; what it re
   for (const [path, values, expected] of shapes) assert.equal((await patch('bo-cli', path, values))[0], expected, `${path} ${JSON.stringify(values).slice(0, 40)}`);
   // `__proto__`, which a schema would drop without a word, is refused in the body itself.
   assert.equal((await app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: '{"__proto__":"v","A":"1"}' }))).status, 400);
+  assert.deepEqual(app.calls, []);
+});
+
+test('a value a client generated, and its regenerate, is one change each: Regenerate reads its recipe and pair from the listing, and a version written since is stale', async () => {
+  const patch = (values: unknown) => cost(() => answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify(values) }))));
+  const listed = async () => {
+    const [status, body] = await answered(app.request('/api/secrets/market/prod', as('bo-cli')));
+    assert.equal(status, 200, JSON.stringify(body));
+    return body.keys as { key: string; archived: boolean; versionId: string | null; generated: Generation | null }[];
+  };
+  // As the CLI and the page make them: a key pair, both halves at once, and one value by a recipe given in any case.
+  const pair = await generateWrite('JWT_PRIVATE_KEY', parseRecipe('ecdsa:p-256'));
+  const [[status, body], calls, statements] = await patch({ ...pair, TOKEN: { value: 'abc', generated: { recipe: 'BYTES:32' } } });
+  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  assert.deepEqual(body.keys, { JWT_PRIVATE_KEY: { version: 1, sensitivity: 'secret' }, JWT_PUBLIC_KEY: { version: 1, sensitivity: 'secret' }, TOKEN: { version: 1, sensitivity: 'secret' } });
+  const generated = Object.fromEntries((await listed()).map((item) => [item.key, item.generated]));
+  const names = { private: 'JWT_PRIVATE_KEY', public: 'JWT_PUBLIC_KEY' };
+  // Kept as `formatRecipe` writes it, which is what Regenerate makes the next one by.
+  assert.deepEqual([generated.JWT_PRIVATE_KEY, generated.JWT_PUBLIC_KEY, generated.TOKEN, generated.DATABASE_URL], [{ recipe: 'ecdsa:p-256', pair: names }, { recipe: 'ecdsa:p-256', pair: names }, { recipe: 'bytes:32:base62' }, null]);
+  // Regenerated from either half, the pair is made again whole, each half over the version listed.
+  const keys = await listed();
+  const again = await regenerateWrite('JWT_PUBLIC_KEY', generated.JWT_PUBLIC_KEY!, (name) => keys.find((item) => item.key === name && !item.archived)?.versionId ?? null);
+  const [[regenerated, made]] = await patch(again);
+  assert.deepEqual([regenerated, made.keys], [200, { JWT_PRIVATE_KEY: { version: 2, sensitivity: 'secret' }, JWT_PUBLIC_KEY: { version: 2, sensitivity: 'secret' } }]);
+  // The same again: what it replaces is no longer the version there, and nothing is written.
+  const [[stale, why], staleCalls] = await patch(again);
+  assert.deepEqual([stale, why.error, why.reason, staleCalls], [409, 'conflict', 'stale', ['change']]);
+  // Typed over, a half is no longer one, and neither key lists a recipe.
+  await patch({ JWT_PUBLIC_KEY: 'typed' });
+  const after = Object.fromEntries((await listed()).map((item) => [item.key, item.generated]));
+  assert.deepEqual([after.JWT_PRIVATE_KEY, after.JWT_PUBLIC_KEY, after.TOKEN], [null, null, { recipe: 'bytes:32:base62' }]);
+  // What would be a fault of the vault's, the app refuses first, as 0.14.7 did: the vault is not asked.
+  app.calls.length = 0;
+  const one = (generated: unknown, more: Record<string, unknown> = {}) => ({ TOKEN: { value: 'x', generated, ...more } });
+  const shapes: unknown[] = [
+    one({ recipe: 'nope' }), one({ recipe: 'bytes:32:hex', pair: names }), one({ recipe: 'ecdsa:p-256' }), one({ recipe: 'ecdsa:p-256', pair: names }),
+    { JWT_PRIVATE_KEY: { value: 'x', generated: { recipe: 'ecdsa:p-256', pair: names } } }, { ...pair, JWT_PUBLIC_KEY: { value: 'y', generated: { recipe: 'ecdsa:p-384', pair: names } } },
+    one({ recipe: 'bytes:32:hex' }, { sensitivity: 'plain' }), one({ recipe: 'bytes:32:hex' }, { replaces: 'v1' }), one({ recipe: 'bytes:32:hex' }, { ref: 'market/prod/FLAG' }), one({ recipe: 'bytes:32:hex', extra: 1 }),
+    { TOKEN: { value: 'x', replaces: randomUUID() } },
+  ];
+  for (const values of shapes) assert.equal((await patch(values))[0][0], 400, JSON.stringify(values).slice(0, 80));
   assert.deepEqual(app.calls, []);
 });
 
