@@ -335,7 +335,7 @@ test("holes by the trees' counts: uses below the first not pruned are not missin
   assert.deepEqual(holesOf(head, null, all.slice(2), false), []);
 });
 
-test('a stretch by many objects reads twice its rows in index rows and one more per object, however many each one holds', async () => {
+test("a stretch by many objects reads twice its rows in index rows and one more per object, and no object's past its newest", async () => {
   // 60,000 entries, each about one of 200 environments, 20 to each of 10 projects, and so in the index under both: 120,000 rows.
   await world.owner.execute(sql`INSERT INTO log (seq, kept, leaf, body) SELECT g, true, g, '{}' FROM generate_series(1000000, 1059999) g`);
   await world.owner.execute(sql`INSERT INTO log_index (object, seq) SELECT o, g FROM generate_series(1000000, 1059999) g, LATERAL (VALUES ('environment:e' || g % 200), ('project:p' || g % 200 / 20)) objects(o)`);
@@ -348,6 +348,12 @@ test('a stretch by many objects reads twice its rows in index rows and one more 
   const read = indexRows(plan!['QUERY PLAN'][0].Plan);
   // A hash of every object's newest would read 70,000: each project's 1,000 and each environment's 300.
   assert.ok(read <= 2 * 1000 + objects.length, `${read} index rows`);
+  // Ten environments hold about what the merge needs: Postgres may sort each one's 300 rather than stream them, and reads each once.
+  const ten = { objects: objects.slice(10, 20), below: null, rows: 1000 };
+  const [tenPlan] = await rowsOf<{ 'QUERY PLAN': [{ Plan: Node }] }>(world.owner, sql`EXPLAIN (ANALYZE, FORMAT JSON) ${stretchOf(ten)}`);
+  const tenRead = indexRows(tenPlan!['QUERY PLAN'][0].Plan);
+  assert.ok(tenRead <= 10 * 300, `${tenRead} index rows`);
+  assert.deepEqual(await logStretch(world.owner, ten).then(({ rows, more }) => [rows.length, rows[0]!.seq, rows.at(-1)!.seq, more]), [1000, 1059809, 1040000, true]);
   // The newest thousand, each once, and more below.
   const stretch = await logStretch(world.owner, at);
   assert.deepEqual([stretch.rows.length, stretch.rows[0]!.seq, stretch.rows.at(-1)!.seq, stretch.more], [1000, 1059999, 1059000, true]);

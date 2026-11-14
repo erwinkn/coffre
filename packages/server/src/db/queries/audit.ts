@@ -91,9 +91,13 @@ export async function logStretch(db: Queryable, at: { objects: readonly string[]
 
 /**
  * `logStretch`'s statement. For `objects`, each one's newest `rows`, merged
- * newest first as one Merge Append under a `LIMIT`, which stops it: the
- * statement reads `COPIES` × `rows` index rows and one more per object,
- * however long the log (audit.test.ts holds it to that). Only then
+ * newest first as one Merge Append under a `LIMIT`, which stops it: where
+ * the objects hold many more entries than that, Postgres streams each one's
+ * from its index, and the statement reads `COPIES` × `rows` index rows and
+ * one more per object, however long the log. Where it expects them to hold
+ * about as many, it may sort each object's instead, and read them all: never
+ * more than each one's newest `rows`, and about what the merge would have
+ * read (audit.test.ts holds it to both). Only then
  * does it drop an entry two objects share, from those it read. A `DISTINCT`
  * over the merge would read the same, but Postgres plans it as a hash of
  * every object's `rows` once the objects are a few dozen: 210 objects at a
