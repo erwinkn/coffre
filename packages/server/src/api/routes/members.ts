@@ -41,7 +41,7 @@ function wellFormed(text: string): boolean {
   }
 }
 
-const typeOf = (member: string): 'user' | 'service' => (member.startsWith('user:') ? 'user' : 'service');
+export const typeOf = (member: string): 'user' | 'service' => (member.startsWith('user:') ? 'user' : 'service');
 const idOf = (member: string) => member.slice(member.indexOf(':') + 1);
 
 const notServed = (what: string) => new ApiError('not_implemented', `${what} is not served yet`);
@@ -92,13 +92,13 @@ function scopeOf(row: MemberRow): Scope {
 }
 
 /** Someone's instance role: a person's, while active. */
-const roleOf = (row: MemberRow): InstanceRole => (row.status === 'active' && typeOf(row.id) === 'user' ? (row.role as InstanceRole) : 'member');
+export const roleOf = (row: MemberRow): InstanceRole => (row.status === 'active' && typeOf(row.id) === 'user' ? (row.role as InstanceRole) : 'member');
 
 /** Where their role applies: everywhere for a member, who holds nothing by it. */
-const standingOf = (row: MemberRow): Scope => (roleOf(row) === 'member' ? EVERYWHERE : scopeOf(row));
+export const standingOf = (row: MemberRow): Scope => (roleOf(row) === 'member' ? EVERYWHERE : scopeOf(row));
 
 /** A scope as the API shows it: projects by slug, those still there, sorted. */
-function scopeView(scope: Scope, slugs: Record<string, string>): Scope {
+export function scopeView(scope: Scope, slugs: Record<string, string>): Scope {
   const named = (ids: string[]) => ids.flatMap((id) => (Object.hasOwn(slugs, id) ? [slugs[id]!] : [])).sort();
   const projects: Filter = scope.projects === 'all' ? 'all' : 'only' in scope.projects ? { only: named(scope.projects.only) } : { except: named(scope.projects.except) };
   return { projects, environments: scope.environments };

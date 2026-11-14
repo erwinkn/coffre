@@ -117,6 +117,9 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   last_owner: ['conflict', 'the instance keeps one Owner of all of it: make another one first'],
   configured_owner: ['conflict', "the deployment names them an Owner, which they stay while its configuration says so"],
   invalid: ['conflict', 'a role the instance does not have, one that holds what only a project has given on an environment, or an end that has passed'],
+  // The instance's roles (routes/roles.ts), as 0.14.7 answered.
+  role_granted: ['conflict', 'a grant names that role: revoke it first'],
+  policy_changed: ['conflict', 'the role changed since this change was weighed: weigh it again'],
   // Any operation's: the vault refuses to decide on a row it did not write, and the operator must look (`noteTampered`).
   tampered: ['tampered', "a record coffre's vault reads failed its integrity check: whoever runs coffre has the details in its server log"],
   adopting: ['adopting', "coffre's vault has not taken over its database yet; try again in a moment"],
