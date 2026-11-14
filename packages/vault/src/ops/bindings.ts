@@ -48,7 +48,7 @@ import type { Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
 import { asking } from './asking.ts';
 import type { Operations } from './index.ts';
-import { presented, text } from './input.ts';
+import { long, presented, text } from './input.ts';
 import {
   by,
   definitionsOf,
@@ -96,7 +96,7 @@ function readsAsked(value: unknown): ReadAsked[] | undefined {
 }
 
 /** A URL or an issuer's name as the contract carries one: well-formed text, 2,048 characters at most. */
-const url = (value: unknown): value is string => text(value) && value !== '' && value.length <= MOST_URL;
+const url = (value: unknown): value is string => long(value, MOST_URL) && value !== '';
 
 /** A binding asked for, checked as 0.14.7's route checked it before asking anything: its shape, its profile's rules, its policy but for `reads`. */
 type Checked = {
@@ -219,7 +219,10 @@ function tokenBind(input: Presented & TokenBind, vault: Deciding): Operation<Par
     ...callerParts(shown.token, sql`(${named} UNION ${projectsOf(member)})`),
     project: part(projects, sql`${projects.slug} = ANY(${sql.param(slugs)}::text[])`),
     environment: part(environments, sql`${environments.id} IN ${onEnvironments}`),
-    asked: part(roles, sql`NOT ${roles.instance} AND ${roles.id} = ANY(${sql.param([...new Set(wanted.map((place) => place.role))])}::text[])`),
+    // The roles the scope asked names, and those its live bindings' scopes name, which a replacement or new keys inherit: read as text, a role's id being plain (`ROLE_ID`).
+    asked: part(roles, sql`NOT ${roles.instance} AND (${roles.id} = ANY(${sql.param([...new Set(wanted.map((place) => place.role))])}::text[])
+      OR ${roles.id} IN (SELECT m.found[1] FROM bindings b, regexp_matches(b.scope, '"role":"([a-z][a-z0-9-]{1,31})"', 'g') AS m(found) WHERE b.principal = ${member} AND b.revoked_at IS NULL
+        AND b.generation = (SELECT p.generation FROM principals p WHERE p.id = ${member})))`),
     ...serviceParts(member),
     // The projects of the service's grants, by which the answer names the places it holds; `beside`, their environments.
     holding: part(projects, sql`${projects.id} IN ${projectsOf(member)}`),

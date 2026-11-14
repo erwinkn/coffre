@@ -261,6 +261,13 @@ test('a binding that replaces others: those revoked, its scope what they reached
   const fourth = await vault.change(bind('root-cli', ci, { replaces: [both.id], claims: { sub: 'less' } }));
   assert.ok(!('refused' in fourth), JSON.stringify(fourth));
   assert.deepEqual(fourth.answer.bindings[0]!.scope, { 'billing/dev': 'viewer' });
+
+  // A role only the binding replaced names, no grant of the service's or the caller's: Root, who holds none, still finds it.
+  const viewerOnly = binding(devs, { scope: JSON.stringify([{ projectId: ids.market, environmentId: ids.dev, role: 'viewer', permissions: VIEWER, sensitive: false }]) });
+  await write(world, ...rows('bindings', viewerOnly));
+  const fifth = await vault.change(bind('root-cli', devs, { replaces: [viewerOnly.id], claims: { sub: 'v' } }));
+  assert.ok(!('refused' in fifth), JSON.stringify(fifth));
+  assert.deepEqual(fifth.answer.bindings[0]!.scope, { 'market/dev': 'viewer' });
   assert.deepEqual(await checked(), []);
 });
 
@@ -353,7 +360,22 @@ test("new keys for a service's bindings on an issuer: each replaced by one the s
   await write(world, ...rows('bindings', aws));
   assert.equal(await made(rekey('root-cli', devs, 'urn:coffre:aws', jwks)), 'invalid');
   assert.equal(await made(rekey('bo-cli', ci, KUBE, jwksOf('k3'))), 'no_access');
+
+  // A role only its bindings name, no grant of the service's or the caller's: Root, who holds none, still finds it.
+  const viewing = binding(devs, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, claims: canonicalClaims({ sub: 'v' }), scope: VIEWER_DEV });
+  await write(world, ...rows('bindings', viewing));
+  const moved = await vault.change(rekey('root-cli', devs, KUBE, jwks));
+  assert.ok(!('refused' in moved), JSON.stringify(moved));
+  assert.deepEqual(moved.answer.bindings.map((made_) => made_.scope), [{ 'market/dev': 'viewer' }]);
   assert.deepEqual(await checked(), []);
+});
+
+test("an issuer and its keys' address as long as the contract carries: 2,048 characters, not a name's 256", async () => {
+  const issuer = `https://id.acme.example/${'a'.repeat(250)}`;
+  const done = await vault.change(bind('root-cli', ci, { issuer, keys: { uri: `${issuer}/${'k'.repeat(1000)}` } }));
+  assert.ok(!('refused' in done), JSON.stringify(done));
+  assert.equal((await bindingsOf(ci))[0]!.issuer, issuer);
+  assert.throws(() => OPERATIONS['token.bind'](bind('root-cli', ci, { issuer: `https://id.acme.example/${'a'.repeat(2048)}` }), deciding), TypeError);
 });
 
 test('a binding removed: its row revoked, which ends what it issued; refused for one not live, another service\'s, or by one who does not manage it', async () => {

@@ -14,7 +14,7 @@ import { amended, part, put, WRITE_MS, type Operation, type Parts, type Seen, ty
 import type { Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
-import { HASH, presented, text, traced } from './input.ts';
+import { HASH, long, presented, text, traced } from './input.ts';
 
 /** How long a CI run's token lasts: 0.14's `EXCHANGED_CREDENTIAL_MS`. */
 const RUN_MS = 5 * 60_000;
@@ -32,8 +32,6 @@ const NO_PROJECT = sql`(SELECT NULL::uuid WHERE false)`;
 /** The longest issuer, keys' address or public URL the contract carries. */
 const MOST_URL = 2048;
 
-/** Text as `text` takes it, of `most` characters at most: what a URL may be. */
-const long = (value: unknown, most: number): value is string => typeof value === 'string' && value.length <= most && !value.includes('\0') && Buffer.from(value).toString() === value;
 
 /** A binding's scope, as the credentials it issues carry it on their row: always one, and one that does not read as a scope reaches nothing. */
 function scopeOf(stored: string | null): string {
