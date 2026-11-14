@@ -393,24 +393,12 @@ export const SECTIONS = [
     title: 'Workloads: apps that use secrets through coffre, with a session bound to a key they never export',
     entries: [
       {
-        command: 'enroll',
-        usage: ['enroll <service> [--binding <id>]'],
-        about: ['an enrollment code, for one deploy of an app on a platform', 'that signs nothing: printed once, for the platform to hold'],
-      },
-      {
-        command: 'enroll',
-        usage: ['enroll <service> --promote <code-id> [--now]'],
-        about: ["the binding's current code, once the deploy is up: older", "codes' sessions drain; --now ends them at once"],
-      },
-      { command: 'enroll', usage: ['enroll <service> --list [--json]'], about: ["the binding's live codes, and what each reaches"] },
-      { command: 'approve', usage: ['approve <service> <session-id>'], about: ['a session its binding holds for a person to check'] },
-      {
         command: 'freeze',
         usage: ['freeze [<target> --reason <text>]'],
         about: [
           'every use under the target refused from its next request,',
           'its sessions and codes kept: instance, service:<name>,',
-          'binding:<id>, session:<id> or credential:<path>/<name>;',
+          'binding:<id> or session:<id>;',
           'alone, what is frozen',
         ],
       },
@@ -525,7 +513,12 @@ export function help(command: string): string {
 }
 
 /** What a route of the API is for the CLI: the commands that call it, or why only a browser does. */
-export type Reach = { commands: readonly Command[] } | { browser: string };
+/**
+ * The commands that call a route; or why only a browser does; or, for a
+ * route 0.14.7 declared and no release ever built (`unserved.ts`), that
+ * nothing calls it until it is built.
+ */
+export type Reach = { commands: readonly Command[] } | { browser: string } | { unbuilt: string };
 
 /**
  * Every route, and the commands that call it. Typed over the route table:
@@ -571,10 +564,10 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'POST /members/:member/bindings/keys': { commands: ['trust'] },
   'DELETE /members/:member/bindings/:id': { commands: ['untrust'] },
   'GET /workloads/lookup': { commands: ['trust'] },
-  'GET /members/:member/bindings/:id/enrollments': { commands: ['enroll'] },
-  'POST /members/:member/bindings/:id/enrollments': { commands: ['enroll'] },
-  'POST /members/:member/bindings/:id/enrollments/:enrollment/promote': { commands: ['enroll'] },
-  'POST /members/:member/tokens/:id/approve': { commands: ['approve'] },
+  'GET /members/:member/bindings/:id/enrollments': { unbuilt: "a deploy's enrollment codes (docs/design/workload-access.md, PR 3): 501 in every release, so no `coffre enroll`" },
+  'POST /members/:member/bindings/:id/enrollments': { unbuilt: 'minting an enrollment code, as above' },
+  'POST /members/:member/bindings/:id/enrollments/:enrollment/promote': { unbuilt: 'promoting an enrollment code, as above' },
+  'POST /members/:member/tokens/:id/approve': { unbuilt: "approving a session a binding holds for a person (PR 3): 501 in every release, so no `coffre approve`" },
   'GET /freezes': { commands: ['freeze'] },
   'POST /freezes': { commands: ['freeze'] },
   'DELETE /freezes/:target': { commands: ['unfreeze'] },

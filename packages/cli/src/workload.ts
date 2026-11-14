@@ -120,7 +120,7 @@ export async function proofOf(spec: string | undefined, runner: Runner): Promise
     case 'github':
       return github();
     case 'enrollment':
-      return enrollment(await readSecret({ label: 'Enrollment code', hint: 'coffre_enr_…, from `coffre enroll <service>`; piped in, as printf %s "$COFFRE_ENROLL" | coffre …' }));
+      return enrollment(await readSecret({ label: 'Enrollment code', hint: 'coffre_enr_…, which no release issues yet; piped in, as printf %s "$COFFRE_ENROLL" | coffre …' }));
     case 'oidc': {
       const token = await readSecret({ label: 'ID token', hint: "the platform's ID token for this instance: GitLab's id_tokens entry, or a custom issuer's" });
       return oidc(token);

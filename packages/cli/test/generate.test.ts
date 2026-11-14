@@ -235,7 +235,7 @@ test('set --plain writes a value that is no secret, given as an argument; list s
   const coffre = await instance(t, {});
   const run = await coffre.coffre(['set', 'app/prod/ACCOUNT_ID', 'acct_42', '--plain']);
   assert.equal(run.code, 0, run.stderr);
-  assert.deepEqual(coffre.writes, [{ ACCOUNT_ID: { value: 'acct_42', plain: true } }]);
+  assert.deepEqual(coffre.writes, [{ ACCOUNT_ID: { value: 'acct_42', sensitivity: 'plain' } }]);
   assert.match(run.stdout, /^ACCOUNT_ID written as version 1, plain: shown to whoever lists app\/prod\n$/);
   assert.match((await coffre.coffre(['list', 'app/prod'])).stdout, /^ACCOUNT_ID\tv1\t.*plain: acct_42\n$/);
   // Not with a value made here or a reference, and a secret is still never an argument.

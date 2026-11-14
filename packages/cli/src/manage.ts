@@ -10,7 +10,7 @@ import { parseArgs } from 'node:util';
 import { INSTANCE_ROLES, isInstanceRole, MAX_PERSONAL_TOKEN_MINUTES, PROJECT_ONLY_PERMISSIONS, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
 import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion, type RoleView, type RouteInput } from '@coffre/client';
 
-import { describeRemoval, reaches, scopeFrom, serviceMember, withheldLine } from './trust.ts';
+import { describeRemoval, reaches, scopeFrom, serviceMember } from './trust.ts';
 
 /** Where a command writes: what it answers on `out`, what it tells a person on `err`. */
 export type Io = {
@@ -321,11 +321,10 @@ export async function resetSecret(connect: () => CoffreClient, args: string[], i
   const { values, positionals } = parse(args, undo, ['<project>/<environment>/<KEY>']);
   const path = secret(positionals[0]!);
   const api = connect();
-  const { from } = await api.secrets.inherit(path, !values.undo);
-  const project = path.slice(0, path.indexOf('/'));
+  await api.secrets.inherit(path, !values.undo);
   io.out.write(values.undo
-    ? `${path} overrides ${project}/${from} again, with the value it had\n`
-    : `${path} reads ${project}/${from}'s value again; its own is kept: \`coffre reset ${path} --undo\` serves it again\n`);
+    ? `${path} overrides its parent again, with the value it had\n`
+    : `${path} reads its parent's value again; its own is kept: \`coffre reset ${path} --undo\` serves it again\n`);
 }
 
 /**
@@ -363,7 +362,6 @@ export async function references(connect: () => CoffreClient, args: string[], io
   for (const reference of list) {
     const state = reference.state === 'live' ? '' : `  (${reference.state.replace('_', ' ')})`;
     io.out.write(`${reference.holder} → ${reference.source}${state}\n`);
-    io.out.write(`  made by ${shownMember(reference.createdBy).replace(/^user:/, '')} on ${reference.createdAt.slice(0, 10)}\n`);
     if (reference.readers !== null) {
       io.out.write(`  read through by ${reference.readers.length === 0 ? 'no one by a grant' : reference.readers.map((reader) => shownMember(reader).replace(/^user:/, '')).join(', ')}\n`);
     }
@@ -383,7 +381,7 @@ export async function referencesBreak(connect: () => CoffreClient, args: string[
     const [reference] = (await api.references.list(path)).references.filter((each) => each.holder === path);
     if (reference === undefined) return void io.out.write(`${path} is no reference you can see\n`);
     const readers = reference.readers === null ? 'whoever reads its environment' : reference.readers.map((reader) => shownMember(reader).replace(/^user:/, '')).join(', ') || 'no one by a grant';
-    io.out.write(`${path} reads ${reference.source}, made by ${shownMember(reference.createdBy).replace(/^user:/, '')} on ${reference.createdAt.slice(0, 10)}\n`);
+    io.out.write(`${path} reads ${reference.source}\n`);
     io.out.write(`breaking it stops ${readers} reading it there, and a run of its environment refuses until ${path.split('/')[2]} gets a value\n`);
     io.out.write('Nothing changed. Re-run with --apply to break it.\n');
     return;
@@ -646,7 +644,7 @@ export async function admit(connect: () => CoffreClient, args: string[], io: Io 
  * to an Admin whose scope takes prod in. No flag is everywhere again.
  */
 export async function settings(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
-  const { values, positionals } = parse(args, { ...json, ...SCOPE_FLAGS }, ['service-accounts'], 0);
+  const { values, positionals } = parse(args, { ...json, ...SCOPE_FLAGS }, ['service-accounts'], 1);
   const api = connect();
   const [projects, environments] = [filterOf(values, 'projects'), filterOf(values, 'environments')];
   if (positionals[0] === undefined && (projects !== undefined || environments !== undefined)) {
@@ -960,8 +958,6 @@ export async function tokensIssue(connect: () => CoffreClient, args: string[], i
   const about = personal
     ? `your personal token ${issued.id} "${values.label!.trim()}", acting as you on ${reaches(issued.scope)}, until ${ends(issued.expiresAt, true)}`
     : `${shownMember(member)}'s bearer token ${issued.id}, reaching ${reaches(issued.scope)}, until ${day(issued.expiresAt)}`;
-  // What it will not read, said now rather than at its first run's refusal (R32).
-  const unread = withheldLine(issued.withheld);
   if (fd !== null) {
     writeSync(fd, `${issued.token}\n`);
     closeSync(fd);
@@ -970,7 +966,6 @@ export async function tokensIssue(connect: () => CoffreClient, args: string[], i
     io.out.write(`${issued.token}\n`);
     if (io.err.isTTY) io.err.write(`coffre: ${about}. It is shown this once\n`);
   }
-  if (unread !== null) io.err.write(`coffre: it ${unread}\n`);
 }
 
 export async function tokensRevoke(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {

@@ -365,7 +365,7 @@ export function oidc(token: string | (() => string | Promise<string>), name = 'o
  * longer show it; the platform's store still holds it.
  */
 export function enrollment(code: string | undefined): Proof {
-  if (code === undefined || !code.startsWith('coffre_enr_')) throw new Error('enrollment(): no enrollment code: CI sets one each deploy, from `coffre enroll <service>`');
+  if (code === undefined || !code.startsWith('coffre_enr_')) throw new Error('enrollment(): no enrollment code: no release issues one yet (docs/workloads.md)');
   const vars = (globalThis as { process?: { env: Env } }).process?.env;
   for (const [name, value] of Object.entries(vars ?? {})) if (value === code) delete vars![name];
   return { name: 'enrollment', kind: 'enrollment', prove: async () => ({ enrollment: code }) };
