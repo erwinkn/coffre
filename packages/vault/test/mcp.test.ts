@@ -21,7 +21,7 @@ import { OPERATIONS } from '../src/ops/index.ts';
 import { through } from '../src/ops/via.ts';
 import { Signer } from '../src/signer.ts';
 import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
-import { amend, credential, environment, grant, identity, instance, oauthClient, principal, project, role, rows, secret, tokenOf, user, value, write } from './world.ts';
+import { amend, credential, environment, grant, identity, instance, oauthClient, principal, project, rewrite, role, rows, secret, tokenOf, user, value, write } from './world.ts';
 
 const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
@@ -208,6 +208,20 @@ test('a code is good for its minute, its client, its redirect and its verifier o
   await assert.rejects(vault.change(byCode('code-1', 'a', 'r', { verifier: 'short' })), TypeError);
   await assert.rejects(vault.change(byCode('code-1', 'a', 'r', { minutes: 366 * 24 * 60 })), TypeError);
   await assert.rejects(vault.change(byCode('code-1', 'a', 'a')), TypeError);
+});
+
+test("an MCP client's reveal is a person's own read: never remembered, so a write within the vault's memory is what the next one opens", async () => {
+  await made(connect('ada-web', 'code-1', ['read', 'reveal']));
+  await redeemed(byCode('code-1', 'acc-1', 'ref-1'));
+  const opened = async () => {
+    const answer = await reveal('acc-1');
+    assert.ok(!('refused' in answer), JSON.stringify(answer));
+    return answer.values.map((item) => ('refused' in item ? item.refused : item.value.toString()));
+  };
+  assert.deepEqual(await opened(), ['postgres://market']);
+  const [held] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id::text FROM secrets WHERE key = 'DATABASE_URL'`);
+  await rewrite(world, held!, 'postgres://next');
+  assert.deepEqual(await opened(), ['postgres://next']);
 });
 
 test('a code presented again after it was redeemed ends the connection, and every access token under it, by its row alone', async () => {

@@ -177,6 +177,20 @@ test('a reveal and a write go all the way: the app opens no connection, the vaul
   assert.deepEqual(entries.slice(-4), [[false, 'secret.read', ada], [false, 'secret.write', ada], [true, 'secret.write', bo], [false, 'secret.read', ada]]);
 });
 
+test("a person reads back what they just wrote: get, set, get on one CLI session within the vault's memory, at one more read of the vault's", { timeout: 120_000 }, async () => {
+  const get = (path: string) => ask('/api/reveals', bearer('bo-cli', { method: 'POST', body: JSON.stringify({ path }) }));
+  // `coffre get`, of one key and of the whole environment.
+  assert.deepEqual((await get('market/prod/DATABASE_URL')).body.values, { DATABASE_URL: 'postgres://next' });
+  assert.equal((await get('market/prod')).status, 200);
+  // `coffre set`, at once.
+  const set = await ask('/api/secrets/market/prod', bearer('bo-cli', { method: 'PATCH', body: JSON.stringify({ DATABASE_URL: 'postgres://third' }) }));
+  assert.equal(set.status, 200, JSON.stringify(set.body));
+  // `coffre get` again, within the memory: the value just written, each read the vault's own, on a connection of its own.
+  const [one, , oneRead] = await opened(() => get('market/prod/DATABASE_URL'));
+  const [whole, , wholeRead] = await opened(() => get('market/prod'));
+  assert.deepEqual([one.body.values, (whole.body.values as Record<string, string>).DATABASE_URL, oneRead, wholeRead], [{ DATABASE_URL: 'postgres://third' }, 'postgres://third', 1, 1]);
+});
+
 test("a workload's session on Workers: its service's gate, a Durable Object, gives the nonce and takes each proof once, before the vault is asked", { timeout: 120_000 }, async () => {
   const URL_ME = 'https://secrets.acme.example/api/me';
   const asSession = async (nonce?: string, proof?: string) => ({
