@@ -124,12 +124,10 @@ function oracle(token: string, keys: Jwk[], expected: { nowMs: number; maxLifeti
   if (!nonempty(claims.iss) || !nonempty(claims.sub) || !finite(claims.exp) || !finite(claims.iat)) return malformed('claim types');
   if (claims.nbf !== undefined && !finite(claims.nbf)) return malformed('nbf type');
 
+  // Any critical extension is one the reader does not know (it reads alg and kid alone), `b64` included: a JWT never leaves its payload unencoded.
+  if (header.crit !== undefined) return malformed('crit');
+
   const defects: Defect[] = [];
-  const crit = header.crit;
-  // b64 is the one extension a JWS verifier knows (RFC 7797); a JWT never leaves its payload unencoded.
-  if (crit !== undefined && !(Array.isArray(crit) && crit.length > 0 && crit.every((name) => name === 'b64') && header.b64 === true)) {
-    defects.push({ what: 'crit', reasons: ['signature'] });
-  }
   const alg = header.alg;
   let either: string | null = null;
   if (alg !== 'RS256' && alg !== 'ES256') {
