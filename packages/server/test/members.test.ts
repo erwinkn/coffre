@@ -230,8 +230,13 @@ test("one member's access: the grants the caller manages, their role, and their 
 });
 
 test('removing a member: their grants go, and their sessions end', async () => {
-  // What went, as the vault's one change counted it: her two grants and her CLI session.
-  assert.deepEqual(await call('cy-cli', 'DELETE', `/members/${ada}`), [200, { revoked: { grants: 2, sessions: 1, tokens: 0, identities: 0, apps: 0 }, report: null }]);
+  // What went, as the vault's one change counted it: her two grants and her CLI session; and her report, as the removal
+  // leaves her, the one `GET /members/:member` gives, in one statement after the change.
+  const [[status, removal], calls, statements] = await cost(() => call('cy-cli', 'DELETE', `/members/${ada}`));
+  assert.deepEqual([status, removal.revoked, calls, statements], [200, { grants: 2, sessions: 1, tokens: 0, identities: 0, apps: 0 }, ['change'], 1]);
+  assert.deepEqual(removal.report, (await report(ada))[0]);
+  const { status: left, removedBy, live } = removal.report as unknown as Report;
+  assert.deepEqual([left, removedBy, live], ['removed', 'cy@acme.example', { grants: 0, sessions: 0, tokens: 0, identities: 0, apps: 0 }]);
   assert.deepEqual(refused(await call('ada-cli', 'GET', '/me')), [401, 'unauthenticated', 'unauthenticated']);
   const [listed] = await directory('cy-cli');
   assert.deepEqual(listed.removed.map((member) => member.principalId), ['ada@acme.example', 'rex@acme.example']);
@@ -267,7 +272,9 @@ test('a person who sets up service accounts lists those they manage, reads their
   assert.deepEqual(refused(await call('cy-token', 'GET', '/members/token:dev-reader/access')), NO_ACCESS);
 
   // He removes his, which ends its token, and the vault refuses him another.
-  assert.deepEqual(await call('ed-cli', 'DELETE', '/members/token:dev-reader'), [200, { revoked: { grants: 1, sessions: 0, tokens: 1, identities: 0, apps: 0 }, report: null }]);
+  // Told no report, which is for whoever runs the instance: no statement.
+  const [removal, , statements] = await cost(() => call('ed-cli', 'DELETE', '/members/token:dev-reader'));
+  assert.deepEqual([removal, statements], [[200, { revoked: { grants: 1, sessions: 0, tokens: 1, identities: 0, apps: 0 }, report: null }], 0]);
   assert.deepEqual(refused(await call('ed-cli', 'DELETE', '/members/token:prod-reader')), NO_ACCESS);
   assert.deepEqual(refused(await call('ada-cli', 'DELETE', '/members/token:market-reader')), NO_ACCESS);
   assert.deepEqual(await managedBy('ed-cli'), ['token:eds (managed):']);
@@ -555,6 +562,23 @@ test("a member's report: the keys whose current value they read or wrote, a rest
   assert.deepEqual(await toRotate(dee), [['market/prod/STRIPE_KEY v3 wrote'], 1]);
   const [listed, listCalls, listStatements] = await directory('cy-cli');
   assert.deepEqual([listed.removed, listCalls, listStatements], [[{ principalType: 'user', principalId: 'dee@acme.example', toRotate: 1 }, { principalType: 'user', principalId: 'rex@acme.example', toRotate: 0 }], ['caller'], 1]);
+});
+
+test("an Owner removing another is told what they read and the app they connected, as the removal leaves them: removed, the app disconnected (0.14.7's offboarding)", async () => {
+  await ok(call('cy-cli', 'PUT', `/members/${dee}`, { role: 'owner' }));
+  await ok(call('cy-cli', 'PATCH', '/secrets/market/prod', { STRIPE_KEY: 'sk_1' }));
+  await ok(call('dee-cli', 'POST', '/reveals', { path: 'market/prod' }));
+  const client = JSON.stringify({ id: 'https://claude.ai/client.json', host: 'claude.ai', registration: 'cimd', redirectUri: 'https://claude.ai/callback', scopes: 'read' });
+  await write(world, ...rows('credentials', credential('dee-app', dee, { kind: 'mcp', label: 'Claude', client })));
+  assert.deepEqual([(await report(dee))[0].live.apps, (await report(dee))[0].apps.length], [1, 1]);
+
+  const [status, body] = await call('cy-cli', 'DELETE', `/members/${dee}`);
+  const removed = body.report as unknown as Report;
+  assert.deepEqual([status, (body.revoked as Record<string, number>).apps], [200, 1]);
+  assert.deepEqual([removed.status, removed.instanceRole, removed.removedBy, removed.live.apps, removed.apps, removed.exposed.map((key) => `${key.project}/${key.environment}/${key.key} ${key.how}`)],
+    ['removed', 'member', 'cy@acme.example', 0, [], ['market/prod/STRIPE_KEY read']]);
+  // Removed again, it is refused as removed, and tells nothing more.
+  assert.deepEqual(refused(await call('cy-cli', 'DELETE', `/members/${dee}`)), [409, 'conflict', 'removed']);
 });
 
 test("a member's report holds a read to the date the value was first written, to the millisecond, and leaves out what is archived", async () => {

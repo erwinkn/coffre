@@ -333,7 +333,7 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
           ...seen.held.map((grant) => (grant.projectId === null ? `environment:${grant.environmentId}` : `project:${grant.projectId}`)),
           ...live.map((account) => `identity:${account.id}`),
         ], { member: principal, generation, revoked }),
-        answer: { revoked: revoked.length, ...ending(rode?.ending?.[0]), identities: live.length },
+        answer: { revoked: revoked.length, ...ending(rode?.ending?.[0]), identities: live.length, runs: runs(caller) },
       };
     },
   };

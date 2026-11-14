@@ -487,9 +487,13 @@ const requests: Record<string, Entry> = {
   // No role keeps theirs, and its scope, which names projects by id, is worded by slug: one statement, after the change.
   'PUT /members/:member, its scope kept': { request: () => api('cy-cli', 'PUT', '/members/user:temp@acme.example', {}), calls: ['change'], statements: 1, fixed: true },
   'PATCH /access/:member': { request: () => api('bo-cli', 'PATCH', '/access/user:temp@acme.example', { 'market/busy': 'viewer' }), calls: ['change'], statements: 0 },
-  'DELETE /members/:member': { request: () => api('cy-cli', 'DELETE', '/members/user:temp@acme.example'), calls: ['change'], statements: 0 },
+  // Whoever runs the instance is told the leaver's report: one statement, after the change.
+  'DELETE /members/:member': { request: () => api('cy-cli', 'DELETE', '/members/user:temp@acme.example'), calls: ['change'], statements: 1, fixed: true },
   'PUT /members/:member, a service account with its grants': { request: () => api('cy-cli', 'PUT', '/members/token:deploy', { access: { 'market/busy': 'viewer' } }), calls: ['change'], statements: 0 },
-  'DELETE /members/:member, a service account': { request: () => api('cy-cli', 'DELETE', '/members/token:deploy'), calls: ['change'], statements: 0 },
+  'DELETE /members/:member, a service account': { request: () => api('cy-cli', 'DELETE', '/members/token:deploy'), calls: ['change'], statements: 1, fixed: true },
+  // A service account set up, and removed, by whoever manages it there: told no report, so no statement.
+  'PUT /members/:member, a service account set up by a manager': { request: () => api('bo-cli', 'PUT', '/members/token:bo-deploy', { access: { 'market/busy': 'viewer' } }), calls: ['change'], statements: 0 },
+  'DELETE /members/:member, a service account, by its manager': { request: () => api('bo-cli', 'DELETE', '/members/token:bo-deploy'), calls: ['change'], statements: 0 },
   // A member's tokens, handles and sessions: a list is `caller` and one statement; each made or ended, one change.
   'GET /members/:member/tokens': { request: () => api('bo-cli', 'GET', `/members/${ci}/tokens`), calls: ['caller'], statements: 1 },
   'GET /members/:member/tokens, by the service itself': { request: () => api('ci-token', 'GET', `/members/${ci}/tokens`), calls: ['caller'], statements: 1 },

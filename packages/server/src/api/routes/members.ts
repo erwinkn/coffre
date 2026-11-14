@@ -5,7 +5,7 @@ import { instanceRole, roleId, scopeInput, slug } from '@coffre/core/schemas';
 import type { AccessChange, Called } from '@coffre/core/vault';
 import { z } from 'zod';
 
-import { members, projectNamed, projectSlugs, reportOf, type Definition, type GrantRow, type MemberRow } from '../../db/queries/members.ts';
+import { members, projectNamed, projectSlugs, reportOf, type Definition, type GrantRow, type MemberRow, type ReportRow } from '../../db/queries/members.ts';
 import type { PlaceRow } from '../../db/queries/places.ts';
 import { can, canAnywhere, permissionsAt, placeOf, projectsReached, type Place } from '../caller.ts';
 import { changed } from '../change.ts';
@@ -450,42 +450,7 @@ export const memberRoutes = {
       if (!runsInstance(who.holds)) throw refusal('no_access');
       const row = await reportOf(ctx.db, principal, new Date());
       if (row === null) throw new ApiError('not_found', 'no such member');
-      const exposed: ExposedSecret[] = row.keys.filter((key) => key.rotate)
-        .sort((a, b) => compare(a.project, b.project) || compare(a.environment, b.environment) || compare(a.key, b.key))
-        .map((key) => ({ project: key.project, environment: key.environment, key: key.key, version: key.version, how: key.wrote ? 'wrote' as const : 'read' as const, at: key.at! }));
-      const removed = row.status === 'removed';
-      return {
-        principalType: typeOf(principal),
-        principalId: idOf(principal),
-        status: row.status,
-        instanceRole: roleOf(row),
-        scope: scopeView(standingOf(row), row.scopeSlugs),
-        declared: false,
-        removedAt: removed ? row.statusChangedAt : null,
-        removedBy: removed ? idOf(row.statusChangedBy) : null,
-        live: row.live,
-        exposed,
-        rotated: row.keys.length - exposed.length,
-        issuedTokens: row.issued.map((token) => ({
-          id: token.id,
-          service: idOf(token.service),
-          label: token.label,
-          hint: token.hint ?? '',
-          expiresAt: token.expiresAt,
-          lastUsedAt: token.lastUsedAt,
-          scope: tokenScope(token.scope, row.slugs),
-        })),
-        apps: row.apps,
-        // A service account's tokens are on its own page.
-        personalTokens: typeOf(principal) === 'user' ? row.tokens.map((token) => tokenView(token, row.slugs)) : [],
-        references: row.made.map((made): MadeReference => {
-          const places = { projects: new Map(made.projects.map((place) => [place.id, place])), environments: new Map(made.environments.map((place) => [place.id, place])) };
-          // Theirs, as the statement picked it, and dated: a row that points somewhere says when (`secrets_source_set_check`).
-          return { ...referenceView(places, made.holder, made.source), createdBy: principal, createdAt: made.holder.sourceSetAt! };
-        }).sort((a, b) => Number(b.state === 'live') - Number(a.state === 'live')),
-        totals: { issuedTokens: row.totals.issued, personalTokens: typeOf(principal) === 'user' ? row.totals.tokens : 0, references: row.totals.made },
-        personal: row.personal,
-      };
+      return reportView(principal, row);
     },
   }),
 
@@ -575,14 +540,17 @@ export const memberRoutes = {
    * connected app and binding they hold. Whoever runs the instance removes
    * anyone; a service account's manager removes it too (`managesService`).
    * One change of the vault's, which says how many of each it ended, as
-   * 0.14.7 did. Their report comes with the offboarding design: null until
-   * then.
+   * 0.14.7 did, and, to whoever runs the instance, their report as the
+   * removal leaves them (`GET /members/:member`), what they knew to rotate:
+   * one statement, after the change. A service's manager is told none.
    */
   ...route('DELETE /members/:member', {
     run: async (ctx, { params }): Promise<MemberRemoval> => {
       const principal = memberOf(params.member);
-      const { revoked, ...ended } = await changed(ctx, { op: 'member.remove', principal }, principal);
-      return { revoked: { grants: revoked, ...ended }, report: null };
+      const { revoked, runs, ...ended } = await changed(ctx, { op: 'member.remove', principal }, principal);
+      // Read once the removal has committed, as it leaves them: removed, with nothing left that lets them in.
+      const row = runs ? await reportOf(ctx.db, principal, new Date()) : null;
+      return { revoked: { grants: revoked, ...ended }, report: row === null ? null : reportView(principal, row) };
     },
   }),
 
@@ -607,3 +575,43 @@ export const memberRoutes = {
     },
   }),
 };
+
+/** A member's report, as their row of `reportOf` holds it: for `GET /members/:member`, and for the removal of one by whoever runs the instance. */
+function reportView(principal: string, row: ReportRow): OffboardingReport {
+  const exposed: ExposedSecret[] = row.keys.filter((key) => key.rotate)
+    .sort((a, b) => compare(a.project, b.project) || compare(a.environment, b.environment) || compare(a.key, b.key))
+    .map((key) => ({ project: key.project, environment: key.environment, key: key.key, version: key.version, how: key.wrote ? 'wrote' as const : 'read' as const, at: key.at! }));
+  const removed = row.status === 'removed';
+  return {
+    principalType: typeOf(principal),
+    principalId: idOf(principal),
+    status: row.status,
+    instanceRole: roleOf(row),
+    scope: scopeView(standingOf(row), row.scopeSlugs),
+    declared: false,
+    removedAt: removed ? row.statusChangedAt : null,
+    removedBy: removed ? idOf(row.statusChangedBy) : null,
+    live: row.live,
+    exposed,
+    rotated: row.keys.length - exposed.length,
+    issuedTokens: row.issued.map((token) => ({
+      id: token.id,
+      service: idOf(token.service),
+      label: token.label,
+      hint: token.hint ?? '',
+      expiresAt: token.expiresAt,
+      lastUsedAt: token.lastUsedAt,
+      scope: tokenScope(token.scope, row.slugs),
+    })),
+    apps: row.apps,
+    // A service account's tokens are on its own page.
+    personalTokens: typeOf(principal) === 'user' ? row.tokens.map((token) => tokenView(token, row.slugs)) : [],
+    references: row.made.map((made): MadeReference => {
+      const places = { projects: new Map(made.projects.map((place) => [place.id, place])), environments: new Map(made.environments.map((place) => [place.id, place])) };
+      // Theirs, as the statement picked it, and dated: a row that points somewhere says when (`secrets_source_set_check`).
+      return { ...referenceView(places, made.holder, made.source), createdBy: principal, createdAt: made.holder.sourceSetAt! };
+    }).sort((a, b) => Number(b.state === 'live') - Number(a.state === 'live')),
+    totals: { issuedTokens: row.totals.issued, personalTokens: typeOf(principal) === 'user' ? row.totals.tokens : 0, references: row.totals.made },
+    personal: row.personal,
+  };
+}
