@@ -122,7 +122,7 @@ one package is seen by the others without a build. Builds leave it off.
 | `@coffre/server/plugins/vault-kv` | `vaultKv()`, a plugin for `plugins: […]`: a read-only Vault KV v2 API at `/v1` ([vault.md](vault.md), [design/plugins.md](design/plugins.md)) |
 | `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`; `githubActions`, `vercel`, `railway`, `cloudflareWorkers`, `SyncConfigError`, `SyncProviderError`; and the config types, `SigninProvider` and `SyncProvider` among them |
 | `@coffre/vault/cloudflare` | `vault(env => config)`, the RPC Worker's default export; `postgres(env.VAULT_HYPERDRIVE)` |
-| `@coffre/vault` (both) | `awsKms`, `KekUnavailableError`, `KekBadClaimError`, and the config types, `KekProvider` among them |
+| `@coffre/vault` (both) | `awsKms`, `KekUnavailableError`, `KekRefusedError`, `KekBadClaimError`, and the config types, `KekProvider` among them |
 | `@coffre/vault/node` | `serveVault({ socket, database, …config })`, `connectVault(socket)`, `localVault({ database, …config })` |
 | `@coffre/ui` | each layout's and page's route options, `shell`, `solo`, `projects` and the like; `createRouter(routeTree)`; `<CoffreProvider>`, `useCoffre()`; `CoffreContext` |
 | `@coffre/ui/pages/<name>` | each page's component, `ProjectsPage` and the like, for its file route |

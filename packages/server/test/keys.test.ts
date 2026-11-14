@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
+import { KekUnavailableError } from '@coffre/core/kek';
 import { credential, dismissed, emptyDatabase, environment, grant, principal, project, rewrite, role, rows, secret, user, value, write } from '@coffre/vault/testing';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
@@ -393,6 +394,33 @@ test("marking keys' natures in place, as 0.14.7 answered: one vault change and n
   assert.deepEqual(refused((await marks('ada-cli', 'market/prod', { A: { sensitivity: 'sensitive' } }))[0]), NO_ACCESS);
   const [bad, badCalls] = await marks('bo-cli', 'market/prod', { A: { sensitivity: 'public' } });
   assert.deepEqual([bad[0], badCalls], [400, []]);
+});
+
+test("a key service that gives out partway through a mark: 503 unavailable with when to ask again, nothing written, and the same request made whole once it answers", async () => {
+  const patch = (body: unknown) => app.request('/api/secrets/market/prod', { method: 'PATCH', headers: { authorization: 'Bearer bo-cli' }, body: JSON.stringify(body) });
+  assert.equal((await patch({ K1: 'one', K2: 'two', K3: 'three' })).status, 200);
+  const versions = async () => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM secret_versions`))[0]!.n;
+  const before = await versions();
+  // Three keys, each opened then sealed again: six calls of the key service's, of which the fifth fails, as one gone down would.
+  const { keks } = world;
+  const [unwrap, wrap] = [keks.unwrap, keks.wrap];
+  let calls = 0;
+  const flaky = <A extends unknown[], T>(run: (...args: A) => Promise<T>) => (...args: A): Promise<T> => (++calls === 5 ? Promise.reject(new KekUnavailableError('KMS Decrypt failed 3 times: KMSInternalException')) : run.apply(keks, args));
+  Object.assign(keks, { unwrap: flaky(unwrap), wrap: flaky(wrap) });
+  const marks = { K1: { sensitivity: 'sensitive' }, K2: { sensitivity: 'sensitive' }, K3: { sensitivity: 'sensitive' } };
+  let failed: Response;
+  try {
+    failed = await patch(marks);
+  } finally {
+    Object.assign(keks, { unwrap, wrap });
+  }
+  assert.deepEqual([failed.status, failed.headers.get('retry-after'), (await failed.json() as Body).error, calls], [503, '5', 'unavailable', 5]);
+  assert.equal(await versions(), before);
+  assert.deepEqual((await list('bo-cli', 'market/prod')).keys.filter((key) => key.key.startsWith('K')).map((key) => [key.key, key.version, key.sensitivity]), [['K1', 1, 'secret'], ['K2', 1, 'secret'], ['K3', 1, 'secret']]);
+  // Asked again, the key service answering: all three marked.
+  const again = await patch(marks);
+  assert.deepEqual([again.status, (await again.json() as Body).keys], [200, { K1: { version: 2, sensitivity: 'sensitive' }, K2: { version: 2, sensitivity: 'sensitive' }, K3: { version: 2, sensitivity: 'sensitive' } }]);
+  assert.equal(await versions(), before + 3);
 });
 
 /** A version, and a reveal of the whole environment, by the same caller: the same answer, or the same refusal. */

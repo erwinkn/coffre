@@ -6,6 +6,7 @@ import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { KekCancelledError, KekRefusedError, KekUnavailableError } from '@coffre/core/kek';
 import { isUnavailable } from '@coffre/db/dialect';
 
 import { failureOf } from '../src/failure.ts';
@@ -97,6 +98,37 @@ test("the vault's database not answering crosses the socket as the outage it is,
     const gone = await connectVault(join(dir, 'nobody.sock')).use(NOBODY).then(() => assert.fail('answered'), (error: unknown) => error);
     assert.match(String((gone as Error).message), /is unreachable/);
     assert.equal(isUnavailable(gone), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a key service's failure crosses the socket with its name: an outage the app answers 503, a refusal 500", async () => {
+  const down = new KekUnavailableError('KMS Decrypt failed 3 times: ThrottlingException');
+  const refused = new KekRefusedError('KMS Decrypt failed: AccessDeniedException');
+  assert.deepEqual(failureOf(down), { status: 503, body: { error: down.message, name: 'KekUnavailableError' } });
+  assert.deepEqual(failureOf(new KekCancelledError(true)), { status: 503, body: { error: 'key operation was cancelled', name: 'KekCancelledError' } });
+  assert.deepEqual(failureOf(refused), { status: 500, body: { error: refused.message, name: 'KekRefusedError' } });
+  // Wrapped, its name is the key service's, not the wrapper's.
+  assert.equal(failureOf(new Error('sealing failed', { cause: down })).body.name, 'KekUnavailableError');
+
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-socket-'));
+  try {
+    const socket = join(dir, 'vault.sock');
+    const answers = [failureOf(down), failureOf(refused)];
+    const server = createServer((_req, res) => {
+      const { status, body } = answers.shift()!;
+      res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
+    });
+    await new Promise<void>((resolve) => server.listen(socket, resolve));
+    try {
+      const vault = connectVault(socket);
+      const failed = () => vault.use(NOBODY).then(() => assert.fail('answered'), (error: unknown) => error as Error);
+      // The names the app reads (`keyServiceDown`, packages/server/src/api/errors.ts), as a Worker's RPC hands them back.
+      assert.deepEqual([(await failed()).name, (await failed()).name], ['KekUnavailableError', 'KekRefusedError']);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

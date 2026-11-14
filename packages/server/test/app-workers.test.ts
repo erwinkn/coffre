@@ -59,19 +59,23 @@ before(async () => {
   const tunnelUrl = await value(world, secret(data, 'TUNNEL_URL'), `${APP_URL}?sslmode=disable`, { sensitive: true });
   const tunnelHandle = credential(TUNNEL_HANDLE, ada, { kind: 'handle', scope: JSON.stringify([{ projectId: market.id, environmentId: data.id, role: 'viewer' }]), places: JSON.stringify([{ environmentId: data.id, personal: false }]) });
   tunnelHandleId = tunnelHandle.id;
+  // Bo's alone: three values he marks, a key service giving out partway through.
+  const lab = project('lab');
+  const labProd = environment(lab, 'prod');
+  const marked = await Promise.all(['K1', 'K2', 'K3'].map((key) => value(world, secret(labProd, key), key.toLowerCase())));
   const used = { lastUsedAt: new Date() };
   const github = identity(bo);
   const deploy = binding(DEPLOY, { policy: '{}', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) });
   await write(
     world,
-    ...rows('projects', market),
-    ...rows('environments', prod, staging, apis, data),
-    ...rows('secrets', url, apiKey, region, tunnelUrl),
+    ...rows('projects', market, lab),
+    ...rows('environments', prod, staging, apis, data, labProd),
+    ...rows('secrets', url, apiKey, region, tunnelUrl, ...marked),
     ...rows('roles', role(false, 'viewer', ['secret.read', 'secret.use'], []), role(false, 'developer', ['secret.read', 'secret.write']), role(true, 'member', [])),
     ...rows('policy', instance()),
     ...rows('principals', principal(ada), principal(bo), principal(DEPLOY)),
     ...rows('identities', github),
-    ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market }), grant(DEPLOY, 'viewer', { project: market })),
+    ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market }), grant(bo, 'developer', { project: lab }), grant(DEPLOY, 'viewer', { project: market })),
     ...rows('bindings', deploy),
     ...rows('credentials', credential('ada-cli', ada, used), credential('bo-cli', bo, used), credential(BROWSER, bo, { ...used, kind: 'browser', identityId: github.id }), session(WORKLOAD, deploy, { jkt: await thumbprint(KEY.jwk), places: JSON.stringify([{ environmentId: apis.id }]) }),
       credential(HANDLE, ada, { kind: 'handle', scope: JSON.stringify([{ projectId: market.id, environmentId: apis.id, role: 'viewer' }]), places: JSON.stringify([{ environmentId: apis.id, personal: false }]) }), tunnelHandle),
@@ -260,4 +264,20 @@ test("a tunnel on Workers: `coffre.upgrade` sends the WebSocket to its object, w
   } finally {
     listener.close();
   }
+});
+
+test("a key service that gives out partway through a mark, behind the vault's RPC: 503 unavailable with when to ask again, nothing written, and the same request made whole once it answers", { timeout: 120_000 }, async () => {
+  const mark = () => ask('/api/secrets/lab/prod', bearer('bo-cli', { method: 'PATCH', body: JSON.stringify({ K1: { sensitivity: 'sensitive' }, K2: { sensitivity: 'sensitive' }, K3: { sensitivity: 'sensitive' } }) }));
+  const versions = async () => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM secret_versions`))[0]!.n;
+  const before = await versions();
+  // Three keys, each opened then sealed again: six calls of the key service's, the fifth failing.
+  await worker.fetch('/key-service', { method: 'POST', body: '4' } as never);
+  const failed = await mark();
+  const { calls } = (await (await worker.fetch('/key-service')).json()) as { calls: number };
+  assert.deepEqual([failed.status, failed.headers.get('retry-after'), failed.body.error, calls], [503, '5', 'unavailable', 5], JSON.stringify(failed.body));
+  assert.equal(await versions(), before);
+  // Asked again, the key service answering: all three marked.
+  const again = await mark();
+  assert.deepEqual([again.status, again.body.keys], [200, { K1: { version: 2, sensitivity: 'sensitive' }, K2: { version: 2, sensitivity: 'sensitive' }, K3: { version: 2, sensitivity: 'sensitive' } }], JSON.stringify(again.body));
+  assert.equal(await versions(), before + 3);
 });

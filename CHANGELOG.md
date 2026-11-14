@@ -38,6 +38,16 @@
   (409), with nothing written: mark fewer keys at once, or fork by
   references or inheritance. A restore comes back no looser than the
   value's newest copy, a mark's included.
+- **A key service that does not answer is 503 `unavailable`.** AWS KMS
+  down, throttling past its retries or out of time fails a read, a write, a
+  mark or a fork with 503 and `Retry-After`, where 0.14.7 answered 500.
+  Nothing is written, so the same request may be sent again: the CLI's
+  `get`, `run` and `export`, and so the Action, do so by themselves; `set`,
+  `mark` and a fork leave it to their caller. KMS refusing
+  coffre's credentials, or its key disabled or gone, stays a 500: asked
+  again, it says the same. A key service of a deployment's own throws
+  `KekRefusedError` (`@coffre/vault`) for what asking again does not mend,
+  and `KekUnavailableError` for the rest.
 - **A restored version comes back as typed.** Restoring a version a recipe
   made, or one half of a key pair, writes it as a value typed by hand:
   Regenerate no longer makes its next one by that recipe, and the pair's

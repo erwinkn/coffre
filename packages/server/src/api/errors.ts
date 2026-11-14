@@ -21,7 +21,7 @@ import { logged } from '../logged.ts';
  *   409 conflict           the request is valid but the current state refuses it
  *   429 too_many_requests  too many sign-ins waiting; try again later
  *   501 not_implemented    a route this release declares and does not serve yet
- *   503 unavailable        something coffre needs is not answering: the vault, a platform, its database
+ *   503 unavailable        something coffre needs is not answering: the vault, a platform, its database, its key service
  *   503 migrating          the database lacks this version's migrations: nothing is served until `coffre migrate`
  *   503 adopting           the vault has not taken the database over yet: nobody signs in until it has
  *   500 tampered           a row the vault read is not one it wrote: the operator reads which in the server log
@@ -187,6 +187,25 @@ export function noteTampered(error: unknown, route: string, request: string | nu
 }
 
 /**
+ * A key service's failure, as `@coffre/core/kek` names it: by name, through
+ * the causes, since a Worker's RPC hands back an error's fields and not its
+ * class. Down, out of time or cancelled is an outage, which the same
+ * request may get past in a moment; `KekRefusedError`, its credentials
+ * refused or its key disabled, is none: asked again, it says the same.
+ */
+const KEY_SERVICE_DOWN = new Set(['KekUnavailableError', 'KekCancelledError']);
+
+/** Whether `error`, or a cause of it, is a key service that did not answer (`KEY_SERVICE_DOWN`). */
+export function keyServiceDown(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    const { name } = cause as { name?: unknown };
+    if (name === 'KekRefusedError') return false;
+    if (typeof name === 'string' && KEY_SERVICE_DOWN.has(name)) return true;
+  }
+  return false;
+}
+
+/**
  * What a request is told when what coffre needs did not answer: its
  * database, mostly, but the same words come from the vault's RPC and from
  * a key service, which coffre cannot tell apart from here.
@@ -216,10 +235,16 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
       body: { error: 'bad_request', message: `${where}${issue?.message ?? 'invalid input'}` },
     };
   }
-  // The database not answering, the vault's behind its call, or a key service's: the request was fine, and may be
-  // asked again; a write whose connection dropped may have committed, which a look at it says. A statement that gave
-  // up waiting is logged apart: under a busy database it is an outage, but a transaction held too long, across a
-  // vault call say, is a bug that looks the same.
+  // A key service that did not answer: no value was written, nor half a change, and the same request may be asked
+  // again. One that refused coffre is a 500, below: asked again, it refuses again, and its operator must act.
+  if (keyServiceDown(error)) {
+    console.error('a key service did not answer', logged(error));
+    return { status: 503, body: { error: 'unavailable', message: UNAVAILABLE } };
+  }
+  // The database not answering, or the vault's behind its call: the request was fine, and may be asked again; a write
+  // whose connection dropped may have committed, which a look at it says. A statement that gave up waiting is logged
+  // apart: under a busy database it is an outage, but a transaction held too long, across a vault call say, is a bug
+  // that looks the same.
   if (isUnavailable(error)) {
     console.error(gaveUp(error) ? 'a statement gave up waiting' : 'a dependency did not answer', logged(error));
     return { status: 503, body: { error: 'unavailable', message: UNAVAILABLE } };
