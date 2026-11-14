@@ -55,6 +55,13 @@ export interface Vault {
    * its input. All of it, or none.
    */
   change<O extends Change['op']>(input: Asked<O>): Promise<{ answer: Answers[O] } | Refused>;
+  /**
+   * What `change` would answer, as of now, and nothing written: the same
+   * read and the same decision, so a preview never says what the change
+   * would not do. What a dry run asks (`?dryRun=1`). A refusal is logged as
+   * a change's is.
+   */
+  weigh<O extends Change['op']>(input: Asked<O>): Promise<{ answer: Answers[O] } | Refused>;
 }
 
 /** Where a request came from, which every call carries. */

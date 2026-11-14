@@ -111,6 +111,27 @@ test('a write gives each key its next version, makes the keys the environment la
   assert.equal(by!.by, ada);
 });
 
+test('a write weighed answers what the write would, and writes nothing; a refusal is the write\'s, logged as one', async () => {
+  const [entries, versions] = [await count('log_pending'), await count('secret_versions')];
+  const ask = writing('ada-cli', { DATABASE_URL: 'postgres://new', NEW_KEY: ['on', 'plain'] });
+  // Through JSON, as over any transport: the versions each key would be at, and their natures.
+  const weighed = await vault.weigh(ask);
+  assert.deepEqual(weighed, { answer: { keys: { DATABASE_URL: { version: 2, nature: 'secret' }, NEW_KEY: { version: 1, nature: 'plain' } } } });
+  assert.deepEqual([await count('log_pending'), await count('secret_versions'), world.woken.length], [entries, versions, 0]);
+  const before = await vault.use(reveal('ada-cli', ['DATABASE_URL', 'NEW_KEY']));
+  assert.ok(!('refused' in before));
+  assert.deepEqual(before.values.map((item) => ('refused' in item ? item.refused : item.value)), ['postgres://old', 'unknown_key']);
+  // Made after, the write answers the same.
+  assert.deepEqual(await vault.change(ask), weighed);
+  // A viewer's: refused as their write is, and the one entry says so for both.
+  const logged = await count('log_pending');
+  assert.deepEqual(await vault.weigh(writing('bo-cli', { DATABASE_URL: 'x' })), await vault.change(writing('bo-cli', { DATABASE_URL: 'x' })));
+  assert.deepEqual(await vault.weigh(writing('bo-cli', { DATABASE_URL: 'x' })), { refused: 'no_access' });
+  assert.equal(await count('log_pending'), logged + 1);
+  // And an operation the contract has not is a fault, as for a change.
+  await assert.rejects(vault.weigh({ ...ask, op: 'nope' } as never), /an operation the contract has/);
+});
+
 test('a write is refused to whoever may not write there, with one answer, and writes nothing', async () => {
   const before = [await count('log_pending'), await count('secret_versions')];
   const refused = async (label: string, more: Partial<SecretWrite> = {}) => vault.change(writing(label, { DATABASE_URL: 'x' }, more));

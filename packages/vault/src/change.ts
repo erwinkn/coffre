@@ -565,14 +565,31 @@ async function deny(vault: Running, said: Denied): Promise<void> {
 export async function change<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>): Promise<{ answer: A } | Refusal> {
   for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
     const prepared = await prepare(vault, operation);
-    if ('refused' in prepared) {
-      if (prepared.said != null) await deny(vault, prepared.said);
-      return { refused: prepared.refused };
-    }
+    if ('refused' in prepared) return refused(vault, prepared);
     const outcome = await written(vault, prepared);
     if (outcome === 'made') return { answer: prepared.answer };
     // Not logged: a proof comes with a change nobody asks, and a refusal nobody who stands asked writes nothing (D236).
     if (outcome === 'spent') return REPLAYED;
   }
   throw new Busy(`a change started ${ATTEMPTS} times over, each time behind another change to the rows it read, or too late for its decision`);
+}
+
+/**
+ * What a change would answer, made now: its read, its check and its
+ * decision, its rows sealed and its values opened, all of a change but the
+ * write, which is never sent. So nothing is written, no proof spent and no
+ * binding used, and a proof spent before is the one refusal it cannot tell.
+ * Its answer is as of its read: the change made after it reads and decides
+ * again. A refusal is a change's, logged as one (D236), so that weighing is
+ * no way to ask what one may do and leave no entry.
+ */
+export async function weigh<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>): Promise<{ answer: A } | Refusal> {
+  const prepared = await prepare(vault, operation);
+  return 'refused' in prepared ? refused(vault, prepared) : { answer: prepared.answer };
+}
+
+/** A refusal, once its entry is logged, if it has one. */
+async function refused(vault: Running, { refused, said }: Refusal & { said?: Denied | null }): Promise<Refusal> {
+  if (said != null) await deny(vault, said);
+  return { refused };
 }

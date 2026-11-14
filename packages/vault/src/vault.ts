@@ -3,7 +3,7 @@ import type { Database } from '@coffre/db';
 
 import type { ResolvedVaultConfig } from './config.ts';
 import { caller } from './caller.ts';
-import { change, type Operation, type Parts } from './change.ts';
+import { change, weigh, type Operation, type Parts } from './change.ts';
 import { OPERATIONS } from './ops/index.ts';
 import { presented, text } from './ops/input.ts';
 import { keyOf } from './rows.ts';
@@ -64,6 +64,12 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
     }
   };
   const serving: Serving = { ...prepared, db, now, wake: told };
+  const operation = <O extends Change['op']>(input: Asked<O>) => {
+    if (!Object.hasOwn(OPERATIONS, input.op)) throw new TypeError('a change names an operation the contract has');
+    // The registry holds each operation under its own name: what it answers is that name's.
+    const made = OPERATIONS[input.op] as unknown as (input: Asked<O>, vault: Deciding) => Operation<Parts, Answers[O], unknown>;
+    return made(input, { workloads: serving.workloads, owners: prepared.owners });
+  };
   return {
     async use(input) {
       const answer = await use(serving, asked(input));
@@ -76,11 +82,11 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
     async caller(input) {
       return caller(serving, { ...presented(input), head: input.head === true });
     },
-    async change<O extends Change['op']>(input: Asked<O>) {
-      if (!Object.hasOwn(OPERATIONS, input.op)) throw new TypeError('a change names an operation the contract has');
-      // The registry holds each operation under its own name: what it answers is that name's.
-      const operation = OPERATIONS[input.op] as unknown as (input: Asked<O>, vault: Deciding) => Operation<Parts, Answers[O], unknown>;
-      return change(serving, operation(input, { workloads: serving.workloads, owners: prepared.owners }));
+    async change(input) {
+      return change(serving, operation(input));
+    },
+    async weigh(input) {
+      return weigh(serving, operation(input));
     },
   };
 }

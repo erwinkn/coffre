@@ -92,6 +92,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async peek(input: UseInput) { return this.#call((vault) => vault.peek(input)); }
   async caller(input: Presented & { head?: boolean }) { return this.#call((vault) => vault.caller(input)); }
   async change<O extends Change['op']>(input: Asked<O>) { return this.#call((vault) => vault.change(input)); }
+  async weigh<O extends Change['op']>(input: Asked<O>) { return this.#call((vault) => vault.weigh(input)); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */
   fetch() {
