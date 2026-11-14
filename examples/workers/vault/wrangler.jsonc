@@ -29,5 +29,11 @@
   // prints the id. Its own config, not the app's: the vault writes
   // members and grants, which the app's login may only read. Locally,
   // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_VAULT_HYPERDRIVE stands in.
-  "hyperdrive": [{ "binding": "VAULT_HYPERDRIVE", "id": "replace-with-your-vault-hyperdrive-id" }]
+  "hyperdrive": [{ "binding": "VAULT_HYPERDRIVE", "id": "replace-with-your-vault-hyperdrive-id" }],
+  // The signer, one object for the whole instance, which src/worker.ts
+  // exports: it numbers and signs the log's entries, each minute and when
+  // the vault tells it of one. SQLite-backed, so that a run's changes are
+  // one transaction.
+  "durable_objects": { "bindings": [{ "name": "SIGNER", "class_name": "CoffreSigner" }] },
+  "migrations": [{ "tag": "signer", "new_sqlite_classes": ["CoffreSigner"] }]
 }

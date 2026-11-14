@@ -251,8 +251,12 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/prepare
       - name: Node conformance
+        # Runs once @coffre/server exports ./node: 0.16.0 is Workers only (D198; docs/design/0.16.md, "Node in 0.16.0").
         run: |
-          pnpm conformance:node --browser /usr/bin/google-chrome
+          ships="$(node scripts/node-ships.mjs 'Node conformance')"
+          if [[ "$ships" == true ]]; then
+            pnpm conformance:node --browser /usr/bin/google-chrome
+          fi
 
   consumer:
     needs: changes
@@ -293,7 +297,15 @@ jobs:
       - name: Name Node.js 24
         run: echo "COFFRE_CLIENT_NODES=$COFFRE_CLIENT_NODES $(command -v node)" >> "$GITHUB_ENV"
       - name: Packed consumer
-        run: pnpm test:consumer --kind ${{ matrix.kind }}
+        # Node's leg runs once @coffre/server exports ./node: 0.16.0 is Workers only (D198; docs/design/0.16.md, "Node in 0.16.0").
+        env:
+          KIND: ${{ matrix.kind }}
+        run: |
+          if [[ "$KIND" == node ]]; then
+            ships="$(node scripts/node-ships.mjs 'Packed consumer (node)')"
+            [[ "$ships" == true ]] || exit 0
+          fi
+          pnpm test:consumer --kind "$KIND"
 
   compat:
     needs: changes

@@ -1,6 +1,9 @@
 // The vault Worker `pnpm dev` runs beside the app, as examples/workers does.
 import { postgres, vault } from '@coffre/vault/cloudflare';
 
+// The signer's Durable Object, configured as the vault below is: ../wrangler.jsonc binds it as SIGNER.
+export { CoffreSigner } from '@coffre/vault/cloudflare';
+
 type Env = {
   VAULT_HYPERDRIVE: { connectionString: string };
   COFFRE_VAULT_KEY_ID: string;
