@@ -723,3 +723,16 @@ test('environments protect and unprotect send the flag, and say what it does', a
   assert.deepEqual(off.calls[0]!.body, { protected: false });
   assert.equal(off.written.out, 'market/prod is not protected: each role holds there what it holds anywhere\n');
 });
+
+test('settings alone reads them, with --json as they came; service-accounts and its flags set them', async () => {
+  const { connect, calls, written, io } = fixture((call) => ({ serviceAccounts: call.method === 'GET' ? EVERYWHERE : { ...EVERYWHERE, environments: { except: ['prod'] } } }));
+  await manage.settings(connect, [], io);
+  await manage.settings(connect, ['--json'], io);
+  await manage.settings(connect, ['service-accounts', '--except-environments', 'prod'], io);
+  assert.deepEqual(calls.map(({ method, path }) => `${method} ${path}`), ['GET /settings', 'GET /settings', 'PUT /settings']);
+  assert.deepEqual(calls[2]!.body, { serviceAccounts: { environments: { except: ['prod'] } } });
+  const [plain, json] = written.out.split('\n{');
+  assert.match(plain!, /^service accounts, set up by anyone who holds access in: /);
+  assert.deepEqual(JSON.parse(`{${json!.slice(0, json!.indexOf('\n}') + 2)}`), { serviceAccounts: EVERYWHERE });
+  await assert.rejects(manage.settings(connect, ['--except-environments', 'prod'], io), manage.UsageError);
+});

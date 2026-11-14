@@ -644,7 +644,7 @@ export async function admit(connect: () => CoffreClient, args: string[], io: Io 
  * to an Admin whose scope takes prod in. No flag is everywhere again.
  */
 export async function settings(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
-  const { values, positionals } = parse(args, { ...json, ...SCOPE_FLAGS }, ['service-accounts'], 0);
+  const { values, positionals } = parse(args, { ...json, ...SCOPE_FLAGS }, ['service-accounts'], 1);
   const api = connect();
   const [projects, environments] = [filterOf(values, 'projects'), filterOf(values, 'environments')];
   if (positionals[0] === undefined && (projects !== undefined || environments !== undefined)) {

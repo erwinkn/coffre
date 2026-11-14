@@ -398,7 +398,7 @@ export const SECTIONS = [
         about: [
           'every use under the target refused from its next request,',
           'its sessions and codes kept: instance, service:<name>,',
-          'binding:<id>, session:<id> or credential:<path>/<name>;',
+          'binding:<id> or session:<id>;',
           'alone, what is frozen',
         ],
       },
