@@ -34,7 +34,6 @@
     "db:migrate": "pnpm --dir packages/db run db:migrate",
     "db:generate": "pnpm --dir packages/db run db:generate",
     "db:check": "pnpm --dir packages/db run db:check",
-    "seed": "DATABASE_URL=postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/coffre node --conditions=coffre:source --env-file=.env.dev dev/seed.mjs",
     "coffre": "node --conditions=coffre:source packages/cli/src/main.ts",
     "add:dep": "pnpm add --save-exact"
   },

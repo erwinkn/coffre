@@ -87,7 +87,8 @@ Open http://127.0.0.1:3000 and sign in through either button as
 `auditor@`, `outsider@`, all at `acme.example`). The dev IdP plays GitHub and
 an OpenID Connect provider, and asks which person you are. `pnpm dev` runs a
 deployment like `examples/workers` on the packages' sources, so an edit
-anywhere reloads in place; it resets and reseeds its database each time.
+anywhere reloads in place. Each run starts over: a new database and a blank
+signer, which the seed fills through the API.
 
 To sign in from another machine through a tunnel (`bb connect expose`, ngrok),
 give `pnpm dev` the URLs a browser uses, one per port:
