@@ -12,6 +12,7 @@ import { after, beforeEach, test } from 'node:test';
 
 import { credential as proxied } from '@coffre/client/credential';
 import { generateToken } from '@coffre/core/identity';
+import type { UseInput } from '@coffre/core/vault';
 import { rowsOf } from '@coffre/db/dialect';
 import { credential, emptyDatabase, environment, grant, instance, principal, project, rewrite, role, rows, secret, value, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
@@ -348,7 +349,7 @@ test("each encrypt and decrypt is one use, the cipher named, and logged by the v
     }
     // Nothing is kept: every request asks the vault again, each time naming the cipher.
     assert.deepEqual(app.calls.slice(before), Array.from({ length: 12 }, () => 'use'));
-    const inputs = app.inputs.slice(before) as { keys: string[]; purpose: string; upstream: string }[];
+    const inputs = app.inputs.slice(before) as { keys: string[]; purpose: string; upstream: UseInput['upstream'] }[];
     for (const input of inputs) assert.deepEqual([input.keys, input.purpose, input.upstream], [['PAYER_SESSION_KEY'], 'use', { credential: 'payer-session' }]);
     // Twelve uses, one entry: the vault's once a minute.
     const entries = (await pending()).filter((entry) => entry.action === 'secret.read' && entry.detail.purpose === 'use');
