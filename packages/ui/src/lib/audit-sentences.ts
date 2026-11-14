@@ -621,8 +621,9 @@ function article(name: string): string {
 
 /** Whether an entry's scope narrows the role; its projects are ids, which a sentence cannot name. */
 function scoped(entry: AuditEntry): Part[] {
-  const scope = entry.metadata.scope as { projects?: unknown; environments?: unknown } | undefined;
-  return scope === undefined || (scope.projects === 'all' && scope.environments === 'all') ? [] : [', with a scope'];
+  // An unscoped member's is null, the vault's `standing`.
+  const scope = entry.metadata.scope as { projects?: unknown; environments?: unknown } | null | undefined;
+  return scope == null || (scope.projects === 'all' && scope.environments === 'all') ? [] : [', with a scope'];
 }
 
 /**
