@@ -296,6 +296,47 @@ test("a handle for dev@me stands in for the personal config: its own values, and
   assert.deepEqual(plan.left, ['EMPTY', 'U_PASS']);
 });
 
+/** Cora, a Contributor of dev who uses it and reads none of it, with her own WEBHOOK_SECRET in dev@me: her handles there and on dev, as `POST /handles` makes them. */
+async function contributor(): Promise<{ mine: string; onDev: string }> {
+  const CORA = 'user:cora';
+  const coras = environment(market, 'dev-cora', { parentId: dev.id, owner: CORA });
+  const scope = JSON.stringify([{ projectId: market.id, environmentId: dev.id, role: 'contributor', permissions: { normal: ['secret.use'], protected: ['secret.use'] } }]);
+  const [mine, onDev] = [generateToken('handle'), generateToken('handle')];
+  const handled = (token: string, personal: boolean) => credential(token, CORA, { kind: 'handle', scope, places: JSON.stringify([{ environmentId: dev.id, personal }]), expiresAt: new Date(Date.now() + 3_600_000) });
+  await write(
+    world,
+    ...rows('roles', role(false, 'contributor', ['secret.use', 'secret.write'])),
+    ...rows('environments', coras),
+    ...rows('principals', principal(CORA)),
+    ...rows('grants', grant(CORA, 'contributor', { environment: dev })),
+    ...rows('secrets', value(world, secret(coras, 'WEBHOOK_SECRET'), 'whsec_cora_own')),
+    ...rows('credentials', handled(mine, true), handled(onDev, false)),
+  );
+  return { mine, onDev };
+}
+
+test("a Contributor's dev@me plan: their own values, and placeholders for every key a credential, signer or tunnel covers, never a value of dev's", async () => {
+  const { mine, onDev } = await contributor();
+  const { plan, response } = await planOf('market/dev@me', mine);
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal(plan.env.WEBHOOK_SECRET, 'whsec_cora_own');
+  for (const key of ['TWILIO_TOKEN', 'AWS_SECRET', 'SIGNING_KEY', 'HOOK_SECRET']) assert.equal(plan.env[key], mine, key);
+  assert.equal(plan.env.STRIPE_KEY, `sk_test_${mine}`);
+  assert.deepEqual(plan.tunnels.db, { key: 'DATABASE_URL', url: `${PUBLIC_URL.replace(/^http/, 'ws')}/use/market/dev@me/db` });
+  for (const secretValue of [...Object.values(COVERED), WEBHOOK]) assert.ok(!JSON.stringify(plan).includes(secretValue), secretValue);
+  // On dev itself, the secret no credential covers is one she does without: hers is in her own config.
+  const dev = await planOf('market/dev', onDev);
+  assert.equal(dev.plan.env.WEBHOOK_SECRET, undefined);
+  assert.ok(dev.plan.left.includes('WEBHOOK_SECRET'));
+});
+
+test("a Contributor's dev@me plan carries dev's plain values, with nothing left but what a reader also goes without", { todo: "0.14.7 handed a Contributor dev's plain values; 0.16 leaves them, as for anyone who only uses the place (docs/design/0.16.md, `coffre run`'s plan): APP_NAME in `left`, TWILIO_SID the handle" }, async () => {
+  const { mine } = await contributor();
+  const { plan } = await planOf('market/dev@me', mine);
+  assert.deepEqual([plan.env.APP_NAME, plan.env.TWILIO_SID], [APP_NAME, SID]);
+  assert.deepEqual(plan.left, ['EMPTY', 'U_PASS']);
+});
+
 test("a handle reads a protected prod as its person does: a Maintainer's is handed its secrets, a Developer's only uses them, and its plan says so", async () => {
   const olga = await planOf('market/prod', handleOf(OLGA, prod));
   assert.equal(olga.plan.env.WEBHOOK_SECRET, 'whsec_prod_0123456789');
