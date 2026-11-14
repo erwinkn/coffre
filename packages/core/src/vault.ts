@@ -261,7 +261,7 @@ export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers & SigninAns
  * or a sentence left for one no writer writes, fails the typecheck.
  */
 export const LOG_ACTIONS = [
-  'secret.read', 'secret.write', 'secret.rename', 'secret.refile', 'reference.break', 'missing.dismiss',
+  'secret.read', 'secret.write', 'secret.loosen', 'secret.rename', 'secret.refile', 'reference.break', 'missing.dismiss',
   'project.create', 'project.update', 'project.archive', 'project.restore', 'project.move', 'project.delete', 'folder.refile',
   'environment.create', 'environment.update', 'environment.archive', 'environment.restore', 'environment.delete',
   'environment.protect', 'environment.unprotect', 'upstream.freeze', 'upstream.thaw',

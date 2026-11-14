@@ -9,7 +9,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { after, beforeEach, test } from 'node:test';
 
 import { canonicalClaims, github, signin } from '@coffre/core/identity';
-import { LOG_ACTIONS } from '@coffre/core/vault';
+import { LOG_ACTIONS, type KeyWrite } from '@coffre/core/vault';
 import { describe, plain, runLabel, type AuditEntry } from '@coffre/ui/audit-sentences';
 
 import {
@@ -138,6 +138,8 @@ test('every action the vault writes reads as a sentence, with no fallback, and s
     ['DELETE', '/secrets/market/prod/LINK/reference'],
     ['PATCH', '/secrets/market/prod', { OWN: { ref: 'market/dev/TOKEN' } }],
     ['PATCH', '/secrets/market/prod', { OWN: 'mine' }],
+    ['PATCH', '/secrets/market/prod', { OWN: { sensitivity: 'sensitive' } }],
+    ['PATCH', '/secrets/market/prod', { OWN: { sensitivity: 'secret' } }],
     ['PATCH', '/secrets/market/dev', { URL: null }],
     ['PATCH', '/secrets/market/dev/URL', { archived: false }],
     ['POST', '/secrets/market/dev/API_KEY/restore', { version: 1 }],
@@ -250,6 +252,8 @@ test('every action the vault writes reads as a sentence, with no fallback, and s
     'reference.break: broke the reference market/prod/LINK',
     'secret.write: made market/prod/OWN a reference',
     'secret.write: gave a value of its own to market/prod/OWN',
+    'secret.write: marked market/prod/OWN sensitive, from secret, its value kept',
+    'secret.loosen: marked market/prod/OWN secret, from sensitive, its value kept',
     'secret.write: archived market/dev/URL',
     'secret.write: brought back market/dev/URL',
     'secret.write: restored market/dev/API_KEY to version 1, now 3',
@@ -316,6 +320,51 @@ test('every action the vault writes reads as a sentence, with no fallback, and s
   ]);
   // Every action the vault writes, but the adoption, the first entry of a database the vault adopted (below).
   assert.deepEqual([...new Set(entries.map((entry) => entry.action))].sort(), LOG_ACTIONS.filter((action) => action !== 'vault.adopt').sort());
+});
+
+test('what an entry says follows what its detail recorded, not what was asked', async () => {
+  await seed();
+  const keys = (...items: KeyWrite[]) => made(app.vault.change({ ...as('cy-cli'), op: 'secret.write', project: 'market', environment: 'dev', mine: false, keys: items }));
+  for (const [method, path, body] of [
+    ['PATCH', '/secrets/market/dev', { A: 'a1', B: 'b1' }],
+    // A nature marked in place, stricter, then looser by an Owner: its own action.
+    ['PATCH', '/secrets/market/dev', { A: { sensitivity: 'sensitive' } }],
+    ['PATCH', '/secrets/market/dev', { A: { sensitivity: 'secret' } }],
+    // Grants: the place named is the change's, and a request that gives a role but only takes one says so.
+    ['PATCH', `/access/${ed}`, { 'market/dev': 'viewer' }],
+    ['PATCH', `/access/${ed}`, { 'market/dev': 'viewer', 'market/prod': 'viewer' }],
+    ['PATCH', `/access/${ed}`, { 'market/dev': null, 'market/prod': 'viewer' }],
+    ['PATCH', `/access/${ed}`, { 'market/dev': 'viewer', 'market/prod': null }],
+    ['PATCH', `/access/${ed}`, { 'market/dev': 'viewer' }],
+    // Dismissals: twice, then one brought back and another dismissed at once.
+    ['PATCH', '/projects/market/dev/dismissals', { X: true }],
+    ['PATCH', '/projects/market/dev/dismissals', { X: true }],
+    ['PATCH', '/projects/market/dev/dismissals', { X: null, Y: true }],
+    // A key renamed onto a name dismissed in an environment with no fork: the dismissal ends there, in no fork.
+    ['PATCH', '/projects/market/dev/dismissals', { Z: true }],
+  ] as const) await ok('cy-cli', method, path, body);
+  // A batch that files one key and writes another; then one that files both.
+  await keys({ key: 'A', folder: 'two' }, { key: 'B', value: 'b2' });
+  await keys({ key: 'A', folder: 'three' }, { key: 'B', folder: 'three' });
+  await ok('cy-cli', 'PATCH', '/secrets/market/dev/A', { key: 'Z' });
+  await sign();
+  assert.deepEqual((await logged()).reverse().map((entry) => `${entry.action}: ${said(entry)}`), [
+    'secret.write: added market/dev: 2 secrets',
+    'secret.write: marked market/dev/A sensitive, from secret, its value kept',
+    'secret.loosen: marked market/dev/A secret, from sensitive, its value kept',
+    'access.grant: gave ed@acme.example viewer on market/dev',
+    'access.grant: gave ed@acme.example viewer on market/prod',
+    'access.grant: took viewer on market/dev from ed@acme.example',
+    'access.grant: gave ed@acme.example viewer on market/dev, and 1 other change',
+    'access.grant: left the access of ed@acme.example on market/dev as it was',
+    'missing.dismiss: dismissed X in market/dev as not needed',
+    'missing.dismiss: left the missing keys of market/dev as they were',
+    'missing.dismiss: dismissed Y in market/dev as not needed, and restored X to the missing keys',
+    'missing.dismiss: dismissed Z in market/dev as not needed',
+    'secret.write: changed market/dev: 2 secrets',
+    'secret.write: moved market/dev: 2 secrets to the folder three',
+    'secret.rename: renamed market/dev/A to Z',
+  ]);
 });
 
 test("a database the vault adopted begins its log with the adoption's entry", async () => {

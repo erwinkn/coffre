@@ -171,11 +171,13 @@ function readVerb({ entry }: Facts): [string, string] {
  * a reference's), set it aside for what a parent passes down or took it
  * back, archived it or brought it back, or filed it in a folder.
  */
-type Written = 'reference' | 'restore' | 'add' | 'own' | 'change' | 'reset' | 'archive' | 'unarchive' | 'move';
+type Written = 'reference' | 'restore' | 'add' | 'own' | 'mark' | 'change' | 'reset' | 'archive' | 'unarchive' | 'move';
 
 function written({ metadata: line }: AuditEntry): Written {
   if (text(line.refers) !== null) return 'reference';
   if (number(line.restored) !== null) return 'restore';
+  // A nature marked in place: `was` the nature it had, `kept` the version whose value it is.
+  if (text(line.was) !== null && number(line.kept) !== null) return 'mark';
   if (number(line.version) !== null) return line.made === true ? 'add' : text(line.source) !== null ? 'own' : 'change';
   if (line.reset === true) return 'reset';
   if (typeof line.archived === 'boolean') return line.archived ? 'archive' : 'unarchive';
@@ -187,6 +189,7 @@ const WRITTEN: Record<Written, string> = {
   restore: 'restored',
   add: 'added',
   own: 'gave a value of its own to',
+  mark: 'marked',
   change: 'changed',
   reset: 'reset',
   archive: 'archived',
@@ -237,7 +240,49 @@ function created(kind: 'project' | 'environment'): Template {
 
 /** A grant's lines (`changes`), the first said, the others counted. */
 const changesOf = ({ metadata }: AuditEntry) => (Array.isArray(metadata.changes) ? metadata.changes.map(record) : []);
-const others = (entry: AuditEntry): Part[] => (changesOf(entry).length > 1 ? [`, and on ${plural(changesOf(entry).length - 1, 'other place')}`] : []);
+
+/**
+ * A grant's sentence, and a revocation's, from what changed: the action is the
+ * request's (a grant if it gives any role), and its lines only what changed, a
+ * role given (`role`) or taken (`role: null`), each at its own place, which the
+ * server names the entry for (`viewOf`). Refused, nothing changed: what was asked.
+ */
+const accessSentence: Template = {
+  did: ({ entry }) => {
+    const [first] = changesOf(entry);
+    return first === undefined ? 'left' : first.role === null ? 'took' : 'gave';
+  },
+  tried: ({ entry }) => (entry.action === 'access.revoke' ? 'take' : 'give'),
+  what: ({ entry, refused }) => {
+    const [first] = changesOf(entry);
+    if (first === undefined && !refused) return ['the access of ', ...subject(entry), ' on ', ...environmentOf(entry), ' as it was'];
+    const taking = first === undefined ? entry.action === 'access.revoke' : first.role === null;
+    if (!taking) return [...subject(entry), ` ${text(first?.role) ?? 'a role'} on `, ...environmentOf(entry)];
+    const role = text(first?.was);
+    return [...(role === null ? ['access to '] : [`${role} on `]), ...environmentOf(entry), ' from ', ...subject(entry)];
+  },
+  then: ({ entry }) => {
+    const [first] = changesOf(entry);
+    if (first === undefined) return [];
+    return [
+      ...(first.role === null ? [] : [
+        ...(text(first.was) === null ? [] : [`, was ${text(first.was)}`]),
+        ...(text(first.expiresAt) === null ? [] : [`, until ${text(first.expiresAt)!.slice(0, 10)}`]),
+      ]),
+      ...others(entry),
+      // Admitted with it, which 0.14.7 logged apart.
+      ...(entry.metadata.admitted === 'member.add' ? [', added to coffre with it'] : entry.metadata.admitted === 'member.restore' ? [', brought back with it'] : []),
+    ];
+  },
+};
+
+/** The changes after a grant's first: "on 2 other places" where each did the same, given or taken; else "2 other changes". */
+function others(entry: AuditEntry): Part[] {
+  const [first, ...rest] = changesOf(entry);
+  if (first === undefined || rest.length === 0) return [];
+  const same = rest.every((line) => (line.role === null) === (first.role === null));
+  return [same ? `, and on ${plural(rest.length, 'other place')}` : `, and ${plural(rest.length, 'other change')}`];
+}
 
 /** Who a revoked credential was: a token, or a session or handle ended. */
 const REVOKED: Record<string, [did: string, tried: string]> = {
@@ -263,6 +308,27 @@ function frozen({ entry }: Facts): Part[] {
   return [target.startsWith('binding:') ? 'the workloads of a trust binding of ' : 'a workload session of ', ...subject(entry)];
 }
 
+/** A write's sentence, and a loosening's: one key as what was done to it; a batch as what was done to every key, or as written. */
+const writeSentence: Template = {
+  did: ({ entry, batch }) => {
+    const kinds = new Set(batch.map(written));
+    if (batch.length === 1 || (kinds.size === 1 && !kinds.has('reference') && !kinds.has('own'))) return WRITTEN[written(entry)];
+    return [...kinds].every((kind) => kind === 'add' || kind === 'change') ? 'wrote' : 'changed';
+  },
+  tried: ({ entry }) => (entry.action === 'secret.loosen' ? 'loosen' : 'change'),
+  what: (facts) => [...secrets(facts), ...(facts.batch.length === 1 && written(facts.entry) === 'reference' ? [' a reference'] : [])],
+  then: ({ entry, batch }) => {
+    const kind = written(entry);
+    const folder = entry.metadata.folder;
+    // A folder said of the batch only where every key moved to it.
+    if (kind === 'move' && batch.every((other) => written(other) === 'move' && other.metadata.folder === folder)) return intoFolder(folder);
+    if (batch.length > 1) return [];
+    if (kind === 'restore') return [` to version ${number(entry.metadata.restored)}`, ...(entry.version === null ? [] : [`, now ${entry.version}`])];
+    if (kind === 'mark') return [` ${text(entry.metadata.nature) ?? ''}, from ${text(entry.metadata.was) ?? ''}, its value kept`];
+    return kind === 'add' || kind === 'change' || kind === 'own' ? [...((entry.version ?? 1) === 1 ? [] : [`, now version ${entry.version}`]), ...nature(entry)] : [];
+  },
+};
+
 // --- one template per action ----------------------------------------------------
 
 const TEMPLATES: Record<LogAction, Template> = {
@@ -272,22 +338,9 @@ const TEMPLATES: Record<LogAction, Template> = {
     what: secrets,
   },
   // One key as what was done to it; a batch as what was done to every key, or as written.
-  'secret.write': {
-    did: ({ entry, batch }) => {
-      const kinds = new Set(batch.map(written));
-      if (batch.length === 1 || (kinds.size === 1 && !kinds.has('reference') && !kinds.has('own'))) return WRITTEN[written(entry)];
-      return [...kinds].every((kind) => kind === 'add' || kind === 'change') ? 'wrote' : 'changed';
-    },
-    tried: 'change',
-    what: (facts) => [...secrets(facts), ...(facts.batch.length === 1 && written(facts.entry) === 'reference' ? [' a reference'] : [])],
-    then: ({ entry, batch }) => {
-      const kind = written(entry);
-      if (kind === 'move') return intoFolder(entry.metadata.folder);
-      if (batch.length > 1) return [];
-      if (kind === 'restore') return [` to version ${number(entry.metadata.restored)}`, ...(entry.version === null ? [] : [`, now ${entry.version}`])];
-      return kind === 'add' || kind === 'change' || kind === 'own' ? [...((entry.version ?? 1) === 1 ? [] : [`, now version ${entry.version}`]), ...nature(entry)] : [];
-    },
-  },
+  'secret.write': writeSentence,
+  // A nature marked looser in place, by an Owner of the project: its own action, as 0.14.7 logged it.
+  'secret.loosen': writeSentence,
   'secret.rename': {
     did: 'renamed',
     tried: 'rename',
@@ -296,16 +349,32 @@ const TEMPLATES: Record<LogAction, Template> = {
       return [...place({ ...here, key: text(entry.metadata.key) ?? entry.key }), ...(text(entry.metadata.to) === null ? [] : [` to ${text(entry.metadata.to)}`]), ...mine];
     },
     // Carried down to the forks that inherit it.
-    then: ({ entry }) => (changesOf(entry).length > 1 ? [`, and in ${plural(changesOf(entry).length - 1, 'fork')}`] : []),
+    then: ({ entry }) => {
+      // Each line is a row renamed, moved aside or a dismissal moved or ended, by its environment's id: the first, the key's own.
+      const [own, ...rest] = changesOf(entry).map((line) => text(line.environment));
+      const forks = new Set(rest.filter((environment) => environment !== null && environment !== own)).size;
+      return forks === 0 ? [] : [`, and in ${plural(forks, 'fork')}`];
+    },
   },
   'secret.refile': { did: 'moved', tried: 'move', what: ({ entry }) => keysIn(entry, list(entry.metadata.keys)), then: ({ entry }) => intoFolder(entry.metadata.to) },
   // The source, by id alone in the entry, is no path the page can say.
   'reference.break': { did: 'broke', tried: 'break', what: ({ entry }) => ['the reference ', ...place(entry)] },
+  // What changed, by key: dismissed, brought back, both, or neither (asked as it was).
   'missing.dismiss': {
-    did: ({ entry }) => (list(entry.metadata.dismissed).length > 0 ? 'dismissed' : 'restored'),
+    did: ({ entry }) => (list(entry.metadata.dismissed).length > 0 ? 'dismissed' : list(entry.metadata.restored).length > 0 ? 'restored' : 'left'),
     tried: 'dismiss',
-    what: ({ entry }) => keysIn(entry, list(entry.metadata.dismissed).length > 0 ? list(entry.metadata.dismissed) : list(entry.metadata.restored)),
-    then: ({ entry }) => [list(entry.metadata.dismissed).length > 0 ? ' as not needed' : ' to the missing keys'],
+    what: ({ entry }) => {
+      const dismissed = list(entry.metadata.dismissed);
+      const restored = list(entry.metadata.restored);
+      if (dismissed.length === 0 && restored.length === 0) return ['the missing keys of ', ...keysIn(entry, [])];
+      return keysIn(entry, dismissed.length > 0 ? dismissed : restored);
+    },
+    then: ({ entry }) => {
+      const dismissed = list(entry.metadata.dismissed);
+      const restored = list(entry.metadata.restored);
+      if (dismissed.length === 0) return [restored.length === 0 ? ' as they were' : ' to the missing keys'];
+      return [' as not needed', ...(restored.length === 0 ? [] : [`, and restored ${restored.length > 3 ? plural(restored.length, 'key') : restored.join(', ')} to the missing keys`])];
+    },
   },
   'project.create': created('project'),
   'project.update': updated('project'),
@@ -330,29 +399,8 @@ const TEMPLATES: Record<LogAction, Template> = {
   // An upstream credential a deployment names, frozen in one environment.
   'upstream.freeze': { did: 'froze the upstream credential', tried: 'freeze the upstream credential', what: ({ entry }) => [`${text(entry.metadata.upstream) ?? ''} in `, ...environmentOf(entry)] },
   'upstream.thaw': { did: 'unfroze the upstream credential', tried: 'unfreeze the upstream credential', what: ({ entry }) => [`${text(entry.metadata.upstream) ?? ''} in `, ...environmentOf(entry)] },
-  'access.grant': {
-    did: 'gave',
-    tried: 'give',
-    what: ({ entry }) => [...subject(entry), ` ${text(changesOf(entry)[0]?.role) ?? 'a role'} on `, ...environmentOf(entry)],
-    then: ({ entry }) => {
-      const [first = {}] = changesOf(entry);
-      return [
-        ...(text(first.was) === null ? [] : [`, was ${text(first.was)}`]),
-        ...(text(first.expiresAt) === null ? [] : [`, until ${text(first.expiresAt)!.slice(0, 10)}`]),
-        ...others(entry),
-        // Admitted with it, which 0.14.7 logged apart.
-        ...(entry.metadata.admitted === 'member.add' ? [', added to coffre with it'] : entry.metadata.admitted === 'member.restore' ? [', brought back with it'] : []),
-      ];
-    },
-  },
-  'access.revoke': {
-    did: 'took',
-    tried: 'take',
-    what: ({ entry }) => {
-      const role = text(changesOf(entry)[0]?.was);
-      return [...(role === null ? ['access to '] : [`${role} on `]), ...environmentOf(entry), ...others(entry), ' from ', ...subject(entry)];
-    },
-  },
+  'access.grant': accessSentence,
+  'access.revoke': accessSentence,
   'member.add': { did: 'added', tried: 'add', what: ({ entry }) => [...subject(entry), ...asRole(entry)] },
   'member.restore': { did: 'brought back', tried: 'bring back', what: ({ entry }) => [...subject(entry), ...asRole(entry)] },
   'member.remove': {
@@ -614,7 +662,7 @@ export function reasonInWords(reason: string | null): string {
 // --- lines ----------------------------------------------------------------------
 
 /** In a batch of mixed actions, the one the line is named for: a write, not its reads. */
-const LEAD = ['secret.write', 'secret.read'];
+const LEAD = ['secret.write', 'secret.loosen', 'secret.read'];
 
 export function leadOf(batch: AuditEntry[]): AuditEntry {
   for (const action of LEAD) {
@@ -635,7 +683,7 @@ export function perSecret<T extends AuditEntry>(entry: T): T[] {
   const listed = entry.metadata.keys;
   const released = entry.secrets ?? [{ key: entry.key, version: entry.version }];
   // One whose list was emptied or mangled, which its proof would flag, still reads as itself.
-  if ((entry.action !== 'secret.read' && entry.action !== 'secret.write') || !Array.isArray(listed) || released.length === 0 || listed.length !== released.length) return [entry];
+  if (!['secret.read', 'secret.write', 'secret.loosen'].includes(entry.action) || !Array.isArray(listed) || released.length === 0 || listed.length !== released.length) return [entry];
   return released.map(({ key, version }, i) => {
     const own = listed[i];
     return {

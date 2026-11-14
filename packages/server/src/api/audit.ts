@@ -444,12 +444,16 @@ function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logPro
   const detail = detailOf(body);
   const mentions = mentionsOf(body);
   const ids = (kind: string) => mentions.filter((object) => object.startsWith(`${kind}:`)).map((object) => object.slice(kind.length + 1));
-  const environment = ids('environment').map((id) => names.environments.get(id)).find((found) => found !== undefined);
-  const projectId = environment?.projectId ?? ids('project').find((id) => names.projects.has(id));
+  // A grant's place is its first change's: the entry names every place asked, unchanged ones too.
+  const [first] = (body.action === 'access.grant' || body.action === 'access.revoke') && Array.isArray(detail.changes) ? (detail.changes as unknown[]) : [];
+  const { environment: changed, project: changedIn } = (first ?? {}) as { environment?: unknown; project?: unknown };
+  const at = (kind: 'environment' | 'project', id: unknown) => (first === undefined ? ids(kind) : typeof id === 'string' ? [id] : []);
+  const environment = at('environment', changed).map((id) => names.environments.get(id)).find((found) => found !== undefined);
+  const projectId = environment?.projectId ?? at('project', changedIn).find((id) => names.projects.has(id));
   const actor = actorOf(body);
   const subject = ids('principal').find((principal) => principal !== actor) ?? null;
   // A use names each key it released, and a write each it wrote; a change of one secret, the secret.
-  const released = Array.isArray(detail.keys) && (body.action === 'secret.read' || body.action === 'secret.write')
+  const released = Array.isArray(detail.keys) && (body.action === 'secret.read' || body.action === 'secret.write' || body.action === 'secret.loosen')
     ? (detail.keys as unknown[]).map((item) => {
         const { key, version } = (item ?? {}) as { key?: unknown; version?: unknown };
         return { key: typeof key === 'string' ? key : null, version: typeof version === 'number' ? version : null };
