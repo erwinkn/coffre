@@ -17,6 +17,8 @@ export type ApiContext = {
    * itself.
    */
   caller(): Promise<Called>;
+  /** Days a value may go unchanged before the pages flag it for rotation, as the deployment says (`rotateAfterDays`); null for no flag. */
+  rotateAfterDays: number | null;
 };
 
 /** Who a request is, as the vault answers it; its refusal, thrown as the API's. */

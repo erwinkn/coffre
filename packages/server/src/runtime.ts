@@ -14,6 +14,7 @@ export type CoffreRuntime = {
   vault: Vault;
   auth: ResolvedConfig['auth'];
   publicUrl: string;
+  rotateAfterDays: ResolvedConfig['rotateAfterDays'];
   /** What is known of the database's schema, for as long as the configuration lives: the isolate's, or the process's. */
   schema: { migrated: boolean };
 };
@@ -31,5 +32,5 @@ const known = new WeakMap<ResolvedConfig, CoffreRuntime['schema']>();
 export function createRuntime(config: ResolvedConfig, db: Database, vault: Vault): CoffreRuntime {
   let schema = known.get(config);
   if (schema === undefined) known.set(config, (schema = { migrated: false }));
-  return { db, vault, auth: config.auth, publicUrl: config.publicUrl, schema };
+  return { db, vault, auth: config.auth, publicUrl: config.publicUrl, rotateAfterDays: config.rotateAfterDays, schema };
 }

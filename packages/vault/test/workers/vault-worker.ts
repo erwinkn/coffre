@@ -43,7 +43,9 @@ export default {
     try {
       const answer = request.method === 'PATCH'
         ? await env.VAULT.change({ ...shown, op: 'secret.write', project, environment, keys: Object.entries(values!).map(([key, value]) => ({ key, value })) })
-        : await env.VAULT.use({ ...shown, project, environment, mine: false, keys: keys ?? null, purpose: 'reveal', upstream: null });
+        : request.method === 'PUT'
+          ? await env.VAULT.peek({ ...shown, project, environment, mine: false, keys: keys ?? null, purpose: 'reveal', upstream: null })
+          : await env.VAULT.use({ ...shown, project, environment, mine: false, keys: keys ?? null, purpose: 'reveal', upstream: null });
       return Response.json(answer, { status: !('refused' in answer) ? 200 : answer.refused === 'unauthenticated' ? 401 : 403 });
     } catch (error) {
       // Its code too, as the app reads it on the other side of the binding (`isUnavailable`).
