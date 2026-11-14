@@ -32,6 +32,7 @@ const ci = 'token:ci';
  * instance, and the service account ci maintains market.
  */
 let ids: Record<string, string> = {};
+let made: { market: ReturnType<typeof project>; fork: ReturnType<typeof environment> };
 beforeEach(async () => {
   await emptyDatabase(world.owner);
   for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
@@ -45,6 +46,7 @@ beforeEach(async () => {
   const billed = environment(billing, 'prod');
   const a = value(world, secret(prod, 'A'), 'a');
   ids = { market: market.id, billing: billing.id, prod: prod.id, adas: adas.id };
+  made = { market, fork };
   await write(
     world,
     ...rows('projects', market, billing, shelf),
@@ -142,6 +144,41 @@ test('the projects list is one call to the vault and two statements, scoped by i
   }
   assert.equal((await listed('bo-cli')).length, 41);
   assert.equal((await listed('bo-cli')).find((at) => at.slug === 'p7')!.secretCount, 5);
+});
+
+test("a credential scoped to one environment narrows the lists to it, however much its holder holds", async () => {
+  // Cy runs the instance; this credential of hers reaches market/prod alone, to read and write there. An Owner's role on one environment is no scope (it holds project-wide permissions): that credential reaches nothing.
+  const scoped = (normal: string[]) => JSON.stringify([{ projectId: ids.market, environmentId: ids.prod, role: 'owner', ...(normal.length === 0 ? {} : { permissions: { normal, protected: normal } }) }]);
+  await write(world, ...rows('credentials', credential('cy-prod', cy, { kind: 'personal', scope: scoped(['secret.read', 'secret.write']) }), credential('cy-bad', cy, { kind: 'personal', scope: scoped([]) })));
+  assert.deepEqual(await listed('cy-bad'), []);
+  const [[status, body], calls, statements] = await cost(() => call('cy-prod', 'GET', '/projects'));
+  assert.deepEqual([status, calls, statements], [200, ['caller'], 2], JSON.stringify(body));
+  const projects = body.projects as Listed[];
+  assert.deepEqual(projects.map((at) => [at.slug, at.permissions, at.secretCount]), [['market', [], 2]]);
+  assert.deepEqual(projects[0]!.environments.map(({ slug, accessible, unprotectable, details }) => [slug, accessible, unprotectable, details?.secretCount ?? null]), [['fork', false, false, null], ['old', false, false, null], ['prod', true, false, 2], ['staging', false, false, null]]);
+  app.executed.length = 0;
+  await call('cy-prod', 'GET', '/projects');
+  assert.deepEqual(params(app.executed[0]), [[ids.market]]);
+  // Managing environments is a project's alone, which no credential on one environment holds: no personal configs, anywhere.
+  for (const path of ['market', 'billing']) assert.deepEqual(refused(await call('cy-prod', 'GET', `/personal/${path}`)), NO_ACCESS, path);
+});
+
+test("a personal config as deep as a chain goes counts each key its chain resolves to: archived overrides passed over, a dismissal restored or not", async () => {
+  // market/prod <- fork <- f2 <- f3, three parents, the most a fork has; Bo's config of f3 sits one below, four from prod: the most a use reads
+  // through (@coffre/vault's use.ts), though the vault makes no new config that deep (0.14's too_deep). The count follows the use.
+  const f2 = environment(made.market, 'f2', { parentId: made.fork.id });
+  const f3 = environment(made.market, 'f3', { parentId: f2.id });
+  const bos = environment(made.market, 'f3-bo', { parentId: f3.id, owner: bo });
+  const restored = { ...dismissed(f2, 'B'), restoredAt: new Date(0), restoredBy: dismissed(f2, 'B').dismissedBy };
+  await write(world, ...rows('environments', f2, f3, bos), ...rows('secrets', secret(f2, 'E'), secret(bos, 'MINE'), secret(bos, 'A', { archivedAt: new Date(0) })), ...rows('dismissedKeys', dismissed(f2, 'D'), restored, dismissed(bos, 'E')));
+  const [[status, body], calls, statements] = await cost(() => call('bo-cli', 'GET', '/projects'));
+  assert.deepEqual([status, calls, statements], [200, ['caller'], 2], JSON.stringify(body));
+  const [market] = body.projects as Listed[];
+  // f2 and f3: prod's A (fork's override archived, its dismissal restored) and f2's E; D dismissed at f2, B at fork, which a restored dismissal of f2's does not undo.
+  // Bo's config: MINE, and prod's A, four up, its own A archived; E dismissed.
+  assert.deepEqual(market!.environments.filter((at) => at.slug.startsWith('f')).map(({ slug, personal, details }) => [slug, personal, details?.secretCount]), [['f2', false, 2], ['f3', false, 2], ['f3@me', true, 2], ['fork', false, 2]]);
+  // The project's names, each once: A, B, D, S, E and MINE.
+  assert.equal(market!.secretCount, 6);
 });
 
 test('an archived project is listed to whoever runs the instance or manages it; a project its caller holds nothing in, to nobody', async () => {
