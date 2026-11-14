@@ -189,6 +189,11 @@ test('limits come first: 429 before the body is read, malformed or not', async (
   const [busy, calls, statements] = await cost(() => login(projected()));
   assert.deepEqual([busy.status, calls, statements], [429, [], 0]);
   assert.equal((await vault('PUT', 'auth/kubernetes/login', { body: 'not json' })).status, 429);
+  // Its body is never read: a stream that counts its reads is never pulled.
+  let pulls = 0;
+  const body = new ReadableStream<Uint8Array>({ pull: (sink) => void (pulls++, sink.enqueue(new TextEncoder().encode(JSON.stringify({ role: SERVICE, jwt: projected() }))), sink.close()) }, { highWaterMark: 0 });
+  const refused = await app.request('/v1/auth/kubernetes/login', { method: 'PUT', headers: { 'x-vault-request': 'true' }, body, duplex: 'half' } as RequestInit);
+  assert.deepEqual([refused.status, pulls], [429, 0]);
   open = true;
   assert.equal((await login(projected())).status, 200);
 });
