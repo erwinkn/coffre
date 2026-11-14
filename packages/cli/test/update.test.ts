@@ -746,7 +746,7 @@ function pnpmAt(version: string, global = false): boolean {
   }
 }
 
-const needsPnpm = (...versions: string[]) => ({ skip: versions.every(pnpmAt) ? false : `needs pnpm ${versions.join(' and ')}` });
+const needsPnpm = (...versions: string[]) => ({ skip: versions.every((version) => pnpmAt(version)) ? false : `needs pnpm ${versions.join(' and ')}` });
 
 test('a deployment moved from pnpm 10 to 11 installs without a terminal, its node_modules purged', needsPnpm('10.15.0', '11.8.0'), async () => {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-majors-'));
