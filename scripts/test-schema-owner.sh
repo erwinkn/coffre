@@ -138,6 +138,9 @@ env -u NODE_EXTRA_CA_CERTS node --conditions=coffre:source \
 NODE_EXTRA_CA_CERTS="$scratch/server.crt" node --conditions=coffre:source \
     packages/db/scripts/check-postgres-tls.ts "${url/localhost/127.0.0.1}" ERR_TLS_CERT_ALTNAME_INVALID
 
+# Another role's table beside coffre's, which the app cannot read, leaves the runtime login verified.
+docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d existing \
+    -c 'CREATE TABLE public.reporting_rows (n integer)'
 NODE_EXTRA_CA_CERTS="$scratch/server.crt" COFFRE_RUNTIME_ROLE=coffre_runtime \
     DATABASE_URL="postgresql://coffre_runtime:local-runtime-only@localhost:$port/existing?sslrootcert=system&sslmode=verify-full" \
     pnpm --filter @coffre/db run db:verify:runtime

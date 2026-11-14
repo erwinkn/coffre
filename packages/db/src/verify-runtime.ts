@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { getTableName, is, Table } from 'drizzle-orm';
 import { postgresClient } from './postgres.ts';
+import * as schema from './schema.ts';
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
@@ -58,7 +60,10 @@ try {
   );
   assert.equal(ownership[0]?.object_count, 0, 'runtime role owns database objects');
 
-  // In 0.16 the app's login only reads: every table, and which migrations ran (docs/design/0.16.md, "Four rules").
+  // In 0.16 the app's login only reads: coffre's tables, and which migrations ran (docs/design/0.16.md, "Four rules").
+  // It must read each of coffre's tables and write none in the schema: another role's table there may stay
+  // unreadable to it (0022 leaves those alone), but never writable.
+  const tables = Object.values(schema).filter((value) => is(value, Table)).map((table) => getTableName(table as Table));
   const privileges = await client.unsafe<{
     database_create: boolean;
     database_temporary: boolean;
@@ -74,10 +79,10 @@ try {
               current_user, 'drizzle.__drizzle_migrations', 'SELECT'
             ) AS migrations_select,
             ARRAY(
-              SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-               WHERE n.nspname = 'public' AND c.relkind = 'r'
-                 AND NOT has_table_privilege(current_user, c.oid, 'SELECT')
-               ORDER BY c.relname
+              SELECT name FROM unnest($1::text[]) AS name
+               WHERE to_regclass(format('public.%I', name)) IS NULL
+                  OR NOT has_table_privilege(current_user, to_regclass(format('public.%I', name)), 'SELECT')
+               ORDER BY name
             )::text[] AS unreadable,
             ARRAY(
               SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -87,6 +92,7 @@ try {
                         OR has_any_column_privilege(current_user, c.oid, 'INSERT, UPDATE, REFERENCES') END)
                ORDER BY c.relname
             )::text[] AS writable`,
+    [tables],
   );
   assert.deepEqual([...privileges], [{
     database_create: false,
