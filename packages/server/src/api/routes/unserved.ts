@@ -15,6 +15,8 @@ const unserved = <const Key extends string>(key: Key, what: string) =>
   });
 
 export const unservedRoutes = {
+  // Every freeze standing, for the service accounts' pages: freezing and lifting one are served (routes/freezes.ts).
+  ...unserved('GET /freezes', 'the freezes standing'),
   // A member's tokens and trust bindings.
   ...unserved('GET /members/:member/tokens', "a member's tokens"),
   ...unserved('POST /members/:member/tokens', 'issuing a token'),
