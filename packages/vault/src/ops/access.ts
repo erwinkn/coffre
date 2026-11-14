@@ -220,8 +220,7 @@ function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Par
     decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
       const caller = managing(seen, shown, vault, at);
       if ('refused' in caller) return caller;
-      const runner = runs(caller);
-      if (!runner) {
+      if (!runs(caller)) {
         // Only a person, on a session (a service account's credentials always have a scope), sets up a service account, as
         // `member`: what they set up would outlive a credential with a scope.
         if (!service || (role !== null && role !== 'member') || scope !== null || !onSession(caller)) return { refused: 'no_access' };
@@ -230,6 +229,9 @@ function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Par
           ...seen.everyEnvironment.map((row) => ({ projectId: row.projectId, environmentId: row.id, environmentSlug: row.slug })),
         ];
         if (!setsUpServices(withRoles(caller, seen.defined), settingOf(seen), places)) return { refused: 'no_access' };
+        // One removed, only whoever removed it brings back: never past someone else's removal.
+        const [removed] = seen.member;
+        if (removed?.status === 'removed' && removed.statusChangedBy !== caller.principal) return { refused: 'no_access' };
         // A row written behind the vault is not a row that is absent: a place's protection edited, a role, the setting. Told
         // only to whoever may by the rows the vault wrote: anyone else is refused as they would be without it.
         if (Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
@@ -243,8 +245,6 @@ function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Par
       const [was] = seen.member;
 
       if (was === undefined || was.status === 'removed') {
-        // Brought back by whoever removed it, or runs the instance: never past someone else's removal.
-        if (!runner && was !== undefined && was.statusChangedBy !== caller.principal) return { refused: 'no_access' };
         const given = role ?? 'member';
         if (given === 'owner' && !ownsAllAsking(caller)) return { refused: 'no_access' };
         if (named(vault, principal) && !(given === 'owner' && written === null)) return { refused: 'configured_owner' };

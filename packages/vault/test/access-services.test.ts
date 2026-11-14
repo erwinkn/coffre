@@ -238,6 +238,7 @@ test('a row of what these weigh, written behind the vault, refuses them, tampere
     assert.deepEqual(await admit('dv-cli', 'token:other', onDev('viewer')), { refused: 'tampered' });
     assert.deepEqual(await put('dv-pat', 'token:other'), { refused: 'no_access' }, 'not on a token');
     assert.deepEqual(await put('bo-cli', 'token:other'), { refused: 'no_access' }, 'nor to whoever holds nothing');
+    assert.deepEqual(await put('dv-cli', theirs), { refused: 'no_access' }, 'nor to Dv bringing back one Fay removed, which Dv may not');
   });
   await world.owner.execute(sql`UPDATE environments SET protected = true WHERE id = ${prod.id}`);
   assert.ok('answer' in await put('dv-cli', 'token:other'), 'as it was, it is the vault\'s again');
