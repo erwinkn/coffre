@@ -135,6 +135,13 @@ in one that is. Project-wide permissions (`environment.manage`,
 `grant.manage`, `project.manage`) have one column: a project is never
 protected.
 
+A role that holds a project-wide permission is granted on a project, never
+on an environment, and a grant on an environment gives nothing while its
+role holds one (`grantDefinition` in `@coffre/core/access`). An Owner
+cannot widen a role so while a grant on an environment names it; a grant
+hidden from that edit and put back gives nothing until the role is
+narrowed again, rather than `grant.manage` at its environment.
+
 | Role | Not protected | Protected |
 |---|---|---|
 | Viewer | read, use | use |
