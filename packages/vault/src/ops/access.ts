@@ -14,9 +14,11 @@ import { presented, text } from './input.ts';
 /**
  * The changes of members, grants, roles and the instance's policy
  * (docs/design/0.16.md, "A change"). Who runs the instance, an Admin or an
- * Owner whose scope narrows nothing, adds and removes members; only an Owner
- * of the whole instance gives an instance role, or changes or removes an
- * Owner; and the instance always keeps one Owner of all of it.
+ * Owner whose scope narrows nothing, adds and removes members and sets their
+ * roles; only an Owner
+ * of the whole instance makes an Owner, or changes or removes one; nobody
+ * else changes their own role; and the instance always keeps one Owner of
+ * all of it. These are 0.14's rules, as they were.
  *
  * Not yet: a person who does not run the instance setting up or removing a
  * service account (`setsUpServices`, `managesService`). That weighs a
@@ -142,8 +144,11 @@ const standing = (role: InstanceRole, scope: string | null): Standing => ({ role
 /**
  * Admit someone the instance has never had (`member.add`), or bring back
  * one removed (`member.restore`), in the generation their removal moved on
- * to and with no grant. Whoever runs the instance admits a member; only an
- * Owner of the whole instance gives an instance role. A person the
+ * to and with no grant. Whoever runs the instance admits a member, with
+ * any role but Owner, which only an Owner of the whole instance gives. A
+ * removed service account comes back the same way: 0.14 let whoever
+ * removed it bring it back too, but only those who run the instance remove
+ * one yet. A person the
  * deployment names an Owner comes in as one, or not at all.
  *
  * A removed member whose row is deleted around the vault looks new, and comes
@@ -166,7 +171,7 @@ const admit = (action: 'member.add' | 'member.restore') =>
       decide(seen: Seen<typeof read>, at: number) {
         const caller = asking(seen, shown, vault, at);
         if ('refused' in caller) return caller;
-        if (!runsInstance(caller.holds) || (role !== 'member' && !ownsAllAsking(caller))) return { refused: 'no_access' };
+        if (!runsInstance(caller.holds) || (role === 'owner' && !ownsAllAsking(caller))) return { refused: 'no_access' };
         const [was] = seen.member;
         if (action === 'member.add' ? was !== undefined : was?.status !== 'removed') {
           return { refused: was === undefined ? 'not_a_member' : was.status === 'removed' ? 'removed' : 'exists' };
@@ -195,9 +200,11 @@ const owners = () => part(principals, sql`${principals.status} = 'active' AND ${
 const anotherOwner = (seen: readonly Row<typeof principals>[], principal: string) => seen.some((row) => row.id !== principal && ownsAll(row));
 
 /**
- * A person's instance role and its scope (`member.role`), which only an
- * Owner of the whole instance sets, their own included: an Owner may step
- * down, but not the last one, and not one the deployment names.
+ * A person's instance role and its scope (`member.role`), which whoever runs
+ * the instance sets; an Owner's, or Owner, only an Owner of the whole
+ * instance, who alone also sets their own. So an Admin makes another Admin
+ * but never widens what they hold themselves, and an Owner may step down,
+ * but not the last one, and not one the deployment names.
  */
 function memberRole(input: Presented & MemberRole, vault: Deciding): Operation<Parts, AccessAnswers['member.role']> {
   const shown = presented(input);
@@ -215,9 +222,10 @@ function memberRole(input: Presented & MemberRole, vault: Deciding): Operation<P
     decide(seen: Seen<typeof read>, at: number) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
-      if (!ownsAllAsking(caller)) return { refused: 'no_access' };
+      if (!runsInstance(caller.holds)) return { refused: 'no_access' };
       const [was] = seen.member;
       if (was === undefined || was.status !== 'active') return { refused: was === undefined ? 'not_a_member' : 'removed' };
+      if ((was.role === 'owner' || role === 'owner' || principal === caller.principal) && !ownsAllAsking(caller)) return { refused: 'no_access' };
       const written = scopeWritten(scope, seen.scoped);
       if (written === undefined) return { refused: 'no_access' };
       const ownsAfter = role === 'owner' && written === null;
