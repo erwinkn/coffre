@@ -5,7 +5,7 @@
 // back is caught asked `GET /audit/verification`, which 0.16 drops: the
 // page's proofs and `coffre verify --full` read the log now
 // (docs/design/0.16.md, "The server").
-import type { AuditEntryView, CoffreClient } from '@coffre/client';
+import { judgeProofs, type AuditEntryView, type CoffreClient, type ProofJudgment } from '@coffre/client';
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
@@ -59,32 +59,31 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
 /**
  * Each entry the audit page lists is held to the head the vault vouched for
  * in the page's own call (docs/design/0.16.md, "The log's head, when
- * asked"): every entry the head numbers proves against it, and only those
- * past it are not proven. What 0.14 asked of `GET /audit/verification`,
- * which 0.16 drops. The signer signs on its own, so a head stands within
- * its minute.
+ * asked"): every entry the head numbers proves against it, only those
+ * past it are not proven, and the page's stretch lacks none of either tree.
+ * What 0.14 asked of `GET /audit/verification`, which 0.16 drops; judged as
+ * `coffre verify instance` judges it (`judgeProofs`). The signer signs on
+ * its own, so a head stands within its minute.
  */
 export async function auditProven({ admin }: People): Promise<string> {
-  type Page = Awaited<ReturnType<CoffreClient['audit']['list']>>;
-  let page: Page | undefined;
-  // A batch the signer publishes between the vault reading its head and the
-  // app reading the log can put every entry listed past the head, honestly
-  // unproven; so wait for a page its head numbers an entry of.
-  await until('a head the vault signed that numbers a listed entry', async () => {
-    page = await admin.api.audit.list({ detail: '1', limit: 200 });
-    const { head } = page;
-    return head !== null && page.entries.some((entry) => entry.seq < head.size);
-  }, 90);
-  const { entries, head } = page!;
-  expect(head !== null && entries.length > 0, 'the audit page has no head or no entries', page);
-  const failed = entries.filter((entry) => entry.proof === 'failed');
+  let judged: ProofJudgment | undefined;
+  // A batch the signer publishes, or a pruning committed, between the vault
+  // reading its head and the app reading the log can leave a page honestly
+  // racing (`judgeProofs`): asked again until it is not, and judged as it
+  // last read if it still is.
+  await until('a page past the race between its head and its log', async () => {
+    judged = judgeProofs(await admin.api.audit.list({ detail: '1', limit: 200 }));
+    return !judged.racing;
+  }, 90).catch((error: unknown) => {
+    if (judged === undefined) throw error;
+  });
+  const { head, proven, failed, misplaced, missing } = judged!;
+  expect(head !== null, 'the audit page has no head');
   expect(failed.length === 0, 'entries the head numbers do not prove against it', failed.slice(0, 5));
-  // The signer signs the log in order, so the head numbers its first `size` entries.
-  const misplaced = entries.filter((entry) => (entry.seq < head.size) !== (entry.proof === 'proven'));
   expect(misplaced.length === 0, 'an entry the head numbers is not proven, or one past it is', { head, misplaced: misplaced.slice(0, 5) });
-  const proven = entries.filter((entry) => entry.proof === 'proven').length;
+  expect(missing !== null && missing.length === 0, "the page's stretch of the log lacks entries, or the page cannot say", { head, missing: missing?.slice(0, 5) });
   expect(proven > 0, 'no entry on the page is proven', { head });
-  return `${proven} of ${entries.length} entries proven against the head of ${head.size}, signed at ${head.signedAt}`;
+  return `${proven} entries proven against the head of ${head.size}, signed at ${head.signedAt}, and none missing`;
 }
 
 /**

@@ -226,7 +226,7 @@ test("a personal token is its person's own, made on a session, with a label, min
 test("a token's preview (`?dryRun=1`) is what it would reach, weighed and not made: one weigh each, nothing written; a refusal is the change's", async () => {
   const before = (await listed('root-cli', ci))[0].length;
   app.calls.length = 0;
-  assert.deepEqual(await call('bo-cli', 'POST', `/members/${ci}/tokens?dryRun=1`, { label: null, expiresInDays: 1 }), [200, { scope: { 'market/dev': 'developer' } }]);
+  assert.deepEqual(await call('bo-cli', 'POST', `/members/${ci}/tokens?dryRun=1`, { label: null, expiresInDays: 1 }), [200, { scope: { 'market/dev': 'developer' }, withheld: [] }]);
   assert.deepEqual(await call('bo-cli', 'POST', `/members/${bo}/tokens?dryRun=1`, { label: 'x', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } }), [200, { scope: { 'market/dev': 'viewer' } }]);
   assert.deepEqual(app.calls, ['weigh', 'weigh']);
   assert.equal((await listed('root-cli', ci))[0].length, before);

@@ -161,6 +161,35 @@ test("the audit page leads each entry a run's credential wrote to its run, throu
   assert.equal(written.run, null);
 });
 
+test("a revocation is its caller's: the entry leads to the run that revoked, never to the run it ended; a person's leads to none", async () => {
+  const [AUD, CY] = ['user:aud@acme.example', 'user:cy@acme.example'];
+  await write(world, ...rows('roles', role(true, 'auditor', ['audit.read'])), ...rows('principals', principal(AUD, { role: 'auditor' }), principal(CY, { role: 'owner' })), ...rows('credentials', credential('aud-cli', AUD), credential('cy-cli', CY)));
+  const call = (bearer: string, path: string, init: RequestInit = {}) => app.request(path, { ...init, headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' } });
+  const { sign } = await signerOf(world);
+  const tokens = new Map<string, string>();
+  for (const runId of ['7001', '7002', '7003']) {
+    const run = await exchange(idToken({ run_id: runId }));
+    assert.equal(run.status, 200, JSON.stringify(run.body));
+    tokens.set(runId, run.body.token!);
+  }
+  // Each run's credential, as its exchange names it, once signed into the log.
+  await sign();
+  const exchanges = (await world.owner.select({ body: log.body }).from(log)).map((row) => JSON.parse(row.body) as { action: string; credential: string; detail: { run: { run_id: string } } }).filter((body) => body.action === 'token.exchange');
+  const credentialOf = (runId: string) => exchanges.find((body) => body.detail.run.run_id === runId)!.credential;
+  const revoke = async (bearer: string, id: string) => (await call(bearer, `/api/sessions/${id}`, { method: 'DELETE' })).status;
+  // Run A ends one that is no one's, then run B's, its own service's; the Owner ends run C's.
+  assert.equal(await revoke(tokens.get('7001')!, '22222222-2222-4222-8222-222222222222'), 404);
+  assert.equal(await revoke(tokens.get('7001')!, credentialOf('7002')), 200);
+  assert.equal(await revoke('cy-cli', credentialOf('7003')), 200);
+  await sign();
+
+  type Entry = { seq: number; action: string; actorId: string; run: { claims: Record<string, unknown> } | null };
+  const got = await call('aud-cli', '/api/audit?detail=1');
+  assert.equal(got.status, 200);
+  const revocations = ((await got.json()) as { entries: Entry[] }).entries.filter((entry) => entry.action === 'token.revoke').sort((x, y) => x.seq - y.seq);
+  assert.deepEqual(revocations.map((entry) => [entry.actorId, entry.run?.claims.run_id ?? null]), [['deploy', '7001'], ['deploy', '7001'], ['cy@acme.example', null]]);
+});
+
 test("an exchange the tree does not prove says no entry's run: a writer who forges one, and points a credential's index at it, is not believed", async () => {
   const AUD = 'user:aud@acme.example';
   // A service token of the same service, which no run ever bought.

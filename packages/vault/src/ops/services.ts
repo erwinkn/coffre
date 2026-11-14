@@ -1,10 +1,10 @@
-import { isScope, managesService, runsInstance, type Permission, type Place, type RoleDefinition, type Scope, type ServiceAccount } from '@coffre/core/access';
+import { isScope, managesService, runsInstance, type Permission, type Place, type RoleDefinition, type Scope, type ScopeGrant, type ServiceAccount } from '@coffre/core/access';
 import { environments, grants, policy, principals, projects, roles } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
 import type { Asking, callerParts } from '../caller.ts';
 import { part, type Seen, type Unsealed } from '../change.ts';
-import type { Row } from '../rows.ts';
+import type { Row, Wire } from '../rows.ts';
 import { NOWHERE } from './asking.ts';
 
 /**
@@ -146,3 +146,43 @@ export function managesSealed(caller: Asking, seen: ServiceSeen, member: string,
 /** The roles of a project's grants a read found, by id: a role with no row is no role. */
 export const definitionsOf = (rows: readonly Row<typeof roles>[]) =>
   Object.fromEntries(rows.filter((row) => !row.instance).map((row): [string, RoleDefinition] => [row.id, { name: row.name, description: row.description, permissions: row.permissions as Permission[], protected: row.protected as Permission[] }]));
+
+/** Where a fork inherits from, three deep, as a use reads it (use.ts). */
+export const MAX_PARENTS = 3;
+
+/**
+ * What rides beside the read of a service's token or binding (R32,
+ * `Operation.beside`): each environment of `projects` but personal
+ * configs, which no service reads, that holds a sensitive value now, and
+ * the projects that hold those values: its own, for one of its keys; a
+ * reference's source's; and, for a fork, what it inherits from its
+ * parents. No decision goes by it, only what the answer tells
+ * (`withheldOf`). Read by the projects' and environments' keys, a few
+ * rows: one per environment.
+ */
+export const sensitiveIn = (projects: SQL): SQL => sql`WITH RECURSIVE lineage (environment, project, at, depth) AS (
+    SELECT e.id, e.project_id, e.id, 0 FROM environments e WHERE e.project_id IN ${projects} AND e.owner IS NULL AND strpos(e.slug, '~') = 0
+    UNION ALL SELECT l.environment, l.project, e.parent_id, l.depth + 1 FROM lineage l JOIN environments e ON e.id = l.at WHERE e.parent_id IS NOT NULL AND l.depth < ${MAX_PARENTS}
+  )
+  SELECT jsonb_build_object('environment', l.environment, 'project', l.project, 'from', jsonb_agg(DISTINCT coalesce(src.project_id, s.project_id))) AS row
+  FROM lineage l JOIN secrets s ON s.project_id = l.project AND s.environment_id = l.at AND s.archived_at IS NULL LEFT JOIN secrets src ON src.id = s.source_id
+  WHERE (s.source_id IS NULL AND s.nature = 'sensitive') OR src.nature = 'sensitive'
+  GROUP BY l.environment, l.project`;
+
+/**
+ * The places of a service's scope, by path, whose sensitive values it
+ * will not read (`withheld`, R32): those where what `sensitiveIn` found
+ * holds one of a project of which it reads none, no Owner of it having
+ * issued it (`ownsProject`). A project's, in any of its environments.
+ * 0.14.7's `withheldIn`. What rode beside the read carries no MAC: a row
+ * written behind the vault changes what the answer tells, never what the
+ * credential reads.
+ */
+export function withheldOf(scope: readonly { grant: ScopeGrant; path: string }[], found: readonly Wire[] | undefined): string[] {
+  const owned = new Set(scope.flatMap(({ grant }) => (grant.sensitive === true ? [grant.projectId] : [])));
+  const held = (found ?? []).filter((row) => !(Array.isArray(row.from) && row.from.every((project) => owned.has(project as string))));
+  return scope
+    .filter(({ grant }) => held.some((row) => (grant.environmentId === null ? row.project === grant.projectId : row.environment === grant.environmentId)))
+    .map(({ path }) => path)
+    .sort();
+}

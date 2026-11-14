@@ -138,7 +138,7 @@ test('a binding made: its scope all the service holds, sealed by place id; its c
   const done = await vault.change(bind('root-cli', ci));
   assert.ok(!('refused' in done), JSON.stringify(done));
   const [row] = await bindingsOf(ci);
-  assert.deepEqual(done.answer, { bindings: [{ id: row!.id, scope: { 'market/dev': 'developer', 'market/prod': 'viewer' } }], replaced: [] });
+  assert.deepEqual(done.answer, { bindings: [{ id: row!.id, scope: { 'market/dev': 'developer', 'market/prod': 'viewer' }, withheld: [] }], replaced: [] });
   assert.deepEqual([row!.generation, row!.profile, row!.issuer, row!.jwks_uri, row!.jwks, row!.claims, row!.policy, row!.label, row!.created_by, row!.revoked_at],
     [0, 'custom', KUBE, KEYS, null, canonicalClaims(POD), null, 'pods', root, null]);
   assert.equal(row!.created_at.getTime(), world.now());
@@ -227,7 +227,7 @@ test('a binding that replaces others: those revoked, its scope what they reached
   const made_ = await bindingsOf(ci);
   const [old, now] = [was, second.answer.bindings[0]!.id].map((id) => made_.find((row) => row.id === id));
   assert.deepEqual([old!.id, old!.revoked_at?.getTime(), old!.revoked_by], [was, world.now(), ada]);
-  assert.deepEqual(second.answer, { bindings: [{ id: now!.id, scope: { 'market/dev': 'viewer' } }], replaced: [was] });
+  assert.deepEqual(second.answer, { bindings: [{ id: now!.id, scope: { 'market/dev': 'viewer' }, withheld: [] }], replaced: [was] });
   // Ada owns market: the sensitive values Root's binding read, hers reads too.
   assert.deepEqual(scopeOf(now), [{ projectId: ids.market, environmentId: ids.dev, role: 'viewer', permissions: VIEWER, sensitive: true }]);
   assert.deepEqual((await last('token.bind')).detail.replaces, [{ binding: was, why: 'asked' }]);
@@ -279,7 +279,7 @@ test("its issuer's other bindings whose keys are elsewhere go with it; one with 
   const done = await vault.change(bind('root-cli', ci));
   assert.ok(!('refused' in done), JSON.stringify(done));
   // Asked no scope, it reaches what the one its issuer's move replaces did, as 0.14.7's did.
-  assert.deepEqual(done.answer, { bindings: [{ id: done.answer.bindings[0]!.id, scope: { 'market/dev': 'viewer' } }], replaced: [before.id] });
+  assert.deepEqual(done.answer, { bindings: [{ id: done.answer.bindings[0]!.id, scope: { 'market/dev': 'viewer' }, withheld: [] }], replaced: [before.id] });
   assert.deepEqual((await last('token.bind')).detail.replaces, [{ binding: before.id, why: 'keys_moved' }]);
   assert.deepEqual((await bindingsOf(ci)).filter((row) => row.revoked_at === null).map((row) => row.id).sort(), [elsewhere.id, done.answer.bindings[0]!.id].sort());
 

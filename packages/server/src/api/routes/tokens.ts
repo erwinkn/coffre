@@ -35,15 +35,15 @@ export type TokenView = {
   session?: { bindingId: string | null };
 };
 
-/** A token made: its value, here and nowhere after. */
-export type IssuedToken = { id: string; token: string; expiresAt: string; scope: Record<string, string> };
+/**
+ * A token made: its value, here and nowhere after. A service's names the
+ * places of its scope that hold a sensitive value it will not read
+ * (`withheld`): only one an Owner of their project issues does (R32).
+ */
+export type IssuedToken = { id: string; token: string; expiresAt: string; scope: Record<string, string>; withheld?: string[] };
 
-/** What a token would reach, each place by path and its role, as the vault would make it now: `?dryRun=1`'s answer. */
-export type TokenPlan = {
-  scope: Record<string, string>;
-  /** 0.14.7's places whose sensitive values it would not read (R32): never answered yet, as the weighing does not say them. */
-  withheld?: string[];
-};
+/** What a token would reach, each place by path and its role, as the vault would make it now: `?dryRun=1`'s answer. A service's names `withheld` too. */
+export type TokenPlan = { scope: Record<string, string>; withheld?: string[] };
 
 /** The most days a service's token lasts, as the vault takes it. */
 const SERVICE_TOKEN_DAYS = 366;
@@ -112,7 +112,7 @@ async function made(ctx: ApiContext, change: TokenCreate, token: string, what: s
   } catch (error) {
     throw worded(error);
   }
-  return { id: answer.credential, token, expiresAt: answer.expiresAt, scope: answer.scope };
+  return { id: answer.credential, token, expiresAt: answer.expiresAt, scope: answer.scope, ...(answer.withheld === undefined ? {} : { withheld: answer.withheld }) };
 }
 
 /**
@@ -122,7 +122,8 @@ async function made(ctx: ApiContext, change: TokenCreate, token: string, what: s
  */
 async function planned(ctx: ApiContext, change: TokenCreate, what: string): Promise<TokenPlan> {
   try {
-    return { scope: (await weighed(ctx, change, what)).scope };
+    const { scope: reached, withheld } = await weighed(ctx, change, what);
+    return { scope: reached, ...(withheld === undefined ? {} : { withheld }) };
   } catch (error) {
     throw worded(error);
   }
@@ -137,9 +138,13 @@ export function tokenScope(stored: string | null, slugs: Record<string, string>)
   } catch {
     return {};
   }
-  if (!Array.isArray(grants)) return {};
+  return Array.isArray(grants) ? scopePaths(grants as unknown[], slugs) : {};
+}
+
+/** A scope's grants by path, each place by id among `slugs`: those still there. */
+export function scopePaths(grants: readonly unknown[], slugs: Record<string, string>): Record<string, string> {
   const shown: [string, string][] = [];
-  for (const grant of grants as unknown[]) {
+  for (const grant of grants) {
     if (typeof grant !== 'object' || grant === null) continue;
     const { projectId, environmentId, role } = grant as Record<string, unknown>;
     if (typeof projectId !== 'string' || typeof role !== 'string' || !Object.hasOwn(slugs, projectId)) continue;

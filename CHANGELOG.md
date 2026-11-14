@@ -26,6 +26,12 @@
   Workers alike, where it used node-postgres (`pg`). No package of coffre's
   depends on `pg` or `pg-connection-string` any more, and a deployment
   installs no driver. Database URLs are read as before, TLS included.
+  A deployment that put a pooler in front of Postgres needs one that keeps
+  prepared statements (PgBouncer 1.21 or later with
+  `max_prepared_statements`), or the database's direct endpoint: a use's
+  read is prepared by name once per connection, and in PgBouncer's
+  transaction mode without them every use after the first fails (`42P05`
+  or `26000`).
 - **`previousAuditChainKeys` is gone.** The app key signs no log entry in
   0.16, so nothing verifies with a key it replaced: `createCoffre` no
   longer takes the option, and a deployment that passes it fails its
@@ -51,6 +57,17 @@
   binding removed ends the credentials its runs hold within the vault's
   memory, 2 seconds, where 0.14.7 ended them at once.
 
+- **A reveal says which version it opened.** `POST /api/reveals` answers
+  `versions` and `secrets` beside `values`: each value's version number,
+  and the id of the secret it is held in (a reference's source, a fork's
+  parent), from the vault's one answer, at no extra cost; an environment's
+  listing names each key's the same way (`secret`). The environment page
+  keeps a revealed value, or an edit's starting value, only while both are
+  the row's: a read that opened another version than the listing showed
+  refetches the listing first, and one the listing has moved past by then
+  hides, where it was shown under the number the row had when clicked. A
+  fork's key reset to its parent's and overridden again can reach the
+  parent's number; the secret tells the two apart.
 - **A key marked in place, as one change.** `coffre mark` (`{ "KEY": {
   "sensitivity" } }` alone in a write) is served again: the value is kept
   as the key's next version, with its first date, recipe and pair. A
@@ -107,8 +124,9 @@
   proves each entry it shows against the head the signer signed, marking any
   past it as not proven. `coffre verify log` says so; a walk of the whole
   log, `coffre verify --full`, is designed, not built. `coffre verify
-  instance` no longer verifies the log as its last step, as the owner or the
-  token.
+  instance`, as the owner, holds the log's newest page, 200 entries, to the
+  head the signer signed (`owner log proofs`), where 0.14.7 walked the whole
+  log; as a token, it no longer checks the log.
 - **A restored version comes back as typed.** Restoring a version a recipe
   made, or one half of a key pair, writes it as a value typed by hand:
   Regenerate no longer makes its next one by that recipe, and the pair's

@@ -119,10 +119,10 @@ In order, since each builds on the ones before:
 | reveals audited, runs audited | A single-secret reveal or an environment read writes one `secret.read` of the vault's per value, under the reveal's operation and request, at the versions revealed |
 | cross-site | A write, a reveal and a sign-out with the admin's cookie, from another site or from no page at all: 403, no value in the answer, nothing changed |
 | live setup | The admin sets up what a token from CI needs: `conformance/live/CANARY`, and `token:conformance-live`, a viewer there and auditor on the project |
-| verify with a token | `coffre verify instance`, the built CLI in a home of its own, signed in with that token, piped to `coffre login --token`, and its canary's value piped in, as CI runs it: every check [as no one and with the token](#against-a-running-instance) passes, but the token's verification, which it skips. Neither the token nor the canary shows in what it prints |
+| verify with a token | `coffre verify instance`, the built CLI in a home of its own, signed in with that token, piped to `coffre login --token`, and its canary's value piped in, as CI runs it: every check [as no one and with the token](#against-a-running-instance) passes, and none reads the log as the owner's run does. Neither the token nor the canary shows in what it prints |
 | login as a user, login as the admin | `coffre login`, in a CLI of each one's own, approved by the reader and by the admin in their browsers |
 | verify as a user | `coffre verify instance` with the reader's session, a plain user: it exits 1, says plainly it needs an admin or owner of the whole instance, and makes nothing. The session still works. No member, grant, project or environment changes |
-| verify as the admin, verify again | With the admin's session, twice: every check of the [owner tier](#signed-in-as-an-owner) passes, and none is skipped. The first makes `token:conformance-probe` and its grants; the second finds everything. No line shows a credential, the session or the canary, and the session still works after |
+| verify as the admin, verify again | With the admin's session, twice: every check of the [owner tier](#signed-in-as-an-owner) passes, `owner log proofs` among them, and none is skipped. The first makes `token:conformance-probe` and its grants; the second finds everything. No line shows a credential, the session or the canary, and the session still works after |
 | verify interrupted | The same, stopped with Ctrl-C mid-run: it exits 130, its credential revoked and the session still signed in, and nothing it printed shows a credential or a canary |
 | verify leftovers | After the runs: the service holds no credential, the CLI's session is the one `coffre login` made, `conformance/live/CANARY` is as the live setup wrote it, no other member, grant, project or environment changed, and the runs' entries are in the audit log |
 | verify keys | `coffre verify keys` with the admin's session: the deployment's own vault key passes, piped in, vault ID included; a wrong key and a malformed one are each named. No key shows in what it prints |
@@ -180,9 +180,11 @@ on tampering, and the signer's full check reports a cut to the alert
 function or the Worker's log.
 In 0.16 the audit page proves each entry it lists against the head
 the vault signed: `audit proven` requires every entry the head numbers
-proven and only those past it not (it waits for a head that numbers an
-entry on the page: a batch signed between the head's read and the log's can
-leave the whole page past it), and `audit page proofs` that the page is sent
+proven, only those past it not, and the page's stretch lacking none
+(`judgeProofs`, which `coffre verify instance` shares; it asks again while
+the page races its head: a batch signed between the head's read and the log's
+can leave the whole page past it, and a pruning committed in between can
+leave the older head counting aging entries it removed), and `audit page proofs` that the page is sent
 with them rendered, each row's proof in `data-proof`, at least one proven
 and none failed (it asks again while every row is past the head, for the
 same race). Conformance does not hold either to a tampered log yet.
@@ -242,7 +244,7 @@ Each prints ✓, ✗ or – and a line, and the run exits 1 on any ✗. Behind
 Cloudflare Access, which turns everyone away before coffre answers, and
 where 0.16.0 takes no CLI's credential, neither tier can run: `coffre verify
 instance` says so. Neither checks the whole audit log, which 0.16.0's vault
-watches itself: the signer checks its end every minute and re-checks older
+watches itself (the owner tier holds the newest page of it to its head): the signer checks its end every minute and re-checks older
 entries a few blocks a minute, and the audit page proves each entry it shows
 ([design](design/0.16.md), D222).
 
@@ -264,7 +266,10 @@ signed in after. Without one, it says to run `coffre login` first. Then:
    issues the service a fresh credential. A `CANARY` beside it, kept for a
    token from CI, is never touched.
 4. It runs the token tier above as that credential, unchanged.
-5. However the run ends, Ctrl-C included, it revokes the credential it
+5. It reads the newest page of the audit log as you, which the token tier
+   cannot, and holds it to the head the vault signed, as conformance's
+   `audit proven` does: one read, whatever the log's length.
+6. However the run ends, Ctrl-C included, it revokes the credential it
    issued, and only that: your session stays.
 
 Neither the credential nor the canary is ever printed or written anywhere.
@@ -275,6 +280,7 @@ Signed in as anyone else, it says so and stops before it makes anything.
 | owner | The session is an admin's or owner's of the whole instance |
 | setup | What step 1 and 2 found and made, a fresh canary and a fresh credential |
 | token, token reveal, token scan, token scope | The token tier, as the fresh credential |
+| owner log proofs | The newest 200 entries of the whole log: those the head numbers proven against it, none past it proven, none failed, and the page's stretch lacking no entry of either tree. It asks again for up to 90 s, each request held to that wait too, while the page races its head: every entry listed past it, signed since the vault's read, or only aging entries missing, pruned since |
 | clean-up | The credential revoked, your session left as it was; what stays |
 
 What stays, for the next run: the project, the environment with its canary,

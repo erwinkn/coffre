@@ -89,7 +89,7 @@ test('who a request is, in one statement: its principal, its credential, and wha
   const answer = await who('ada');
   assert.equal(statements, 1, 'one read');
   assert.equal(answer.principal, ada);
-  assert.deepEqual({ ...answer.credential, id: 'x' }, { id: 'x', kind: 'cli', expiresAt: far.toISOString() });
+  assert.deepEqual({ ...answer.credential, id: 'x' }, { id: 'x', kind: 'cli', expiresAt: far.toISOString(), label: 'ada' });
   assert.deepEqual([answer.holds.role, answer.holds.service, answer.holds.kind, answer.holds.credentialScope], ['member', false, 'person', null]);
   assert.deepEqual(answer.holds.grants, [{ projectId: w.market.id, environmentId: null, role: 'viewer' }]);
   // Only the roles her rows name, her grants' and her own in the instance: not `unused`, which only Bo holds.

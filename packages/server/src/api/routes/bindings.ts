@@ -76,8 +76,8 @@ export type BindingPlan = {
   claims: BindingClaims;
   scope: Record<string, string>;
   policy: PolicyView | null;
-  /** 0.14.7's places whose sensitive values it would not read (R32): never answered yet, as the weighing does not say them. */
-  withheld?: string[];
+  /** The places of `scope` that hold a sensitive value it will not read: only an Owner of their project binds one that does (R32). */
+  withheld: string[];
   /** `asked`: named in `replaces`. `keys_moved`: one of the service's on the issuer, under other keys. */
   replaces: { id: string; why: 'asked' | 'keys_moved' }[];
 };
@@ -332,11 +332,13 @@ export async function bind(ctx: ApiContext, raw: string, input: z.output<typeof 
       claims: checked.claims,
       scope: plan.bindings[0]!.scope,
       policy: (input.policy as PolicyView | undefined) ?? null,
+      withheld: plan.bindings[0]!.withheld,
       replaces: plan.replaced.map((id) => ({ id, why: asked.has(id) ? ('asked' as const) : ('keys_moved' as const) })),
     };
   }
   const bound = await bindingChange<'token.bind'>(ctx, change, member);
-  return { binding: bound.bindings[0]!, replaced: bound.replaced };
+  const { id, scope } = bound.bindings[0]!;
+  return { binding: { id, scope }, replaced: bound.replaced };
 }
 
 export const bindingRoutes = {
@@ -387,7 +389,7 @@ export const bindingRoutes = {
       if (query.dryRun !== undefined) throw NO_PREVIEW;
       await checkedKeys(input.jwks);
       const bound = await bindingChange<'token.bind'>(ctx, { op: 'token.bind', member, keys: { issuer: input.issuer, jwks: input.jwks } }, member);
-      return { bindings: bound.bindings, replaced: bound.replaced };
+      return { bindings: bound.bindings.map(({ id, scope }) => ({ id, scope })), replaced: bound.replaced };
     },
   }),
 

@@ -136,6 +136,9 @@ test('a page renders as the person Access admitted, and its response sets the co
   const [page, calls] = await cost(async () => app.render({ headers: { 'cf-access-jwt-assertion': ada1, cookie: CF } }, async ({ client }) => (seen = (await client.me()).principal.id)));
   assert.deepEqual([page.status, seen, calls], [200, 'ada@acme.example', ['change', 'caller']]);
   assert.deepEqual(Object.keys(cookiesOf(page)).sort(), [ACCESS_SUBJECT_COOKIE, SESSION].sort());
+  // Its shell reads how the instance signs in of the page's own request, which carried Access's assertion.
+  const shell = await app.render({ headers: { 'cf-access-jwt-assertion': ada1, cookie: CF } }, async ({ client }) => client.auth());
+  assert.deepEqual(await shell.json(), { signin: null, access: { assertion: true } });
 });
 
 test("someone else's assertion with the session on a shared browser signs them in, and ends the session it found", async () => {

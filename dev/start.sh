@@ -4,7 +4,9 @@
 # people in with its own page, the dev IdP standing in for GitHub and for an
 # OpenID Connect provider.
 #
-# A second stack can run beside the first, on its own ports and database:
+# A second stack can run beside the first, on its own ports, database and
+# Workers storage: each start drops the database it names and empties that
+# storage, so two stacks sharing either would reset each other.
 #
 #   COFFRE_DEV_PORT=3080 COFFRE_DEV_IDP_PORT=3081 COFFRE_DEV_DATABASE=coffre_two \
 #   COFFRE_STATE_DIR=/tmp/coffre-two pnpm dev
@@ -36,6 +38,9 @@ port="${COFFRE_DEV_PORT:-3000}"
 idp_port="${COFFRE_DEV_IDP_PORT:-8081}"
 database="${COFFRE_DEV_DATABASE:-coffre}"
 state_dir="${COFFRE_STATE_DIR:-$root/dev/.wrangler/state}"
+# Absolute: Vite resolves a relative one against its own root, not this one,
+# and the reset below must empty the storage the Workers use.
+case "$state_dir" in /*) ;; *) state_dir="$root/$state_dir" ;; esac
 owner_url="postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
 
 # What deployment/app/src/server.ts, the dev IdP and the seed read. The app's
@@ -108,6 +113,13 @@ trap cleanup EXIT INT TERM
 
 log 'starting Postgres'
 ./scripts/ensure-postgres.sh
+
+# Each run starts over: a fresh database, and fresh local storage for every
+# Worker, the vault's signer included, which keeps the log's head beside the
+# database. The seed then fills it through the API.
+log "starting $database over"
+DATABASE_URL="$owner_url" node --conditions=coffre:source dev/reset.mjs
+rm -rf "$state_dir/v3"
 
 log "applying migrations to $database"
 node --conditions=coffre:source scripts/ensure-database.mjs "$database"

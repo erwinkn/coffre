@@ -1,10 +1,12 @@
 import type { Me } from '@coffre/client';
 import { runsInstance, type Filter, type Scope } from '@coffre/core/access';
+import type { Called } from '@coffre/core/vault';
 
 import { places, type PlaceRow } from '../../db/queries/places.ts';
 import { canAnywhere, permissionsAt, placeOf, projectsReached } from '../caller.ts';
 import { mcpOf, resourceOf } from '../../mcp/oauth.ts';
 import { route } from '../route.ts';
+import { scopePaths } from './tokens.ts';
 
 /** A scope as the API tells it: its projects by slug, those among `known`. */
 function scopeView(scope: Scope, known: readonly PlaceRow[]): Scope {
@@ -14,15 +16,25 @@ function scopeView(scope: Scope, known: readonly PlaceRow[]): Scope {
   return { projects, environments: scope.environments };
 }
 
+/** The personal token a request came in on, as 0.14.7 named it: none for any other credential. */
+function personalToken({ credential, holds }: Called, known: readonly PlaceRow[]): Me['personalToken'] {
+  if (credential.kind !== 'personal' || holds.credentialScope == null) return null;
+  const slugs = Object.fromEntries(known.flatMap((project) => [[project.id, project.slug], ...project.environments.map((environment) => [environment.id, environment.slug])]));
+  return { id: credential.id, label: credential.label ?? '', expiresAt: credential.expiresAt, scope: scopePaths(holds.credentialScope, slugs) };
+}
+
 export const meRoutes = {
   /**
    * Who is asking, and every live environment they hold something in:
    * what every page's shell reads first. One call to the vault, shared by
    * all the calls of one render, and one statement.
    *
-   * Two of its fields are other areas' to answer, and say "none" until
-   * they are served: `setsUpServices` past whoever runs the instance and
-   * `serviceSetup` (the policy's row), `personalToken` (the token's label).
+   * A personal token is named (`personalToken`): its label, which the
+   * vault's `caller` answers, and its scope by path, from the places read.
+   *
+   * One of its fields is another area's to answer, and says "none" until
+   * it is served: `setsUpServices` past whoever runs the instance and
+   * `serviceSetup` (the policy's row).
    */
   ...route('GET /me', {
     run: async (ctx): Promise<Me> => {
@@ -57,7 +69,7 @@ export const meRoutes = {
         setsUpServices: runs,
         serviceSetup: null,
         features: { mcp: mcp === null ? null : resourceOf(mcp.publicUrl), workloads: ctx.auth.mode === 'signin' && ctx.auth.signin.workloads !== null },
-        personalToken: null,
+        personalToken: personalToken(who, known),
         credentialExpiresAt: who.credential.expiresAt,
         environments,
       };
