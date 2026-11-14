@@ -11,13 +11,14 @@ import { after, beforeEach, test } from 'node:test';
 import { MAX_CLIENTS, MAX_CONNECTIONS, type McpScope } from '@coffre/core/mcp';
 import type { Asked, McpClient, Presented } from '@coffre/core/vault';
 import { rowsOf } from '@coffre/db/dialect';
-import { principals } from '@coffre/db/schema';
+import { credentials, principals } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
 
 import { commit, prepare, WRITE_MS } from '../src/change.ts';
 import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
+import { through } from '../src/ops/via.ts';
 import { Signer } from '../src/signer.ts';
 import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
 import { amend, credential, environment, grant, identity, instance, oauthClient, principal, project, role, rows, secret, tokenOf, user, value, write } from './world.ts';
@@ -48,6 +49,7 @@ beforeEach(async () => {
   const market = project('market');
   const prod = environment(market, 'prod');
   const adas = identity(ada, { provider: 'github', issuerHash: 'issuer-of-github', subject: 'gh-ada' });
+  const bos = identity(bo, { provider: 'github', issuerHash: 'issuer-of-github', subject: 'gh-bo' });
   const database = await value(world, secret(prod, 'DATABASE_URL'), 'postgres://market');
   cursor = oauthClient('Cursor', { redirectUris: '["http://127.0.0.1/callback","https://cursor.example/cb"]' });
   await write(
@@ -55,7 +57,7 @@ beforeEach(async () => {
     ...rows('policy', instance()),
     ...rows('roles', role(true, 'owner', ['secret.read']), role(true, 'member', []), role(false, 'viewer', ['secret.read'])),
     ...rows('principals', principal(root, { role: 'owner' }), principal(ada), principal(bo), principal(cy, { status: 'removed', generation: 1 }), principal(ci)),
-    ...rows('identities', adas),
+    ...rows('identities', adas, bos),
     ...rows('projects', market),
     ...rows('environments', prod),
     ...rows('secrets', database),
@@ -66,6 +68,7 @@ beforeEach(async () => {
       credential('ada-pat', ada, { kind: 'personal', scope: '[]' }),
       credential('ada-handle', ada, { kind: 'handle', scope: '[]', places: '[]' }),
       credential('bo-cli', bo),
+      credential('bo-web', bo, { kind: 'browser', identityId: bos.id }),
       credential('cy-cli', cy),
       credential('ci-token', ci, { scope: '[]' }),
     ),
@@ -116,7 +119,7 @@ async function checked() {
   return (await signer.take()).map((finding) => finding.found);
 }
 /** A change's answer, which the test needs made. */
-async function made<O extends 'mcp.connect' | 'mcp.token' | 'mcp.revoke' | 'oauth.register' | 'credential.end'>(input: Asked<O>) {
+async function made<O extends 'mcp.connect' | 'mcp.token' | 'mcp.revoke' | 'oauth.register' | 'mcp.decide' | 'credential.end'>(input: Asked<O>) {
   const done = await vault.change(input);
   assert.ok(!('refused' in done), JSON.stringify(done));
   return done.answer;
@@ -575,4 +578,206 @@ test('a token given back whose row, or whose connection\'s, was written behind t
   await world.owner.execute(sql`UPDATE credentials SET label = 'Claudia' WHERE id = ${connection}::uuid`);
   assert.deepEqual(await vault.change(revoke('ref-1')), { refused: 'tampered' });
   assert.equal((await stored(connection)).revoked_at, null);
+});
+
+const deciding = { workloads: world.workloads, owners: world.owners };
+/** A connect Ada approves through her connection, as the vault makes it (`through`), to prepare and commit apart. */
+const approving = (input: Asked<'mcp.connect'>) => through(OPERATIONS['mcp.connect'](input, deciding), input.via, tokenOf('ada-web'));
+const ARGS = '{"secret":"market/prod/KEY"}';
+const digestOf = (tool: string, args: string) => createHash('sha256').update(`[${JSON.stringify(tool)},${args}]`).digest('hex');
+const ask = (label: string, args = ARGS, tool = 'request_secret_value', place: string | null = 'market/prod/KEY'): Asked<'mcp.ask'> => ({ ...shown(label), op: 'mcp.ask', tool, arguments: args, place });
+const decide = (label: string, approval: string, approve: boolean, digest = digestOf('request_secret_value', ARGS)): Asked<'mcp.decide'> => ({ ...shown(label), op: 'mcp.decide', approval, approve, digest });
+const approvalOf = async (id: string) => (await rowsOf<{ status: string; decided: boolean }>(world.owner, sql`SELECT status, decided_at IS NOT NULL AS decided FROM mcp_approvals WHERE id = ${id}::uuid`))[0];
+/** Ada's connection, redeemed: its access token is `acc-1`. */
+async function adaConnected() {
+  const { connection } = await made(connect('ada-web', 'code-1', ['read', 'write']));
+  const tokens = await redeemed(byCode('code-1', 'acc-1', 'ref-1'));
+  return { connection, token: tokens.credential };
+}
+/** An approval asked on `acc-1`. */
+async function asked(args = ARGS, tool = 'request_secret_value') {
+  const answer = await vault.change(ask('acc-1', args, tool));
+  assert.ok(!('refused' in answer), JSON.stringify(answer));
+  return answer.answer.approval;
+}
+
+test('an MCP client asks for a change on its access token: one approval, pending five minutes, logged by its tool, place and digest, never its arguments', async () => {
+  const { connection, token } = await adaConnected();
+  const before = (await entries()).length;
+  const args = '{"note":"the Stripe key, from Ada\'s dashboard","secret":"market/prod/KEY"}';
+  const answer = await vault.change(ask('acc-1', args));
+  assert.ok(!('refused' in answer));
+  assert.equal(answer.answer.expiresAt, new Date(world.now() + 5 * MINUTE).toISOString());
+  const [entry, ...more] = (await entries()).slice(before);
+  assert.equal(more.length, 0);
+  assert.deepEqual([entry!.kept, entry!.action, entry!.actor, entry!.credential], [true, 'mcp.ask', ada, token]);
+  assert.deepEqual(entry!.detail, { approval: answer.answer.approval, connection, tool: 'request_secret_value', names: ['market/prod/KEY'], digest: digestOf('request_secret_value', args) });
+  assert.ok(!JSON.stringify(entry).includes('Stripe'), 'the arguments are the client\'s text: only the row keeps them');
+  assert.ok(!entry!.rows.some((row) => row.row.includes('mcp_approvals')), 'a row with no MAC is not among the entry\'s rows');
+  const [row] = await rowsOf<{ connection_id: string; arguments: string; digest: string; status: string }>(world.owner, sql`SELECT connection_id::text, arguments, encode(digest, 'hex') AS digest, status FROM mcp_approvals`);
+  assert.deepEqual(row, { connection_id: connection, arguments: args, digest: digestOf('request_secret_value', args), status: 'pending' });
+
+  // Only an MCP access token that stands asks one: not a session, nor the connection's refresh token, nor one ended.
+  for (const label of ['ada-web', 'ada-cli', 'ref-1', 'ada-pat']) assert.deepEqual(await vault.change(ask(label)), { refused: 'unauthenticated' }, label);
+  // What it asks is a tool, a JSON object of its arguments, and a place, each plain.
+  for (const bad of [ask('acc-1', '["market"]'), ask('acc-1', `{"note":"${'x'.repeat(4100)}"}`), ask('acc-1', ARGS, 'Rm -rf'), ask('acc-1', ARGS, 'x', 'market/prod/KEY with spaces')]) {
+    await assert.rejects(vault.change(bad), TypeError);
+  }
+  await made({ ...shown('ada-web'), op: 'credential.end', credential: connection, of: null });
+  assert.deepEqual(await vault.change(ask('acc-1')), { refused: 'unauthenticated' }, 'its connection ended');
+  assert.deepEqual(await checked(), []);
+});
+
+test('a connection holds five approvals waiting: the same call waits on its own, and a client asking in a loop writes five entries an expiry, whatever it does between', async () => {
+  await adaConnected();
+  const first = await asked();
+  const before = (await entries()).length;
+  assert.deepEqual(await vault.change(ask('acc-1')), { refused: 'pending' }, 'the same call waits on its own: the app joins it');
+  for (const key of ['B', 'C', 'D', 'E']) await asked(`{"secret":"market/prod/${key}"}`);
+  assert.deepEqual(await vault.change(ask('acc-1', '{"secret":"market/prod/F"}')), { refused: 'full' });
+  assert.deepEqual(await vault.change(ask('acc-1', '{"secret":"market/prod/G"}')), { refused: 'full' });
+  // Four made, and the refusals wrote nothing, not even an entry.
+  assert.equal((await entries()).length - before, 4);
+  // Only the person's decision or the expiry frees a place.
+  await made(decide('ada-web', first, false));
+  await asked('{"secret":"market/prod/F"}');
+  await world.owner.execute(sql`UPDATE mcp_approvals SET expires_at = ${new Date(world.now() - 1000).toISOString()}::timestamptz WHERE arguments = '{"secret":"market/prod/B"}'`);
+  await asked('{"secret":"market/prod/G"}');
+  assert.deepEqual(await vault.change(ask('acc-1', '{"secret":"market/prod/H"}')), { refused: 'full' });
+  assert.equal((await entries()).filter((entry) => entry.action === 'mcp.ask').length, 7);
+  assert.deepEqual(await checked(), []);
+});
+
+test("Ada denies an approval, or approves one that only shows her a value, on her browser session: decided once, while it waits, and only hers", async () => {
+  const { connection } = await adaConnected();
+  const change = await asked();
+  const show = await asked(ARGS, 'show_secret_value');
+  const showDigest = digestOf('show_secret_value', ARGS);
+  const unknown = { refused: 'unknown_approval' };
+  // A change is approved only by the change itself, through it.
+  assert.deepEqual(await vault.change(decide('ada-web', change, true)), unknown);
+  assert.deepEqual(await vault.change(decide('ada-web', change, false, showDigest)), unknown, 'not the digest the page rendered');
+  assert.deepEqual(await vault.change(decide('bo-cli', change, false)), { refused: 'no_access' }, "Bo's CLI");
+  assert.deepEqual(await vault.change(decide('bo-web', change, false)), unknown, "Bo's browser: Ada's approval is not his to see, let alone decide");
+  assert.deepEqual(await vault.change(decide('ada-cli', change, false)), { refused: 'no_access' }, 'a CLI decides nothing of an app\'s');
+  assert.deepEqual(await vault.change(decide('ada-web', '00000000-0000-4000-8000-000000000000', false)), unknown);
+  const before = (await entries()).length;
+  assert.deepEqual(await made(decide('ada-web', change, false)), { approval: change });
+  assert.deepEqual(await approvalOf(change), { status: 'denied', decided: true });
+  assert.deepEqual(await vault.change(decide('ada-web', change, false)), unknown, 'decided once');
+  assert.deepEqual(await made(decide('ada-web', show, true, showDigest)), { approval: show });
+  assert.deepEqual(await approvalOf(show), { status: 'approved', decided: true });
+  const [denied, approved] = (await entries()).slice(before);
+  assert.deepEqual([denied!.action, denied!.actor, denied!.detail], ['mcp.deny', ada, { approval: change, connection, tool: 'request_secret_value', digest: digestOf('request_secret_value', ARGS) }]);
+  assert.equal(approved!.action, 'mcp.approve');
+  assert.ok(approved!.objects.includes(`mcp_approval:${show}`) && approved!.objects.includes(`credential:${connection}`));
+
+  // Expired by the time its write would start, a write's time before its end, it waits no more.
+  const late = await asked('{"secret":"market/prod/LATE"}');
+  await world.owner.execute(sql`UPDATE mcp_approvals SET expires_at = ${new Date(world.now() + WRITE_MS - 1000).toISOString()}::timestamptz WHERE id = ${late}::uuid`);
+  assert.deepEqual(await vault.change(decide('ada-web', late, false, digestOf('request_secret_value', '{"secret":"market/prod/LATE"}'))), unknown);
+  // Its connection ended, none is decided.
+  const ended = await asked('{"secret":"market/prod/ENDED"}');
+  await made({ ...shown('ada-web'), op: 'credential.end', credential: connection, of: null });
+  assert.deepEqual(await vault.change(decide('ada-web', ended, false, digestOf('request_secret_value', '{"secret":"market/prod/ENDED"}'))), { refused: 'disconnected' });
+  assert.deepEqual(await checked(), []);
+});
+
+test('two decisions of one approval at once: the second to write finds the approval changed under the change lock, starts over, and is refused', async () => {
+  await adaConnected();
+  const show = await asked(ARGS, 'show_secret_value');
+  const showDigest = digestOf('show_secret_value', ARGS);
+  const [approving, denying] = await Promise.all([prepare(world, OPERATIONS['mcp.decide'](decide('ada-web', show, true, showDigest), deciding)), prepare(world, OPERATIONS['mcp.decide'](decide('ada-web', show, false, showDigest), deciding))]);
+  assert.ok(!('refused' in approving!) && !('refused' in denying!), 'each decided alone, the approval pending');
+  assert.equal(await commit(world, denying), true);
+  assert.equal(await commit(world, approving), false, 'read again by a hash of all of it: it is denied now');
+  assert.deepEqual(await approvalOf(show), { status: 'denied', decided: true });
+  assert.deepEqual(await vault.change(decide('ada-web', show, true, showDigest)), { refused: 'unknown_approval' });
+});
+
+test("an approval decided in its last moments is written only if its write starts a write's time before it expires, by the database's clock", async () => {
+  const { connection } = await adaConnected();
+  const approval = await asked();
+  const digest = digestOf('request_secret_value', ARGS);
+  // 50 ms before a write's time is left of its five minutes: decided, and its write waits longer than that.
+  world.tick(5 * MINUTE - WRITE_MS - 50);
+  const late = [
+    await prepare(world, OPERATIONS['mcp.decide'](decide('ada-web', approval, false), deciding)),
+    await prepare(world, approving({ ...connect('ada-web', 'code-late'), via: { connection, approval, digest } })),
+  ];
+  assert.ok(late.every((prepared) => !('refused' in prepared)));
+  await sleep(120);
+  assert.deepEqual([await commit(world, late[0] as never), await commit(world, late[1] as never)], [false, false]);
+  world.tick(120);
+  assert.deepEqual(await vault.change(decide('ada-web', approval, false)), { refused: 'unknown_approval' });
+  assert.deepEqual(await approvalOf(approval), { status: 'pending', decided: false });
+});
+
+test("a decision is written only if its write starts a write's time before its connection ends too, which nothing in the connection's row says", async () => {
+  const { connection } = await adaConnected();
+  const approval = await asked();
+  const show = await asked(ARGS, 'show_secret_value');
+  const digest = digestOf('request_secret_value', ARGS);
+  // The connection ends 50 ms after a write's time from now: decided, and the writes wait longer than that.
+  await amend(world, 'credentials', sql`id = ${connection}::uuid`, { expiresAt: new Date(world.now() + WRITE_MS + 50) });
+  const late = [
+    await prepare(world, OPERATIONS['mcp.decide'](decide('ada-web', show, true, digestOf('show_secret_value', ARGS)), deciding)),
+    await prepare(world, approving({ ...connect('ada-web', 'code-late'), via: { connection, approval, digest } })),
+  ];
+  assert.ok(late.every((prepared) => !('refused' in prepared)));
+  await sleep(120);
+  assert.deepEqual([await commit(world, late[0] as never), await commit(world, late[1] as never)], [false, false]);
+  // Asked again, with less than a write's time left of it, the connection stands for none.
+  world.tick(120);
+  assert.deepEqual(await vault.change(decide('ada-web', approval, false)), { refused: 'disconnected' });
+  assert.deepEqual(await vault.change({ ...connect('ada-web', 'code-later'), via: { connection, approval, digest } }), { refused: 'disconnected' });
+  assert.deepEqual([await approvalOf(approval), await approvalOf(show)], [{ status: 'pending', decided: false }, { status: 'pending', decided: false }]);
+});
+
+test("a change Ada approves for her connection on coffre's page is hers, on her browser session: it marks the approval approved in its own write, once, and its entry names both", async () => {
+  const { connection } = await adaConnected();
+  const waiting = await made(connect('ada-web', 'code-2'));
+  const bos = await made(connect('bo-cli', 'code-bo'));
+  await redeemed(byCode('code-bo', 'acc-bo', 'ref-bo'));
+  const approval = await asked();
+  const digest = digestOf('request_secret_value', ARGS);
+  const viaAda = (label: string, via: Record<string, string> = {}, code = 'code-x'): Asked<'mcp.connect'> => ({ ...connect(label, code), via: { connection, approval, digest, ...via } });
+
+  // Weighed, it writes nothing; made, the approval is approved with it.
+  assert.ok(!('refused' in (await vault.weigh(viaAda('ada-web')))));
+  assert.deepEqual(await approvalOf(approval), { status: 'pending', decided: false });
+  const before = (await entries()).length;
+  // Not on a browser session, nor through another member's connection, nor anything but a connection that stands.
+  const disconnected = { refused: 'disconnected' };
+  assert.deepEqual(await vault.change(viaAda('ada-cli')), disconnected, "the CLI's session approves nothing");
+  assert.deepEqual(await vault.change(viaAda('ada-web', { connection: bos.connection })), disconnected, "Bo's connection");
+  assert.deepEqual(await vault.change(viaAda('ada-web', { connection: waiting.connection })), disconnected, 'a connection whose code still waits');
+  // Nor an approval that is not this connection's, of this digest, and waiting.
+  const unknown = { refused: 'unknown_approval' };
+  assert.deepEqual(await vault.change(viaAda('ada-web', { digest: digestOf('request_secret_value', '{}') })), unknown, 'another digest');
+  assert.deepEqual(await vault.change(viaAda('ada-web', { approval: '00000000-0000-4000-8000-000000000000' })), unknown, 'none');
+  const denied = (await entries()).slice(before).filter((one) => one.detail.refused !== undefined);
+  assert.ok(denied.length > 0 && denied.every((one) => one.action === 'mcp.connect' && one.detail.via === connection && one.detail.approval === approval), 'a refusal is logged as the change\'s, both named');
+
+  const madeFor = await made(viaAda('ada-web'));
+  const [entry] = (await entries()).slice(-1);
+  assert.deepEqual([entry!.action, entry!.actor, entry!.detail.connection, entry!.detail.via, entry!.detail.approval], ['mcp.connect', ada, madeFor.connection, connection, approval]);
+  assert.ok(entry!.objects.includes(`credential:${connection}`) && entry!.objects.includes(`mcp_approval:${approval}`));
+  assert.ok(entry!.rows.some((row) => row.row === JSON.stringify(['credentials', connection]) && row.was === row.now), 'the connection is among the rows it read and left');
+  assert.deepEqual(await approvalOf(approval), { status: 'approved', decided: true });
+  assert.deepEqual(await vault.change(viaAda('ada-web', {}, 'code-y')), unknown, 'approved once: a second change under it is refused');
+
+  // Two Approves at once, of two changes: the second to write finds the approval approved, starts over, and is refused.
+  const second = await asked('{"secret":"market/prod/TWICE"}');
+  const twice = (code: string) => approving(viaAda('ada-web', { approval: second, digest: digestOf('request_secret_value', '{"secret":"market/prod/TWICE"}') }, code));
+  const [one, two] = await Promise.all([prepare(world, twice('code-a')), prepare(world, twice('code-b'))]);
+  assert.ok(!('refused' in one!) && !('refused' in two!));
+  assert.equal(await commit(world, one), true);
+  assert.equal(await commit(world, two), false);
+
+  // An approval and its connection are named by their ids, and only for a change someone asks.
+  await assert.rejects(vault.change(viaAda('ada-web', { connection: 'not-an-id' })), TypeError);
+  await assert.rejects(vault.change(viaAda('ada-web', { digest: 'nope' })), TypeError);
+  await assert.rejects(vault.change({ ...revoke('acc-1'), via: { connection, approval, digest } } as never), TypeError);
+  assert.deepEqual(await checked(), []);
 });

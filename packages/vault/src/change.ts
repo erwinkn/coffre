@@ -3,7 +3,7 @@ import { KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
 import { gaveUpCode } from '@coffre/db/dialect';
 import { later, laterRows } from '@coffre/db/later';
-import { bindings, environments, projects, secrets, secretVersions } from '@coffre/db/schema';
+import { bindings, environments, mcpApprovals, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
@@ -29,18 +29,21 @@ import { contextOf, natureOf } from './value.ts';
  * not find has no name to give. So a decision takes nothing from a missing
  * row: with fewer rows it refuses, or allows less.
  *
- * One table is read that carries no MAC: the versions of values, for a
- * change that copies one (`Value`) or goes by one's label (`vouched`). A
+ * Two tables are read that carry no MAC. The versions of values, for a
+ * change that copies one (`Value`) or goes by one's label (`vouched`): a
  * version's encryption names what it is, so its row is held to that when it
- * is opened, before anything is written, and the write reads it again, as
- * any row, by a hash of all of it.
+ * is opened, before anything is written. And the approvals of the changes
+ * MCP clients ask for (`Loose`), a row of which grants nothing (D240): a
+ * change writes them as they are, and its entry does not list them. The
+ * write reads either again, as any row, by a hash of all of it: two
+ * decisions of one approval at once, the second finds it changed.
  *
  * So what an operation says is what it reads and how it decides. Reading
  * again, comparing, writing, sealing each row and logging what it replaced
  * are here, once.
  *
- * A value is the one thing a change writes that carries no MAC: a version's
- * encryption names what it is. The decision says what the version holds,
+ * A value is the one thing a change writes that carries no MAC and is
+ * worth anything: a version's encryption names what it is. The decision says what the version holds,
  * and the value is sealed here, after it and before the write, since
  * sealing draws a key and may call a key service, which no decision does.
  *
@@ -62,8 +65,11 @@ export type Running = {
   refused: Map<string, { at: number }>;
 };
 
-/** A table a change reads: one whose rows carry the vault's MAC, or the versions of values, which carry none. */
-export type Readable = Sealed | typeof secretVersions;
+/** A table a change writes whose rows carry no MAC: an approval changes nothing by itself (D240). */
+export type Loose = typeof mcpApprovals;
+
+/** A table a change reads: one whose rows carry the vault's MAC, the versions of values, or approvals, which carry none. */
+export type Readable = Sealed | typeof secretVersions | Loose;
 
 /**
  * Rows a decision depends on: those of `table` that `where` holds for, a
@@ -100,14 +106,14 @@ export type Unsealed<P extends Parts> = { readonly [K in keyof P]: number };
  * another only if the first goes `first` (`aside`): every write that goes
  * first is made before any other.
  */
-export type Write = { table: Sealed; row: object | null; was: object | null; first?: boolean };
+export type Write = { table: Sealed | Loose; row: object | null; was: object | null; first?: boolean };
 
-export function put<T extends Sealed>(table: T, row: Fresh<T>, was: Row<T> | null = null): Write {
+export function put<T extends Sealed | Loose>(table: T, row: Fresh<T>, was: Row<T> | null = null): Write {
   return { table, row, was };
 }
 
 /** A row read, put back with what a change says of it: every other column as it was. */
-export function amended<T extends Sealed>(table: T, was: Row<T>, changes: Partial<Fresh<T>>): Write {
+export function amended<T extends Sealed | Loose>(table: T, was: Row<T>, changes: Partial<Fresh<T>>): Write {
   const { mac: _, ...kept } = was as Row<T> & { mac: unknown };
   return put(table, { ...kept, ...changes } as Fresh<T>, was);
 }
@@ -310,7 +316,7 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
 /**
  * Parts read in one statement: each part's rows whose MAC is the vault's,
  * `named` by table and key; `versions`, the rows of a table with no MAC
- * (a secret's versions), given unchecked: the engine opens one under its
+ * (a secret's versions, and approvals), given unchecked: the engine opens one under its
  * label before a change copies it or goes by it (`Value`, `vouched`);
  * `tokens`, every row the statement found,
  * by its part and what it is read again by (`tokenOf`), the vault's or
@@ -376,7 +382,7 @@ export async function readParts<P extends Parts, B extends string = never>(
   return { seen: seen as Seen<P>, unsealed: unsealed as Unsealed<P>, named, versions, tokens, readAt: found[0] && Number(found[0].read_at), beside: aside };
 }
 
-/** What a row is read again by: its MAC, or a version's, which has none, a hash of all of it. */
+/** What a row is read again by: its MAC, or for a version or an approval, which have none, a hash of all of it. */
 const tokenOf = (table: Readable) => ('mac' in table ? sql`encode(${table}.mac, 'hex')` : sql`md5(to_jsonb(${table})::text)`);
 /** What an answer beside the parts is read again by: a hash of it. */
 const besideToken = sql`md5(aside.row::text)`;
@@ -409,19 +415,27 @@ async function decided<P extends Parts, A, C = undefined>(vault: Running, operat
 
   const key = vault.keys[0]!;
   const rows: Entry['rows'][number][] = [];
-  const written = new Map<string, { table: Sealed; first: boolean; inserts: Wire[]; updates: Wire[]; deletes: Wire[] }>();
+  const written = new Map<string, { table: Sealed | Loose; first: boolean; inserts: Wire[]; updates: Wire[]; deletes: Wire[] }>();
+  const loose = new Set<string>();
   for (const { table, row, was, first = false } of plan.writes) {
-    if (was !== null && !read.has(was)) throw new Error(`a change of ${shapeOf(table).name} replaces a row its decision did not read`);
+    const sealed = 'mac' in table;
+    if (was !== null && !(sealed ? read.has(was) : copied.has(was))) throw new Error(`a change of ${shapeOf(table).name} replaces a row its decision did not read`);
     const name = nameOf(table, row ?? was!);
     if (row !== null && was !== null && nameOf(table, was) !== name) throw new Error(`a change of ${name} moves its key`);
-    if (rows.some((other) => other.row === name)) throw new Error(`a change writes ${name} twice`);
-    const mac = row === null ? null : seal(key, table, row);
-    rows.push({ row: name, was: was === null ? null : (was as { mac: Buffer }).mac.toString('hex'), now: mac?.toString('hex') ?? null });
+    if (rows.some((other) => other.row === name) || loose.has(name)) throw new Error(`a change writes ${name} twice`);
     const shape = shapeOf(table);
     const group = written.get(`${first} ${shape.name}`) ?? { table, first, inserts: [], updates: [], deletes: [] };
     written.set(`${first} ${shape.name}`, group);
     if (row === null) group.deletes.push(toWire(table, was!, shape.key));
-    else (was === null ? group.inserts : group.updates).push({ ...toWire(table, row), mac: `\\x${mac!.toString('hex')}` });
+    // A row with no MAC is written as it is, and the entry does not list it: the signer's mirror holds MACs.
+    if (!sealed) {
+      loose.add(name);
+      if (row !== null) (was === null ? group.inserts : group.updates).push(toWire(table, row));
+      continue;
+    }
+    const mac = row === null ? null : seal(key, table, row);
+    rows.push({ row: name, was: was === null ? null : (was as { mac: Buffer }).mac.toString('hex'), now: mac?.toString('hex') ?? null });
+    if (row !== null) (was === null ? group.inserts : group.updates).push({ ...toWire(table, row), mac: `\\x${mac!.toString('hex')}` });
   }
   const { used, until, erase } = plan;
   for (const place of [...(erase?.projects ?? []), ...(erase?.environments ?? [])]) {

@@ -140,6 +140,26 @@ test('a value that replaces a version is written only over the version the key h
   assert.deepEqual(await vault.change(writing([{ key: 'TOKEN', value: 'typed' }])), { refused: 'archived' });
 });
 
+test('a value that replaces no version is written only where the key reads none and is no reference; one that replaces a reference, only over that one', async () => {
+  const before = await versions();
+  // A value here, and in a fork one inherited, refuse it, and nothing is written.
+  assert.deepEqual(await vault.change(writing([{ key: 'TOKEN', value: 'over', replaces: null }])), { refused: 'stale' });
+  assert.deepEqual(await vault.change(writing([{ key: 'TOKEN', value: 'over', replaces: null }], { environment: 'staging' })), { refused: 'stale' });
+  assert.equal(await versions(), before);
+  // A new key takes it; a reference, which holds no value of its own, is named by its source, and only that one.
+  const [{ id: source }] = await rowsOf<{ id: string }>(world.owner, sql`SELECT source_id::text AS id FROM secrets WHERE environment_id = ${places.prod!.id} AND key = 'REF'`);
+  assert.deepEqual(await vault.change(writing([{ key: 'FRESH', value: 'first', replaces: { source: source! } }])), { refused: 'stale' }, 'none there');
+  assert.deepEqual(await written(vault.change(writing([{ key: 'FRESH', value: 'first', replaces: null }]))), { FRESH: { version: 1, nature: 'secret' } });
+  for (const replaces of [null, { source: '00000000-0000-4000-8000-000000000000' }]) {
+    assert.deepEqual(await vault.change(writing([{ key: 'REF', value: 'own', replaces }])), { refused: 'stale' }, JSON.stringify(replaces));
+  }
+  assert.equal(await versions(), before + 1);
+  assert.deepEqual(await written(vault.change(writing([{ key: 'REF', value: 'own', replaces: { source: source! } }]))), { REF: { version: 1, nature: 'secret' } });
+  // The second of two such writes finds the first's value.
+  assert.deepEqual(await vault.change(writing([{ key: 'FRESH', value: 'second', replaces: null }])), { refused: 'stale' });
+  assert.deepEqual(await opened('prod', ['FRESH']), ['first']);
+});
+
 test('in a fork, a value replaces the version it inherits while it holds none of its own, unless it dismissed the key', async () => {
   const prods = await listed('prod', 'TOKEN');
   const regenerate = (environment: string, replaces = prods) => vault.change(writing([{ key: 'TOKEN', value: `${environment}-next`, generated: made('bytes:32:hex'), replaces }], { environment }));

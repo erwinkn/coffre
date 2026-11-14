@@ -13,6 +13,14 @@ export type ApiContext = {
   /** What the request showed, which every call to the vault starts with. */
   shown: Presented;
   /**
+   * The MCP connection and the approval whose change the person approves
+   * on coffre's page (`POST /approvals/:id`): every change the request
+   * makes names them, and the vault refuses it unless the connection stands,
+   * the person's own, and the approval waits, of the digest the page showed
+   * (`ForConnection` in @coffre/core/vault). Unset for every other request.
+   */
+  via?: { connection: string; approval: string; digest: string };
+  /**
    * Who the request is and what it holds, for a page's queries: asked of
    * the vault once a request, and once for all the calls of a page's
    * render. A use or a change does not ask: the vault reads its caller

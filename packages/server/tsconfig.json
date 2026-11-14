@@ -35,9 +35,6 @@
     "test/one-access.test.ts",
 
     // MCP and sign-in (W421).
-    "src/mcp/approvals.ts",
-    "src/mcp/changes.ts",
-    "test/mcp-approvals.test.ts",
     "test/mcp-values.test.ts",
     "test/auth-boundary.test.ts",
 

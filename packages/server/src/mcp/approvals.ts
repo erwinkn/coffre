@@ -1,48 +1,34 @@
-// Approvals (docs/design/mcp.md, section 7): every change an MCP client asks
-// for waits here until its person decides it on coffre's own page. The page
-// shows what the change would do, read afresh; Approve makes it there and
-// then, once, as the person with the connection attached, and stores what
-// it answered, without values, for the client to read when it comes back.
-// The client never makes the change itself, so it happens exactly once,
-// whether or not the client returns (D36).
-import { createHash, randomUUID } from 'node:crypto';
+// Approvals (docs/design/mcp.md, section 7; docs/design/0.16.md, "An MCP
+// client's changes"): every change an MCP client asks for waits here until its
+// person decides it on coffre's own page. The vault writes each: the client's
+// ask (`mcp.ask`), a denial or a value shown (`mcp.decide`), and an Approve,
+// which is the change itself, made there and then on the person's browser
+// session with the connection and the approval named (`via`): the vault marks
+// the approval approved in the change's own write. The client never makes the
+// change itself, so it happens exactly once, whether or not the client
+// returns (D36), and it hears how it ended by the approval's id, a read.
+import { createHash } from 'node:crypto';
 
-import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
-import { parseScopes } from '@coffre/core/mcp';
-import type { Database } from '@coffre/db';
-import { mcpApprovals } from '@coffre/db/schema';
+import { APPROVAL_SECONDS, MAX_PENDING } from '@coffre/core/mcp';
 
-import { allowed, audited, denied, Refusal, withRefusals, type ApiContext, type McpVia } from '../api/context.ts';
-import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
-import { serveApi } from '../api/router.ts';
-import { AuthRowTampered } from '../auth-rows.ts';
-import type { AuditEntry } from '../db/audit.ts';
-import { decideApproval, findApproval, findConnection, insertApproval, openApprovals, unansweredApprovals, update, type ApprovalRow, type ConnectionRow } from '../db/queries.ts';
-import { logged } from '../logged.ts';
-import type { WorkloadTransport } from '../workloads/transport.ts';
-import type { Applied, Detail, Replaced, Viewing } from './changes.ts';
-import type { McpConnection } from './service.ts';
+import { changed } from '../api/change.ts';
+import type { ApiContext } from '../api/context.ts';
+import { ApiError, badRequest, conflict, forbidden, notFound, refusal } from '../api/errors.ts';
+import { findApproval, pendingAsk, type ApprovalRow, type FoundApproval } from '../db/queries/approvals.ts';
+import { clientOf } from '../db/queries/mcp.ts';
+import type { Detail, Replaced, Viewing } from './changes.ts';
 import { TOOL_BY_NAME, type Tool } from './tools.ts';
 
-/** How long the person has to decide: Q1's bound, for links as for elicitation. */
-export const APPROVAL_SECONDS = 5 * 60;
-/** How long after it was asked the client may still read the outcome. */
+export { APPROVAL_SECONDS, MAX_PENDING };
+/** How long after it was asked a client may still hear how an approval ended; and how far back its page recalls the same call approved. */
 export const OUTCOME_SECONDS = 10 * 60;
-/** Approvals a connection may hold waiting at once: no flood of prompts. */
-export const MAX_PENDING = 5;
-/** How long Approve may take to make its change: approved and still without an outcome after that, it never got one. */
-export const APPLY_SECONDS = 60;
+/** How long a client's retry waits on its approval before answering that it still waits: well inside every client's timeout. Tests shorten it. */
+export const approvalWait = { ms: 25_000 };
 
 export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'cancelled' | 'failed' | 'expired';
 
-/** What a decided change answered: the client's text and result, or why it failed. Never a value. */
+/** What became of a decided approval: the client's text and result. Never a value. */
 export type Outcome = { text: string; result?: Record<string, unknown>; error?: string };
-
-/** The outcome of a change approved whose making never answered: it may or may not have been made. */
-export const UNKNOWN_OUTCOME: Outcome = {
-  text: 'The person approved this, but coffre does not know whether the change was made: check before asking for it again.',
-  error: 'unknown_outcome',
-};
 
 /** What the approval page shows. */
 export type ApprovalView = {
@@ -60,7 +46,7 @@ export type ApprovalView = {
   kind: 'change' | 'reveal';
   /** Whether the app holds Reveal values, and so can read any value the person can. */
   reveals: boolean;
-  /** Of the tool and its arguments: sent back with the decision, so what runs is what was shown. */
+  /** Of the tool and its arguments, as rendered: sent back with the decision, so what runs is what was shown. */
   digest: string;
   /** A digest of what the change replaces, as shown: sent back with Approve, which refuses it if it changed since. */
   basis: string | null;
@@ -75,7 +61,10 @@ export type ApprovalView = {
 /** What the page shows once the person decided: the outcome, and what only it may show, once. */
 export type Decision = { status: ApprovalStatus; outcome: Outcome; shown: Detail[] };
 
-/** SHA-256 of the canonical JSON of a tool's name and arguments: what a call, and its approval, are. */
+/** What the page sends back: the decision, the digest and basis it showed, and a value typed. */
+export type Decide = { approve: boolean; digest: string; basis?: string | null; value?: string };
+
+/** SHA-256 of the canonical JSON of a tool's name and arguments: what a call, and its approval, are. The vault draws the same from `[tool, canonical(args)]`. */
 export function callDigest(tool: string, args: unknown): string {
   return createHash('sha256').update(canonical([tool, args])).digest('hex');
 }
@@ -98,294 +87,214 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/** Where an approval stands at `now`: pending past its expiry, it expired. */
+export function statusOf(row: ApprovalRow): ApprovalStatus {
+  return row.status === 'pending' && row.expiresAt <= row.now ? 'expired' : row.status;
+}
+
 /**
- * Where an approval stands at `now`. Pending past its expiry, it expired.
- * Approved, and still without an outcome a minute on, its making died
- * before it answered: it failed, its outcome unknown (`outcomeOf`).
+ * What became of an approval, from its status alone: the vault writes an
+ * approval approved with its change, so approved is made. Null while it waits.
  */
-export function statusOf(row: ApprovalRow, now: Date): ApprovalStatus {
-  if (row.status === 'pending' && row.expiresAt <= now) return 'expired';
-  if (unanswered(row, now)) return 'failed';
-  return row.status as ApprovalStatus;
+export function outcomeOf(row: ApprovalRow, tool: Tool): Outcome | null {
+  const status = statusOf(row);
+  if (status === 'pending') return null;
+  if (status === 'approved') return tool.change!.done(JSON.parse(row.arguments) as never, row.decidedAt ?? row.now);
+  if (status === 'denied') return { text: 'The person denied this on coffre: nothing changed.' };
+  return { text: `This approval ${status === 'expired' ? 'expired before the person decided it' : `is ${status}`}: nothing changed.` };
 }
 
-function unanswered(row: ApprovalRow, now: Date): boolean {
-  return row.status === 'approved' && row.outcome === null && (row.decidedAt?.getTime() ?? 0) + APPLY_SECONDS * 1000 <= now.getTime();
+/** Where the person decides an approval. */
+export const approvalUrl = (publicUrl: string, id: string) => `${publicUrl}/approvals/${id}`;
+
+// --- for /mcp -------------------------------------------------------------------
+
+/** An approval's id, as a call names it: nothing else is read. */
+const UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+
+/**
+ * The approval for a call that names none, the vault's (`mcp.ask`): a new
+ * one, or the one the same call waits on (`joined`); none (`full`) past
+ * `MAX_PENDING` waiting.
+ */
+export async function ask(ctx: ApiContext, connection: string, tool: Tool, args: Record<string, unknown>): Promise<{ id: string; expiresAt: Date; joined: boolean } | { full: true }> {
+  for (let attempt = 0; ; attempt += 1) {
+    const answer = await ctx.vault.change<'mcp.ask'>({ ...ctx.shown, op: 'mcp.ask', tool: tool.name, arguments: canonical(args), place: tool.change!.place(args as never) });
+    if (!('refused' in answer)) return { id: answer.answer.approval, expiresAt: new Date(answer.answer.expiresAt), joined: false };
+    if (answer.refused === 'full') return { full: true };
+    if (answer.refused !== 'pending') throw refusal(answer.refused, tool.name);
+    const joined = await pendingAsk(ctx.db, connection, callDigest(tool.name, args));
+    if (joined !== null) return { ...joined, joined: true };
+    // Decided or expired since the vault read it: asked again, once.
+    if (attempt > 0) throw new ApiError('unavailable', 'the same change was asked at the same moment: try again');
+  }
 }
 
-/** What became of an approval, once known; `UNKNOWN_OUTCOME` for one approved that never answered. */
-export function outcomeOf(row: ApprovalRow, now: Date): Outcome | null {
-  if (row.outcome !== null) return JSON.parse(row.outcome) as Outcome;
-  return unanswered(row, now) ? UNKNOWN_OUTCOME : null;
+/**
+ * The approval a call names by its id (`requestState`, or its `approval`
+ * argument): this connection's, read with its digest. One that is unknown
+ * or another connection's is `unknown`, alike; one of this connection's for
+ * other arguments is `other_call`. A read: as often as the client likes.
+ */
+export async function named(ctx: ApiContext, connection: string, id: string, tool: Tool, args: unknown): Promise<FoundApproval | 'unknown' | 'other_call'> {
+  const row = UUID.test(id) ? await findApproval(ctx.db, id, OUTCOME_SECONDS) : null;
+  if (row === null || row.connectionId !== connection) return 'unknown';
+  return row.digest === callDigest(tool.name, args) ? row : 'other_call';
 }
 
-type ApprovalDeps = { db: Database; chainKey: Buffer; publicUrl: string; transport: WorkloadTransport };
-
-export class McpApprovals {
-  readonly #deps: ApprovalDeps;
-
-  constructor(deps: ApprovalDeps) {
-    this.#deps = deps;
+/** The approval once it no longer waits for the person, or as it is at `until`: read again every second, in plain queries, holding nothing. */
+export async function settle(ctx: ApiContext, row: FoundApproval, until: number): Promise<FoundApproval> {
+  while (statusOf(row) === 'pending' && Date.now() + 1000 <= until) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    row = (await findApproval(ctx.db, row.id, OUTCOME_SECONDS))!;
   }
+  return row;
+}
 
-  /** Where the person decides an approval. */
-  url(id: string): string {
-    return `${this.#deps.publicUrl}/approvals/${id}`;
-  }
+// --- for coffre's page ----------------------------------------------------------
 
-  // --- for /mcp -----------------------------------------------------------------
+/** The client a connection's row names, as the page shows it, and the scopes it holds. */
+function clientShown(connection: NonNullable<FoundApproval['connection']>) {
+  const client = clientOf(connection.client);
+  return { name: connection.label ?? 'Unnamed app', host: client?.host ?? null, registration: client?.registration ?? 'cimd', scopes: client?.scopes ?? [] };
+}
 
-  /**
-   * The approval for a call: the one the same call already opened, if its
-   * client has not yet heard how it ended, or a new one, logged with
-   * `entry`. `joined` says which. Read and written under the log's head,
-   * so that identical calls at once open one approval, and no burst of
-   * calls gets past `MAX_PENDING`.
-   */
-  async ask(connection: McpConnection, tool: Tool, args: unknown, entry: (approvalId: string) => AuditEntry): Promise<{ row: ApprovalRow; joined: boolean } | { full: true }> {
-    const digest = Buffer.from(callDigest(tool.name, args), 'hex');
-    return audited(this.#deps, async (tx, log) => {
-      const { rows, now } = await openApprovals(tx, connection.id, new Date(Date.now() - OUTCOME_SECONDS * 1000));
-      const same = rows.find((row) => row.digest.equals(digest) && statusOf(row, now) !== 'expired' && row.createdAt.getTime() + OUTCOME_SECONDS * 1000 > now.getTime());
-      if (same !== undefined) return { row: same, joined: true };
-      if (rows.filter((row) => statusOf(row, now) === 'pending').length >= MAX_PENDING) return { full: true as const };
-      const row = {
-        id: randomUUID(),
-        connectionId: connection.id,
-        tool: tool.name,
-        arguments: JSON.stringify(args),
-        digest,
-        status: 'pending',
-        outcome: null,
-        createdAt: now,
-        expiresAt: new Date(now.getTime() + APPROVAL_SECONDS * 1000),
-        decidedAt: null,
-        reportedAt: null,
-      };
-      await insertApproval(tx, row);
-      log.push(entry(row.id));
-      return { row, joined: false };
-    });
-  }
+/** "2 minutes ago", from the database's clock. */
+function ago(at: Date, now: Date): string {
+  const minutes = Math.floor((now.getTime() - at.getTime()) / 60_000);
+  return minutes < 1 ? 'less than a minute ago' : `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+}
 
-  async find(id: string): Promise<(ApprovalRow & { now: Date }) | null> {
-    return findApproval(this.#deps.db, id);
-  }
-
-  /**
-   * The approval once it is no longer waiting for the person, or as it is
-   * at `until`: read again every second, in plain queries, holding nothing.
-   * One approved whose change is still being made counts as waiting.
-   */
-  async settle(id: string, until: number): Promise<ApprovalRow & { now: Date }> {
-    for (;;) {
-      const row = (await findApproval(this.#deps.db, id))!;
-      const status = statusOf(row, row.now);
-      if (!(status === 'pending' || (status === 'approved' && row.outcome === null)) || Date.now() + 1000 > until) return row;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-  }
-
-  /** The client heard how it ended: the same call asks afresh from now on. */
-  async reported(id: string): Promise<void> {
-    await update(this.#deps.db, mcpApprovals, { id, reportedAt: null }, { reportedAt: new Date() });
-  }
-
-  /** The client declined the prompt: a pending approval is cancelled, logged with `entry`, and then decided. */
-  async cancel(id: string, entry: AuditEntry): Promise<void> {
-    await audited(this.#deps, async (tx, log) => {
-      if ((await update(tx, mcpApprovals, { id, status: 'pending' }, { status: 'cancelled', decidedAt: new Date() })) > 0) log.push(entry);
-    });
-  }
-
-  // --- for coffre's page ----------------------------------------------------------
-
-  /** What the page shows: only to the approval's own person, at their connection's generation. */
-  async view(ctx: ApiContext, id: string): Promise<ApprovalView> {
-    const { row, connection, tool } = await withRefusals(ctx, () => this.#mine(ctx, id, 'mcp.view'));
-    const status = statusOf(row, row.now);
-    const args = JSON.parse(row.arguments) as never;
-    const viewing: Viewing = { reveals: parseScopes(connection.scopes).scopes.includes('reveal'), transport: this.#deps.transport };
-    let details: Detail[] = [];
-    let basis: string | null = null;
-    if (status === 'pending') {
-      const api = this.#client(ctx);
-      const unread = (error: unknown): Detail[] => {
-        if (!(error instanceof CoffreError)) throw error;
-        return [{ label: 'Note', value: `coffre could not read what this replaces: ${error.message}`, warn: true }];
-      };
-      // Read once: the page shows what the change replaces, and Approve compares its basis with this one.
-      // Unread, the rest of the page still shows, and nothing is approved without a basis.
-      let replaced: Replaced | null = null;
-      let missing: Detail[] = [];
-      try {
-        replaced = (await tool.change!.replaces?.(api, args)) ?? null;
-      } catch (error) {
-        missing = unread(error);
-      }
-      try {
-        details = await tool.change!.preview(api, args, viewing, replaced?.details ?? missing);
-        basis = replaced === null ? null : basisOf(replaced);
-      } catch (error) {
-        details = unread(error);
-      }
-      // The same call approved before, whose making never answered: approving it again may make it twice.
-      const earlier = (await unansweredApprovals(this.#deps.db, row.connectionId, row.digest)).filter((other) => other.id !== row.id);
-      if (earlier.length > 0) {
-        details.unshift({ label: 'Asked before', value: 'You approved this same change before, and coffre does not know whether it was made: check before approving it again.' });
-      }
-    }
-    return {
-      id: row.id,
-      status,
-      client: { name: connection.clientName, host: connection.clientHost, registration: connection.registration as 'cimd' | 'dcr' },
-      tool: tool.name,
-      summary: tool.change!.summary(args),
-      details,
-      asks: tool.change!.asks?.(viewing) ?? null,
-      kind: tool.change!.reveal === true ? 'reveal' : 'change',
-      reveals: viewing.reveals,
-      digest: row.digest.toString('hex'),
-      basis,
-      ready: tool.change!.replaces === undefined || basis !== null,
-      createdAt: row.createdAt.toISOString(),
-      expiresAt: row.expiresAt.toISOString(),
-      outcome: outcomeOf(row, row.now),
-    };
-  }
-
-  /**
-   * The person's decision. Approved, the change is made here, once, as the
-   * person through the connection, every check of the API's running again;
-   * its outcome is stored for the client. `digest` and `basis` are the
-   * ones the page showed: a change that is not what the person read, or
-   * that would replace something else now, is refused.
-   */
-  async decide(ctx: ApiContext, id: string, input: Decide): Promise<Decision> {
-    return withRefusals(ctx, () => this.#decide(ctx, id, input));
-  }
-
-  async #decide(ctx: ApiContext, id: string, input: Decide): Promise<Decision> {
-    const action = input.approve ? 'mcp.approve' : 'mcp.deny';
-    const { row, connection, tool } = await this.#mine(ctx, id, action);
-    const args = JSON.parse(row.arguments) as unknown;
-    const metadata = { approvalId: row.id, connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, tool: tool.name, names: tool.names(args as never) };
-    const refuse = (error: ApiError, reason: string) => new Refusal(error, denied(ctx, action, reason, { metadata }));
-    const digest = callDigest(tool.name, args);
-    if (input.digest !== digest || row.digest.toString('hex') !== digest) {
-      throw refuse(conflict('this change is not the one the page showed: open the approval again'), 'changed');
-    }
-    const status = statusOf(row, row.now);
-    if (status !== 'pending') throw refuse(conflict(`this approval is ${status} already`), status);
-    if (!parseScopes(connection.scopes).scopes.includes(tool.scope)) {
-      throw refuse(forbidden(`${connection.clientName} no longer holds the ${tool.scope} scope`), 'insufficient_scope');
-    }
-    if (input.approve && tool.change!.asks !== undefined && (input.value === undefined || input.value === '')) {
-      throw new ApiError('bad_request', 'type the value to set first');
-    }
-    // What it replaces, read again: another version set, or another role granted, since the page showed it refuses it.
-    // Unread on either side, nothing is approved: a page that could not read it, or a read that fails now.
-    // The API takes no expected version, so a write in the moment between this read and the change still lands first;
-    // what a token or a binding reaches, found as shown, is what it is made with (`apply`), whatever the account holds by then.
-    let replaced: Replaced | undefined;
-    if (input.approve && tool.change!.replaces !== undefined) {
-      if (input.basis === undefined || input.basis === null) {
-        throw refuse(conflict('coffre could not read what this replaces when the page opened: reload it and try again'), 'unconfirmed');
-      }
-      try {
-        replaced = await tool.change!.replaces(this.#client(ctx), args as never);
-      } catch (error) {
-        if (!(error instanceof CoffreError)) throw error;
-        throw refuse(new ApiError('unavailable', 'coffre could not read what this replaces just now: try again'), 'unconfirmed');
-      }
-      if (basisOf(replaced) !== input.basis) throw refuse(conflict('this changed since you opened it: open the approval again'), 'replaced');
-    }
-
-    await audited(ctx, async (tx, log) => {
-      // Under the log's head, the approval and its connection as they are now: one that expired, or a disconnect, since they were read refuses it.
-      const again = (await findApproval(tx, id))!;
-      const status = statusOf(again, again.now);
-      if (status !== 'pending') throw refuse(conflict(`this approval is ${status} already`), status);
-      if (!live(await findConnection(tx, ctx.chainKey, { id: connection.id }).catch(untampered), ctx)) {
-        throw refuse(conflict(`${connection.clientName} is disconnected: this approval can no longer be decided`), 'disconnected');
-      }
-      // Pending, and unexpired by the database's clock as the write runs.
-      if ((await decideApproval(tx, id, input.approve ? 'approved' : 'denied')) === 0) throw refuse(conflict('this approval was decided already, or expired'), 'decided');
-      log.push(allowed(ctx, action, { metadata }));
-    });
-    if (!input.approve) {
-      const outcome = { text: `The person denied this on coffre: nothing changed.` };
-      await this.#store(id, { outcome: JSON.stringify(outcome) });
-      return { status: 'denied', outcome, shown: [] };
-    }
-
-    // The change, after the decision committed and outside any transaction: the API makes it as it would for the person.
-    // A reveal reads the value for the page alone, so its call may reach Reveal values' route whatever the connection holds.
-    const scopes = [...parseScopes(connection.scopes).scopes, ...(tool.change!.reveal === true ? (['reveal'] as const) : [])];
-    const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes, approvalId: row.id };
-    let applied: Applied;
+/** What the page shows: only to the approval's own person, on their browser session. */
+export async function viewApproval(ctx: ApiContext, id: string): Promise<ApprovalView> {
+  const { row, tool, client } = await mine(ctx, id);
+  const status = statusOf(row);
+  const args = JSON.parse(row.arguments) as never;
+  const change = tool.change!;
+  const viewing: Viewing = { reveals: client.scopes.includes('reveal'), transport: ctx.transport };
+  let details: Detail[] = [];
+  let basis: string | null = null;
+  if (status === 'pending') {
+    // Read once: the page shows what the change replaces, and Approve compares its basis with this one.
+    // Unread, the rest of the page still shows, and nothing is approved without a basis.
+    let replaced: Replaced | null = null;
+    let missing: Detail[] = [];
     try {
-      applied = await tool.change!.apply(this.#client({ ...ctx, via, provenance: connection.id }), args as never, { value: input.value, replaced });
+      replaced = (await change.replaces?.(ctx, args)) ?? null;
     } catch (error) {
-      const known = error instanceof CoffreError;
-      if (!known) console.error('an approved MCP change failed', logged(error));
-      const outcome: Outcome = { text: `coffre could not make the change: ${known ? error.message : 'see the server log'}`, error: known ? error.code : 'internal' };
-      await this.#store(id, { status: 'failed', outcome: JSON.stringify(outcome) });
-      return { status: 'failed', outcome, shown: [] };
+      missing = unread(error);
     }
-    // Made: the page hears so, and sees what only it may, whether or not the outcome is stored.
-    const outcome: Outcome = { text: applied.text, result: applied.result };
-    await this.#store(id, { outcome: JSON.stringify(outcome) });
-    return { status: 'approved', outcome, shown: applied.shown ?? [] };
-  }
-
-  /**
-   * What became of a decided approval, stored for its client. Not stored,
-   * the approval stays without an outcome, which its client reads as
-   * unknown a minute on (`statusOf`), never as a failure or as nothing.
-   */
-  async #store(id: string, outcome: { status?: 'failed'; outcome: string }): Promise<void> {
     try {
-      await update(this.#deps.db, mcpApprovals, { id }, outcome);
+      details = await change.preview(ctx, args, viewing, replaced?.details ?? missing);
+      basis = replaced === null ? null : basisOf(replaced);
     } catch (error) {
-      console.error("an MCP approval's outcome was not stored", logged(error));
+      details = unread(error);
     }
+    // The same call approved a moment before: a client that lost the approval's id asks again, and the person may not mean it twice.
+    if (row.approvedBefore !== null) details.unshift({ label: 'Asked before', value: `You approved this same request ${ago(row.approvedBefore, row.now)}.`, warn: true });
   }
-
-  /**
-   * An approval, its connection and its tool, if the caller is its person,
-   * at the generation they connected the client in, and the connection is
-   * live. Anyone else is told it is someone else's, and nothing more.
-   */
-  async #mine(ctx: ApiContext, id: string, action: string): Promise<{ row: ApprovalRow & { now: Date }; connection: ConnectionRow; tool: Tool }> {
-    const row = await findApproval(this.#deps.db, id);
-    if (row === null) throw notFound('no such approval');
-    const connection = await findConnection(this.#deps.db, ctx.chainKey, { id: row.connectionId }).catch(untampered);
-    const tool = TOOL_BY_NAME.get(row.tool);
-    if (connection === null || tool?.change === undefined) throw notFound('no such approval');
-    if (ctx.caller.principal.type !== 'user' || connection.principal !== `user:${ctx.caller.principal.id}`) {
-      throw new Refusal(forbidden('this approval is for someone else'), denied(ctx, action, 'not_yours', { metadata: { approvalId: id } }));
-    }
-    if (!live(connection, ctx)) throw conflict(`${connection.clientName} is disconnected: this approval can no longer be decided`);
-    return { row, connection, tool };
-  }
-
-  /** The API in process, with this request's caller and connection, and nothing to authenticate again. */
-  #client(ctx: ApiContext): CoffreClient {
-    return createClient({ url: this.#deps.publicUrl, transport: (request) => serveApi(request, ctx) });
-  }
+  return {
+    id: row.id,
+    status,
+    client: { name: client.name, host: client.host, registration: client.registration },
+    tool: tool.name,
+    summary: change.summary(args),
+    details,
+    asks: change.asks?.(viewing) ?? null,
+    kind: change.reveal === true ? 'reveal' : 'change',
+    reveals: viewing.reveals,
+    digest: row.digest,
+    basis,
+    ready: change.replaces === undefined || basis !== null,
+    createdAt: row.createdAt.toISOString(),
+    expiresAt: row.expiresAt.toISOString(),
+    outcome: outcomeOf(row, tool),
+  };
 }
 
-/** What the page sends back: the decision, the digest and basis it showed, and a value typed. */
-type Decide = { approve: boolean; digest: string; basis?: string | null; value?: string };
-
-/** A connection that failed its MAC is no connection. */
-function untampered(error: unknown): null {
-  if (!(error instanceof AuthRowTampered)) throw error;
-  return null;
+/** What the page says when a read it makes is refused: the rest still shows. */
+function unread(error: unknown): Detail[] {
+  if (!(error instanceof ApiError)) throw error;
+  return [{ label: 'Note', value: `coffre could not read what this replaces: ${error.message}`, warn: true }];
 }
 
-/** Whether a connection still acts for the caller: live, and at the generation they connected it in. */
-function live(connection: (ConnectionRow & { now: Date }) | null, ctx: ApiContext): boolean {
-  return connection !== null && connection.revokedAt === null && connection.expiresAt > connection.now && connection.generation === ctx.caller.generation;
+/**
+ * The person's decision. `digest` and `basis` are the ones the page showed:
+ * a change that is not what the person read, or one that would replace
+ * something else now, is refused before the vault is asked anything, and
+ * the vault holds the decision to the row's digest again.
+ *
+ * - Deny: `mcp.decide`, the approval written denied.
+ * - Approve of a change: the change, on the person's session with the
+ *   connection and the approval named (`via`): the vault writes the
+ *   approval approved in the change's own write. Refused (another version
+ *   set since, `stale`; expired; disconnected), nothing is written, and the
+ *   approval still waits: the page shows why, and the person reloads it.
+ * - Approve of a value shown: the value first, read as the person's own
+ *   reveal, then `mcp.decide`. Should the second be refused (expired, or
+ *   decided in another tab meanwhile), the person still sees the value,
+ *   theirs to read, and the client hears the approval as it stands.
+ */
+export async function decide(ctx: ApiContext, id: string, input: Decide): Promise<Decision> {
+  const { row, tool, client } = await mine(ctx, id);
+  const change = tool.change!;
+  const args = JSON.parse(row.arguments) as never;
+  // Of the arguments the row holds now, too: what runs is what the page rendered, whatever was written in the row since.
+  if (input.digest !== row.digest || row.digest !== callDigest(tool.name, args)) throw conflict('this change is not the one the page showed: open the approval again');
+  const status = statusOf(row);
+  if (status !== 'pending') throw conflict(`this approval is ${status} already`);
+  if (!client.scopes.includes(tool.scope)) throw forbidden(`${client.name} no longer holds the ${tool.scope} scope`);
+  const decided = (approve: boolean) => changed(ctx, { op: 'mcp.decide', approval: id, approve, digest: input.digest }, 'this approval');
+  if (!input.approve) {
+    await decided(false);
+    return { status: 'denied', outcome: outcomeOf({ ...row, status: 'denied' }, tool)!, shown: [] };
+  }
+  if (change.asks !== undefined && (input.value === undefined || input.value === '')) throw badRequest('type the value to set first');
+
+  if (change.reveal === true) {
+    const { shown = [] } = await change.apply(ctx, args, {});
+    try {
+      await decided(true);
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      const now = await findApproval(ctx.db, id, OUTCOME_SECONDS);
+      return { status: now === null ? 'expired' : statusOf(now), outcome: { text: `Shown to you, but coffre could not record the approval (${error.message}): the app is not told it was shown.`, error: error.code }, shown };
+    }
+    return { status: 'approved', outcome: change.done(args, new Date()), shown };
+  }
+
+  // What it replaces, read again: another version set since the page showed it refuses it. Unread on either side,
+  // nothing is approved. The change carries what this read found to the vault, which refuses a write made in between.
+  let replaced: Replaced | undefined;
+  if (change.replaces !== undefined) {
+    if (input.basis === undefined || input.basis === null) throw conflict('coffre could not read what this replaces when the page opened: reload it and try again');
+    try {
+      replaced = await change.replaces(ctx, args);
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      throw new ApiError('unavailable', 'coffre could not read what this replaces just now: try again');
+    }
+    if (basisOf(replaced) !== input.basis) throw conflict('this changed since you opened it: open the approval again');
+  }
+  const { shown = [] } = await change.apply({ ...ctx, via: { connection: row.connectionId, approval: id, digest: input.digest } }, args, { value: input.value, replaced });
+  return { status: 'approved', outcome: change.done(args, new Date()), shown };
+}
+
+/**
+ * An approval, its tool and its client, if the caller is its person on a
+ * browser session of theirs, from coffre's own page, and its connection
+ * stands. Anyone else is told it is someone else's, and nothing more. The
+ * vault holds every decision to the same: this is what the page is told.
+ */
+async function mine(ctx: ApiContext, id: string): Promise<{ row: FoundApproval; tool: Tool; client: ReturnType<typeof clientShown> }> {
+  if (ctx.crossSite) throw new ApiError('cross_origin', "an app's change is decided on coffre's own page");
+  const who = await ctx.caller();
+  if (who.credential.kind !== 'browser') throw forbidden("an app's change is decided on coffre's page, in the browser you signed in with");
+  const row = await findApproval(ctx.db, id, OUTCOME_SECONDS);
+  const tool = row === null ? undefined : TOOL_BY_NAME.get(row.tool);
+  if (row?.connection == null || tool?.change === undefined) throw notFound('no such approval');
+  if (row.connection.principal !== who.principal) throw forbidden('this approval is for someone else');
+  const client = clientShown(row.connection);
+  if (!row.connection.live) throw conflict(`${client.name} is disconnected: this approval can no longer be decided`);
+  return { row, tool, client };
 }

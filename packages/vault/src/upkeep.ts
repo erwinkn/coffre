@@ -162,8 +162,9 @@ const SEALS_NOTHING = new KekRegistry({ provider: 'none', keyId: 'upkeep', keyVe
  * whose entry the signer holds to its mirror, as any other; an enrollment
  * code once no credential names it; a registered OAuth client no MCP
  * credential names, a week after it was made. Then, by a statement with no entry, the
- * rows that carry no MAC and that nothing reads again: ID tokens spent two
- * hours ago, MCP approvals a day past their expiry. The change's entry, if
+ * rows that carry no MAC and that no change decides on any more: ID tokens
+ * spent two hours ago, MCP approvals a day past their expiry, which a
+ * change reads only while they wait. The change's entry, if
  * it made one, is `told` the signer as it commits, before the statement
  * that follows can fail: its answer, whether one waits to be signed.
  */

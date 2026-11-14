@@ -98,7 +98,25 @@ export type Presented = Trace & {
  * request showed, or for one nobody asks (`Unasked`), where it came from
  * alone.
  */
-export type Asked<O extends Change['op']> = O extends Change['op'] ? (O extends Unasked | WorkloadsUnasked | McpUnasked ? Trace : Presented) & Extract<Change, { op: O }> : never;
+export type Asked<O extends Change['op']> = O extends Change['op'] ? (O extends Unasked | WorkloadsUnasked | McpUnasked ? Trace : Presented & ForConnection) & Extract<Change, { op: O }> : never;
+
+/**
+ * The approval a person makes a change for, on coffre's page
+ * (docs/design/0.16.md, "An MCP client's changes"): the change is theirs,
+ * made on their browser session, and its entry names the app that asked.
+ * The vault reads the connection and the approval with the change's other
+ * rows. The connection must stand, be of the caller's own member and
+ * generation, and the caller be on a browser session, or the change is
+ * refused `disconnected`. The approval must be the connection's, pending,
+ * unexpired by the time the write starts, and of the `digest` the page
+ * rendered, or it is refused `unknown_approval`. Made, the change marks the
+ * approval approved in its own write: no approval is approved without its
+ * change, nor a change made twice under one. It decides nothing else: what
+ * the change may do is the person's.
+ */
+export type ForConnection = {
+  via?: { connection: string; approval: string; digest: string };
+};
 
 export type UseInput = Presented & {
   /** The place, by its slugs. */

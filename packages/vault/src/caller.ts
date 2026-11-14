@@ -322,6 +322,12 @@ export function callerFrom(seen: Seen<ReturnType<typeof callerParts>>, shown: Sh
   return caller?.mcp != null ? null : caller;
 }
 
+/** An MCP connection's access token that stands, for the one change it asks itself, an approval (`mcp.ask`); null for any other caller. */
+export function mcpCallerFrom(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, workloads: Workloads, at: number): (Asking & { mcp: Mcp }) | null {
+  const caller = standing(seen, shown, workloads, at);
+  return caller?.mcp != null ? (caller as Asking & { mcp: Mcp }) : null;
+}
+
 /** The caller as `callerFrom` has them, an MCP connection too: who a page's request is (`caller`). */
 function standing(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, workloads: Workloads, at: number): Asking | null {
   const caller = callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: seen.places, binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy }, shown, workloads, at);

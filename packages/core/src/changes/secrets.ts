@@ -58,7 +58,12 @@ export type Nature = 'secret' | 'sensitive' | 'plain';
  *   holds none, the one it inherits. Anything else, a key renamed,
  *   archived, made a reference or written since, refuses the write,
  *   `stale`: a regenerate addresses keys by name, and would otherwise
- *   write a name that no longer holds what it listed.
+ *   write a name that no longer holds what it listed. `null`: the key
+ *   reads no value now and is no reference, here or inherited (it is new,
+ *   archived with none passed down, or a reference broken); `{ source }`:
+ *   it reads, here or inherited, a reference to that secret, by its id (a
+ *   listing's `reference.sourceId`). Anything else refuses either the same:
+ *   an MCP approval's value, set over what its person read.
  * - `restore`: the key's next version, the value of that version of its
  *   own, opened and sealed again by the vault, which never hands it out.
  *   The value comes back as it was kept, plain, a secret or sensitive, and
@@ -89,7 +94,7 @@ export type Nature = 'secret' | 'sensitive' | 'plain';
  * it were live: it overrides its parent's again, as 0.14's did.
  */
 export type KeyWrite = { key: string; archived?: boolean; folder?: string | null; inherit?: undefined } & (
-  | { value: string; nature?: Nature; generated?: Generation; replaces?: string; ref?: undefined; restore?: undefined }
+  | { value: string; nature?: Nature; generated?: Generation; replaces?: string | null | { source: string }; ref?: undefined; restore?: undefined }
   | { restore: number; value?: undefined; nature?: undefined; generated?: undefined; replaces?: undefined; ref?: undefined }
   | { ref: SecretPath; value?: undefined; nature?: undefined; generated?: undefined; replaces?: undefined; restore?: undefined }
   | { value?: undefined; nature?: undefined; generated?: undefined; replaces?: undefined; ref?: undefined; restore?: undefined }

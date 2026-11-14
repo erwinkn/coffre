@@ -156,10 +156,13 @@ let handleToken = '';
 let bound = '';
 /** The round's MCP client, as it registered, its PKCE verifier, and what it holds. */
 let oauth = { client: '', verifier: '', code: '', access: '', refresh: '', connection: '' };
+/** The change the round's client asks for, and the approval page as Cy's browser read it. */
+const ASKED = { name: 'request_secret_value', arguments: { secret: 'market/dev/ASKED' } };
+let approval = { id: '', digest: '', basis: null as string | null };
 const MCP_REDIRECT = 'http://127.0.0.1/callback';
 const consent = () => {
   const challenge = createHash('sha256').update(oauth.verifier).digest('base64url');
-  return { client_id: oauth.client, redirect_uri: MCP_REDIRECT, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', state: 's', scope: 'read reveal' };
+  return { client_id: oauth.client, redirect_uri: MCP_REDIRECT, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', state: 's', scope: 'read write reveal' };
 };
 /** A 2026-07-28 request to `/mcp` on the round's access token. */
 const mcpCall = (method: string, params: Record<string, unknown> = {}) =>
@@ -320,7 +323,7 @@ const requests: Record<string, Entry> = {
   },
   'GET /oauth/authorizations': { request: () => app.request(`/api/oauth/authorizations?${new URLSearchParams(consent())}`, { headers: asCy }), calls: ['caller'], statements: 1, fixed: true },
   'POST /oauth/authorizations': {
-    request: () => take<{ redirect: string }>(app.request('/api/oauth/authorizations', { method: 'POST', headers: asCy, body: JSON.stringify({ request: consent(), approve: true, scopes: ['read', 'reveal'] }) }), (body) => (oauth.code = new URL(body.redirect).searchParams.get('code')!)),
+    request: () => take<{ redirect: string }>(app.request('/api/oauth/authorizations', { method: 'POST', headers: asCy, body: JSON.stringify({ request: consent(), approve: true, scopes: ['read', 'write', 'reveal'] }) }), (body) => (oauth.code = new URL(body.redirect).searchParams.get('code')!)),
     calls: ['caller', 'change'], statements: 1,
   },
   'POST /api/oauth/token': {
@@ -342,11 +345,28 @@ const requests: Record<string, Entry> = {
   'POST /mcp, tools/list': { request: () => mcpCall('tools/list'), calls: ['caller'], statements: 0 },
   'POST /mcp, a read tool': { request: () => mcpCall('tools/call', { name: 'list_secrets', arguments: { environment: 'market/dev' } }), calls: ['caller'], statements: 1, fixed: true },
   'POST /mcp, reveal_secret_values': { request: () => mcpCall('tools/call', { name: 'reveal_secret_values', arguments: { path: 'market/dev/API_KEY' } }), calls: ['caller', 'use'], statements: 0 },
+  // A change through `/mcp`: the tool's check as the connection (the listing's statement), then the vault's `mcp.ask`,
+  // which opens the approval. The page reads it, and what it would replace, a statement each; Approve reads both again
+  // around the route's own `change`, which names the connection and the approval and marks it approved in its write.
+  // The client's call again names the approval and reads how it ended: one statement, and no write.
+  'POST /mcp, a change asked': {
+    request: () => take<{ result: { structuredContent: { approval: { id: string } } } }>(mcpCall('tools/call', ASKED), (body) => (approval.id = body.result.structuredContent.approval.id)),
+    calls: ['caller', 'change'], statements: 1,
+  },
+  'GET /approvals/:id': {
+    request: () => take<{ approval: { digest: string; basis: string | null } }>(app.request(`/api/approvals/${approval.id}`, { headers: asCy }), (body) => (approval = { ...approval, ...body.approval })),
+    calls: ['caller'], statements: 2,
+  },
+  'POST /approvals/:id': {
+    request: () => app.request(`/api/approvals/${approval.id}`, { method: 'POST', headers: asCy, body: JSON.stringify({ approve: true, digest: approval.digest, basis: approval.basis, value: `fake-asked-${round}` }) }),
+    calls: ['caller', 'change'], statements: 2,
+  },
+  'POST /mcp, a change reported': { request: () => mcpCall('tools/call', { ...ASKED, arguments: { ...ASKED.arguments, approval: approval.id } }), calls: ['caller'], statements: 1 },
   'GET /apps': { request: () => take<{ apps: { id: string }[] }>(app.request('/api/apps', { headers: asCy }), (body) => (oauth.connection = body.apps[0]!.id)), calls: ['caller'], statements: 1, fixed: true },
   'POST /api/oauth/revoke': { request: () => oauthForm('/api/oauth/revoke', { token: oauth.access, client_id: oauth.client }), calls: ['change'], statements: 0 },
   // The round's connection ended by its client just now: its person's Disconnect needs another, made as above.
   'POST /oauth/authorizations, again': {
-    request: () => take<{ redirect: string }>(app.request('/api/oauth/authorizations', { method: 'POST', headers: asCy, body: JSON.stringify({ request: consent(), approve: true, scopes: ['read', 'reveal'] }) }), (body) => (oauth.code = new URL(body.redirect).searchParams.get('code')!)),
+    request: () => take<{ redirect: string }>(app.request('/api/oauth/authorizations', { method: 'POST', headers: asCy, body: JSON.stringify({ request: consent(), approve: true, scopes: ['read', 'write', 'reveal'] }) }), (body) => (oauth.code = new URL(body.redirect).searchParams.get('code')!)),
     calls: ['caller', 'change'], statements: 1,
   },
   'POST /api/oauth/token, again': {

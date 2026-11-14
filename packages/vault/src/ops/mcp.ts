@@ -1,19 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { ACCESS_TOKEN_MINUTES, CODE_SECONDS, isMcpScope, MAX_CLIENTS, MAX_CONNECTIONS, MCP_SCOPES, redirectKind, redirectMatches, scopeString, supersedes, type McpScope } from '@coffre/core/mcp';
-import type { Answers, Asked, McpChanges, McpClient, Presented } from '@coffre/core/vault';
-import { credentials, oauthClients, principals } from '@coffre/db/schema';
+import { ACCESS_TOKEN_MINUTES, APPROVAL_SECONDS, CODE_SECONDS, isMcpScope, MAX_CLIENTS, MAX_CONNECTIONS, MAX_PENDING, MCP_SCOPES, MCP_SHOWS, redirectKind, redirectMatches, scopeString, supersedes, type McpScope } from '@coffre/core/mcp';
+import type { Answers, Asked, McpAsk, McpChanges, McpClient, McpDecide, Presented } from '@coffre/core/vault';
+import { credentials, mcpApprovals, oauthClients, principals } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
-import { callerParts, ID, mcpClientOf, refusedTo } from '../caller.ts';
+import { callerParts, ID, mcpCallerFrom, mcpClientOf, refusedTo } from '../caller.ts';
 import { amended, part, put, WRITE_MS, type Operation, type Parts, type Seen, type Unsealed, type Write } from '../change.ts';
 import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
-import { asking, NOWHERE } from './asking.ts';
+import { asking, NOWHERE, said } from './asking.ts';
 import type { Operations } from './index.ts';
 import { HASH, long, presented, text, traced } from './input.ts';
 import { onSession } from './services.ts';
 import { adopted, by, instancePart, VAULT } from './signin.ts';
+import { heldUntil, liveConnection, waiting } from './via.ts';
 
 /**
  * MCP connections and the OAuth clients that make them
@@ -403,10 +404,128 @@ function oauthRegister(input: Asked<'oauth.register'>): Operation<Parts, Answers
   };
 }
 
+/** A tool's name, as the app's tools have them. */
+const TOOL = /^[a-z][a-z_]{0,63}$/;
+/** A place, as `project/environment/KEY` or less: what the entry names, so plain slugs and a key's name. */
+const PLACE = /^[a-z0-9][a-z0-9-]{0,62}(\/[a-z0-9][a-z0-9-]{0,62}(\/[A-Za-z_][A-Za-z0-9_]{0,127})?)?$/;
+/** A tool's arguments, as JSON: a few names and a note. */
+const MOST_ARGUMENTS = 4096;
+
+/** Arguments as the app sends them: a JSON object, as its text. */
+function argumentsAsked(value: unknown): boolean {
+  if (!long(value, MOST_ARGUMENTS)) return false;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * An MCP client asks for a change (`McpAsk`), on its access token: one row
+ * written, the approval, pending for `APPROVAL_SECONDS`. The token must be
+ * an MCP access token that stands (`mcpCallerFrom`). The read finds the
+ * connection's approvals still pending: one for the same call refuses it,
+ * `pending`, which the app joins; `MAX_PENDING` of them refuse it, `full`.
+ * Only their person's decision or their expiry frees a place, so a client
+ * that asks in a loop writes `MAX_PENDING` entries an expiry at most. A
+ * refusal writes nothing, not even its entry. Two asks at once read the
+ * same rows, and the second's write finds a row where there was none and
+ * starts over.
+ */
+function mcpAsk(input: Presented & McpAsk, vault: Deciding): Operation<Parts, Answers['mcp.ask']> {
+  const shown = presented(input);
+  const { tool, place } = input;
+  const args = input.arguments;
+  if (!text(tool) || !TOOL.test(tool) || !argumentsAsked(args) || !(place === null || (text(place) && PLACE.test(place)))) {
+    throw new TypeError("an approval asks for a tool by its name, with its arguments as a JSON object of 4,096 characters at most, and the place it is about or none");
+  }
+  const digest = createHash('sha256').update(`[${JSON.stringify(tool)},${args}]`).digest();
+  // Drawn here: a decision draws nothing.
+  const id = randomUUID();
+  const hash = sql`decode(${shown.token.toString('hex')}, 'hex')`;
+  const read = {
+    ...callerParts(shown.token, NOWHERE),
+    // Its connection's newest approvals that wait, by the connection's index: each expires a fixed time after it was
+    // asked, so those that have not expired are among them, and the decision tells which by its own clock.
+    open: part(mcpApprovals, sql`${mcpApprovals.id} IN (SELECT a.id FROM mcp_approvals a WHERE a.status = 'pending' AND a.connection_id =
+      (SELECT (c.ancestors::jsonb ->> 0)::uuid FROM credentials c WHERE c.token_hash = ${hash} AND c.kind = 'mcp' AND c.ancestors ~ '^[[]"${ID}"[]]$')
+      ORDER BY a.expires_at DESC LIMIT ${MAX_PENDING})`),
+  };
+  return {
+    read,
+    decide(seen: Seen<typeof read>, at: number) {
+      const caller = mcpCallerFrom(seen, shown, vault.workloads, at);
+      if (caller === null) return { refused: 'unauthenticated' };
+      const connection = caller.mcp.connection.id;
+      const open = seen.open.filter((row) => row.connectionId === connection && row.status === 'pending' && row.expiresAt.getTime() > at);
+      if (open.some((row) => row.digest.equals(digest))) return { refused: 'pending' };
+      if (open.length >= MAX_PENDING) return { refused: 'full' };
+      const expiresAt = new Date(at + APPROVAL_SECONDS * 1000);
+      return {
+        writes: [put(mcpApprovals, {
+          id, connectionId: connection, tool, arguments: args, digest, status: 'pending', outcome: null,
+          createdAt: new Date(at), expiresAt, decidedAt: null,
+        })],
+        // Its tool, its place and its digest: the arguments are the client's text, and only the row keeps them.
+        entry: said('mcp.ask', caller, shown, [`credential:${connection}`, `mcp_approval:${id}`], { approval: id, connection, tool, names: place === null ? [] : [place], digest: digest.toString('hex') }),
+        answer: { approval: id, expiresAt: expiresAt.toISOString() },
+      };
+    },
+  };
+}
+
+/**
+ * A person, on a browser session of theirs, decides an approval itself
+ * (`McpDecide`): a denial, or the Approve of a tool that changes nothing
+ * (`MCP_SHOWS`), after the page showed them the value. Its row written,
+ * decided, while it and its connection have a write's time left (`heldUntil`): of
+ * two decisions at once, the second's write finds it decided, starts over
+ * and is refused. Every other Approve is its change's (`through`).
+ */
+function mcpDecide(input: Presented & McpDecide, vault: Deciding): Operation<Parts, Answers['mcp.decide']> {
+  const shown = presented(input);
+  const { approval, approve, digest } = input;
+  if (!text(approval) || !UUID.test(approval) || typeof approve !== 'boolean' || !text(digest) || !HASH.test(digest)) {
+    throw new TypeError("an approval is decided by its id, approved or not, with the digest the page rendered");
+  }
+  const action = approve ? 'mcp.approve' : 'mcp.deny';
+  const read = {
+    ...callerParts(shown.token, NOWHERE),
+    approval: part(mcpApprovals, sql`${mcpApprovals.id} = ${approval}::uuid`),
+    connection: part(credentials, sql`${credentials.id} = (SELECT a.connection_id FROM mcp_approvals a WHERE a.id = ${approval}::uuid)`),
+  };
+  return {
+    read,
+    denied: refusedTo(action, shown, vault.workloads, { objects: () => [`mcp_approval:${approval}`] }),
+    decide(seen: Seen<typeof read>, at: number) {
+      const caller = asking(seen, shown, vault, at);
+      if ('refused' in caller) return caller;
+      // On coffre's page, in the browser the person signed in with: no token decides an app's change.
+      if (!onSession(caller) || caller.credential.kind !== 'browser') return { refused: 'no_access' };
+      const [row] = seen.approval;
+      const [connection] = seen.connection;
+      if (row === undefined || connection === undefined || connection.principal !== caller.principal || !waiting(row, connection.id, digest, at)) return { refused: 'unknown_approval' };
+      if (!liveConnection(connection, caller.principal, caller.credential.generation, at)) return { refused: 'disconnected' };
+      // Approved here only where nothing is changed: a change's Approve is the change, made through it.
+      if (approve && !MCP_SHOWS.includes(row.tool)) return { refused: 'unknown_approval' };
+      return {
+        writes: [amended(mcpApprovals, row, { status: approve ? 'approved' : 'denied', decidedAt: new Date(at) })],
+        until: Math.min(heldUntil(row), heldUntil(connection)),
+        entry: said(action, caller, shown, [`credential:${connection.id}`, `mcp_approval:${row.id}`], { approval: row.id, connection: connection.id, tool: row.tool, digest }),
+        answer: { approval: row.id },
+      };
+    },
+  };
+}
+
 /** The changes of MCP connections and OAuth clients (docs/design/0.16.md, "MCP connections"). */
 export const mcpOperations: Operations<McpChanges> = {
   'mcp.connect': mcpConnect,
   'mcp.token': mcpToken,
   'mcp.revoke': mcpRevoke,
   'oauth.register': oauthRegister,
+  'mcp.ask': mcpAsk,
+  'mcp.decide': mcpDecide,
 };

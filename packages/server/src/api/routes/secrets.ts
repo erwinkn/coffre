@@ -6,7 +6,7 @@ import type { KeyWrite, SecretWrite } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import type { Nature } from '../../db/queries/secrets.ts';
-import { changed } from '../change.ts';
+import { asking, changed } from '../change.ts';
 import type { ApiContext } from '../context.ts';
 import { badRequest, refusal } from '../errors.ts';
 import { parsePath } from '../paths.ts';
@@ -18,7 +18,7 @@ const MOST_READ = 1000;
 const VALUE_LENGTH = 64 * 1024;
 
 /** A value as text Postgres stores and a reader gets back as written: no NUL, no half of a surrogate pair. The vault's own rule, told here as a 400. */
-const secretValue = z.string().max(VALUE_LENGTH).refine((value) => !value.includes('\0') && Buffer.from(value).toString() === value, 'a value is well-formed text, with no NUL');
+export const secretValue = z.string().max(VALUE_LENGTH).refine((value) => !value.includes('\0') && Buffer.from(value).toString() === value, 'a value is well-formed text, with no NUL');
 
 /** An environment as a path names it: its slug, and whether it is the caller's personal config of it (`dev@me`). */
 export function environmentOf(named: string): { environment: string; mine: boolean } {
@@ -137,7 +137,7 @@ const same = (a: string, b: string) => timingSafeEqual(createHash('sha256').upda
  * write's own answer would tell them, every value `changed`.
  */
 async function dryRun(ctx: ApiContext, change: SecretWrite, values: ReadonlyMap<string, string>, at: string): Promise<DryRunResult> {
-  const weighed = await ctx.vault.weigh<'secret.write'>({ ...ctx.shown, ...change });
+  const weighed = await ctx.vault.weigh<'secret.write'>({ ...asking(ctx), ...change });
   if ('refused' in weighed) throw refusal(weighed.refused, at);
   const { outcomes } = weighed.answer;
   const asked = Object.entries(outcomes).flatMap(([key, outcome]) => (typeof outcome === 'object' ? [{ key, ...outcome.compare }] : []));

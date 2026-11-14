@@ -31,6 +31,8 @@ export type TestApp = {
   calls: string[];
   /** What each of `calls` was given, in the same order. */
   inputs: unknown[];
+  /** Run before the app's next vault change, then cleared: for a test to make something happen between a request's reads and its change. */
+  beforeChange: { next: ((input: unknown) => Promise<void>) | null };
   /** How many statements the app ran on its own connection. */
   readonly statements: number;
   /** What it executed, oldest first, as Drizzle's `SQL`: for a test to read a statement's parameters. */
@@ -94,10 +96,16 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
       };
     },
   }) as Database;
+  const beforeChange: TestApp['beforeChange'] = { next: null };
   const recorded = new Proxy(vault, {
-    get: (target, name: keyof Vault) => (input: never) => {
+    get: (target, name: keyof Vault) => async (input: never) => {
       calls.push(name);
       inputs.push(input);
+      const before = name === 'change' ? beforeChange.next : null;
+      if (before !== null) {
+        beforeChange.next = null;
+        await before(input);
+      }
       return (target[name] as (input: never) => unknown)(input);
     },
   });
@@ -115,6 +123,7 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
     vault,
     calls,
     inputs,
+    beforeChange,
     get statements() {
       return statements;
     },

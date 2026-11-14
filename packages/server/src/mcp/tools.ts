@@ -3,7 +3,8 @@
 // with the vault's answer about it, so a tool can do no more than its person
 // could with the CLI, and the vault holds each use to the connection's own
 // rules: a value only with `reveal`, no change at all. Read, here: what is
-// there, and values only to a connection with Reveal values.
+// there, and values only to a connection with Reveal values; the changes,
+// which wait for the person's approval, are in changes.ts.
 import { apiMember } from '@coffre/client';
 import { PERMISSIONS, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
@@ -14,6 +15,7 @@ import { canAnywhere } from '../api/caller.ts';
 import type { ApiContext } from '../api/context.ts';
 import { badRequest } from '../api/errors.ts';
 import { runRoute } from '../api/router.ts';
+import { CHANGE_TOOLS, type Change } from './changes.ts';
 
 /** What a tool answers: its structured result, and the text a model reads. */
 export type ToolResult = { structured: Record<string, unknown>; text?: string };
@@ -38,7 +40,10 @@ export type Tool<I extends z.ZodObject = z.ZodObject> = {
   input: I;
   /** The result's top-level fields, which `structuredContent` holds. */
   output: Record<string, unknown>;
-  run: (tool: ToolContext, args: z.infer<I>) => Promise<ToolResult>;
+  /** A Read tool's call, made there and then. */
+  run?: (tool: ToolContext, args: z.infer<I>) => Promise<ToolResult>;
+  /** Or a change, or a value shown to the person, which waits for the person's approval on coffre's page (`changes.ts`). */
+  change?: Change<I>;
 };
 
 const environment = z.string().min(1).max(200).describe('An environment, as project/environment: market/prod');
@@ -185,7 +190,7 @@ const REVEAL_VALUES = tool({
   },
 });
 
-export const TOOLS: readonly Tool[] = [...READ_TOOLS, REVEAL_VALUES];
+export const TOOLS: readonly Tool[] = [...READ_TOOLS, REVEAL_VALUES, ...CHANGE_TOOLS];
 
 export const TOOL_BY_NAME = new Map(TOOLS.map((entry) => [entry.name, entry]));
 

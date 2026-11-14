@@ -312,6 +312,7 @@ test('every other action has a sentence', () => {
     [{ action: 'mcp.connect', metadata: { clientName: 'Claude' } }, 'connected Claude'],
     [{ action: 'mcp.read', metadata: { tool: 'list_secrets', names: ['market/prod'], via: { clientName: 'Claude Code' } } }, 'used list_secrets on market/prod via Claude Code'],
     [{ action: 'mcp.call', decision: 'deny', reason: 'insufficient_scope', metadata: { tool: 'archive_secret', names: ['market/prod/OLD'] } }, 'tried to use archive_secret on market/prod/OLD: insufficient scope'],
+    [{ action: 'mcp.ask', metadata: { tool: 'request_secret_value', names: ['market/prod/KEY'] } }, 'was asked by an app for request_secret_value on market/prod/KEY'],
     [{ action: 'mcp.approve', metadata: { tool: 'archive_secret', names: ['market/prod/OLD'], clientName: 'Claude' } }, 'approved archive_secret on market/prod/OLD for Claude'],
     [{ action: 'mcp.deny', metadata: { tool: 'set_access', names: ['user:bob@acme.example'], clientName: 'Claude' } }, 'turned down set_access on user:bob@acme.example for Claude'],
     [{ action: 'mcp.connect', decision: 'deny', reason: 'person_denied', metadata: { clientName: 'Claude' } }, 'tried to connect Claude: they said no'],

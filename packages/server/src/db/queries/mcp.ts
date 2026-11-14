@@ -41,7 +41,7 @@ const redeemed = (principal: string, at: Date) =>
   sql`c.principal = ${principal} AND c.revoked_at IS NULL AND c.expires_at > ${at} AND c.kind = 'mcp' AND c.ancestors IS NULL AND c.challenge IS NULL`;
 
 /** The client a connection's row keeps, JSON (`storedClient` in the vault's ops/mcp.ts); undefined for one that does not read as such. */
-function clientOf(stored: string): { host: string | null; registration: 'cimd' | 'dcr'; scopes: McpScope[] } | undefined {
+export function clientOf(stored: string): { host: string | null; registration: 'cimd' | 'dcr'; scopes: McpScope[] } | undefined {
   try {
     const client = JSON.parse(stored) as Record<string, unknown>;
     const { host, registration, scopes } = client ?? {};

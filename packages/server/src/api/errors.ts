@@ -152,6 +152,9 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   unknown_code: ['not_found', 'that code is unknown or has expired'],
   // Tokens, handles and sessions (routes/tokens.ts): one answer for a credential that is not there, ended, or not the caller's to end.
   unknown_credential: ['not_found', 'unknown credential'],
+  // A change approved for an MCP connection (routes/approvals.ts): the connection ended, or the page is on no browser session of its person.
+  unknown_approval: ['conflict', 'this approval was decided already, has expired, or is not the one the page showed: open it again'],
+  disconnected: ['conflict', 'the app is disconnected, or this is not the browser session of the person who connected it: nothing changed'],
 };
 
 /** Refusals about the instance, not what was asked for: their words are the same whatever the request named. */

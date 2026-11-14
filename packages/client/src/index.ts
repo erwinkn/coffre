@@ -16,11 +16,13 @@ import { Unreachable } from './reach.ts';
 export type {
   AccessValue,
   Api,
+  ApprovalView,
   AuditEntryView,
   AuthInfo,
   AuthorizationView,
   BindingView,
   ConnectedApp,
+  Decision,
   Deletion,
   DeletionResult,
   DismissedKey,
