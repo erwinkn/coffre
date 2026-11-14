@@ -16,6 +16,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 
 import { can, placeOf, projectsReached } from '../src/api/caller.ts';
+import { unservedRoutes } from '../src/api/routes/unserved.ts';
 import { openApp, PUBLIC_URL, SESSION } from './app-fixture.ts';
 
 const app = await openApp();
@@ -668,6 +669,17 @@ test('behind Cloudflare Access nothing of the API is served yet: an assertion is
     assert.deepEqual(behind.calls, []);
   } finally {
     await behind.close();
+  }
+});
+
+test("each of 0.14.7's routes not served yet answers 501, not 404, and asks the vault nothing", async () => {
+  const sample: Record<string, string> = { project: 'market', environment: 'prod', member: 'ada@acme.example', target: 'market' };
+  for (const key of Object.keys(unservedRoutes)) {
+    const [method, pattern] = key.split(' ') as [string, string];
+    const path = pattern.replace(/:(\w+)/g, (_, name: string) => sample[name] ?? randomUUID());
+    const [[status, body], calls, statements] = await cost(() => answered(app.request(`/api${path}`, as('ada-cli', method === 'GET' ? {} : { method, body: '{}' }))));
+    assert.deepEqual([status, body.error, calls, statements], [501, 'not_implemented', [], 0], key);
+    assert.match(String(body.message), /is not served yet$/, key);
   }
 });
 

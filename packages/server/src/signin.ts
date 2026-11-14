@@ -150,12 +150,18 @@ function refused(route: string, request: string | null, code: string, cookies: s
  * page, the account page and the CLI read before anyone is signed in.
  * Exactly one is set.
  */
+export type AuthInfo = {
+  signin: { title: string; note: string | null; providers: ReturnType<typeof publicProviders> } | null;
+  access: { assertion: boolean } | null;
+};
+
 export const describeSignin: Path = async (request, runtime) => {
   const { auth } = runtime;
-  return jsonResponse({
+  const info: AuthInfo = {
     signin: auth.mode === 'signin' ? { title: auth.signin.page.title, note: auth.signin.page.note, providers: publicProviders(auth.signin) } : null,
     access: auth.mode === 'cloudflare' ? { assertion: (request.headers.get(ACCESS_JWT_HEADER) ?? '').trim() !== '' } : null,
-  });
+  };
+  return jsonResponse(info);
 };
 
 /** What rides in the sealed cookie between leaving for the provider and coming back. */

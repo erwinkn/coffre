@@ -18,13 +18,16 @@ const target = fileURLToPath(new URL('../src/api.ts', import.meta.url));
 
 /**
  * The named types the client re-exports, beside the route map: what callers
- * hold on to and pass around, such as the pages' views of a member.
+ * hold on to and pass around, such as the pages' views of a member. Each is
+ * a type a server file exports, or a part of a route's input or output.
+ * 0.14's `IdentityRow`, `SessionRow` and `TokenPlan` come back with the
+ * routes that answer them, which 0.16 does not serve yet.
  */
 const NAMED = {
   AccessValue: 'api/access.ts',
   ApprovalView: 'mcp/approvals.ts',
   AuditEntryView: 'api/audit.ts',
-  AuthInfo: 'fetch-api.ts',
+  AuthInfo: 'signin.ts',
   AuthorizationView: 'mcp/service.ts',
   BindingPlan: 'api/workloads.ts',
   BindingView: 'api/workloads.ts',
@@ -37,17 +40,16 @@ const NAMED = {
   DismissedKey: 'api/missing.ts',
   DryRunOutcome: 'api/routes/secrets.ts',
   DryRunResult: 'api/routes/secrets.ts',
-  IdentityRow: 'api/signin.ts',
   InheritResult: 'api/secrets.ts',
-  Me: 'api/projects.ts',
+  Me: "RouteOutput<'GET /me'>",
   Member: 'api/members.ts',
   MemberAccess: 'api/members.ts',
   SettingsView: 'api/settings.ts',
   MissingKey: 'api/missing.ts',
   OffboardingReport: 'api/members.ts',
-  PersonalConfig: 'api/personal.ts',
+  PersonalConfig: "RouteOutput<'GET /personal/:project'>['configs'][number]",
   ListedReference: 'api/references.ts',
-  ProjectSummary: 'api/projects.ts',
+  ProjectSummary: "RouteOutput<'GET /projects'>['projects'][number]",
   ReferenceView: 'api/references.ts',
   RemovedMember: 'api/members.ts',
   ImpactLine: 'api/roles.ts',
@@ -57,10 +59,8 @@ const NAMED = {
   EnvironmentView: 'api/projects.ts',
   SecretKey: 'api/secrets.ts',
   SecretVersion: 'api/secrets.ts',
-  SessionRow: 'api/signin.ts',
   SetResult: 'api/secrets.ts',
-  TokenPlan: 'api/signin.ts',
-  TokenRow: 'api/signin.ts',
+  TokenRow: 'db/queries/tokens.ts',
 } as const;
 
 const PROBE = `${root}__api_probe.ts`;
@@ -68,8 +68,9 @@ const PROBE = `${root}__api_probe.ts`;
 function probeSource(keys: readonly string[]): string {
   const lines = [
     `import type { RouteInput, RouteOutput } from './api/routes.ts';`,
-    ...Object.entries(NAMED).map(([name, file]) => `import type { ${name} } from './${file}';`),
-    ...Object.keys(NAMED).map((name) => `type named_${name} = ${name};`),
+    ...Object.entries(NAMED).flatMap(([name, from]) =>
+      from.endsWith('.ts') ? [`import type { ${name} } from './${from}';`, `type named_${name} = ${name};`] : [`type named_${name} = ${from};`],
+    ),
     ...keys.flatMap((key, i) => [
       `type input_${i} = RouteInput<${JSON.stringify(key)}>;`,
       `type output_${i} = RouteOutput<${JSON.stringify(key)}>;`,
@@ -205,6 +206,8 @@ function printer(checker: ts.TypeChecker) {
       const members = (value.isUnion() ? value.types : [value]).filter(
         (member) => !optional || !(member.flags & ts.TypeFlags.Undefined),
       );
+      // An optional property that is only ever `undefined` is never sent.
+      if (members.length === 0) continue;
       const name = /^[A-Za-z_$][\w$]*$/.test(property.name) ? property.name : JSON.stringify(property.name);
       lines.push(`${inner}${name}${optional ? '?' : ''}: ${union(members, inner)};`);
     }
