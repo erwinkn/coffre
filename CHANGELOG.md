@@ -116,9 +116,12 @@
   sign-in now, on its own configuration: a deployment that trusts
   workloads adds `workloads: {}` to `vault(env => …)` in
   `vault/src/worker.ts`, with `useOnly` or `noReads` as the app's
-  `signin({ workloads })` says them. Left out, the vault refuses every run
-  as `no_match` (401), whatever bindings the owners made
-  ([deploy.md](docs/deploy.md#ci-runs-without-a-stored-token)).
+  `signin({ workloads })` says them. The field is required: one that
+  trusts none says `workloads: null`, and the vault refuses every run as
+  `no_match` (401), whatever bindings the owners made
+  ([deploy.md](docs/deploy.md#ci-runs-without-a-stored-token)). A vault
+  upgraded from 0.14, which said nothing of workloads, fails to typecheck
+  until it says one or the other.
   `/api/me`'s `features.workloads` says whether sign-in trusts workloads,
   where it always said `false`.
 - **A run's trail on the audit page.** Each entry a CI run's credential

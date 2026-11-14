@@ -42,6 +42,7 @@ export const Vault = vault((env: Env) => ({
   ...(env.SIGNING_KEY === undefined ? {} : { signingKey: env.SIGNING_KEY }),
   ...(env.SIGNER_NAME === undefined ? {} : { signerName: env.SIGNER_NAME }),
   owners: ['root@acme.example'],
+  workloads: null,
 }));
 
 export default {

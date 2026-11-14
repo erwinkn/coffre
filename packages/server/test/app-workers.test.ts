@@ -24,7 +24,7 @@ import { appClient, tunnelListener } from './tunnel-listener.ts';
 
 const VAULT_KEY = randomBytes(32).toString('base64');
 // The instance's rows are written here as the Worker's vault would write them: under its keys.
-const { world } = await openConfiguredVault({ kek: { id: 'app-workers-test', key: VAULT_KEY }, owners: ['root@acme.example'] });
+const { world } = await openConfiguredVault({ kek: { id: 'app-workers-test', key: VAULT_KEY }, owners: ['root@acme.example'], workloads: null });
 
 const [ada, bo] = [user('ada'), user('bo')];
 const BROWSER = `coffre_web_${'b'.repeat(43)}`;
