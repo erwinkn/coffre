@@ -1,4 +1,4 @@
-import { defineSignin, type McpOptions, type SigninConfig, type WorkloadsOptions } from './signin/config.ts';
+import { defineSignin, lifetime, type McpOptions, type SigninConfig, type WorkloadsOptions } from './signin/config.ts';
 import type { SigninProvider } from './signin/types.ts';
 import type { AccessVerifierConfig } from './types.ts';
 
@@ -21,6 +21,8 @@ export type AuthConfig =
   | {
       mode: 'cloudflare';
       access: AccessVerifierConfig;
+      /** How long the coffre session a browser signs in to behind Access lasts, at most: Access is still asked on every request. */
+      browserSessionHours: number;
     };
 
 /**
@@ -62,11 +64,16 @@ function checkAudience(audience: string): string {
 /**
  * Cloudflare Access in front of coffre: every request carries Access's
  * signed assertion, checked against the team's keys and the application's
- * AUD tag.
+ * AUD tag. A browser's first request signs its person in to a session of
+ * coffre's, which every later one shows beside the assertion; the CLI and
+ * machines are not served behind Access yet.
  *
  *   cloudflareAccess({ teamDomain: 'acme.cloudflareaccess.com', audience: env.ACCESS_AUD })
+ *
+ * `browserSessionHours`: the longest that session lasts, 12 hours unless
+ * set, at most a week. Access's own session is the one people see.
  */
-export function cloudflareAccess(options: { teamDomain: string; audience: string }): Auth {
+export function cloudflareAccess(options: { teamDomain: string; audience: string; browserSessionHours?: number }): Auth {
   const domain = options.teamDomain.trim();
   const issuerUrl = httpsOrigin('the Access team domain', domain.includes('://') ? domain : `https://${domain}`);
   if (
@@ -84,6 +91,7 @@ export function cloudflareAccess(options: { teamDomain: string; audience: string
       jwksUrl: `${issuer}/cdn-cgi/access/certs`,
       audience: checkAudience(options.audience.trim()),
     },
+    browserSessionHours: lifetime(options.browserSessionHours, 'browserSessionHours', 12, 24 * 7),
   };
   return { resolve: () => config };
 }

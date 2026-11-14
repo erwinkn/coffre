@@ -5,12 +5,21 @@
 // files the browser loads too, and reach the server only through here.
 import type { Preferences } from '@coffre/core/pages';
 
-import { coffreRoute, respond, type PageContext } from './app.ts';
+import { coffreRoute, respond, type PageContext as Rendered } from './app.ts';
+import type { Admission } from './behind-access.ts';
 import { ApiError } from './api/errors.ts';
 import { errorResponse } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
-export type { PageContext, Preferences };
+export type { Preferences };
+
+/**
+ * What a response is rendered with: its nonce, the API as the visitor, their
+ * preferences, and coffre for the route it may be, which answers as the
+ * visitor was admitted (behind Access, the session `respond` checked).
+ * Start hands it on in the request's context, where coffre's routes find it.
+ */
+export type PageContext = Rendered & CoffreContext;
 
 /** coffre's part of one request. */
 export type CoffreRequest = {
@@ -38,18 +47,21 @@ export function requestScope(
     track(work);
     return work;
   };
-  return {
-    route: (request) =>
-      tracked(
-        (async () => {
-          try {
-            return (await coffreRoute(request, runtime, sourceIp(request), track)) ?? errorResponse(new ApiError('not_found', 'no such path'));
-          } catch (error) {
-            return errorResponse(error);
-          }
-        })(),
-      ),
-    respond: (request, render) => tracked(respond(request, runtime, sourceIp(request), render)),
+  const route = (request: Request, access?: Admission) =>
+    tracked(
+      (async () => {
+        try {
+          return (await coffreRoute(request, runtime, sourceIp(request), track, access)) ?? errorResponse(new ApiError('not_found', 'no such path'));
+        } catch (error) {
+          return errorResponse(error);
+        }
+      })(),
+    );
+  const scope: CoffreRequest = {
+    route: (request) => route(request),
+    respond: (request, render) =>
+      tracked(respond(request, runtime, sourceIp(request), (page, access) => render({ ...page, coffre: { ...scope, route: (inner) => route(inner, access) } }))),
   };
+  return scope;
 }
 

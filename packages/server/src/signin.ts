@@ -18,6 +18,7 @@ import { z } from 'zod';
 
 import { ApiError, noteTampered, notFound, refusal } from './api/errors.ts';
 import { readCookie, sessionCookie, sessionCookieName, presented } from './auth.ts';
+import type { Admission } from './behind-access.ts';
 import { waitingDeviceLogins } from './db/queries/signin.ts';
 import { apiCredential, isSameOrigin } from './fetch-api.ts';
 import { errorResponse, jsonResponse, readJson } from './http.ts';
@@ -39,7 +40,8 @@ export function callbackUrl(config: SigninConfig, providerId: string): string {
 }
 
 function secure(auth: AuthConfig): boolean {
-  return auth.mode === 'signin' && auth.signin.publicUrl.startsWith('https:');
+  // Behind Access every request is HTTPS.
+  return auth.mode === 'cloudflare' || auth.signin.publicUrl.startsWith('https:');
 }
 
 export function pendingCookieName(auth: AuthConfig): string {
@@ -119,7 +121,8 @@ export function publicProviders(config: SigninConfig) {
   return config.providers.map(({ id, label, brand }) => ({ id, label, brand }));
 }
 
-type Path = (request: Request, runtime: CoffreRuntime, sourceIp: string | null) => Promise<Response>;
+/** `access`: behind Cloudflare Access, the session the request was admitted with (`admit`). */
+type Path = (request: Request, runtime: CoffreRuntime, sourceIp: string | null, track?: unknown, access?: Admission) => Promise<Response>;
 
 /** A session's lifetime as the vault takes it, in whole minutes: the configuration's may be a fraction of an hour or a day. */
 const minutesOf = (minutes: number) => Math.max(1, Math.round(minutes));
@@ -318,36 +321,45 @@ function accountOf(provider: SigninProvider, profile: SigninProfile): Account {
  * POST /auth/signout: end this browser's session, and clear its cookie. A
  * POST from coffre's own pages, so a link or an image elsewhere cannot sign
  * anyone out. A session that no longer stands is signed out already.
+ * Behind Access it ends coffre's session, then sends the browser on to
+ * Access's logout, which ends Access's: without it, the next request would
+ * sign in again.
  */
-export const signOut: Path = async (request, runtime, sourceIp) => {
+export const signOut: Path = async (request, runtime, sourceIp, _track, access) => {
   const { auth } = runtime;
-  // The session is Access's; its logout endpoint ends it.
-  if (auth.mode === 'cloudflare') return redirectResponse('/cdn-cgi/access/logout', [], 303);
-  const clear = clearCookieHeader(auth, sessionCookieName(auth));
-  const session = sessionCookie(request, auth);
+  const behindAccess = auth.mode === 'cloudflare';
+  // Behind Access the check's cookies are the response's (`respond`): ending them clears both, whatever it set.
+  access?.ended();
+  const clear = behindAccess ? [] : [clearCookieHeader(auth, sessionCookieName(auth))];
+  const session = behindAccess ? (access?.session ?? null) : sessionCookie(request, auth);
   if (session !== null) {
     const shown = presented(session, sourceIp);
     const ended = await ask<'credential.end'>(runtime, { ...shown, op: 'credential.end', credential: null, of: null });
-    if ('refused' in ended && ended.refused !== 'unauthenticated') return refused('POST /auth/signout', shown.request, ended.refused, [clear]);
+    if ('refused' in ended && ended.refused !== 'unauthenticated') return refused('POST /auth/signout', shown.request, ended.refused, clear);
   }
-  return redirectResponse('/login', [clear], 303);
+  return redirectResponse(behindAccess ? '/cdn-cgi/access/logout' : '/login', clear, 303);
 };
 
 /**
  * POST /api/auth/logout: end the credential the request carries, `coffre
  * logout`: a bearer token, or the browser's session from coffre's own
- * pages. One that no longer stands is signed out already.
+ * pages. One that no longer stands is signed out already. Behind Access,
+ * the browser's session alone (`apiCredential`).
  */
-export const logout: Path = async (request, runtime, sourceIp) => {
-  // Behind Access a request carries Access's assertion, which is no credential of the vault's (docs/design/0.16.md, "Still to design").
-  if (runtime.auth.mode === 'cloudflare') return errorResponse(new ApiError('not_implemented', 'coffre behind Cloudflare Access is not served yet'));
-  const credential = apiCredential(request, runtime.auth);
-  if (credential === null) return errorResponse(new ApiError('unauthenticated', 'sign in first'));
-  if (credential.ambient && !isSameOrigin(request, runtime.publicUrl)) return errorResponse(new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself'));
-  const shown = presented(credential.token, sourceIp);
-  const ended = await ask<'credential.end'>(runtime, { ...shown, op: 'credential.end', credential: null, of: null });
-  if ('refused' in ended && ended.refused !== 'unauthenticated') return refused('POST /api/auth/logout', shown.request, ended.refused);
-  return jsonResponse({ signedOut: true });
+export const logout: Path = async (request, runtime, sourceIp, _track, access) => {
+  try {
+    const credential = apiCredential(request, runtime.auth, access);
+    if (credential === null) throw new ApiError('unauthenticated', access?.why ?? 'sign in first');
+    if (credential.ambient && !isSameOrigin(request, runtime.publicUrl)) throw new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself');
+    // Behind Access, both cookies cleared, in place of any the check set (`ended`).
+    access?.ended();
+    const shown = presented(credential.token, sourceIp);
+    const ended = await ask<'credential.end'>(runtime, { ...shown, op: 'credential.end', credential: null, of: null });
+    if ('refused' in ended && ended.refused !== 'unauthenticated') return refused('POST /api/auth/logout', shown.request, ended.refused);
+    return jsonResponse({ signedOut: true });
+  } catch (error) {
+    return errorResponse(error);
+  }
 };
 
 /** A device login's body carries a short label or a device code, nothing more: read in at most this many bytes, as anyone may call it. */

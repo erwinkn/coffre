@@ -474,7 +474,7 @@ function checkProvider(provider: SigninProvider): void {
   }
 }
 
-function lifetime(value: number | undefined, name: string, fallback: number, max: number): number {
+export function lifetime(value: number | undefined, name: string, fallback: number, max: number): number {
   if (value === undefined) return fallback;
   if (!Number.isFinite(value) || value <= 0 || value > max) {
     throw new Error(`${name} must be a number above 0 and at most ${max}`);

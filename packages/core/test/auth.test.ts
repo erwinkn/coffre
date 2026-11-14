@@ -14,6 +14,7 @@ test('cloudflareAccess derives the issuer and cert URL from the team domain', ()
       jwksUrl: 'https://acme.cloudflareaccess.com/cdn-cgi/access/certs',
       audience: AUD,
     },
+    browserSessionHours: 12,
   };
   for (const teamDomain of ['acme.cloudflareaccess.com', 'https://acme.cloudflareaccess.com', ' acme.cloudflareaccess.com/ ']) {
     const auth = cloudflareAccess({ teamDomain, audience: AUD });
@@ -38,6 +39,13 @@ test('cloudflareAccess takes only an Access team domain, with an AUD tag', () =>
       audience,
     );
   }
+});
+
+test('cloudflareAccess takes how long a browser session behind it lasts: 12 hours unless set, at most a week', () => {
+  const resolved = (browserSessionHours?: number) => cloudflareAccess({ teamDomain: 'acme.cloudflareaccess.com', audience: AUD, browserSessionHours }).resolve('https://secrets.acme.example');
+  assert.equal((resolved() as { browserSessionHours: number }).browserSessionHours, 12);
+  assert.equal((resolved(0.5) as { browserSessionHours: number }).browserSessionHours, 0.5);
+  for (const bad of [0, -1, 24 * 7 + 1, Number.NaN]) assert.throws(() => resolved(bad), /browserSessionHours/);
 });
 
 test('signin checks its options where they are written, and resolves against the public URL', () => {

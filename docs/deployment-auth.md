@@ -6,13 +6,15 @@ A deployment says who vouches for people with its `auth`, one of two:
   Microsoft, any OpenID Connect provider, or one of the deployment's own.
   `coffre init` sets up GitHub; [deploy.md](deploy.md) walks through it.
 - `cloudflareAccess({ teamDomain, audience })`: Cloudflare Access in front of
-  coffre, which verifies the assertion Access forwards.
+  coffre, which verifies the assertion Access forwards, and signs a browser
+  in on its first request.
 
 Either way, coffre decides who is a member: signing in proves who someone
 is, not that they may enter. With `signin`, the sessions, the CLI's device
-logins and service accounts' bearer tokens are coffre's too. Behind Access, Access keeps the
-browser's session, `cloudflared` the CLI's, and CI uses Access service
-tokens. Neither runs a password flow.
+logins and service accounts' bearer tokens are coffre's too. Behind Access,
+a browser's session is coffre's too, made by its first request through
+Access; the CLI and machines are not served there yet. Neither runs a
+password flow.
 
 ## Providers
 
@@ -128,8 +130,21 @@ from `wrangler.jsonc` and the configuration's `Env`.
 
 Cloudflare documents that the origin receives the application token in
 `Cf-Access-Jwt-Assertion`, and recommends validating that header rather than
-the browser cookie. Coffre verifies its signature, issuer, and audience before
-any `/api` handler runs, and every page reads through `/api`.
+the browser cookie. Coffre verifies its signature, issuer, audience and
+expiry on every request but health's, before any page or `/api` handler
+runs.
+
+A browser's first request signs its person in, as a provider's callback
+does with `signin`: coffre binds their Access account (its subject) to the
+member their email names, opens a session of its own, and sets its cookie
+beside a second one, sealed, that ties the session to that Access subject.
+Every later request shows both, and the assertion is still verified each
+time, so Access's own revocation takes effect on the next request. When
+someone else signs in to Access on the same browser, their first request
+ends the session it finds and signs them in. The session lasts 12 hours at
+most, or `cloudflareAccess({ …, browserSessionHours })`; Access's own
+session is the one people notice. Signing out in coffre ends its session,
+then Access's (`/cdn-cgi/access/logout`).
 
 Official references:
 
@@ -137,43 +152,25 @@ Official references:
 - [Create an Access application](https://developers.cloudflare.com/learning-paths/clientless-access/access-application/create-access-app/)
 - [Connect through Access using a CLI](https://developers.cloudflare.com/cloudflare-one/tutorials/cli/)
 
-### The CLI
+### The CLI and machines
 
-`coffre login` recognises an Access-protected instance by the redirect to
-Access's login page, and hands over to `cloudflared`:
-
-```sh
-coffre login https://<coffre-api-hostname>
-```
-
-`cloudflared` opens the browser, keeps the resulting application token, and
-refreshes it; the CLI asks it for the current token on every command
-(`cloudflared access token -app=…`) and sends it as `cf-access-token`, which
-Cloudflare validates at the edge before adding the `Cf-Access-Jwt-Assertion`
-header the origin verifies. If the Access application answers non-browser
-clients with a 401 instead of a redirect, say which mode to use:
-`coffre --auth-mode cloudflare login https://…`.
-
-CI and other machines sign in with an Access service token instead. Its ID
-is a flag; its secret is asked for, or piped in, never a flag's value. The
-session it makes is the instance's, for the commands after it, and `coffre
-logout` forgets it there without revoking anything:
-
-```sh
-printf '%s' "$ACCESS_CLIENT_SECRET" | coffre login https://<coffre-api-hostname> --access-client-id <id>.access
-coffre run app/prod -- ./deploy.sh
-```
-
-The CLI refuses a plaintext, credentialed, or path-bearing address before
-sending anything, and never follows Access login redirects: a rejected or
-expired token is reported as such instead of loading the browser login page.
+Not served behind Access yet. A request from the CLI through `cloudflared`,
+with an Access service token, with a bearer token of coffre's, or with a
+workload's session (`Authorization: DPoP`) answers `401 unauthenticated`, saying that behind Access only browsers sign in. They
+will sign in with coffre's own credentials, Access checking them at the
+edge: `coffre login` through a device login approved in the browser, and
+machines with a service token or a binding of coffre's beside an Access
+service token. Until then, a deployment whose CLI or machines reach coffre
+through Access stays on 0.14.
 
 ### Closed-door behavior
 
 The production hostname must be protected by an Access Allow policy. Coffre
 still fails closed at the origin boundary: without the forwarded assertion,
-every `/api` route but `GET /api/auth` answers `401 unauthenticated`, and
-every page says to open coffre through Access.
+whatever cookie comes with it, every `/api` route but `GET /api/auth`
+answers `401 unauthenticated`, and every page says to open coffre through
+Access. Someone Access lets in who is no member of coffre is told so on
+every page, and binds nothing.
 
 Do not treat this application check as a substitute for protecting the data
 plane. The Worker receives PostgreSQL access only through its Hyperdrive
@@ -257,8 +254,9 @@ It also plays a CI platform under `/workloads`, which a trust binding may
 name in development: `curl -s -X POST http://127.0.0.1:8081/workloads/token
 -d aud=http://127.0.0.1:3000` mints a run's ID token, to pipe to the CLI's
 `coffre login <url> --service <name> --id-token`.
-Nothing local stands in for Access: its verifier is covered by unit tests
-against Access-shaped tokens.
+Nothing local runs behind Access: its verifier is covered by unit tests
+against Access-shaped tokens, and signing in behind it by the server's
+`packages/server/test/behind-access.test.ts`, on the dev IdP's Access keys.
 
 ### Email admission
 

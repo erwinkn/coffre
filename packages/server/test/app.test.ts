@@ -699,14 +699,14 @@ test('below its migrations the app serves nothing but its health, and asks the v
   }
 });
 
-test('behind Cloudflare Access nothing of the API is served yet: an assertion is no credential of the vault', async () => {
+test('behind Cloudflare Access the API takes no bearer token, nor an assertion that does not verify: 401, and the vault is asked nothing', async () => {
   const behind = await openApp({ auth: cloudflareAccess({ teamDomain: 'acme.cloudflareaccess.com', audience: 'a'.repeat(64) }) });
   try {
     const answers = await Promise.all([
       behind.request('/api/me', { headers: { 'cf-access-jwt-assertion': 'ada-cli' } }),
       behind.request('/api/me', as('ada-cli')),
     ]);
-    for (const response of answers) assert.deepEqual([response.status, ((await response.json()) as Body).error], [501, 'not_implemented']);
+    for (const response of answers) assert.deepEqual([response.status, ((await response.json()) as Body).error], [401, 'unauthenticated']);
     assert.deepEqual(behind.calls, []);
   } finally {
     await behind.close();
