@@ -20,7 +20,6 @@ import { parseArgs } from 'node:util';
 import { deriveLogKey, GENESIS_HASH, verifyEntries, type Author, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import { decrypt, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { derivedSigningKey, KekBadClaimError, LocalKekProvider } from '@coffre/core/kek';
-import { MOVES_FROM } from '@coffre/db/log';
 import { postgresClient, postgresSession, type PostgresClient } from '@coffre/db/connect';
 
 import { BackupError, counted, type Facts, type Manifest, MANIFEST_FORMAT, manifestPath, migrationName, pgTool, readFacts, sha256, size } from './backup.ts';
@@ -37,6 +36,14 @@ type Keys = { vault: string; app: string };
 
 /** The roles coffre's migrations make, which a dump's grants and policies name. */
 const COFFRE_ROLES = ['coffre_app', 'coffre_vault', 'coffre_backup'];
+
+/**
+ * The actions by which an author of 0.14's log moved to a new key, naming
+ * the key it moved from (0.14's `MOVES_FROM`, in `@coffre/db/log`, which
+ * 0.16 deleted): a key moved from writes no more. This file checks 0.14's
+ * log, and no command runs it in 0.16 yet (`notIn016` in main.ts).
+ */
+const MOVES_FROM = ['key.reseal', 'key.rotate'] as const;
 
 /** How a dump comes back: for a deployment, or as a copy to check. */
 type Mode = 'restore' | 'verify';

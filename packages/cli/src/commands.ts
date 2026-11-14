@@ -64,12 +64,12 @@ export const SECTIONS = [
       {
         command: 'backup',
         usage: ['backup [<file>]'],
-        about: ['the database, with pg_dump, as the backup login, and a', 'manifest of what it holds beside it'],
+        about: ['the database, with pg_dump, as the backup login, and a', 'manifest of what it holds beside it;', 'not in 0.16 yet'],
       },
       {
         command: 'restore',
         usage: ['restore <dump> [--keys]'],
-        about: ['into an empty database, then checked against its', 'manifest; with --keys, every value opened too'],
+        about: ['into an empty database, then checked against its', 'manifest; with --keys, every value opened too;', 'not in 0.16 yet'],
       },
     ],
   },
@@ -454,7 +454,7 @@ export const SECTIONS = [
       {
         command: 'verify backup',
         usage: ['verify backup <dump> [--keys]'],
-        about: ['a backup, restored into an empty scratch database and', 'checked as restore does; needs no coffre role'],
+        about: ['a backup, restored into an empty scratch database and', 'checked as restore does; needs no coffre role;', 'not in 0.16 yet'],
       },
     ],
   },
