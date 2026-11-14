@@ -866,6 +866,51 @@ async function workload(policy: object = {}, more: Parameters<typeof session>[2]
 }
 const keyed = { proof: 'pod' };
 
+/** A role that uses and reads nothing, at a protected place too: a Contributor's. */
+const USES = () => role(false, 'contributor', ['secret.use'], ['secret.use']);
+
+test("for their own app (`expose`), whoever only uses a place is handed its plain values alone: every other is use_only, unopened and unlogged; every other purpose refuses them the place, as before", async () => {
+  const region = await value(vault, secret(w.guarded, 'REGION'), 'eu-west-3', { plain: true });
+  await write(vault, ...rows('secrets', region));
+  await vault.owner.execute(sql`DELETE FROM log_pending`);
+  // Ada views market, and only uses its protected vault.
+  assert.deepEqual(await got(ask('ada', 'market/vault', ['ROOT', 'REGION'], { purpose: 'expose' })), { ROOT: 'refused: use_only', REGION: 'eu-west-3' });
+  const entries = await logged();
+  assert.deepEqual(entries.map((entry) => [entry.detail.purpose, entry.detail.keys]), [['expose', [{ key: 'REGION', secret: region.id, version: 1 }]]]);
+  assert.equal(entries[0]!.objects.includes(`secret:${w.root.id}`), false);
+  assert.deepEqual(await exposed(), [{ principal: ada, secret_id: region.id }]);
+  // A use uses both. A reveal, a run, a dry run's compare and a run's peek are refused the place, as before.
+  assert.deepEqual(await got(ask('ada', 'market/vault', ['ROOT', 'REGION'], { purpose: 'use', upstream: { credential: 'root' } })), { ROOT: 'root-key', REGION: 'eu-west-3' });
+  for (const purpose of ['reveal', 'run', 'compare'] as const) assert.equal(await got(ask('ada', 'market/vault', ['REGION'], { purpose })), 'no_access', purpose);
+  assert.deepEqual(await peek(vault, ask('ada', 'market/vault', ['REGION'], { purpose: 'run' })), { refused: 'no_access' });
+  // Who holds nothing there is refused it, for their app too.
+  assert.equal(await got(ask('dee', 'market/vault', ['REGION'], { purpose: 'expose' })), 'no_access');
+});
+
+test("for their own app, a key is read where it lives: a parent's plain value goes to whoever uses the parent, its secrets only to who reads there; a reference counts where it is, not where its source is", async () => {
+  const eve = user('eve');
+  const region = await value(vault, secret(w.prod, 'REGION'), 'eu-west-3', { plain: true });
+  const toProd = secret(w.staging, 'TO_PROD', { sourceId: w.database.id });
+  // Eve reads staging and billing's prod, and only uses market's prod, which staging inherits from.
+  await write(vault, ...rows('roles', USES()), ...rows('principals', principal(eve)), ...rows('grants', grant(eve, 'viewer', { environment: w.staging }), grant(eve, 'contributor', { environment: w.prod }), grant(eve, 'viewer', { environment: w.billed })), ...rows('secrets', region, toProd), ...rows('credentials', credential('eve', eve)));
+  const expose = { purpose: 'expose' } as const;
+  assert.deepEqual(await got(ask('eve', 'market/staging', ['DATABASE_URL', 'REGION', 'STRIPE_KEY', 'LINK', 'TO_PROD'], expose)), { DATABASE_URL: 'postgres://staging', REGION: 'eu-west-3', STRIPE_KEY: 'refused: use_only', LINK: 'refused: use_only', TO_PROD: 'postgres://prod' });
+  // Bo holds nothing in prod: its keys are not his, plain or not.
+  assert.deepEqual(await got(ask('bo', 'market/staging', ['REGION', 'LINK'], expose)), { REGION: 'refused: parent_unreadable', LINK: 'refused: parent_unreadable' });
+  // In prod itself, a reference to billing's value, which she reads, is use_only all the same.
+  assert.deepEqual(await got(ask('eve', 'market/prod', ['LINK', 'REGION', 'DATABASE_URL'], expose)), { LINK: 'refused: use_only', REGION: 'eu-west-3', DATABASE_URL: 'refused: use_only' });
+});
+
+test("a workload whose role only uses a place is handed its plain values for its app, and nothing else, a secret its binding lists included", async () => {
+  const runner = 'token:runner';
+  const bound = binding(runner, { profile: 'kubernetes', scope: scopeOf({ projectId: w.market.id, environmentId: null, role: 'contributor' }, { projectId: w.market.id, environmentId: w.prod.id, role: 'contributor' }), policy: JSON.stringify({ reads: { [w.prod.id]: { keys: [w.database.id] } } }) });
+  await write(vault, ...rows('roles', USES()), ...rows('principals', principal(runner)), ...rows('grants', grant(runner, 'contributor', { project: w.market })), ...rows('policy', instance()), ...rows('bindings', bound), ...rows('credentials', session('runner', bound)));
+  await settled();
+  assert.deepEqual(await got(ask('runner', 'market/prod', ['DATABASE_URL', 'STRIPE_KEY', 'FLAG'], { proof: 'runner', purpose: 'expose' })), { DATABASE_URL: 'refused: use_only', STRIPE_KEY: 'refused: use_only', FLAG: 'on' });
+  // Its reveal is refused the place, as before.
+  assert.equal(await got(ask('runner', 'market/prod', ['FLAG'], { proof: 'runner' })), 'no_access');
+});
+
 test('a workload\'s session is its key\'s: it uses what its service does, and is handed what its binding lists', async () => {
   const { api, bound, pod } = await workload();
   // The token alone, or with another key, is nobody's.

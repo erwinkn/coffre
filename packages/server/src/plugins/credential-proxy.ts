@@ -674,11 +674,8 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   const filled = new Set([...signers.map(([, signer]) => signer.key), ...tunnels.map(([, tunnel]) => tunnel.key), ...using.filter((credential) => !carriesHandle(credential.inject, plain)).flatMap((credential) => credential.keys)]);
   // A plain value is no secret, wherever it is held; a secret no credential covers, its person reads where it is held.
   const asked = [...usable].filter(([key, nature]) => (nature === 'plain' && !filled.has(key)) || (nature !== 'sensitive' && !covered.has(key))).map(([key]) => key);
-  // A person who only uses the environment, a Developer's protected prod, reads none of it: every value is left.
-  const exposed = asked.length === 0 ? null : await coffre.expose(handle, { path: read, keys: asked }).catch((error: unknown) => {
-    if (error instanceof CoffreError && error.reason === 'no_access') return null;
-    throw error;
-  });
+  // A person who only uses the environment, a Developer's protected prod, is handed its plain values alone: each secret is `use_only`, left.
+  const exposed = asked.length === 0 ? null : await coffre.expose(handle, { path: read, keys: asked });
   const env: Record<string, string> = Object.create(null);
   const credentials: Record<string, string> = {};
   const placed = new Set<string>();

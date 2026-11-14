@@ -774,7 +774,8 @@ export type HeldKey = { projectId: string; environmentId: string; secretId: stri
  * one its credential's scope lists, by the key's id, on a grant that covers
  * the place where the value is held, never the place a request names. A
  * rename therefore moves no listing, and no reference, fork or copy moves a
- * value under one. Nobody else's: their roles and the value's nature decide.
+ * value under one. Nobody else's: for them, whether their role reads where
+ * the key lives (the vault's `decide`), and the value's nature.
  * A plain value is no secret, use-only to nobody, so it is never asked of.
  *
  *   api-prod lists STRIPE_WEBHOOK_SECRET's id at market/prod
