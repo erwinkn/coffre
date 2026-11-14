@@ -139,24 +139,27 @@ export type VersionRow = { version: number; createdAt: string; createdBy: string
  * for `owner`), and its versions below `before` (all, for null), newest
  * first, `limit` of them: one statement. `place` is null when there is no
  * such project or environment; `secret` when the environment holds no row
- * of that key, archived or not.
+ * of that key, archived or not. `parent`: the environment's parent, which
+ * decides who reads a personal config named by its own slug.
  */
 export async function historyOf(
   db: Queryable,
   at: { project: string; environment: string; owner: string | null; key: string },
   before: number | null,
   limit: number,
-): Promise<{ project: ProjectRow | null; base: EnvironmentRow | null; mine: EnvironmentRow | null; secret: SecretRow | null; versions: VersionRow[] }> {
-  const rows = await rowsOf<{ part: 'project' | 'base' | 'mine' | 'secret' | 'version'; row: Wire }>(
+): Promise<{ project: ProjectRow | null; base: EnvironmentRow | null; parent: EnvironmentRow | null; mine: EnvironmentRow | null; secret: SecretRow | null; versions: VersionRow[] }> {
+  const rows = await rowsOf<{ part: 'project' | 'base' | 'parent' | 'mine' | 'secret' | 'version'; row: Wire }>(
     db,
     sql`
       WITH
         p AS (SELECT * FROM projects WHERE slug = ${at.project}),
         base AS (SELECT e.* FROM environments e, p WHERE e.project_id = p.id AND e.slug = ${at.environment}),
+        parent AS (SELECT e.* FROM environments e, base WHERE e.id = base.parent_id),
         mine AS (SELECT e.* FROM environments e, base WHERE ${at.owner}::text IS NOT NULL AND e.parent_id = base.id AND e.owner = ${at.owner}::text AND strpos(e.slug, '~') = 0 AND e.archived_at IS NULL),
         k AS (SELECT s.* FROM secrets s, p WHERE s.project_id = p.id AND s.key = ${at.key} AND s.environment_id = coalesce((SELECT id FROM mine), (SELECT id FROM base)))
       SELECT 'project' AS part, ${PROJECT} AS row FROM p t
       UNION ALL SELECT 'base', ${ENVIRONMENT} FROM base t
+      UNION ALL SELECT 'parent', ${ENVIRONMENT} FROM parent t
       UNION ALL SELECT 'mine', ${ENVIRONMENT} FROM mine t
       UNION ALL SELECT 'secret', ${SECRET} FROM k t
       UNION ALL (SELECT 'version', jsonb_build_object('version', v.version, 'createdAt', v.created_at, 'createdBy', v.created_by, 'kek', v.kek_provider || ':' || v.kek_id,
@@ -165,10 +168,11 @@ export async function historyOf(
         WHERE ${before}::int IS NULL OR v.version < ${before}::int
         ORDER BY v.version DESC LIMIT ${limit})`,
   );
-  const found: Awaited<ReturnType<typeof historyOf>> = { project: null, base: null, mine: null, secret: null, versions: [] };
+  const found: Awaited<ReturnType<typeof historyOf>> = { project: null, base: null, parent: null, mine: null, secret: null, versions: [] };
   for (const { part, row } of rows) {
     if (part === 'project') found.project = projectOf(row);
     else if (part === 'base') found.base = environmentOf(row);
+    else if (part === 'parent') found.parent = environmentOf(row);
     else if (part === 'mine') found.mine = environmentOf(row);
     else if (part === 'secret') found.secret = secretOf(row);
     else found.versions.push({ version: row.version as number, createdAt: iso(row.createdAt), createdBy: row.createdBy as string, kek: row.kek as string, plain: row.plain as boolean, sensitive: row.sensitive as boolean });

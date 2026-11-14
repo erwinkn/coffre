@@ -347,16 +347,18 @@ test('the rules of a use, edge by edge: a chain too long or cut, references that
   const [toPersonal, toOld, toShelf, gone] = [environment(billing, 'c-personal'), environment(billing, 'c-old'), environment(billing, 'c-shelf'), environment(billing, 'gone', { archivedAt: new Date(0) })];
   // Ed reads b-ed, a fork of billing/prod he alone is granted: its own AREF, to old's archived O, cannot be read, and the keys it inherits are his parent's, which he does not read: that is what he is told.
   const bed = environment(billing, 'b-ed', { parentId: ids.billed });
-  // dev2 forks prod and holds a reference to C, archived; orphan forks old, archived; Bo keeps a config of staging, protected.
+  // dev2 forks prod and holds a reference to C, archived; orphan forks old, archived; Bo keeps a config of staging, protected, and so does Ada, who reads no protected place; Cy keeps one of old.
   const [dev2, orphan, bos] = [environment(market, 'dev2', { parentId: ids.prod }), environment(market, 'orphan', { parentId: ids.old }), environment(market, 'staging-bo', { parentId: ids.staging, owner: bo })];
+  const [adaStaging, cyOld] = [environment(market, 'staging-ada', { parentId: ids.staging, owner: ada }), environment(market, 'old-cy', { parentId: ids.old, owner: cy })];
   await write(
     world,
     ...rows('projects', shelf),
-    ...rows('environments', shelved, b1, b2, b3, b4, cy3, cy2, toPersonal, toOld, toShelf, gone, dev2, orphan, bos, bed),
+    ...rows('environments', shelved, b1, b2, b3, b4, cy3, cy2, toPersonal, toOld, toShelf, gone, dev2, orphan, bos, bed, adaStaging, cyOld),
     ...rows('secrets',
       sh, { ...value(world, secret({ id: ids.billed, projectId: ids.billing }, 'G'), 'g'), recipe: 'bytes:32:hex' }, value(world, secret(cy3, 'CYS'), 'cys'), secret(cy2, 'REF', { sourceId: ids.a }),
       secret(toPersonal, 'REFP', { sourceId: ids.own }), secret(toOld, 'REFO', { sourceId: ids.o }), secret(toShelf, 'REFS', { sourceId: sh.id }), secret(gone, 'GONE', { sourceId: ids.a }),
-      secret(dev2, 'AREF', { sourceId: ids.c }), secret(bed, 'AREF', { sourceId: ids.o }), value(world, secret(bos, 'MINE'), 'mine'), value(world, secret(staging, 'C'), 'sc')),
+      secret(dev2, 'AREF', { sourceId: ids.c }), secret(bed, 'AREF', { sourceId: ids.o }), value(world, secret(bos, 'MINE'), 'mine'), value(world, secret(staging, 'C'), 'sc'),
+      value(world, secret(adaStaging, 'AS'), 'as'), value(world, secret(cyOld, 'OC'), 'oc')),
     // b1 dismissed LINK, then restored it: it inherits it.
     ...rows('dismissedKeys', { ...dismissed(b1, 'LINK'), restoredAt: new Date(0), restoredBy: dismissed(b1, 'LINK').dismissedBy }),
     ...rows('grants', grant(ed, 'viewer', { environment: dev2 }), grant(ed, 'viewer', { environment: bed })),
@@ -383,6 +385,17 @@ test('the rules of a use, edge by edge: a chain too long or cut, references that
   // The list: a chain too long is cut, a config of the deepest is no Owner's to unprotect, Bo's config is protected as staging is.
   assert.deepEqual(refused(await call('cy-cli', 'GET', '/secrets/billing/b4')), [409, 'conflict', 'broken_chain']);
   assert.deepEqual(refused(await call('cy-cli', 'GET', '/secrets/billing/b3-cy')), [409, 'conflict', 'broken_chain']);
+  // A fork of an archived environment inherits nothing, as a use refuses it.
+  assert.deepEqual(refused(await call('cy-cli', 'GET', '/secrets/market/orphan')), [409, 'conflict', 'broken_chain']);
+  // A personal config is read through its parent, however it is named: Ada's config of staging, protected, is no more hers than staging is; Cy's of old, archived, is no one's.
+  for (const [label, path] of [['ada-cli', 'market/staging-ada'], ['ada-cli', 'market/staging@me'], ['cy-cli', 'market/old-cy']] as const) {
+    const key = label === 'ada-cli' ? 'AS' : 'OC';
+    assert.deepEqual(refused(await call(label, 'GET', `/secrets/${path}/${key}/versions`)), NO_ACCESS, `${label} ${path} versions`);
+    assert.deepEqual(refused(await call(label, 'GET', `/secrets/${path}`)), NO_ACCESS, `${label} ${path}`);
+    assert.deepEqual(refused(await call(label, 'GET', `/projects/${path}/version`)), NO_ACCESS, `${label} ${path} version`);
+  }
+  // Bo, who maintains market, reads his own config of staging's history, named either way.
+  for (const path of ['market/staging-bo', 'market/staging@me']) assert.equal((await call('bo-cli', 'GET', `/secrets/${path}/MINE/versions`))[0], 200, path);
   // A reference held in a personal config reads nothing, as a use refuses it.
   assert.deepEqual((await list('cy-cli', 'billing/b2@me')).keys.filter((key) => key.key === 'REF').map((key) => [key.reference!.state, key.reference!.version, key.readable]), [['broken', null, false]]);
   const cys = await list('cy-cli', 'billing/b3@me');

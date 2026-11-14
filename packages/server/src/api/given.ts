@@ -33,6 +33,18 @@ export function placeAt(project: { id: string }, environment: EnvironmentRow, en
 }
 
 /**
+ * Whether anyone reads at an environment, as the vault decides before any
+ * grant: a personal config only while its parent is there and live. Cy's
+ * config of an archived dev answers no one, whether named `dev@me` or
+ * `dev-cy`.
+ */
+export function readsAt(row: EnvironmentRow, environments: ReadonlyMap<string, EnvironmentRow>): boolean {
+  if (row.owner === null) return true;
+  const parent = row.parentId === null ? undefined : environments.get(row.parentId);
+  return parent !== undefined && live(parent);
+}
+
+/**
  * What an environment inherits from, nearest first, as a use follows it:
  * three parents at most, four above a personal config read as `dev@me`
  * (`mine`), not when named by its own slug. Null for a chain a use refuses
@@ -64,14 +76,8 @@ export function decideRead(who: Called, read: ChainRead, mine: boolean): Decided
   if (project === null || !live(project) || base === null || !live(base)) return { refused: 'no_access' };
   const first = (mine && read.mine !== null && live(read.mine) ? read.mine : null) ?? base;
   const environments = read.environments;
-  /** Whether the caller reads the keys an environment holds: a personal config's, as its owner, while its parent is there. */
-  const may = (row: EnvironmentRow): boolean => {
-    if (row.owner !== null) {
-      const parent = row.parentId === null ? undefined : environments.get(row.parentId);
-      if (parent === undefined || !live(parent)) return false;
-    }
-    return can(who, 'secret.read', placeAt(project, row, environments));
-  };
+  /** Whether the caller reads the keys an environment holds. */
+  const may = (row: EnvironmentRow): boolean => readsAt(row, environments) && can(who, 'secret.read', placeAt(project, row, environments));
   if (!may(first)) return { refused: 'no_access' };
 
   // The environment, then what it inherits from, nearest first: a key is the nearest one's.

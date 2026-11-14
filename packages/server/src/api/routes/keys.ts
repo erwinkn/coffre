@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { chainOf, historyOf, keyNamesOf, referencesOf, type EnvironmentRow, type Nature, type ProjectRow, type SecretRow } from '../../db/queries/secrets.ts';
 import { can, permissionsAt, type Place } from '../caller.ts';
 import { badRequest, refusal } from '../errors.ts';
-import { decideRead, live, MAX_PARENTS, parentsOf, placeAt, stopOf, type Given } from '../given.ts';
+import { decideRead, live, parentsOf, placeAt, readsAt, stopOf, type Given } from '../given.ts';
 import { parsePath } from '../paths.ts';
 import { route } from '../route.ts';
 import { environmentOf, versionOf } from './secrets.ts';
@@ -221,16 +221,11 @@ export const keyRoutes = {
       const { project, base, here } = resolvedHere(read, path);
       const { environments } = read;
       const at = placeAt(project, here, environments);
-      if (!lists(who, at)) throw refusal('no_access', path);
+      if (!readsAt(here, environments) || !lists(who, at)) throw refusal('no_access', path);
 
-      // What it inherits from, nearest first: a chain that loops, leaves the project or runs past what a use follows was written around the vault.
-      const parents: EnvironmentRow[] = [];
-      for (let id = here.parentId; id !== null; ) {
-        const parent = environments.get(id);
-        if (parent === undefined || parents.includes(parent) || parent.projectId !== project.id || parents.length >= MAX_PARENTS + (here === base ? 0 : 1)) throw refusal('broken_chain', path);
-        parents.push(parent);
-        id = parent.parentId;
-      }
+      // What it inherits from, nearest first, as a use follows it: a chain it refuses lists nothing.
+      const parents = parentsOf(here, environments, here !== base);
+      if (parents === null) throw refusal('broken_chain', path);
       const secrets = [...read.secrets.values()];
       const rowsAt = (id: string) => secrets.filter((row) => row.environmentId === id);
       const dismissedAt = (id: string) => read.dismissed.filter((row) => row.environmentId === id).map((row) => row.key);
@@ -358,8 +353,8 @@ export const keyRoutes = {
       const path = `${params.project}/${params.environment}`;
       const found = await historyOf(ctx.db, { project: params.project, environment, owner: mine ? who.principal : null, key: params.key }, input.before ?? null, HISTORY_PAGE + 1);
       const { project, here } = resolvedHere(found, path);
-      const environments = new Map([found.base!, ...(found.mine === null ? [] : [found.mine])].map((row) => [row.id, row]));
-      if (!lists(who, placeAt(project, here, environments))) throw refusal('no_access', path);
+      const environments = new Map([found.base!, ...[found.parent, found.mine].filter((row) => row !== null)].map((row) => [row.id, row]));
+      if (!readsAt(here, environments) || !lists(who, placeAt(project, here, environments))) throw refusal('no_access', path);
       const { secret } = found;
       if (secret === null) throw refusal('unknown_key', `${path}/${params.key}`);
       return {
