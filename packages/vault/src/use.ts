@@ -419,17 +419,28 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
     // Dated now, as its write is sent, not when the use was decided: opening its values, through a key service, takes as long as it takes.
     const written = vault.now();
     const unlogged = ask.purpose === 'use' ? memory.unlogged.get(caller.credential.id) : undefined;
-    const entry = pending(vault.keys[0]!, {
+    // Each key as the entry's place calls it: the holder's by the reference's key, a source's by its own.
+    const said = (objects: string[], items: readonly Given[], name: (item: Given) => string, more: Record<string, unknown> = {}) => pending(vault.keys[0]!, {
       kept: false,
       action: 'secret.read',
       actor: caller.principal,
       credential: caller.credential.id,
       request: ask.request,
       ip: ask.ip,
-      objects: [...new Set([`project:${project.id}`, `environment:${environment.id}`, `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...fresh.flatMap((item) => [`secret:${item.held.id}`, `secret:${item.asked.id}`])])],
-      // After an outage, this credential's proxied uses that no entry says: since when, and how many (`use`).
-      detail: { purpose: ask.purpose, ...ask.upstream, ...(unlogged === undefined ? {} : { unlogged: { since: new Date(unlogged.at).toISOString(), uses: unlogged.uses } }), keys: fresh.map(({ key, held, asked, version }) => ({ key, secret: held.id, version: version.version, ...(asked === held ? {} : { through: asked.id }) })) },
+      objects: [...new Set(objects)],
+      detail: { purpose: ask.purpose, ...more, keys: items.map((item) => ({ key: name(item), secret: item.held.id, version: item.version.version, ...(item.asked === item.held ? {} : { through: item.asked.id }) })) },
     }, written, []);
+    const who = [`principal:${caller.principal}`, `credential:${caller.credential.id}`];
+    const entry = said([`project:${project.id}`, `environment:${environment.id}`, ...who, ...fresh.flatMap((item) => [`secret:${item.held.id}`, `secret:${item.asked.id}`])], fresh, (item) => item.key,
+      // The upstream it was used for, the holder's alone to know of; after an outage, this credential's proxied uses
+      // that no entry says: since when, and how many (`use`).
+      { ...ask.upstream, ...(unlogged === undefined ? {} : { unlogged: { since: new Date(unlogged.at).toISOString(), uses: unlogged.uses } }) });
+    // A read through a reference is its source's to know of too, as 0.14.7 logged it: an entry in each source
+    // environment, which whoever reads that environment's log reads, whatever they read of the holder's. It names
+    // the source and the reference alone: not the holder's places, nor the upstream the holder used it for.
+    const sources = new Map<string, Given[]>();
+    for (const item of fresh) if (item.asked !== item.held && item.held.environmentId !== environment.id) sources.set(item.held.environmentId, [...(sources.get(item.held.environmentId) ?? []), item]);
+    const entries = [entry, ...[...sources.values()].map((items) => said([`project:${items[0]!.held.projectId}`, `environment:${items[0]!.held.environmentId}`, ...who, ...items.map((item) => `secret:${item.held.id}`)], items, (item) => item.held.key))];
     const time = sql`${new Date(written).toISOString()}::timestamptz`;
     const since = sql`${new Date(written - vault.cap.windowMs).toISOString()}::timestamptz`;
     // The cap counts the keys this principal was given in the window, these among them. Uses side by side each count
@@ -439,14 +450,14 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
       WITH ids AS (SELECT id FROM unnest(${sql.param(ids)}::uuid[]) AS id),
         cap AS (SELECT (SELECT count(*) FROM exposures WHERE principal = ${caller.principal} AND seen_at > ${since} AND secret_id NOT IN (SELECT id FROM ids)) + ${ids.length} <= ${vault.cap.count} AS ok),
         seen AS (INSERT INTO exposures (principal, secret_id, seen_at) SELECT ${caller.principal}, id, ${time} FROM ids, cap WHERE cap.ok ORDER BY id ON CONFLICT (principal, secret_id) DO UPDATE SET seen_at = greatest(exposures.seen_at, excluded.seen_at)),
-        entry AS (INSERT INTO log_pending (kept, body, mac) SELECT ${entry.kept}, ${entry.body}, decode(${entry.mac.toString('hex')}, 'hex') FROM cap WHERE cap.ok)
+        entry AS (INSERT INTO log_pending (kept, body, mac) SELECT ${entry.kept}, body, decode(mac, 'hex') FROM unnest(${sql.param(entries.map((each) => each.body))}::text[], ${sql.param(entries.map((each) => each.mac.toString('hex')))}::text[]) WITH ORDINALITY AS e(body, mac, n), cap WHERE cap.ok ORDER BY n)
       SELECT ok FROM cap`) as [{ ok: boolean }];
     if (!ok) {
       // Kept for the next use, as before, but no longer what an outage may be answered from: it would be refused too.
       found.used = false;
       return { refused: 'bulk_limit' };
     }
-    vault.wake(entry.hash);
+    for (const each of entries) vault.wake(each.hash);
     // Said, unless more were counted while it was being written, by a use that found no database: the next entry says them all.
     if (unlogged !== undefined && memory.unlogged.get(caller.credential.id) === unlogged) memory.unlogged.delete(caller.credential.id);
     // Remembered by the entry's own date: the minute a use is logged once in starts there.

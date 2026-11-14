@@ -250,6 +250,8 @@ test('every action the vault writes reads as a sentence, with no fallback, and s
     'secret.read: ran market/dev: 3 secrets',
     'secret.write: made market/prod/LINK a reference',
     'secret.read: revealed market/prod/LINK through a reference',
+    // And in the source's own log, by its own key (0.14.7's).
+    'secret.read: revealed market/dev/TOKEN through a reference',
     'reference.break: broke the reference market/prod/LINK',
     'secret.write: made market/prod/OWN a reference',
     'secret.write: gave a value of its own to market/prod/OWN',
