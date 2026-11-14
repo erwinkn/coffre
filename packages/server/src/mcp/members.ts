@@ -17,6 +17,8 @@ import { approved, changeTool, type Replaced } from './changes.ts';
 import type { Tool, ToolContext } from './tools.ts';
 
 export const member = z.string().min(1).max(320).describe('A member: user:ada@acme.example, or service:ci-deploy for a service account');
+/** A member as the vault names one, `user:` emails lowercased, as the routes take it: what the page compares with what the vault holds. */
+const canonical = (raw: string): string => memberOf(apiMember(raw));
 const environment = z.string().min(1).max(200).describe('An environment, as project/environment: market/prod');
 // A project or environment goes by its slug since 0.6.2. A call made before
 // takes a name still, so that it matches the approval it asked for.
@@ -132,7 +134,7 @@ type Held = { role: Role; expiresAt: string | null } | null;
 
 /** What `set_access` replaces: the role a member holds at each place, and until when, or nothing. */
 async function heldAt(ctx: ApiContext, member: string, changes: Record<string, AccessChange>): Promise<Replaced> {
-  const named = apiMember(member);
+  const named = canonical(member);
   const held = (await runRoute('GET /members', {}, {}, ctx)).members.find((entry) => entry.member === named)?.grants ?? [];
   const now = Object.keys(changes).map((place): [string, Held] => {
     const grant = held.find((entry) => (entry.environment === null ? entry.project : `${entry.project}/${entry.environment}`) === placeOf(place));
@@ -152,7 +154,7 @@ async function granted(ctx: ApiContext, member: string, changes: Record<string, 
   const held = replaced?.state as Record<string, Held> | undefined;
   const places = Object.keys(changes);
   if (held === undefined || !places.every((place) => Object.hasOwn(held, place))) throw conflict('coffre could not read what this replaces: open the approval again');
-  const principal = memberOf(apiMember(member));
+  const principal = canonical(member);
   const wanted = grantsAsked(changes).map(({ path: _, ...change }, i) => ({ ...change, was: held[places[i]!]! }));
   await changed(ctx, { op: 'access.grant', principal, changes: wanted, ...(admit ? { admit } : {}) }, principal);
 }
@@ -238,20 +240,20 @@ const SET_ACCESS = changeTool({
   change: {
     summary: ({ member, changes }) => {
       const places = Object.keys(changes);
-      return `change ${shownMember(apiMember(member))}'s access at ${places.length === 1 ? places[0] : `${places.length} places`}`;
+      return `change ${shownMember(canonical(member))}'s access at ${places.length === 1 ? places[0] : `${places.length} places`}`;
     },
     place: () => null,
-    done: ({ member, changes }) => ({ result: { member: shownMember(apiMember(member)), changes }, text: `${shownMember(apiMember(member))}'s access is changed.` }),
+    done: ({ member, changes }) => ({ result: { member: shownMember(canonical(member)), changes }, text: `${shownMember(canonical(member))}'s access is changed.` }),
     // Each place needs grant.manage there, as the API checks: on a project, all of it; on an environment, that one.
     // A service account's manager gives it what they hold, which the vault decides on Approve.
     check: async (tool, { member, changes }) => {
       const places = Object.keys(changes).map(placeOf);
       if (places.some((place) => place.split('/')[0] === '*')) throw badRequest('grants are on a project or an environment: a person reaches every project by their instance role (admit_member)');
-      if (apiMember(member).startsWith('token:') && !runsInstance(tool.connection.called.holds)) return manages(tool, apiMember(member));
+      if (canonical(member).startsWith('token:') && !runsInstance(tool.connection.called.holds)) return manages(tool, canonical(member));
       await needsAt(tool, places, 'grant.manage');
     },
     replaces: async (ctx, { member, changes }) => heldAt(ctx, member, changes),
-    preview: async (_ctx, { member }, _viewing, replaced) => [{ label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' }, ...replaced],
+    preview: async (_ctx, { member }, _viewing, replaced) => [{ label: 'Member', value: shownMember(canonical(member)), kind: 'mono' }, ...replaced],
     apply: async (ctx, { member, changes }, { replaced }) => {
       await granted(ctx, member, changes, replaced, false);
       return {};
@@ -285,15 +287,15 @@ const ADMIT = changeTool({
     .strict(),
   change: {
     summary: ({ member, role, scope, access }) =>
-      `admit ${shownMember(apiMember(member))}${role === undefined ? '' : ` as ${role}, ${scopeInWords(fullScope(scope))}`}${access === undefined ? '' : `, with access at ${Object.keys(access).join(', ')}`}`,
+      `admit ${shownMember(canonical(member))}${role === undefined ? '' : ` as ${role}, ${scopeInWords(fullScope(scope))}`}${access === undefined ? '' : `, with access at ${Object.keys(access).join(', ')}`}`,
     place: () => null,
     done: ({ member, role, access }) => ({
-      result: { member: shownMember(apiMember(member)), ...(role === undefined ? {} : { instanceRole: role }), ...(access === undefined ? {} : { changes: access }) },
-      text: `${shownMember(apiMember(member))} is a member${role === undefined ? '' : `, as ${role}`}${access === undefined ? '' : ', with its access set'}.`,
+      result: { member: shownMember(canonical(member)), ...(role === undefined ? {} : { instanceRole: role }), ...(access === undefined ? {} : { changes: access }) },
+      text: `${shownMember(canonical(member))} is a member${role === undefined ? '' : `, as ${role}`}${access === undefined ? '' : ', with its access set'}.`,
     }),
     // The grants are the vault's to decide on Approve, as set_access's for a service account are.
     check: async (tool, { member, role, scope, access }) => {
-      const service = apiMember(member).startsWith('token:');
+      const service = canonical(member).startsWith('token:');
       if (access !== undefined && (!service || role !== undefined || scope !== undefined)) {
         throw badRequest('access comes with a service account, and no role or scope: a person is given grants once a member (set_access)');
       }
@@ -303,7 +305,7 @@ const ADMIT = changeTool({
       if (!service || (role ?? 'member') !== 'member' || scope !== undefined) {
         instanceOnly(tool);
         // A person's role kept as it is (none asked) is no change of it.
-        if (!service && role !== undefined) await ownerOnly(tool, apiMember(member), role);
+        if (!service && role !== undefined) await ownerOnly(tool, canonical(member), role);
         return;
       }
       if (!(await runRoute('GET /me', {}, undefined, tool.ctx)).setsUpServices) throw forbidden('you set up no service account: the instance keeps them to admins where you hold access');
@@ -316,7 +318,7 @@ const ADMIT = changeTool({
       return { details: [], state: { role, definition: await instanceRoleOf(ctx, role) } };
     },
     preview: async (ctx, { member, role, scope, access }, _viewing, replaced) => [
-      { label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' },
+      { label: 'Member', value: shownMember(canonical(member)), kind: 'mono' },
       role === undefined
         ? { label: 'As', value: access === undefined ? 'a member, with no access until granted some, or as they are' : 'a member, with this access' }
         : { label: 'As', value: instanceRoleInWords(await instanceRoleOf(ctx, role)) },
@@ -326,7 +328,7 @@ const ADMIT = changeTool({
     apply: async (ctx, { member, role, scope, access }, { replaced }) => {
       // Its first grants over what the page showed it holds, as set_access's; else the route's role, as Approve weighed it.
       if (access !== undefined) await granted(ctx, member, access, replaced, true);
-      else await runRoute('PUT /members/:member', { member: apiMember(member) }, { ...(role === undefined ? {} : { role }), ...(scope === undefined ? {} : { scope }) }, ctx);
+      else await runRoute('PUT /members/:member', { member: canonical(member) }, { ...(role === undefined ? {} : { role }), ...(scope === undefined ? {} : { scope }) }, ctx);
       return {};
     },
   },
@@ -342,20 +344,20 @@ const OFFBOARD = changeTool({
   destructive: true,
   input: z.object({ member }).strict(),
   change: {
-    summary: ({ member }) => `offboard ${shownMember(apiMember(member))}`,
+    summary: ({ member }) => `offboard ${shownMember(canonical(member))}`,
     place: () => null,
     done: ({ member }) => ({
-      result: { member: shownMember(apiMember(member)), removed: true },
-      text: `${shownMember(apiMember(member))} is offboarded. describe_member lists the secrets they read or wrote, to rotate.`,
+      result: { member: shownMember(canonical(member)), removed: true },
+      text: `${shownMember(canonical(member))} is offboarded. describe_member lists the secrets they read or wrote, to rotate.`,
     }),
     check: async (tool, { member }) => {
-      const named = apiMember(member);
+      const named = canonical(member);
       if (named.startsWith('token:')) return runsInstance(tool.connection.called.holds) ? undefined : manages(tool, named);
       instanceOnly(tool);
       await ownerOnly(tool, named, 'removed');
     },
     preview: async (ctx, { member }) => {
-      const named = apiMember(member);
+      const named = canonical(member);
       if (!(await runRoute('GET /me', {}, undefined, ctx)).runsInstance) {
         const access = await runRoute('GET /members/:member/access', { member: named }, undefined, ctx);
         return [
@@ -371,7 +373,7 @@ const OFFBOARD = changeTool({
       ];
     },
     apply: async (ctx, { member }) => {
-      await runRoute('DELETE /members/:member', { member: apiMember(member) }, undefined, ctx);
+      await runRoute('DELETE /members/:member', { member: canonical(member) }, undefined, ctx);
       return {};
     },
   },

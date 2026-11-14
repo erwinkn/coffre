@@ -191,6 +191,7 @@ test("what only an Owner of the instance may do of an instance role is refused a
     ['admit_member', { member: 'user:new@acme.example', role: 'owner' }],
     ['admit_member', { member: root, role: 'admin' }],
     ['admit_member', { member: admin, role: 'member' }],
+    ['admit_member', { member: 'user:Admin@acme.example', role: 'member' }],
     ['offboard_member', { member: root }],
   ] as const) {
     assert.match(await refused(token, tool, args), /only an owner of the whole instance/, JSON.stringify(args));
@@ -263,6 +264,16 @@ test('a grant of an earlier generation, and one that ended, are nothing on the p
   assert.equal(decided.body.status, 'approved', JSON.stringify(decided.body));
   const { members } = await api<{ members: { member: string; grants: { role: string }[] }[] }>('root-web', 'GET', '/members');
   assert.deepEqual(members.find((entry) => entry.member === back)!.grants.map((entry) => entry.role), ['viewer', 'viewer']);
+});
+
+test('a person named in another case is the one the vault holds: the page shows their grant, and Approve ends it, as the route would', async () => {
+  const id = await asked(await connect('root-web', ALL), 'set_access', { member: 'user:Other@acme.example', changes: { 'market/prod': null } });
+  const page = await view(id, 'root-web');
+  assert.deepEqual(page.details.find((line) => line.label === 'market/prod'), { label: 'market/prod', value: 'viewer → nothing' });
+  const decided = await approve(id, 'root-web', page);
+  assert.equal(decided.body.status, 'approved', JSON.stringify(decided.body));
+  const { members } = await api<{ members: { member: string; grants: unknown[] }[] }>('root-web', 'GET', '/members');
+  assert.deepEqual(members.find((entry) => entry.member === other)?.grants ?? [], []);
 });
 
 test('admit_member admits a service account with its first grants, and a person; one who does not run the instance sets up none until the policy row is served', async () => {
