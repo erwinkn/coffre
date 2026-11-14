@@ -112,6 +112,9 @@ test('a value is written over an archived key only as it is brought back, which 
   ]);
 
   assert.deepEqual(await vault.change(writing('cy-cli', [{ key: 'DATABASE_URL', archived: true }])), { answer: { versions: {} } });
+  // Nor does a key with a value come back to one who archives it and does not read it.
+  assert.deepEqual(await vault.change(writing('cy-cli', [{ key: 'DATABASE_URL', archived: false }])), { refused: 'no_access' });
+  assert.deepEqual(await key('DATABASE_URL'), { archived: true, folder: null, versions: 1 });
   assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'OLD', value: 'back', nature: 'secret', archived: false }])), { answer: { versions: { OLD: 1 } } });
   assert.deepEqual(await lines(), [{ key: 'OLD', version: 1, nature: 'secret', archived: false }]);
   assert.deepEqual(await given(['OLD']), ['back']);
@@ -132,6 +135,11 @@ test('a key read by a reference is not archived while the reference reads it: fr
   assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'STRIPE_KEY', archived: true }], { project: 'billing' })), { refused: 'referenced' });
   assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'PRIMARY', archived: true }])), { refused: 'referenced' });
   await nothing(before);
+  // A reference brought back in the write that archives its source reads it again: refused.
+  assert.ok('answer' in (await vault.change(writing('ada-cli', [{ key: 'ALIAS', archived: true }]))));
+  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'ALIAS', archived: false }, { key: 'PRIMARY', archived: true }])), { refused: 'referenced' });
+  assert.deepEqual([await key('ALIAS'), await key('PRIMARY')], [{ archived: true, folder: null, versions: 0 }, { archived: false, folder: null, versions: 1 }]);
+  assert.ok('answer' in (await vault.change(writing('ada-cli', [{ key: 'ALIAS', archived: false }]))));
   // Archived with the key that reads it, or once that key holds a value of its own.
   assert.ok('answer' in (await vault.change(writing('ada-cli', [{ key: 'PRIMARY', archived: true }, { key: 'ALIAS', archived: true }]))));
   assert.deepEqual(await lines(), [{ key: 'PRIMARY', archived: true }, { key: 'ALIAS', archived: true }]);
