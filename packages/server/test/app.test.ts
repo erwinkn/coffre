@@ -213,7 +213,7 @@ test('a write is one change of the vault and no statement of the app; what it re
     ['market/prod', { API_KEY: 'a\0b' }, 400], ['market/prod', { API_KEY: '\ud800' }, 400], ['market/prod', { API_KEY: 'x'.repeat(64 * 1024 + 1) }, 400], ['market/prod', { 'not a key': 'x' }, 400], ['market/prod', {}, 400],
     ['market/prod', { API_KEY: { ref: 'market/prod' } }, 400],
     ['market/prod', { API_KEY: { ref: 'market/prod@me/FLAG' } }, 400], ['market/prod', { API_KEY: { ref: 'market/prod/FLAG', value: 'x' } }, 400], ['market/prod', { API_KEY: { sensitivity: 'sensitive' } }, 400],
-    ['market/prod?dryRun=1', { API_KEY: 'x' }, 400], ['market/prod@me', { API_KEY: 'x' }, 501], ['Market/prod', { API_KEY: 'x' }, 400],
+    ['market/prod?dryRun=1', { API_KEY: 'x' }, 400], ['market/prod@me', { API_KEY: { ref: 'market/prod/FLAG' } }, 400], ['Market/prod', { API_KEY: 'x' }, 400],
   ];
   for (const [path, values, expected] of shapes) assert.equal((await patch('bo-cli', path, values))[0], expected, `${path} ${JSON.stringify(values).slice(0, 40)}`);
   // `__proto__`, which a schema would drop without a word, is refused in the body itself.
@@ -290,7 +290,7 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
   // What the app refuses by its shape, and what is not served yet: the vault is not asked.
   app.calls.length = 0;
   const unserved: [string, unknown, number][] = [
-    ['market/prod/FLAG', { key: 'NEW_FLAG' }, 501], ['market/prod/FLAG', { key: 'FLAG' }, 501], ['market/prod/FLAG', { inherit: true }, 501], ['market/prod@me/FLAG', { folder: 'x' }, 501],
+    ['market/prod/FLAG', { key: 'NEW_FLAG' }, 501], ['market/prod/FLAG', { key: 'FLAG' }, 501], ['market/prod@me/FLAG', { key: 'MINE' }, 501], ['market/prod/FLAG', { inherit: 'yes' }, 400],
     ['market/prod/FLAG', {}, 400], ['market/prod/FLAG', { inherit: true, folder: 'x' }, 400], ['market/prod/FLAG', { folder: ' x' }, 400], ['market/prod/FLAG', { folder: '\ud800' }, 400], ['market/prod/FLAG', { archived: 'yes' }, 400], ['market/prod/FLAG', { sensitivity: 'plain' }, 400],
   ];
   for (const [path, patch, code] of unserved) assert.equal((await call('bo-cli', 'PATCH', `secrets/${path}`, patch))[0][0], code, `${path} ${JSON.stringify(patch)}`);
@@ -315,7 +315,7 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
   const [[gone, why]] = await call('bo-cli', 'DELETE', 'folders/market/prod/data');
   assert.deepEqual([gone, why.error, why.reason], [404, 'not_found', 'no_folder']);
   app.calls.length = 0;
-  const shapes: [string, string, unknown, number][] = [['DELETE', 'folders/market/prod@me/data', undefined, 501], ['PATCH', 'folders/market/prod/%20data', { name: 'x' }, 400], ['PATCH', 'folders/market/prod/data', { name: 'a/b' }, 400], ['PATCH', 'folders/market/prod/data', { name: '\ud800' }, 400]];
+  const shapes: [string, string, unknown, number][] = [['PATCH', 'folders/market/prod/%20data', { name: 'x' }, 400], ['PATCH', 'folders/market/prod/data', { name: 'a/b' }, 400], ['PATCH', 'folders/market/prod/data', { name: '\ud800' }, 400]];
   for (const [method, path, input, code] of shapes) assert.equal((await call('bo-cli', method, path, input))[0][0], code, path);
   assert.deepEqual(app.calls, []);
 });
@@ -341,11 +341,72 @@ test('a version restored is one change: the key\'s next version is the old value
   // What the app refuses by its shape, and what is not served yet: the vault is not asked.
   app.calls.length = 0;
   const shapes: [string, unknown, number][] = [
-    ['market/prod@me/DATABASE_URL', { version: 1 }, 501], ['market/prod/DATABASE_URL', {}, 400], ['market/prod/DATABASE_URL', { version: 0 }, 400], ['market/prod/DATABASE_URL', { version: 1.5 }, 400],
+    ['market/prod/DATABASE_URL', {}, 400], ['market/prod/DATABASE_URL', { version: 0 }, 400], ['market/prod/DATABASE_URL', { version: 1.5 }, 400],
     ['market/prod/DATABASE_URL', { version: '1' }, 400], ['market/prod/DATABASE_URL', { version: 2 ** 31 }, 400], ['market/prod/DATABASE_URL', { version: 1, sensitivity: 'plain' }, 400],
   ];
   for (const [path, input, code] of shapes) assert.equal((await call('bo-cli', path, input))[0][0], code, `${path} ${JSON.stringify(input)}`);
   assert.deepEqual(app.calls, []);
+});
+
+test("a write in `dev@me` is one change, in the caller's personal config of dev, made by its first value; and so is each thing asked of its keys", async () => {
+  const call = (label: string, method: string, path: string, body?: unknown) =>
+    cost(() => answered(app.request(`/api/${path}`, as(label, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }))));
+  const values = async (label: string, path: string) => {
+    world.memory.reads.clear();
+    return (await reveal(label, path))[1].values;
+  };
+  // Bo has none: his first value makes it, in the same change. Prod's own values are not his to see the history of here.
+  const [[status, body], calls, statements] = await call('bo-cli', 'PATCH', 'secrets/market/prod@me', { LOCAL: 'his', FLAG: 'off locally' });
+  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  // A plain value written over stays plain in a config: nobody but its owner lists it.
+  assert.deepEqual(body.keys, { LOCAL: { version: 1, sensitivity: 'secret' }, FLAG: { version: 1, sensitivity: 'plain' } });
+  assert.deepEqual(await values('bo-cli', 'market/prod@me'), { DATABASE_URL: 'postgres://märkt', FLAG: 'off locally', LOCAL: 'his' });
+  assert.deepEqual(await values('bo-cli', 'market/prod'), { DATABASE_URL: 'postgres://märkt', FLAG: 'on' }, 'prod itself is as it was');
+  assert.deepEqual(await values('ada-cli', 'market/prod@me'), { DATABASE_URL: 'postgres://märkt', FLAG: 'on', OWN: 'hers alone' }, "Ada's is hers");
+  // A Viewer writes in her own config, files, restores and refiles there: its values are hers.
+  assert.deepEqual((await call('ada-cli', 'PATCH', 'secrets/market/prod@me', { OWN: 'hers again' }))[0][1].keys, { OWN: { version: 2, sensitivity: 'secret' } });
+  assert.deepEqual((await call('ada-cli', 'PATCH', 'secrets/market/prod@me/OWN', { folder: 'mine' }))[0][1].folder, 'mine');
+  assert.deepEqual((await call('ada-cli', 'POST', 'secrets/market/prod@me/OWN/restore', { version: 1 }))[0][1].version, 3);
+  assert.deepEqual((await call('ada-cli', 'PATCH', 'folders/market/prod@me/mine', { name: 'local' }))[0][1].moved, ['OWN']);
+  assert.deepEqual(await values('ada-cli', 'market/prod@me/OWN'), { OWN: 'hers alone' });
+  const refused: [string, string, string, unknown, number, string][] = [
+    // Bo's viewer token writes nothing, in his config either; a key or a folder of a config one does not have is not there.
+    [PERSONAL, 'PATCH', 'secrets/market/prod@me', { LOCAL: 'x' }, 403, 'no_access'], ['cy-cli', 'PATCH', 'secrets/market/prod@me/OWN', { folder: 'x' }, 404, 'unknown_key'],
+    ['cy-cli', 'DELETE', 'folders/market/prod@me/local', undefined, 404, 'no_folder'], ['cy-cli', 'POST', 'secrets/market/prod@me/OWN/restore', { version: 1 }, 404, 'unknown_key'],
+  ];
+  for (const [label, method, path, input, code, reason] of refused) {
+    const [[got, said]] = await call(label, method, path, input);
+    assert.deepEqual([got, said.reason], [code, reason], `${label} ${method} ${path}`);
+  }
+});
+
+test("a fork's key reset to what it inherits, and that undone, is one change each", async () => {
+  const call = (label: string, path: string, body: unknown) => cost(() => answered(app.request(`/api/secrets/${path}`, as(label, { method: 'PATCH', body: JSON.stringify(body) }))));
+  const values = async (path: string) => {
+    world.memory.reads.clear();
+    return (await reveal('bo-cli', path))[1].values;
+  };
+  assert.equal((await call('bo-cli', 'market/fork', { S_KEY: 'overridden' }))[0][0], 200);
+  const [[status, body], calls, statements] = await call('bo-cli', 'market/fork/S_KEY', { inherit: true });
+  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', key: 'S_KEY', inherit: true });
+  assert.deepEqual(await values('market/fork/S_KEY'), { S_KEY: 'staging only' });
+  assert.equal((await call('bo-cli', 'market/fork/S_KEY', { inherit: false }))[0][0], 200);
+  assert.deepEqual(await values('market/fork/S_KEY'), { S_KEY: 'overridden' });
+  // In a config too: Ada's own DATABASE_URL, reset to prod's.
+  assert.equal((await call('ada-cli', 'market/prod@me', { DATABASE_URL: 'postgres://local' }))[0][0], 200);
+  assert.equal((await call('ada-cli', 'market/prod@me/DATABASE_URL', { inherit: true }))[0][0], 200);
+  world.memory.reads.clear();
+  assert.deepEqual((await reveal('ada-cli', 'market/prod@me/DATABASE_URL'))[1].values, { DATABASE_URL: 'postgres://märkt' });
+  const refused: [string, string, boolean, number, string][] = [
+    // A key no parent passes down, an environment that inherits from none, and a viewer of the fork.
+    ['bo-cli', 'market/fork/FINE', true, 409, 'not_inherited'], ['bo-cli', 'market/prod/FLAG', true, 409, 'not_inherited'], ['ada-cli', 'market/prod@me/OWN', true, 409, 'not_inherited'],
+    ['ada-cli', 'market/fork/S_KEY', true, 403, 'no_access'],
+  ];
+  for (const [label, path, inherit, code, reason] of refused) {
+    const [[got, said]] = await call(label, path, { inherit });
+    assert.deepEqual([got, said.reason], [code, reason], `${label} ${path}`);
+  }
 });
 
 test('a path is a route or it is not: its method, its segments and its body are held before any handler runs', async () => {

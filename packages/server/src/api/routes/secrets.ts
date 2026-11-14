@@ -67,12 +67,10 @@ const readPath = z.string().max(400).transform((text, issue) => {
 /** A reference's source, `market/prod/KEY`: a key of an environment, never of a personal config. */
 const sourcePath = readPath.refine((path) => path.key !== undefined && personalOf(path.environment) === null, 'a reference names its source as <project>/<environment>/<KEY>, never in a personal config');
 
-/** The keys a folder of one environment held, re-filed under `to`, or in none. */
+/** The keys a folder of one environment, or of the caller's personal config of it, held, re-filed under `to`, or in none. */
 async function refiled(ctx: ApiContext, params: { project: string; environment: string; folder: string }, to: string | null): Promise<string[]> {
-  const { environment, mine } = environmentOf(params.environment);
   const at = `${params.project}/${params.environment}`;
-  if (mine) throw new ApiError('not_implemented', `a folder of ${at}, your personal config, is not served yet`);
-  return (await changed(ctx, { op: 'secret.refile', project: params.project, environment, folder: params.folder, to }, `${at}, folder ${params.folder}`)).moved;
+  return (await changed(ctx, { op: 'secret.refile', project: params.project, ...environmentOf(params.environment), folder: params.folder, to }, `${at}, folder ${params.folder}`)).moved;
 }
 
 export const secretRoutes = {
@@ -134,8 +132,12 @@ export const secretRoutes = {
    * a sensitive one, and a secret otherwise (`secret.write`). A reference
    * is answered with its source, as asked, and a key archived as archived.
    *
-   * Not served yet, each refused as a 400 by the input's shape or below:
-   * a generated value, a nature changed in place, a dry run, and `dev@me`.
+   * In `dev@me`, the caller's personal config of dev, made by a write that
+   * gives a key a value where they have none, as 0.14's: its owner's alone,
+   * while they read or use dev, and it holds no reference (a 400).
+   *
+   * Not served yet, each refused as a 400 by the input's shape: a generated
+   * value, a nature changed in place, and a dry run.
    */
   ...route('PATCH /secrets/:project/:environment', {
     input: z.record(secretKey, z.union([secretValue, z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']) }).strict(), z.object({ ref: sourcePath }).strict()]).nullable())
@@ -143,11 +145,13 @@ export const secretRoutes = {
     query: z.object({}).strict(),
     run: async (ctx, { params, input }) => {
       const { environment, mine } = environmentOf(params.environment);
-      if (mine) throw new ApiError('not_implemented', `a write to ${params.project}/${params.environment}, your personal config, is not served yet`);
+      if (mine && Object.values(input).some((written) => typeof written === 'object' && written !== null && 'ref' in written)) {
+        throw badRequest(`${params.project}/${params.environment} is your personal config, which holds values only: make the reference in ${params.project}/${environment}`);
+      }
       const keys = Object.entries(input).map(([key, written]): KeyWrite => (written === null ? { key, archived: true } : typeof written === 'string' ? { key, value: written }
         : 'ref' in written ? { key, ref: { project: written.ref.project, environment: written.ref.environment, key: written.ref.key! } }
           : { key, value: written.value, nature: written.sensitivity }));
-      const answer = await changed(ctx, { op: 'secret.write', project: params.project, environment, keys }, `${params.project}/${params.environment}`);
+      const answer = await changed(ctx, { op: 'secret.write', project: params.project, environment, mine, keys }, `${params.project}/${params.environment}`);
       const told = keys.flatMap((item): [string, { reference: string } | { archived: true }][] => (item.ref !== undefined ? [[item.key, { reference: `${item.ref.project}/${item.ref.environment}/${item.ref.key}` }]]
         : item.archived === true ? [[item.key, { archived: true }]] : []));
       // As entries: a key named __proto__ is a key like any other.
@@ -160,11 +164,14 @@ export const secretRoutes = {
    * folder, or in none (`folder`): one call to the vault, which decides
    * both or neither (`secret.write`). Archiving takes `secret.archive`, a
    * return `secret.read` too, since the value serves again; filing takes
-   * `secret.write`, archived or not. Answered with the key and what was
-   * asked of it, which is what it now is.
+   * `secret.write`, archived or not. Or, alone, in a fork, reset it to what
+   * a parent passes down (`inherit: true`), its own value archived, or
+   * undo that (`false`): `secret.write`, as writing over a parent's does,
+   * and `secret.read` to undo, since its value serves again. Answered with
+   * the key and what was asked of it, which is what it now is; 0.14 also
+   * answered a reset with the parent it reads and the key's folder.
    *
-   * Not served yet, 501: a rename (`key`), and a fork's key reset to what
-   * it inherits (`inherit`).
+   * Not served yet, 501: a rename (`key`).
    */
   ...route('PATCH /secrets/:project/:environment/:key', {
     input: z.object({ key: secretKey, archived: z.boolean(), folder: folderName.nullable(), inherit: z.boolean() }).partial().strict()
@@ -172,14 +179,12 @@ export const secretRoutes = {
       .refine((patch) => patch.inherit === undefined || Object.keys(patch).length === 1, 'inherit goes alone'),
     run: async (ctx, { params, input }) => {
       const at = `${params.project}/${params.environment}/${params.key}`;
-      if (input.inherit !== undefined) throw new ApiError('not_implemented', `resetting ${at} to what it inherits is not served yet`);
-      const { archived, folder } = input;
+      const { archived, folder, inherit } = input;
       // Its own name beside what else is asked is no rename, as in 0.14; alone, it is asked as one.
       if (input.key !== undefined && (input.key !== params.key || (archived === undefined && folder === undefined))) throw new ApiError('not_implemented', `renaming ${at} is not served yet`);
-      const { environment, mine } = environmentOf(params.environment);
-      if (mine) throw new ApiError('not_implemented', `a change to ${at}, in your personal config, is not served yet`);
-      await changed(ctx, { op: 'secret.write', project: params.project, environment, keys: [{ key: params.key, archived, folder }] }, at);
-      return { operationId: ctx.shown.request, key: params.key, ...(archived === undefined ? {} : { archived }), ...(folder === undefined ? {} : { folder }) };
+      const write: KeyWrite = inherit === undefined ? { key: params.key, archived, folder } : { key: params.key, inherit };
+      await changed(ctx, { op: 'secret.write', project: params.project, ...environmentOf(params.environment), keys: [write] }, at);
+      return { operationId: ctx.shown.request, key: params.key, ...(archived === undefined ? {} : { archived }), ...(folder === undefined ? {} : { folder }), ...(inherit === undefined ? {} : { inherit }) };
     },
   }),
 
@@ -197,9 +202,7 @@ export const secretRoutes = {
     input: z.object({ version: z.number().int().min(1).max(2 ** 31 - 1) }).strict(),
     run: async (ctx, { params, input }) => {
       const at = `${params.project}/${params.environment}/${params.key}`;
-      const { environment, mine } = environmentOf(params.environment);
-      if (mine) throw new ApiError('not_implemented', `a restore in ${at}, your personal config, is not served yet`);
-      const answer = await changed(ctx, { op: 'secret.write', project: params.project, environment, keys: [{ key: params.key, restore: input.version }] }, at);
+      const answer = await changed(ctx, { op: 'secret.write', project: params.project, ...environmentOf(params.environment), keys: [{ key: params.key, restore: input.version }] }, at);
       const { version, nature } = Object.entries(answer.keys).find(([key]) => key === params.key)![1];
       return { operationId: ctx.shown.request, key: params.key, version, sensitivity: nature };
     },

@@ -1,17 +1,18 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
-import { allows, useOnly, type Permission } from '@coffre/core/access';
+import { allows, useOnly, withinCredential, type Permission } from '@coffre/core/access';
 import type { Answers, KeyWrite, Nature, Presented, ReferenceBreak, SecretPath, SecretRefile, SecretsChanges, SecretWrite } from '@coffre/core/vault';
 import { dismissedKeys, environments, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
-import { callerFrom, callerParts, live, refusedTo } from '../caller.ts';
-import { amended, part, put, type Operation, type Parts, type Seen, type Value, type Write } from '../change.ts';
+import { callerFrom, callerParts, live, refusedTo, type Asking } from '../caller.ts';
+import { amended, part, put, type Operation, type Parts, type Refusal, type Seen, type Value, type Write } from '../change.ts';
 import type { Fresh, Row } from '../rows.ts';
 import { natureOf } from '../value.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
 import { KEY, presented, text } from './input.ts';
+import { chainOf } from './places.ts';
 
 /** The app's own bounds (its routes'): a value's length in characters, the keys of one write, and a request's body, which every value of a write came in. */
 const VALUE_LENGTH = 64 * 1024;
@@ -31,7 +32,47 @@ const written = (value: unknown): value is string => typeof value === 'string' &
 /** A folder as the app's routes have it (`folderName`), within the table's check: 1 to 64 UTF-16 units, no slash or control character, nothing `trim` takes away. */
 const filed = (value: unknown) => value === null || (typeof value === 'string' && wellFormed(value) && value.length >= 1 && value.length <= 64 && !/[/\p{Cc}]/u.test(value) && value === value.trim());
 
-const wrong = () => new TypeError('a write names a place by its slugs and 1 to 2,000 keys, each once, with a value of well-formed text, 64 Ki characters at most and 1 MiB in all, a version restored counted as 192 KiB, the most a value weighs, and its nature if any, a version to restore, or a reference to a key by its slugs and name, an archiving or a folder');
+const wrong = () => new TypeError('a write names a place by its slugs, or the caller\'s personal config of it, and 1 to 2,000 keys, each once, with a value of well-formed text, 64 Ki characters at most and 1 MiB in all, a version restored counted as 192 KiB, the most a value weighs, and its nature if any, a version to restore, or a reference to a key by its slugs and name, an archiving or a folder; or alone, a reset to what it inherits or its undoing');
+
+/** A personal config's slug, never shown but to delete it: its environment's, and enough at random that two never meet (as `environment.create` makes one). */
+const configSlug = (of: string) => `${of.slice(0, 48)}-p-${randomBytes(4).toString('hex')}`;
+
+/**
+ * The environment a change of keys is in, as its read finds it: the one
+ * named, or with `mine` the caller's personal config of it, whose owner is
+ * who holds the token shown.
+ */
+function keysPlace(token: Buffer, projectSlug: string, environmentSlug: string, mine: boolean) {
+  const project = sql`(SELECT p.id FROM projects p WHERE p.slug = ${projectSlug})`;
+  const named = sql`(SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${environmentSlug})`;
+  const principal = sql`(SELECT c.principal FROM credentials c WHERE c.token_hash = decode(${token.toString('hex')}, 'hex'))`;
+  // A deleted config leaves a tombstone, whose slug has a `~`: the one a person has is the one that stands.
+  const config = sql`(SELECT e.id FROM environments e WHERE e.parent_id = ${named} AND e.owner = ${principal} AND strpos(e.slug, '~') = 0)`;
+  return {
+    project,
+    named,
+    here: mine ? config : named,
+    environment: part(environments, mine ? sql`${environments.id} = ${named} OR ${environments.id} = ${config}` : sql`${environments.projectId} = ${project} AND ${environments.slug} = ${environmentSlug}`),
+  };
+}
+
+/**
+ * Whether the caller may do each of `needs` in an environment's keys: by
+ * what they hold there; or in their personal config of it (`mine`), as its
+ * owner alone, while they read or use the environment, and as far as their
+ * credential's scope does there, reading as far as it uses (use.ts's `may`,
+ * 0.14's `personalCap`): their viewer's token reads their config, and
+ * writes nothing; a Viewer's session keeps a local value. A service
+ * account keeps no config. Refused, the reason; undefined where they may.
+ */
+function deniedIn(caller: Asking, environment: Row<typeof environments>, mine: boolean, needs: Iterable<Permission>): Refusal | undefined {
+  if (!mine) return [...needs].every((permission) => caller.may(permission, environment)) ? undefined : { refused: 'no_access' };
+  if (!caller.principal.startsWith('user:')) return { refused: 'not_a_person' };
+  const there = { projectId: environment.projectId, environmentId: environment.id, environmentSlug: environment.slug };
+  const owns = (caller.may('secret.read', environment) || caller.may('secret.use', environment))
+    && [...needs].every((permission) => withinCredential(caller.holds, permission === 'secret.read' ? 'secret.use' : permission, there));
+  return owns ? undefined : { refused: 'no_access' };
+}
 
 /** A key named where it is held: its project's and environment's slugs, and its name. */
 const located = (path: unknown): path is SecretPath =>
@@ -40,6 +81,10 @@ const located = (path: unknown): path is SecretPath =>
 /** One key's item, on its own: what it does, with what it says it with. */
 function valid(item: KeyWrite): boolean {
   if (typeof item !== 'object' || item === null || typeof item.key !== 'string' || !KEY.test(item.key)) return false;
+  // A reset goes alone.
+  if (item.inherit !== undefined) {
+    return typeof item.inherit === 'boolean' && [item.value, item.nature, item.restore, item.ref, item.archived, item.folder].every((said) => said === undefined);
+  }
   if (!(item.archived === undefined || typeof item.archived === 'boolean') || !(item.folder === undefined || filed(item.folder))) return false;
   // A key is archived with no value written over it or restored, and made no reference.
   if (item.value !== undefined) return written(item.value) && (item.nature === undefined || NATURES.includes(item.nature)) && item.ref === undefined && item.restore === undefined && item.archived !== true;
@@ -101,25 +146,55 @@ function valid(item: KeyWrite): boolean {
  * its own or that. A reference's is its source's, whose row the
  * reference cannot be without. A row the vault does not see, the key's own, a source or a
  * parent, refuses the write, `unreadable`, rather than guess.
+ *
+ * In a fork, a key reset to what a parent passes down (0.14's
+ * `inheritSecret`, `inherit: true`) has its own row archived, with its
+ * history, and `false` brings it back over the parent's. Either takes
+ * `secret.write`, as writing over a parent's does, since neither loses a
+ * value, and a key no live parent passes down is `not_inherited`: that
+ * would be an archiving, or its return, which takes more. Undoing one
+ * takes `secret.read` too, as any return. A value, a version or a
+ * reference written over a reset key makes it an override again, with no
+ * `archived: false`, as 0.14 did; any other archived key is `archived`.
+ * And whatever makes a key hold a value or a reference here again ends
+ * its dismissal here, if any (0.14's `endRemovals`), so that reset later,
+ * it reads its parent's.
+ *
+ * In the caller's personal config of the environment (`mine`, 0.14's
+ * `dev@me`), its owner alone writes, while they read or use the
+ * environment, and as far as their credential's scope does there (use.ts):
+ * a Viewer keeps a local value, and their viewer's token writes nothing.
+ * A service account keeps none, `not_a_person`. A write that gives a key a
+ * value makes the config where they have none, as `environment.create`
+ * does, in the same change; anything else asked of a config not there is
+ * asked of a key not there. It holds no reference, and a value typed there
+ * with no nature over a plain one, its own or the one it reads now, stays
+ * plain (0.14.7's `bareLevel`): nobody but its owner lists it.
  */
 function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation<Parts, Answers['secret.write']> {
   const shown = presented(input);
   const { project: projectSlug, environment: environmentSlug, keys } = input;
+  const mine = input.mine ?? false;
   const items = Array.isArray(keys) ? [...keys] : [];
-  if (!text(projectSlug) || !text(environmentSlug) || items.length === 0 || items.length > MOST_KEYS || !items.every(valid) || new Set(items.map((item) => item.key)).size !== items.length
+  if (!text(projectSlug) || !text(environmentSlug) || typeof mine !== 'boolean' || items.length === 0 || items.length > MOST_KEYS || !items.every(valid) || new Set(items.map((item) => item.key)).size !== items.length
     || items.reduce((sum, item) => sum + (item.restore === undefined ? Buffer.byteLength(item.value ?? '') : VALUE_BYTES), 0) > WRITE_BYTES) {
     throw wrong();
   }
   // A key the environment does not have yet is made under an id drawn here: a decision draws nothing.
   const fresh = new Map(items.map((item) => [item.key, { secret: randomUUID(), version: randomUUID() }]));
+  // And the caller's personal config, where they have none and a value makes it.
+  const config = { id: randomUUID(), slug: configSlug(environmentSlug) };
   const needs = new Set<Permission>(items.flatMap((item): Permission[] => [
-    ...(item.value !== undefined || item.restore !== undefined || item.ref !== undefined || item.folder !== undefined ? ['secret.write' as const] : []),
+    ...(item.value !== undefined || item.restore !== undefined || item.ref !== undefined || item.folder !== undefined || item.inherit !== undefined ? ['secret.write' as const] : []),
     ...(item.archived === undefined ? [] : ['secret.archive' as const]),
-    ...(item.archived === false || item.restore !== undefined ? ['secret.read' as const] : []),
+    ...(item.archived === false || item.restore !== undefined || item.inherit === false ? ['secret.read' as const] : []),
   ]));
-  const archiving = items.flatMap((item) => (item.archived === true ? [item.key] : []));
+  // A reset archives the key too.
+  const archiving = items.flatMap((item) => (item.archived === true || item.inherit === true ? [item.key] : []));
   // The keys whose value comes with no nature said, typed or restored: what each is now decides it.
   const bare = items.flatMap((item) => ((item.value !== undefined && item.nature === undefined) || item.restore !== undefined ? [item.key] : []));
+  // The keys whose parents decide: one reset, or made live (a reset one written over stops being one), whose dismissal ends.
+  const inheriting = items.flatMap((item) => ([item.value, item.restore, item.ref, item.inherit].some((said) => said !== undefined) || item.archived === false ? [item.key] : []));
   const restores = items.flatMap((item) => (item.restore === undefined ? [] : [{ key: item.key, version: item.restore }]));
   const refs = items.flatMap((item) => (item.ref === undefined ? [] : [{ key: item.key, to: item.ref }]));
   // The keys whose readers decide: one archived stops them, and one made a reference would be a second hop for them.
@@ -127,12 +202,12 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
   // A reference's source may be in another project, whose grants and protections the caller is weighed by too.
   const slugs = [...new Set([projectSlug, ...refs.map((ref) => ref.to.project)])];
 
-  const project = sql`(SELECT p.id FROM projects p WHERE p.slug = ${projectSlug})`;
-  const here = sql`(SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${environmentSlug})`;
-  // The environment and those it inherits from, for a bare value only: what it is written over may be a parent's.
+  const { project, named, here, environment: environmentPart } = keysPlace(shown.token, projectSlug, environmentSlug, mine);
+  // The environment and those it inherits from, where its parents decide: what a value is written over may be a parent's.
+  // A personal config's start at the environment too, where it has none yet; and they are one more.
   const chain = sql`(WITH RECURSIVE chain (id, parent_id, depth) AS (
-    SELECT e.id, e.parent_id, 0 FROM environments e WHERE ${bare.length > 0 ? sql`true` : sql`false`} AND e.id = ${here}
-    UNION SELECT e.id, e.parent_id, chain.depth + 1 FROM environments e JOIN chain ON e.id = chain.parent_id WHERE chain.depth < ${MAX_PARENTS}
+    SELECT e.id, e.parent_id, 0 FROM environments e WHERE ${inheriting.length > 0 || mine ? sql`true` : sql`false`} AND (e.id = ${here} OR e.id = ${named})
+    UNION SELECT e.id, e.parent_id, chain.depth + 1 FROM environments e JOIN chain ON e.id = chain.parent_id WHERE chain.depth < ${MAX_PARENTS + (mine ? 1 : 0)}
   ) SELECT id FROM chain)`;
   // The references that read a key this write archives or makes a reference, from wherever they are held.
   const readers = sql`(SELECT r.id FROM secrets r WHERE r.source_id IN (SELECT s.id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(stopping)}::text[])))`;
@@ -141,12 +216,13 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
   const read = {
     ...callerParts(shown.token, sql`(SELECT p.id FROM projects p WHERE p.slug = ANY(${sql.param(slugs)}::text[]))`),
     project: part(projects, sql`${projects.slug} = ANY(${sql.param(slugs)}::text[])`),
-    environment: part(environments, sql`${environments.projectId} = ${project} AND ${environments.slug} = ${environmentSlug}`),
+    environment: environmentPart,
     secret: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} = ${here} AND ${secrets.key} = ANY(${sql.param(items.map((item) => item.key))}::text[])`),
-    parent: part(environments, sql`${environments.id} IN ${chain} AND ${environments.id} <> ${here}`),
-    // What a key written with no nature is now where the environment holds none: a parent's, unless dismissed on the way.
-    inherited: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} IN ${chain} AND ${secrets.environmentId} <> ${here} AND ${secrets.key} = ANY(${sql.param(bare)}::text[])`),
-    dismissed: part(dismissedKeys, sql`${dismissedKeys.environmentId} IN ${chain} AND ${dismissedKeys.key} = ANY(${sql.param(bare)}::text[])`),
+    // Not the environment's own row: a personal config the caller has none of yet is none, and its environment is a parent.
+    parent: part(environments, sql`${environments.id} IN ${chain} AND ${environments.id} IS DISTINCT FROM ${here}`),
+    // What a key is passed down where the environment holds none, or reset it: a parent's, unless dismissed on the way.
+    inherited: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} IN ${chain} AND ${secrets.environmentId} IS DISTINCT FROM ${here} AND ${secrets.key} = ANY(${sql.param(inheriting)}::text[])`),
+    dismissed: part(dismissedKeys, sql`${dismissedKeys.environmentId} IN ${chain} AND ${dismissedKeys.key} = ANY(${sql.param(inheriting)}::text[])`),
     // What a key written with no nature refers to, its own or the one it inherits, if a reference: its value's nature is the source's.
     source: part(secrets, sql`${secrets.id} IN (SELECT s.source_id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id IN ${chain} AND s.key = ANY(${sql.param(bare)}::text[]))`),
     // Each key a reference is made to, and where it is.
@@ -162,18 +238,19 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       WHERE s.project_id = ${project} AND s.environment_id = ${here}
       UNION SELECT s.id, s.versions FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(restores.map((each) => each.key))}::text[]))`),
   };
-  /** The place asked about, as far as it is there. */
+  /** The place asked about, as far as it is there: the environment named, and the personal config of it the read found, if any. */
   const placed = (seen: Seen<typeof read>) => {
     const place = seen.project.find((row) => row.slug === projectSlug && live(row));
-    return { place, environment: place && seen.environment.find((row) => row.projectId === place.id && row.slug === environmentSlug && live(row)) };
+    const environment = place && seen.environment.find((row) => row.projectId === place.id && row.slug === environmentSlug && live(row));
+    return { place, environment, config: environment && seen.environment.find((row) => row.parentId === environment.id && row.owner !== null && !row.slug.includes('~')) };
   };
   return {
     read,
     denied: refusedTo('secret.write', shown, vault.workloads, {
       where: { project: projectSlug, environment: environmentSlug },
       objects: (seen: Seen<typeof read>) => {
-        const { place, environment } = placed(seen);
-        return [...(place === undefined ? [] : [`project:${place.id}`]), ...(environment === undefined ? [] : [`environment:${environment.id}`])];
+        const { place, environment, config: own } = placed(seen);
+        return [...(place === undefined ? [] : [`project:${place.id}`]), ...[environment, own].flatMap((row) => (row === undefined ? [] : [`environment:${row.id}`]))];
       },
     }),
     decide(seen: Seen<typeof read>, at: number, unsealed) {
@@ -182,9 +259,34 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       if (caller.workload?.stop != null) return { refused: caller.workload.stop };
       // A narrowed session uses values, and changes nothing.
       if (caller.workload?.narrowed === true) return { refused: 'narrowed' };
-      const { place, environment } = placed(seen);
+      const now = new Date(at);
+      const { place, environment: named, config: own } = placed(seen);
       // The same answer whether the place is not there, is someone's personal config, or is not theirs to write in: none says which.
-      if (place === undefined || environment === undefined || environment.owner !== null || ![...needs].every((permission) => caller.may(permission, environment))) return { refused: 'no_access' };
+      if (place === undefined || named === undefined || named.owner !== null) return { refused: 'no_access' };
+      const denied = deniedIn(caller, named, mine, needs);
+      if (denied !== undefined) return denied;
+      /** Where the keys are: the environment named, or the caller's config of it, which a value makes where they have none. */
+      let environment: Fresh<typeof environments> = named;
+      let made: Fresh<typeof environments> | undefined;
+      if (mine) {
+        // A personal config holds values only: no reference holds one there, nor reads one from there.
+        if (refs.length > 0) return { refused: 'no_access' };
+        // Its own, by its row: the read found it by who holds the token, which its MAC says nothing of.
+        if (own !== undefined && own.owner !== caller.principal) return { refused: 'unreadable' };
+        // An archived one is written in no more than any archived environment is.
+        if (own !== undefined && !live(own)) return { refused: 'no_access' };
+        if (own !== undefined) environment = own;
+        // Its row edited behind the vault is not made again beside it.
+        else if (unsealed.environment > 0) return { refused: 'unreadable' };
+        // None yet: a value makes it, and anything else is asked of a key that is not there.
+        else if (!items.some((item) => item.value !== undefined)) return { refused: 'unknown_key' };
+        else {
+          // As `environment.create` makes one: one more environment that inherits from this one.
+          const chained = chainOf(named, seen.parent);
+          if (chained !== 'ok') return { refused: chained };
+          environment = made = { id: config.id, projectId: place.id, slug: config.slug, name: config.slug, createdAt: now, archivedAt: null, parentId: named.id, owner: caller.principal, protected: false, frozenCredentials: [] };
+        }
+      }
       // A key's own row edited behind the vault still holds its name: the key is neither made again nor guessed at.
       if (unsealed.secret > 0) return { refused: 'unreadable' };
       // Each reference's source, as its rows say: a live key of a live place, no personal config's, that the caller reads there.
@@ -201,7 +303,6 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         targets.set(key, { row, where });
       }
 
-      const now = new Date(at);
       const held = new Map(seen.secret.map((row) => [row.key, row]));
       const sources = new Map(seen.source.map((row) => [row.id, row]));
       const parents = new Map(seen.parent.map((row) => [row.id, row]));
@@ -209,12 +310,18 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       const dismissed = new Set(seen.dismissed.filter((row) => row.restoredAt === null).map((row) => `${row.environmentId} ${row.key}`));
       // A parent, a key or a dismissal edited behind the vault may be what decides a nature: none is guessed.
       const blind = unsealed.parent + unsealed.inherited + unsealed.dismissed > 0;
-      /** The key a key the environment does not hold reads, as a use finds it: null for none, undefined for one the vault cannot tell. */
-      const passedDown = (key: string): Row<typeof secrets> | null | undefined => {
+      /**
+       * The key a key the environment does not hold reads, as a use finds it: null for none, undefined for one the vault
+       * cannot tell. A personal config's chain is one longer. For a reset (`reset`), what a parent passes down whatever this
+       * environment dismissed, which its reset ends, and nothing past a parent archived, as a use reads nothing through one.
+       */
+      const passedDown = (key: string, reset = false): Row<typeof secrets> | null | undefined => {
         if (blind) return undefined;
-        for (let layer = environment, depth = 0; !dismissed.has(`${layer.id} ${key}`) && layer.parentId !== null; depth += 1) {
+        const deepest = MAX_PARENTS + (environment.owner === null ? 0 : 1);
+        for (let layer = environment, depth = 0; !(dismissed.has(`${layer.id} ${key}`) && !(reset && layer === environment)) && layer.parentId !== null; depth += 1) {
           const parent = parents.get(layer.parentId);
-          if (parent === undefined || parent.projectId !== place.id || depth >= MAX_PARENTS) return undefined;
+          if (parent === undefined || parent.projectId !== place.id || depth >= deepest) return undefined;
+          if (reset && !live(parent)) return null;
           const row = inherited.get(`${parent.id} ${key}`);
           if (row !== undefined) return row;
           layer = parent;
@@ -229,15 +336,21 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       const answered: [string, { version: number; nature: Nature }][] = [];
       const referring = new Set<string>();
       const versions = new Map(seen.version.map((row) => [`${row.secretId} ${row.version}`, row]));
-      for (const { key, value, nature: asked, restore, ref, archived, folder } of items) {
+      for (const { key, value, nature: asked, restore, ref, archived, folder, inherit } of items) {
         const was = held.get(key) ?? null;
-        // Only a value or a reference makes a key: there is nothing else to archive, file or restore.
+        // Only a value or a reference makes a key: there is nothing else to archive, file, restore or reset.
         if (was === null && value === undefined && ref === undefined) return { refused: 'unknown_key' };
-        // An archived key keeps its name: it is brought back, not written over.
-        if (was?.archivedAt != null && (value !== undefined || restore !== undefined || ref !== undefined) && archived !== false) return { refused: 'archived' };
+        // A reset, or its undoing, is of a key a parent passes down: anything else is an archiving, which takes more.
+        const down = inherit === undefined && !(was?.archivedAt != null && (value !== undefined || restore !== undefined || ref !== undefined) && archived !== false) ? null : passedDown(key, true);
+        if (down === undefined) return { refused: 'unreadable' };
+        if (inherit !== undefined && down === null) return { refused: 'not_inherited' };
+        // An archived key keeps its name: it is brought back, not written over. In a fork, one reset to what a parent passes
+        // down is an override set aside, which a value, a version or a reference written over it makes one again, as in 0.14.
+        if (inherit === undefined && down === null && was?.archivedAt != null && (value !== undefined || restore !== undefined || ref !== undefined) && archived !== false) return { refused: 'archived' };
+        const archiving = inherit ?? (down === null ? archived : false);
         const ids = fresh.get(key)!;
         const { mac: _, ...kept } = was ?? { mac: null, id: ids.secret, projectId: place.id, environmentId: environment.id, key, createdAt: now, updatedAt: now, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: null, nature: null, recipe: null, pairId: null, pairHalf: null };
-        let secret: Fresh<typeof secrets> = { ...kept, archivedAt: archived === undefined ? kept.archivedAt : archived ? (kept.archivedAt ?? now) : null, folder: folder === undefined ? kept.folder : folder };
+        let secret: Fresh<typeof secrets> = { ...kept, archivedAt: archiving === undefined ? kept.archivedAt : archiving ? (kept.archivedAt ?? now) : null, folder: folder === undefined ? kept.folder : folder };
         const line: Record<string, unknown> = { key, secret: secret.id };
         if (value !== undefined || restore !== undefined) {
           // The version restored, which the key's sealed row counts, and its newest: a row of either gone behind the vault is not guessed at.
@@ -255,7 +368,9 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           const unsaid = restore !== undefined && kept.currentVersion !== kept.versions ? newest : undefined;
           if (unsaid !== undefined && unsaid !== from) vouched.push(unsaid);
           const sticks = natures.some((row) => row?.nature === 'sensitive') || unsaid?.sensitive === true;
-          const nature: Nature = asked ?? (sticks ? 'sensitive' : from === undefined ? 'secret' : natureOf(from));
+          // In a personal config, a value typed over a plain one, its own or the one it reads now, stays plain: nobody but its owner lists it (0.14.7's `bareLevel`).
+          const plain = environment.owner !== null && natures.at(-1)?.nature === 'plain';
+          const nature: Nature = asked ?? (sticks ? 'sensitive' : from !== undefined ? natureOf(from) : plain ? 'plain' : 'secret');
           const version = kept.versions + 1;
           // Typed or restored, not generated: no recipe for Regenerate, and in no pair.
           secret = { ...secret, versions: version, currentVersion: version, updatedAt: now, sourceId: null, nature, recipe: null, pairId: null, pairHalf: null };
@@ -278,7 +393,15 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           referring.add(key);
         }
         if ((secret.archivedAt === null) !== (kept.archivedAt === null)) line.archived = secret.archivedAt !== null;
+        // `reset`: archived to read what a parent passes down, or brought back from that.
+        if (inherit !== undefined && line.archived !== undefined) line.reset = inherit;
         if (secret.folder !== kept.folder) line.folder = secret.folder;
+        // A key that holds a value or a reference here again is no longer dismissed here: reset later, it inherits again (0.14's `endRemovals`).
+        const removal = seen.dismissed.find((row) => row.environmentId === environment.id && row.key === key && row.restoredAt === null);
+        if (removal !== undefined && secret.archivedAt === null && (line.version !== undefined || line.refers !== undefined || line.archived === false)) {
+          writes.push(amended(dismissedKeys, removal, { restoredAt: now, restoredBy: caller.principal }));
+          line.dismissed = false;
+        }
         // What changes nothing writes nothing: archived already, filed where it is.
         if (Object.keys(line).length === 2) continue;
         writes.push(put(secrets, secret, was));
@@ -316,7 +439,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         if (referring.has(key)) for (const object of [`project:${where.projectId}`, `environment:${where.id}`, `secret:${source.id}`]) also.add(object);
       }
       return {
-        writes,
+        // The config first, which its keys are made in.
+        writes: made === undefined ? writes : [put(environments, made), ...writes],
         values: sealed,
         vouched,
         entry: {
@@ -326,8 +450,11 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           credential: caller.credential.id,
           request: shown.request,
           ip: shown.ip,
-          objects: [...new Set([`project:${place.id}`, `environment:${environment.id}`, `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...lines.map((line) => `secret:${line.secret as string}`), ...also])],
-          detail: { keys: lines },
+          // A personal config's, found from the environment it is a config of too.
+          objects: [...new Set([`project:${place.id}`, `environment:${environment.id}`, ...(mine ? [`environment:${named.id}`] : []), `principal:${caller.principal}`, `credential:${caller.credential.id}`,
+            ...lines.map((line) => `secret:${line.secret as string}`), ...also])],
+          // `personal`: the environment whose config it is; `made`, the config's slug, where this write made it.
+          detail: { ...(mine ? { personal: named.slug } : {}), ...(made === undefined ? {} : { made: made.slug }), keys: lines },
         },
         // As entries: a key named `__proto__` is a key like any other.
         answer: { keys: Object.fromEntries(answered) },
@@ -351,15 +478,15 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
 function secretRefile(input: Presented & SecretRefile, vault: Deciding): Operation<Parts, Answers['secret.refile']> {
   const shown = presented(input);
   const { project: projectSlug, environment: environmentSlug, folder: from, to } = input;
-  if (!text(projectSlug) || !text(environmentSlug) || from === null || !filed(from) || to === undefined || !filed(to)) {
-    throw new TypeError('a folder of keys is named by its place\'s slugs and its name, and renamed to one of 1 to 64 characters, with no "/", no control character and no space at either end, or emptied');
+  const mine = input.mine ?? false;
+  if (!text(projectSlug) || !text(environmentSlug) || typeof mine !== 'boolean' || from === null || !filed(from) || to === undefined || !filed(to)) {
+    throw new TypeError('a folder of keys is named by its place\'s slugs, or the caller\'s personal config of it, and its name, and renamed to one of 1 to 64 characters, with no "/", no control character and no space at either end, or emptied');
   }
-  const project = sql`(SELECT p.id FROM projects p WHERE p.slug = ${projectSlug})`;
-  const here = sql`(SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${environmentSlug})`;
+  const { project, here, environment } = keysPlace(shown.token, projectSlug, environmentSlug, mine);
   const read = {
     ...callerParts(shown.token, project),
     project: part(projects, sql`${projects.slug} = ${projectSlug}`),
-    environment: part(environments, sql`${environments.projectId} = ${project} AND ${environments.slug} = ${environmentSlug}`),
+    environment,
     // Every key of the environment, not those its rows say are in the folder: a row moved out behind the vault says it is not.
     keys: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} = ${here}`),
   };
@@ -381,9 +508,19 @@ function secretRefile(input: Presented & SecretRefile, vault: Deciding): Operati
       if (caller === null) return { refused: 'unauthenticated' };
       if (caller.workload?.stop != null) return { refused: caller.workload.stop };
       if (caller.workload?.narrowed === true) return { refused: 'narrowed' };
-      const { place, environment } = placed(seen);
-      // As for a write: a personal config holds keys only its owner files, which no route serves yet.
-      if (place === undefined || environment === undefined || environment.owner !== null || !caller.may('secret.write', environment)) return { refused: 'no_access' };
+      const { place, environment: named } = placed(seen);
+      // As for a write: not there, someone's personal config, or not theirs to write in, and a personal config's keys, its owner's alone.
+      if (place === undefined || named === undefined || named.owner !== null) return { refused: 'no_access' };
+      const denied = deniedIn(caller, named, mine, ['secret.write']);
+      if (denied !== undefined) return denied;
+      const own = mine ? seen.environment.find((row) => row.parentId === named.id && row.owner !== null && !row.slug.includes('~')) : named;
+      // Found by who holds the token, which its MAC says nothing of; edited behind the vault, it is not guessed at; archived, it is written in no more.
+      if (own !== undefined && own.owner !== (mine ? caller.principal : null)) return { refused: 'unreadable' };
+      if (own === undefined && unsealed.environment > 0) return { refused: 'unreadable' };
+      if (own !== undefined && !live(own)) return { refused: 'no_access' };
+      // A config they do not have files nothing: no folder there.
+      if (own === undefined) return { refused: 'no_folder' };
+      const environment = own;
       if (unsealed.keys > 0) return { refused: 'unreadable' };
       const there = seen.keys.filter((row) => row.environmentId === environment.id && row.folder === from);
       if (there.length === 0) return { refused: 'no_folder' };
@@ -398,8 +535,8 @@ function secretRefile(input: Presented & SecretRefile, vault: Deciding): Operati
           credential: caller.credential.id,
           request: shown.request,
           ip: shown.ip,
-          objects: [`project:${place.id}`, `environment:${environment.id}`, `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...there.map((row) => `secret:${row.id}`)],
-          detail: { folder: from, to, keys: moved },
+          objects: [`project:${place.id}`, `environment:${environment.id}`, ...(mine ? [`environment:${named.id}`] : []), `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...there.map((row) => `secret:${row.id}`)],
+          detail: { ...(mine ? { personal: named.slug } : {}), folder: from, to, keys: moved },
         },
         answer: { moved },
       };
