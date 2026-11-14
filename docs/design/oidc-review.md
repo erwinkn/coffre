@@ -13,7 +13,6 @@ moving bindings into the vault would not, by itself, fix these problems.
 This review covers [the proposal](oidc.md), the existing
 [sign-in service](../../packages/server/src/api/signin.ts),
 [authentication boundary](../../packages/server/src/auth.ts),
-[authentication MACs](../../packages/server/src/auth-rows.ts),
 [credential queries](../../packages/server/src/db/queries.ts), both
 [Postgres](../../packages/db/src/schema.ts) and
 [SQLite](https://github.com/erwinkn/coffre/blob/7be559628/packages/db/src/schema.sqlite.ts) schemas, the vault's access

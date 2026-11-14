@@ -10,7 +10,6 @@ export default {
   scheduled: coffre.scheduled,
 };
 
-/** The Durable Objects `SOCKETS`, `GATES` and `ANCHOR` bind (wrangler.jsonc). */
+/** The Durable Objects `SOCKETS` and `GATES` bind (wrangler.jsonc). */
 export const CoffreSockets = coffre.Sockets;
 export const CoffreGates = coffre.Gates;
-export const CoffreAnchor = coffre.Anchor;
