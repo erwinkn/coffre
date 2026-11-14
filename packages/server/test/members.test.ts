@@ -13,6 +13,7 @@ import { eq, sql } from 'drizzle-orm';
 
 import { amend, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, user, write } from '@coffre/vault/testing';
 
+import type { ConnectedApp } from '../src/api/routes/members.ts';
 import { openApp } from './app-fixture.ts';
 
 const app = await openApp();
@@ -395,7 +396,7 @@ test('what is not served yet answers 501', async () => {
 });
 
 type Exposed = { project: string; environment: string; key: string; version: number; how: 'read' | 'wrote'; at: string };
-type Report = Record<string, unknown> & { status: string; exposed: Exposed[]; rotated: number; live: Record<string, number> };
+type Report = Record<string, unknown> & { status: string; exposed: Exposed[]; rotated: number; live: Record<string, number>; apps: ConnectedApp[] };
 const report = async (member: string): Promise<[Report, string[], number]> => {
   const [[status, body], calls, statements] = await cost(() => call('cy-cli', 'GET', `/members/${member}`));
   assert.equal(status, 200, JSON.stringify(body));
