@@ -187,7 +187,8 @@ async function cost<T>(run: () => Promise<T>): Promise<[T, string[], number]> {
 }
 
 test("a run's token naming the key buys a session bound to it: one statement, one sign-in, one more for its places by path, and the gate's nonce for its first request", async () => {
-  const [made, calls, statements] = await cost(() => signIn({ oidc: idToken({ aud: `${PUBLIC_URL}#jkt=${jkt}` }) }));
+  const naming = idToken({ aud: `${PUBLIC_URL}#jkt=${jkt}` });
+  const [made, calls, statements] = await cost(() => signIn({ oidc: naming }));
   assert.equal(made.status, 200, JSON.stringify(made.body));
   assert.deepEqual([made.body.tokenType, made.body.places, calls, statements], ['DPoP', ['market/prod'], ['change'], 2]);
   assert.match(made.body.token!, /^coffre_wl_/);
@@ -197,8 +198,8 @@ test("a run's token naming the key buys a session bound to it: one statement, on
   assert.ok(Math.abs(expires - (Date.now() + 3_600_000)) < 60_000 && notAfter - Date.now() > 23 * 3_600_000, `${made.body.expiresAt} ${made.body.notAfter}`);
   const me = await asSession('/api/me', made.body.token!, { method: 'GET' });
   assert.deepEqual([me.status, me.body.principal?.id], [200, 'deploy']);
-  // The same token again makes another session for the same key.
-  assert.equal((await signIn({ oidc: idToken({ aud: `${PUBLIC_URL}#jkt=${jkt}` }) })).status, 200);
+  // The same token again, with a fresh proof, makes another session for the same key.
+  assert.equal((await signIn({ oidc: naming })).status, 200);
 });
 
 test("the token is worth nothing to another key, which its audience does not name; nothing of the vault's is asked", async () => {
