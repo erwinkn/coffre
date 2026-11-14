@@ -130,6 +130,15 @@ test('a key made a reference is restored from its own history: the reference end
   assert.deepEqual((entry.detail as { keys: object[] }).keys, [{ key: 'STRIPE_KEY', secret: ids.STRIPE_KEY, version: 4, nature: 'sensitive', restored: 2, source: ids.SOURCE }]);
 });
 
+test('a restore over a reference to a sensitive source brings the old value back sensitive, as 0.14.7 did: never looser than what the key read', async () => {
+  // DATABASE_URL: a secret at 1, then a reference to STRIPE_KEY, sensitive: its row says no nature, its source does.
+  assert.ok(!('refused' in (await vault.change(writing('ada-cli', [{ key: 'DATABASE_URL', ref: { project: 'market', environment: 'prod', key: 'STRIPE_KEY' } }])))));
+  assert.deepEqual([(await rowOf('DATABASE_URL')).nature, (await rowOf('DATABASE_URL')).source], [null, ids.STRIPE_KEY]);
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'DATABASE_URL', 1)), { answer: { keys: { DATABASE_URL: { version: 2, nature: 'sensitive' } }, outcomes: { DATABASE_URL: 'changed' } } });
+  assert.deepEqual([(await rowOf('DATABASE_URL')).nature, (await rowOf('DATABASE_URL')).source, (await versionsOf('DATABASE_URL'))[1]!.sensitive], ['sensitive', null, true]);
+  assert.deepEqual(await given(['DATABASE_URL']), ['sensitive']);
+});
+
 test('a key with no value of its own goes by its newest version\'s label, which its encryption holds: relabelled, the restore is refused', async () => {
   // ACCOUNT: plain at 1, sensitive at 2, then a reference to billing's SOURCE, a secret: its row says no nature now.
   await typed('ACCOUNT', 'acct_2', 'sensitive');

@@ -620,3 +620,91 @@ test("a version is each key's secret and version alone: what else a peek or a re
   assert.equal(versionOf(read), 'o9-wbe2hJSoJxsC_-Wsfe94I0wr_K46CtIhB5MfBVjw');
   assert.equal(versionOf(read.map((item, i) => ({ ...item, nature: i === 0 ? ('plain' as const) : ('sensitive' as const) }))), versionOf(read));
 });
+
+// What 0.14.7's secrets-api, api-routes, credential-scopes and service-sensitive
+// suites held of a key and its value that no 0.16 test held yet, as 0.14.7 answered.
+const reveal = (label: string, path: string) => call(label, 'POST', '/reveals', { path });
+const set = async (label: string, path: string, patch: Record<string, unknown>) => {
+  const [status, body] = await call(label, 'PATCH', `/secrets/${path}`, patch);
+  assert.equal(status, 200, JSON.stringify(body));
+};
+
+test('the longest value round-trips whole, however many bytes it takes: 64 Ki characters, three times that in euro signs', async () => {
+  const [ascii, euros] = ['x'.repeat(64 * 1024), '€'.repeat(64 * 1024)];
+  await set('bo-cli', 'market/prod', { ASCII: ascii, EUROS: euros });
+  const [status, body] = await call('bo-cli', 'POST', '/reveals', { path: 'market/prod', keys: ['ASCII', 'EUROS'] });
+  assert.equal(status, 200, JSON.stringify(body).slice(0, 200));
+  const values = body.values as Record<string, string>;
+  assert.ok(values.ASCII === ascii && values.EUROS === euros, 'a value came back other than written');
+  // Both fit after encryption: one byte of ciphertext a byte of text, 192 KiB for the euros.
+  const stored = await rowsOf<{ key: string; bytes: number }>(world.owner, sql`SELECT s.key, octet_length(v.ciphertext) AS bytes FROM secret_versions v JOIN secrets s ON s.id = v.secret_id WHERE s.key IN ('ASCII', 'EUROS') ORDER BY s.key`);
+  assert.deepEqual(stored.map(({ key, bytes }) => [key, bytes]), [['ASCII', 64 * 1024], ['EUROS', 3 * 64 * 1024]]);
+});
+
+test('keys that differ only in case are two secrets, and keys named as Object.prototype holds a property round-trip', async () => {
+  await set('bo-cli', 'market/dev', { API_KEY: 'upper', api_key: 'lower', constructor: 'one', toString: 'two' });
+  const [, all] = await reveal('ada-cli', 'market/dev');
+  const values = all.values as Record<string, string>;
+  assert.deepEqual([values.API_KEY, values.api_key, values.constructor, values.toString], ['upper', 'lower', 'one', 'two']);
+  await set('bo-cli', 'market/dev', { api_key: 'lower, again' });
+  assert.deepEqual((await reveal('ada-cli', 'market/dev/API_KEY'))[1].values, { API_KEY: 'upper' });
+  assert.deepEqual((await reveal('ada-cli', 'market/dev/api_key'))[1].values, { api_key: 'lower, again' });
+  assert.deepEqual((await list('ada-cli', 'market/dev')).keys.map((key) => key.key).filter((key) => /^(api_key|API_KEY|constructor|toString)$/.test(key)), ['API_KEY', 'api_key', 'constructor', 'toString']);
+});
+
+test("a key's age is its current version's: a rename or a move leaves it, a write moves it", async () => {
+  await set('bo-cli', 'market/prod', { OLD_KEY: 'v1' });
+  const age = async (key: string) => (await list('ada-cli', 'market/prod')).keys.find((listed) => listed.key === key)?.updatedAt;
+  const written = await age('OLD_KEY');
+  assert.match(String(written), /^\d{4}-\d\d-\d\dT/);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal((await call('bo-cli', 'PATCH', '/secrets/market/prod/OLD_KEY', { key: 'NEW_KEY' }))[0], 200);
+  assert.equal((await call('bo-cli', 'PATCH', '/secrets/market/prod/NEW_KEY', { folder: 'stripe' }))[0], 200);
+  const moved = (await list('ada-cli', 'market/prod')).keys.find((listed) => listed.key === 'NEW_KEY')!;
+  assert.deepEqual([moved.updatedAt, moved.folder], [written, 'stripe']);
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await set('bo-cli', 'market/prod', { NEW_KEY: 'v2' });
+  const [, history] = await call('ada-cli', 'GET', '/secrets/market/prod/NEW_KEY/versions');
+  const current = (history.versions as { version: number; current: boolean; createdAt: string }[]).find((version) => version.current)!;
+  const after = await age('NEW_KEY');
+  assert.deepEqual([current.version, after], [2, current.createdAt]);
+  assert.ok(after! > written!, `${after} after ${written}`);
+});
+
+test('each segment is one level: …/prod/versions is a secret named versions, its history a level further down', async () => {
+  await set('bo-cli', 'market/prod', { versions: 'v1' });
+  await set('bo-cli', 'market/prod', { versions: 'v2' });
+  const [status, history] = await call('ada-cli', 'GET', '/secrets/market/prod/versions/versions');
+  assert.equal(status, 200, JSON.stringify(history));
+  assert.deepEqual((history.versions as { version: number }[]).map((version) => version.version), [2, 1]);
+  assert.equal((await call('bo-cli', 'PATCH', '/secrets/market/prod/versions', { key: 'RENAMED' }))[0], 200);
+  const names = (await list('ada-cli', 'market/prod')).keys.map((key) => key.key);
+  assert.deepEqual([names.includes('RENAMED'), names.includes('versions')], [true, false]);
+  // `/secrets/market/prod/versions` is a secret's address: there is no GET on it.
+  const response = await app.request('/api/secrets/market/prod/versions', { headers: { authorization: 'Bearer ada-cli' } });
+  assert.deepEqual([response.status, response.headers.get('allow')], [405, 'PATCH']);
+});
+
+test("a service account on a token no Owner issued is refused a whole environment holding a sensitive key, by that key's name", async () => {
+  // cj maintains market on a token a Developer issued; ci on one an Owner did.
+  assert.deepEqual(refused(await reveal('cj-token', 'market/prod/S')), [403, 'forbidden', 'not_owner_issued']);
+  const [status, body] = await reveal('cj-token', 'market/prod');
+  assert.deepEqual([status, body.error, body.reason], [403, 'forbidden', 'not_owner_issued']);
+  assert.match(body.message!, /^market\/prod\/S: a service account reads a sensitive value only on a token or trust binding an Owner of its project issued/);
+  // The rest it reads one by one, and ci reads it all, S included.
+  assert.deepEqual((await reveal('cj-token', 'market/prod/A'))[1].values, { A: 'a' });
+  assert.equal(((await reveal('ci-token', 'market/prod'))[1].values as Record<string, string>).S, 's');
+});
+
+test("a token that reads only dev lists the keys its project's other environments have and dev lacks, by name, as the CI gate needs: never their values", async () => {
+  // dev is a fork of prod, so it lacks only what staging holds beside it.
+  await set('cy-cli', 'market/staging', { STAGING_ONLY: 'staging-only' });
+  await write(world, ...rows('credentials', credential('gate-token', ci, { scope: JSON.stringify([{ projectId: ids.market, environmentId: ids.dev, role: 'viewer' }]) })));
+  const [status, body] = await call('gate-token', 'GET', '/projects/market/dev/missing');
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.deepEqual(body.missing, [{ key: 'STAGING_ONLY', in: ['staging'], folder: null }, { key: 'Y', in: ['staging'], folder: null }, { key: 'Z', in: ['staging'], folder: null }]);
+  assert.equal(JSON.stringify(body).includes('staging-only'), false);
+  assert.deepEqual(refused(await call('gate-token', 'GET', '/projects/market/prod/missing')), NO_ACCESS);
+  assert.equal((await reveal('gate-token', 'market/prod'))[0], 403);
+});
