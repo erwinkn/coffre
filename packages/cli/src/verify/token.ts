@@ -33,13 +33,14 @@ export async function tokenChecks(
   report: Checks,
   origin: string,
   setup: { token?: string; canary?: Canary },
+  send: typeof fetch,
   { prefix = '' }: { prefix?: string } = {},
 ): Promise<void> {
-  const api = setup.token === undefined ? undefined : bearer(origin, setup.token);
-  const token = await report.check(`${prefix}token`, { api, canary: setup.canary }, ({ api, canary }) => whoIsToken(origin, api, canary));
+  const api = setup.token === undefined ? undefined : bearer(origin, setup.token, send);
+  const token = await report.check(`${prefix}token`, { api, canary: setup.canary }, ({ api, canary }) => whoIsToken(origin, api, canary, send));
   const needs = { api, canary: setup.canary, token, secret: setup.token };
   await report.check(`${prefix}token reveal`, needs, ({ api, canary, token }) => tokenReveal(api, canary, token));
-  await report.check(`${prefix}token scan`, needs, ({ canary, secret }) => tokenScan(origin, secret, canary));
+  await report.check(`${prefix}token scan`, needs, ({ canary, secret }) => tokenScan(origin, secret, canary, send));
   await report.check(`${prefix}token scope`, needs, ({ api, canary }) => tokenScope(api, canary));
 }
 
@@ -48,8 +49,8 @@ export async function tokenChecks(
 type Token = { member: string };
 
 /** The token is a service's, and reads the canary's environment. */
-async function whoIsToken(origin: string, api: CoffreClient, canary: Canary): Promise<{ detail: string; value: Token }> {
-  const auth = (await (await fetch(`${origin}/api/auth`)).json()) as AuthInfo;
+async function whoIsToken(origin: string, api: CoffreClient, canary: Canary, send: typeof fetch): Promise<{ detail: string; value: Token }> {
+  const auth = (await (await send(`${origin}/api/auth`)).json()) as AuthInfo;
   if (auth.signin === null) throw new Skip("behind Cloudflare Access, coffre issues no bearer tokens: the token's checks need coffre's own sign-in");
   const me = await api.me();
   expect(me.principal.type === 'service', `the token is ${me.principal.type}:${me.principal.id}'s, not a service's`);
@@ -91,8 +92,8 @@ async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Pro
  * The canary's value, in any answer to a GET route as the token or as no
  * one, or in any page. The reveal is the only answer allowed to carry it.
  */
-async function tokenScan(origin: string, token: string, canary: Canary): Promise<string> {
-  const api = bearer(origin, token);
+async function tokenScan(origin: string, token: string, canary: Canary, send: typeof fetch): Promise<string> {
+  const api = bearer(origin, token, send);
   const me = await api.me();
   const member = `token:${me.principal.id}`;
   const listed = me.environments.map(({ project, environment }) => ({ project, environment }));
@@ -111,7 +112,7 @@ async function tokenScan(origin: string, token: string, canary: Canary): Promise
   ];
   let answers = 0;
   const look = async (what: string, url: string, headers: Record<string, string>) => {
-    const text = await (await fetch(url, { headers, redirect: 'manual' })).text();
+    const text = await (await send(url, { headers, redirect: 'manual' })).text();
     answers++;
     if (forms.some((form) => text.includes(form))) leaks.push(what);
   };

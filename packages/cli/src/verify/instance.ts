@@ -13,13 +13,13 @@
 import { randomBytes } from 'node:crypto';
 import { parseArgs } from 'node:util';
 
-import { CoffreError, createClient, shownMember, type CoffreClient } from '@coffre/client';
+import { CoffreError, shownMember, type CoffreClient } from '@coffre/client';
 
 import { readSecret } from '../secret.ts';
 import { browsersOnly, credentialHeaders, instanceOrigin, resolveTarget, SIGN_IN_HINT, signInError, type Local, type SessionFlags, type Store } from '../instance.ts';
 import { style, type Output } from '../tty.ts';
 import { anonymousChecks } from './anonymous.ts';
-import { Checks, expect, Failure, stop } from './checks.ts';
+import { Checks, client, expect, Failure, stop } from './checks.ts';
 import { parseCanary, tokenChecks, type Canary } from './token.ts';
 
 /** The run's own place on an instance, made the first time, and found after. Nothing else is touched. */
@@ -60,7 +60,19 @@ and writes its canary and its grants. Exits 1 when a check fails.`;
 /** What the run issued, to revoke at its end. */
 type Issued = { member: string; id: string };
 
-export async function verifyInstance(args: string[], store: Store, session: SessionFlags, local: Local | null, out: Output = process.stdout): Promise<void> {
+/**
+ * `fetching` is the CLI's fetch for an instance (`main.ts`): every check's request goes through it, so a redirect is
+ * never followed and Cloudflare Access answering any of them ends the run with what 0.16.0 says there, before a
+ * credential is sent.
+ */
+export async function verifyInstance(
+  args: string[],
+  store: Store,
+  session: SessionFlags,
+  local: Local | null,
+  fetching: (instance: string) => typeof fetch,
+  out: Output = process.stdout,
+): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
@@ -87,6 +99,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   } catch (error) {
     stop(2, `coffre: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const send = fetching(origin);
   const s = style(out);
   const report = new Checks(out);
   const saved = store.instances[origin];
@@ -111,8 +124,8 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
     out.write(`${s.bold(`Checking ${origin}`)}, as no one and with the bearer token \`coffre login --token\` saved\n`);
     out.write(s.dim("  The token's reads add a few entries to the instance's audit log, for good.\n\n"));
     // Behind Access, as the checks found, the token is not sent.
-    if (await anonymousChecks(report, origin)) stop(1, `coffre: ${browsersOnly(origin)}`);
-    await tokenChecks(report, origin, { token, canary });
+    if (await anonymousChecks(report, origin, send)) stop(1, `coffre: ${browsersOnly(origin)}`);
+    await tokenChecks(report, origin, { token, canary }, send);
     return finish(out, report);
   }
   if (values.canary !== undefined) {
@@ -124,7 +137,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   let api: CoffreClient;
   try {
     const to = resolveTarget({ ...session, url: origin }, store);
-    api = createClient({ url: origin, headers: () => credentialHeaders(to.credential) });
+    api = client(origin, () => credentialHeaders(to.credential), send);
   } catch (error) {
     stop(1, `coffre: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -135,8 +148,8 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
     ),
   );
   // Behind Access, as the checks found, the session is not sent.
-  if (await anonymousChecks(report, origin)) stop(1, `coffre: ${browsersOnly(origin)}`);
-  await ownerChecks(report, origin, api);
+  if (await anonymousChecks(report, origin, send)) stop(1, `coffre: ${browsersOnly(origin)}`);
+  await ownerChecks(report, origin, api, send);
   finish(out, report);
 }
 
@@ -144,7 +157,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
  * As the signed-in owner: who they are, set up, the token's checks; and, however it ends, a Ctrl-C included, the credential
  * revoked. The session stays as it was.
  */
-export async function ownerChecks(report: Checks, origin: string, api: CoffreClient): Promise<void> {
+export async function ownerChecks(report: Checks, origin: string, api: CoffreClient, send: typeof fetch): Promise<void> {
   const owner = await report.check('owner', {}, () => signedIn(api, origin));
   if (owner === undefined) return;
   const issued: Issued[] = [];
@@ -158,7 +171,7 @@ export async function ownerChecks(report: Checks, origin: string, api: CoffreCli
   process.once('SIGTERM', onTerm);
   try {
     const live = await report.check('setup', {}, () => setUp(api, issued));
-    await tokenChecks(report, origin, live ?? {});
+    await tokenChecks(report, origin, live ?? {}, send);
   } finally {
     process.off('SIGINT', onInt);
     process.off('SIGTERM', onTerm);

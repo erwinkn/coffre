@@ -187,7 +187,12 @@ What it holds to there is three things:
 3. What it learns from an answer, it says: Access's redirect to
    `<team>.cloudflareaccess.com`, or coffre's own 401 for a credential
    behind Access (`"reason": "browsers_only"`), ends any command with the
-   first line above.
+   first line above, at the first request it answers: `coffre verify
+   instance`'s checks as no one included, so its session or token is not
+   sent after them, and a run's plan, `GET /use/<project>/<env>`. Not what
+   the credential proxy relays from another service, under
+   `/use/<project>/<env>/<name>/…` or `/use/<name>/<path>/…`: that service's
+   own Access login page is the app's answer.
 
 So a credential can still reach the instance's hostname once. A session
 `coffre login` saved before the instance went behind Access goes with the

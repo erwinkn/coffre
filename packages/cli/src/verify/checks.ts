@@ -42,9 +42,24 @@ export function stop(code: number, message: string): never {
   process.exit(code);
 }
 
-/** The API as a service or the CLI calls it, with a bearer token: every refusal thrown, as a check wants it. */
-export function bearer(origin: string, token: string): CoffreClient {
-  return createClient({ url: origin, headers: () => ({ authorization: `Bearer ${token}` }) });
+/**
+ * The API through the CLI's fetch, `send`: every refusal thrown, as a check wants it, and an instance this machine
+ * cannot reach as `Unreachable`, as the client's own fetch says it.
+ */
+export function client(origin: string, headers: () => Record<string, string>, send: typeof fetch): CoffreClient {
+  return createClient({
+    url: origin,
+    headers,
+    transport: (request) =>
+      send(request).catch((error: unknown) => {
+        throw new Unreachable(origin, error);
+      }),
+  });
+}
+
+/** The API as a service or the CLI calls it, with a bearer token. */
+export function bearer(origin: string, token: string, send: typeof fetch): CoffreClient {
+  return client(origin, () => ({ authorization: `Bearer ${token}` }), send);
 }
 
 type Passed<T> = string | { detail: string; value: T };

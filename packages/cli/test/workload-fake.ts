@@ -45,6 +45,8 @@ export type FakeOptions = {
   /** A logout that never answers; one that asks for a fresh nonce every time. */
   stallLogout?: boolean;
   nonceLogout?: boolean;
+  /** Cloudflare Access in front of these paths: its redirect to the team's login page, before coffre sees the request. */
+  access?: (path: string) => boolean;
 };
 
 const WINDOW = 1024 * 1024;
@@ -129,6 +131,10 @@ export async function fakeCoffre(options: FakeOptions = {}) {
     const url = new URL(req.url!, publicUrl);
     const body = await read(req);
     const record = (outcome: string) => log.push(`${req.method} ${url.pathname} ${outcome}`);
+    if (options.access?.(url.pathname)) {
+      record('access');
+      return void res.writeHead(302, { location: `https://acme.cloudflareaccess.com/cdn-cgi/access/login/${url.host}?redirect_url=${encodeURIComponent(url.pathname)}` }).end();
+    }
 
     if (req.method === 'POST' && url.pathname === '/api/auth/workload') {
       const proof = req.headers.dpop;

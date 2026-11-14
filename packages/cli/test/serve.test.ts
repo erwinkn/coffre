@@ -9,7 +9,7 @@ import { once } from 'node:events';
 import { request } from 'node:http';
 import { connect as connectTcp } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -21,9 +21,13 @@ import { fakeCoffre, fakePostgres } from './workload-fake.ts';
 const MAIN = new URL('../src/main.ts', import.meta.url).pathname;
 const CODE = `coffre_enr_${'k'.repeat(43)}`;
 
-function cli(t: test.TestContext, args: string[], stdin = CODE): { child: ChildProcess; stderr: () => string; stdout: () => string } {
+function cli(t: test.TestContext, args: string[], stdin = CODE, saved?: object): { child: ChildProcess; stderr: () => string; stdout: () => string } {
   const home = mkdtempSync(join(tmpdir(), 'coffre-serve-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
+  if (saved !== undefined) {
+    mkdirSync(join(home, '.coffre'), { mode: 0o700 });
+    writeFileSync(join(home, '.coffre', 'credentials.json'), JSON.stringify(saved), { mode: 0o600 });
+  }
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COFFRE_') && !key.startsWith('ACTIONS_'))), COFFRE_STATE_DIR: home, HOME: home };
   // From the package, whose dependencies a run's command imports.
   const child = spawn(process.execPath, ['--conditions=coffre:source', MAIN, ...args], { env, cwd: new URL('..', import.meta.url).pathname, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -168,6 +172,34 @@ test("a service's run falls back to the bearer exchange where the instance has n
   assert.equal(code, 1);
   assert.deepEqual(coffre.log, ['POST /api/auth/workload 501']);
   assert.match(run.stderr(), /--service signs in with the run's ID token, and there is none/);
+});
+
+test("Cloudflare Access in front of /use/: a run's plan says browsers only, an answer the proxy relays stays the app's, and serve goes by its own --url", async (t) => {
+  // Access in front of the plan, coffre's own answer: the run says what 0.16.0 does there, not that it got no plan.
+  const planned = await fakeCoffre({ access: (path) => path === '/use/market/prod' });
+  t.after(() => planned.close());
+  const run = cli(t, ['--url', planned.url, '--service', 'api-prod', 'run', '--proof', 'enrollment', 'market/prod', '--', process.execPath, '-e', '']);
+  const [code] = await once(run.child, 'exit');
+  assert.equal(code, 1);
+  assert.match(run.stderr(), new RegExp(`coffre: ${planned.url} is behind Cloudflare Access, where coffre 0\\.16\\.0 signs people in through the browser only; the CLI and machines come back in 0\\.16\\.x\n$`));
+  assert.deepEqual(planned.log, ['POST /api/auth/workload 200', 'GET /use/market/prod access']);
+
+  // An upstream behind an Access of its own, through the sidecar: its login redirect is the app's answer, and the sidecar
+  // stays up. Its default instance, another one behind Access as a 0.14 session says, is not the one it names.
+  const relayed = await fakeCoffre({ upstream: () => ({ status: 302, headers: { location: 'https://partner.cloudflareaccess.com/cdn-cgi/access/login/api.partner.example' } }) });
+  t.after(() => relayed.close());
+  const other = 'https://secrets.acme.example';
+  const serve = cli(t, ['serve', '--url', relayed.url, '--service', 'api-prod', '--proof', 'enrollment', '--listen', '127.0.0.1:0'], CODE, {
+    version: 2,
+    current: other,
+    instances: { [other]: { mode: 'cloudflare', obtainedAt: '2026-09-01T00:00:00Z' } },
+  });
+  const [, listener] = await said(serve, /(http:\/\/127\.0\.0\.1:\d+)\/use\/<credential>/);
+  const response = await fetch(`${listener}/use/partner/v1/orders`, { redirect: 'manual' });
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get('location'), 'https://partner.cloudflareaccess.com/cdn-cgi/access/login/api.partner.example');
+  assert.equal(serve.child.exitCode, null, serve.stderr());
+  assert.deepEqual(relayed.forwarded.map(({ path }) => path), ['/use/partner/v1/orders']);
 });
 
 test('coffre serve sends no proof to an instance outside TLS, and survives a request with no URL; --place picks the environment of its tunnels', async (t) => {

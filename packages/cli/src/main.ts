@@ -233,8 +233,8 @@ function target(): Target {
  * nowhere else (`redirect: 'error'` still fails on one). And Cloudflare
  * Access's answer, to whichever request got it, ends the command with what
  * 0.16.0 does there (`accessAnswered`, `browsersOnly`): one place, so no
- * command needs a check of its own. Not under `/use/`, where the credential
- * proxy relays another service's answers.
+ * command needs a check of its own. Not for a request the credential proxy
+ * relays (`relayed`), whose answer is another service's.
  */
 function fetching(instance?: string): typeof fetch {
   const sent = sessionFlags.verbose ? timed(fetch, stderr, instance) : fetch;
@@ -242,10 +242,22 @@ function fetching(instance?: string): typeof fetch {
     const asked = init?.redirect ?? (input instanceof Request ? input.redirect : 'follow');
     const response = await sent(input, { ...init, redirect: 'manual' });
     const url = new URL(input instanceof Request ? input.url : input);
-    if (!url.pathname.startsWith('/use/') && (await accessAnswered(response))) fail(browsersOnly(url.origin));
+    if (!relayed(url) && (await accessAnswered(response))) fail(browsersOnly(url.origin));
     if (asked === 'error' && response.status >= 300 && response.status < 400) throw new TypeError(`fetch failed: ${url.href} redirects, and redirect is "error"`);
     return response;
   };
+}
+
+/**
+ * Whether `url` is one the credential proxy relays to another service, a
+ * credential's path under it: `/use/<project>/<env>/<name>/…`, or the stable
+ * `/use/<name>/<a>/…`, three segments or more. Not `/use`, nor the plan,
+ * `/use/<project>/<env>`, which are coffre's own. A stable URL's one-segment
+ * path, `/use/<name>/<a>`, reads as coffre's: an Access login page that
+ * service answers there ends the command as coffre's would.
+ */
+function relayed(url: URL): boolean {
+  return /^\/use\/[^/]+\/[^/]+\/./.test(url.pathname);
 }
 
 /** A request to the instance. */
@@ -1990,7 +2002,7 @@ async function verify(args: string[]): Promise<void> {
   const check = named ?? (await pickCheck());
   switch (check) {
     case 'instance':
-      return verifyInstance(more, readStore(), sessionFlags, localHere());
+      return verifyInstance(more, readStore(), sessionFlags, localHere(), fetching);
     case 'keys': {
       const to = target();
       return verifyKeys(more, client(to), to.origin);
@@ -2187,8 +2199,9 @@ if ('group' in found) {
   process.stderr.write(`coffre: ${command} needs a command after it\n${helpText(words)}`);
   process.exit(2);
 }
-// Behind Cloudflare Access, before the command reads a secret or sends a credential (`accessRefusal`).
-if (talksToInstance(command)) {
+// Behind Cloudflare Access, before the command reads a secret or sends a credential (`accessRefusal`); `serve` names its
+// instance itself, and refuses for that one.
+if (talksToInstance(command) && command !== 'serve') {
   const refusal = refusalBefore();
   if (refusal !== null) fail(refusal);
 }
