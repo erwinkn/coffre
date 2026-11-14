@@ -533,7 +533,7 @@ export type Api = {
         at: string;
       }[];
       rotated: number;
-      issuedTokens: {
+      issuedTokens: null | {
         id: string;
         service: string;
         label: string | null;
@@ -544,7 +544,7 @@ export type Api = {
           [key: string]: string;
         };
       }[];
-      apps: {
+      apps: null | {
         id: string;
         name: string;
         host: string | null;
@@ -555,7 +555,7 @@ export type Api = {
         lastUsedIp: string | null;
         expiresAt: string;
       }[];
-      personalTokens: {
+      personalTokens: null | {
         id: string;
         label: string | null;
         hint: string;
@@ -571,7 +571,7 @@ export type Api = {
           bindingId: string | null;
         };
       }[];
-      references: {
+      references: null | {
         id: string;
         holder: string;
         source: string;
@@ -678,7 +678,7 @@ export type Api = {
           at: string;
         }[];
         rotated: number;
-        issuedTokens: {
+        issuedTokens: null | {
           id: string;
           service: string;
           label: string | null;
@@ -689,7 +689,7 @@ export type Api = {
             [key: string]: string;
           };
         }[];
-        apps: {
+        apps: null | {
           id: string;
           name: string;
           host: string | null;
@@ -700,7 +700,7 @@ export type Api = {
           lastUsedIp: string | null;
           expiresAt: string;
         }[];
-        personalTokens: {
+        personalTokens: null | {
           id: string;
           label: string | null;
           hint: string;
@@ -716,7 +716,7 @@ export type Api = {
             bindingId: string | null;
           };
         }[];
-        references: {
+        references: null | {
           id: string;
           holder: string;
           source: string;
@@ -2219,7 +2219,7 @@ export type OffboardingReport = {
     at: string;
   }[];
   rotated: number;
-  issuedTokens: {
+  issuedTokens: null | {
     id: string;
     service: string;
     label: string | null;
@@ -2230,7 +2230,7 @@ export type OffboardingReport = {
       [key: string]: string;
     };
   }[];
-  apps: {
+  apps: null | {
     id: string;
     name: string;
     host: string | null;
@@ -2241,7 +2241,7 @@ export type OffboardingReport = {
     lastUsedIp: string | null;
     expiresAt: string;
   }[];
-  personalTokens: {
+  personalTokens: null | {
     id: string;
     label: string | null;
     hint: string;
@@ -2257,7 +2257,7 @@ export type OffboardingReport = {
       bindingId: string | null;
     };
   }[];
-  references: {
+  references: null | {
     id: string;
     holder: string;
     source: string;

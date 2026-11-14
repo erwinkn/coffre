@@ -18,8 +18,8 @@ export function PrincipalReportCards({ report }: { report: PrincipalReport }) {
   return (
     <>
       {report.status === 'removed' && <ConsiderRotating report={report} person={person} />}
-      {report.issuedTokens.length > 0 && <IssuedTokens report={report} />}
-      {report.references.length > 0 && <MadeReferences report={report} />}
+      {report.issuedTokens !== null && report.issuedTokens.length > 0 && <IssuedTokens tokens={report.issuedTokens} />}
+      {report.references !== null && report.references.length > 0 && <MadeReferences references={report.references} />}
     </>
   );
 }
@@ -179,7 +179,7 @@ function ConsiderRotating({ report, person }: { report: PrincipalReport; person:
  * environment that holds it, like a value, not to them (D46), so their
  * leaving ends none. Listed to review.
  */
-function MadeReferences({ report }: { report: PrincipalReport }) {
+function MadeReferences({ references }: { references: NonNullable<PrincipalReport['references']> }) {
   return (
     <Card
       labelledBy="made-references"
@@ -196,7 +196,7 @@ function MadeReferences({ report }: { report: PrincipalReport }) {
             </tr>
           </thead>
           <tbody>
-            {report.references.map((reference) => (
+            {references.map((reference) => (
               <tr key={reference.id}>
                 <td className="mono" data-label="Reference">{reference.holder}</td>
                 <td data-label="Reads">
@@ -215,7 +215,7 @@ function MadeReferences({ report }: { report: PrincipalReport }) {
   );
 }
 
-function IssuedTokens({ report }: { report: PrincipalReport }) {
+function IssuedTokens({ tokens }: { tokens: NonNullable<PrincipalReport['issuedTokens']> }) {
   return (
     <Card
       labelledBy="issued-tokens"
@@ -232,7 +232,7 @@ function IssuedTokens({ report }: { report: PrincipalReport }) {
             </tr>
           </thead>
           <tbody>
-            {report.issuedTokens.map((token) => (
+            {tokens.map((token) => (
               <tr key={token.id}>
                 <td>
                   <span className="cell-stack">

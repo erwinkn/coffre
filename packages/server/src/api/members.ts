@@ -147,19 +147,23 @@ export type OffboardingReport = {
   exposed: ExposedSecret[];
   /** Secrets they saw that have had a new version since. */
   rotated: number;
-  /** Service tokens they issued that still work. */
-  issuedTokens: IssuedToken[];
+  /**
+   * Service tokens they issued that still work. This and the three lists
+   * below are null where the instance does not list them (0.16 does not
+   * yet), which is not the same as none: the UI then says nothing of them.
+   */
+  issuedTokens: IssuedToken[] | null;
   /** A person's connected MCP apps, which removing them disconnects. */
-  apps: ConnectedApp[];
+  apps: ConnectedApp[] | null;
   /** A person's personal tokens, which removing them revokes; none for a service account, whose tokens are on its page. */
-  personalTokens: TokenRow[];
+  personalTokens: TokenRow[] | null;
   /**
    * References they made, live ones first, as the log's `reference.create`
    * entries name their actor: each belongs to the environment that holds
    * it, and their leaving ends none. Listed for review
    * (docs/design/environments.md, "Offboarding").
    */
-  references: ReferenceView[];
+  references: ReferenceView[] | null;
   /**
    * Their personal configs (docs/design/forking.md), by project, the
    * environment each is a config of, and the slug that deletes it: values
