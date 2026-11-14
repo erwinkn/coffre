@@ -13,7 +13,7 @@ moving bindings into the vault would not, by itself, fix these problems.
 This review covers [the proposal](oidc.md), the existing
 [sign-in service](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/src/api/signin.ts),
 [authentication boundary](../../packages/server/src/auth.ts),
-[credential queries](../../packages/server/src/db/queries.ts), both
+[credential queries](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/src/db/queries.ts), both
 [Postgres](../../packages/db/src/schema.ts) and
 [SQLite](https://github.com/erwinkn/coffre/blob/7be559628/packages/db/src/schema.sqlite.ts) schemas, the vault's access
 checks, and the [architecture limits](../architecture.md#limits).
@@ -715,7 +715,7 @@ against these requirements before release.
 
 **Revocation.** The same uncached credential query now checks the binding
 MAC, revocation and tombstone. This fits the existing
-[`findCredential`](../../packages/server/src/db/queries.ts) query and its
+[`findCredential`](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/src/db/queries.ts) query and its
 Hyperdrive cache avoidance without another database connection or vault
 call. Restoring a removed binding together with its old credential no
 longer revives that credential while the successful unbind remains. The

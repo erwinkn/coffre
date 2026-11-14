@@ -414,7 +414,7 @@ names the policy it was weighed from by its revision (`policyRevision`,
 packages/core/src/vault.ts): the newest `policy.change` and a digest of
 the protected environments' slugs, by id, which the vault computes again
 under its head and refuses, `policy_changed`, unless equal.
-`protectIds` (packages/server/src/api/roles.ts) asks with the caller's,
+`protectIds` (0.14.7's [`packages/server/src/api/roles.ts`](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/src/api/roles.ts)) asks with the caller's,
 and the request's caller then holds the policy it made, as of its own
 entry. A role's edit (`changeRole`) is asked with its preview's: the
 preview answers with the revision it was weighed from, the confirmation
@@ -435,7 +435,7 @@ stale, and asked again it goes through. That is the price of a fence
 that never trusts the newest entry's own number, which a forged one
 could hold.
 
-Tests (packages/server/test/roles.test.ts): "rule 2: a reveal of plain
+Tests (0.14.7's [`packages/server/test/roles.test.ts`](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/test/roles.test.ts)): "rule 2: a reveal of plain
 values…", "rule 2: a plain value is fenced by a read…", "rule 2: a
 protected environment renamed while a token is given…", "a role edit
 weighed from a policy another change overtook…", "a role edit confirmed
@@ -489,7 +489,7 @@ so the vault Worker deploys with the app, or first. Acceptable under
 R17, nobody running Coffre in production yet. 0.10 reads one 0.9 issued
 as its roles ship.
 
-Tests (packages/server/test/roles.test.ts): "rule 3: a personal token
+Tests (0.14.7's [`packages/server/test/roles.test.ts`](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/test/roles.test.ts)): "rule 3: a personal token
 holds no more…", "rule 3: a service token issued under a narrowed
 role…".
 
@@ -509,7 +509,7 @@ reads where it is held, as the policy has each reader there. The project-wide ch
 and a project's log leaves out each protected environment its reader's
 role leaves out (`listAudit`).
 
-Tests (packages/server/test/roles.test.ts): "rule 4: a personal token on
+Tests (0.14.7's [`packages/server/test/roles.test.ts`](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/test/roles.test.ts)): "rule 4: a personal token on
 a whole project…", "rule 4: who reads through a reference…", "a
 reference takes its value and nature from its source…", "a reference to
 a sensitive source is use-only where it lives…", "a person
@@ -525,7 +525,7 @@ by id (rows), or not at all, and why it need not. A change to the
 policy itself, and a role's edit confirmed from its preview, is checked
 by the vault for both at once, under its head, as the revision. A change to this list,
 or a new way to make one, comes with its row here and its case in
-packages/server/test/roles.test.ts ("what changes the policy: …"), where
+0.14.7's [`packages/server/test/roles.test.ts`](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/test/roles.test.ts) ("what changes the policy: …"), where
 each is made while Ada gives a token on all of market, a decision rule 4
 weighs in protected prod.
 

@@ -303,5 +303,5 @@ For one key, template the path:
 `dev/vault-kv/main.go` makes ESO's calls through HashiCorp's own Go client
 against `pnpm dev`. It is a manual check, kept for when a client changes,
 and the test suite does not run it. Its header comment says how to run it.
-`packages/server/test/vault-kv.test.ts` sends the same requests in the
+[0.14.7's vault-kv test](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/test/vault-kv.test.ts) sent the same requests in its
 suite.

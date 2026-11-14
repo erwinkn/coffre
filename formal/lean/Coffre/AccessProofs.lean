@@ -441,7 +441,7 @@ theorem protected_never_widens {h : Holdings} {ps qs p x}
 
 /-! ## Only an Owner of the project gives a service its sensitive values (R32)
 
-`issuedScope` in `packages/server/src/api/services.ts` keeps each grant of a
+`issuedScope` in 0.14.7's `packages/server/src/api/services.ts` kept each grant of a
 service's credential as `serviceGrant` does: its role's columns now, reading
 the sensitive values there only if its issuer is an Owner of the project
 (`ownsProject`), and, replacing a binding, no more than that one did
