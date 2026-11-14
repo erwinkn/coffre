@@ -29,7 +29,9 @@ test('a name a plain object holds already names no role and no project of the po
     assert.equal(readsWholeLog(odd), false);
     assert.deepEqual(protectedWithin(DEFAULT_POLICY, { projectId: name }), []);
     const developer: Holdings = { role: 'developer', scope: EVERYWHERE, grants: [], policy: DEFAULT_POLICY };
-    assert.equal(givesService(developer, EVERYWHERE, 'viewer', { projectId: name }), true);
+    // On a whole project, what they hold in its protected environments, whichever those are: use and write, not read.
+    assert.equal(givesService(developer, EVERYWHERE, 'contributor', { projectId: name }), true);
+    assert.equal(givesService(developer, EVERYWHERE, 'viewer', { projectId: name }), false);
   }
 });
 
@@ -53,11 +55,17 @@ test('a grant on an environment gives nothing while its role holds a permission 
   const onMarket: Holdings = { ...eve(wide), grants: [{ ...onDev, environmentId: null }] };
   assert.equal(allows(onMarket, 'grant.manage', place), true);
   assert.equal(allows(onMarket, 'secret.read', place), true);
-  // Nor is one given at an environment, to a service account or on its credential: a Maintainer of market, who holds
-  // environment.manage at market/dev, gives no maintainer there; an Owner issues none there for an account that holds it on market.
-  const maintainer: Holdings = { role: 'member', scope: EVERYWHERE, grants: [{ projectId: market, environmentId: null, role: 'maintainer' }], policy: DEFAULT_POLICY };
-  assert.equal(givesService(maintainer, EVERYWHERE, 'maintainer', place), false);
-  assert.equal(givesService(maintainer, EVERYWHERE, 'maintainer', { projectId: market }), true);
+  // Nor is one given at an environment, to a service account or on its credential: a Keeper of market, who holds
+  // environment.manage at market/dev, gives no keeper there; an Owner issues none there for an account that holds it on market.
+  const keeper = { name: 'Keeper', description: '', permissions: ['secret.use', 'secret.write', 'environment.manage'], protected: ['secret.use', 'secret.write'] } as const;
+  const kept: Policy = { ...DEFAULT_POLICY, roles: { ...DEFAULT_POLICY.roles, keeper } };
+  const holding = (role: string, policy: Policy): Holdings => ({ role: 'member', scope: EVERYWHERE, grants: [{ projectId: market, environmentId: null, role }], policy });
+  assert.equal(givesService(holding('keeper', kept), EVERYWHERE, 'keeper', place), false);
+  assert.equal(givesService(holding('keeper', kept), EVERYWHERE, 'keeper', { projectId: market }), true);
+  // A Maintainer of market gives no maintainer on market either, for another reason: a grant on a whole project takes
+  // holding the role in the protected column, and a Maintainer reads no protected value (D241).
+  assert.equal(givesService(holding('maintainer', DEFAULT_POLICY), EVERYWHERE, 'maintainer', place), false);
+  assert.equal(givesService(holding('maintainer', DEFAULT_POLICY), EVERYWHERE, 'maintainer', { projectId: market }), false);
   const owner: Holdings = { role: 'owner', scope: EVERYWHERE, grants: [], policy: DEFAULT_POLICY };
   const account = { grants: [{ role: 'maintainer', place: { projectId: market } }], admittedBy: null };
   assert.equal(issuesCredential(owner, EVERYWHERE, 'user:ada', account, [{ role: 'maintainer', place }]), false);

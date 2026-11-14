@@ -2,7 +2,7 @@
  * The changes of sign-in and of credentials (`packages/vault/src/ops/signin.ts`,
  * docs/design/0.16.md, "Signing in").
  */
-export type SigninChanges = Signin | CredentialEnd | AccountLink | AccountUnlink;
+export type SigninChanges = Signin | CredentialEnd | AccountLink | AccountUnlink | TokenCreate;
 
 export type SigninAnswers = {
   signin: Issued;
@@ -11,6 +11,8 @@ export type SigninAnswers = {
   /** The identity the account is bound by. */
   'account.link': { identity: string };
   'account.unlink': { identity: string };
+  /** The token made, and what it reaches, each place by its path and the role there. */
+  'token.create': Issued & { scope: Record<string, string> };
 };
 
 /**
@@ -105,3 +107,40 @@ export type AccountLink = { op: 'account.link'; account: Account };
  * first time.
  */
 export type AccountUnlink = { op: 'account.unlink'; identity: string };
+
+/**
+ * Make a token (`token.create`), one of three kinds. The app draws it and
+ * sends its SHA-256 (`credential`), and its hint as the token's list shows it,
+ * its kind's prefix and its last four characters (`coffre_pat_…x7Qd`). Its
+ * scope is sealed on its row, each place by id with what its role held
+ * there as it was made, and never changes after: a request made with it
+ * holds what both that and its member hold then. A credential with a
+ * scope never makes one, but a personal token a handle; a workload's
+ * session makes none (`workload_cannot_issue`).
+ *
+ * - `personal`: a person, on a session, for themselves; a label, a week at
+ *   most, and a scope by path (`{ "market/dev": "viewer" }`), each role one
+ *   that manages no access and that they hold all of at its place now, in
+ *   a project's protected environments too (0.14.7's `personalScope`).
+ * - `handle`: a person, on a session or a personal token of theirs, for
+ *   the proxy (docs/design/credential-proxy.md); a label, a week at most
+ *   and never past the token it is made on, and the environments it stands
+ *   in for by path, `@me` for the person's personal config of one. It
+ *   reaches each, and each parent it inherits from that they read or use,
+ *   reading where they read and using where they only use.
+ * - `service`: a token of the service account `member`, for whoever
+ *   manages it (`issuesCredential`); a label or none, 366 days at most, and
+ *   the scope asked or, `scope` null, every grant it holds. Each place
+ *   reads the sensitive values there only if the caller is an Owner of its
+ *   project (`ownsProject`, R32). Refused `use_only` on an instance whose
+ *   services sign in with a key only.
+ *
+ * A place that is not there and one beyond the caller are one refusal,
+ * `no_access`; a role there is not, or one its place does not take,
+ * `invalid`; a service's token with nothing to reach, `no_grants`.
+ */
+export type TokenCreate = { op: 'token.create'; credential: NewCredential; hint: string } & (
+  | { kind: 'personal'; scope: Record<string, string> }
+  | { kind: 'handle'; paths: string[] }
+  | { kind: 'service'; member: string; scope: Record<string, string> | null }
+);

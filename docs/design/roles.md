@@ -62,9 +62,9 @@ service account, a Viewer of `market/prod`, reads them as it always did.
   and every plain value it hands back reads it again after the value was
   read; either answers 409, reason `policy_changed`, if it moved: a change
   appends under the same head, so one that passes was not overtaken
-  (section 8, rule 2). A Developer's service token weighed before prod was
-  protected, and issued after, is refused; asked again, it is weighed as
-  prod is now. `coffre run`, `export` and `get` ask again once, after a
+  (section 8, rule 2). A Developer's personal token on all of `market`,
+  weighed before prod was protected and issued after, is refused; asked
+  again, it is weighed as prod is now. `coffre run`, `export` and `get` ask again once, after a
   short pause; the UI's confirmations ask the person again.
 - **A reference takes its value and nature from its source, and its
   permissions from where it lives** (Erwin, 2026-10-19, R20, R23).
@@ -498,11 +498,19 @@ too.** A grant on a project reaches each environment of it the policy
 protects (`protectedWithin`, packages/core/src/access.ts, each with its
 slug, which a scoped instance role's filters read), where a person
 holds the protected column and a service account the normal one, so a
-check of what someone holds on a project is made there too: giving a
-service account a role (`givesService`, and through it `managesService`,
-`issuesCredential` and `setsUpServices`, in the app and in the vault's
-`setAccess`, `admit` and `remove`, so service tokens and trust bindings
-too), and a personal token's scope (`personalScope`). Handles name
+check of what someone holds on a project is made there too: a personal
+token's scope (`personalScope`), against the environments protected now.
+Giving a service account a role on a whole project (`givesService`, and
+through it `managesService`, `issuesCredential` and `setsUpServices`, in
+the app and in the vault's `setAccess`, `admit` and `remove`, so service
+tokens and trust bindings too) takes more: whoever does not manage access
+there holds each of the role's environment permissions in their own
+protected column (`heldColumns`), whichever environments are protected,
+now or later. It reads no environment's row, so none taken away from the
+decision widens it (D241). A Developer of `market`, protected or not,
+gives a service Contributor on `market`, and Viewer or Developer
+environment by environment; 0.14.7 let them give Viewer on a `market`
+with nothing protected. Handles name
 environments only. Who reads through a reference (`readersAt`) is who
 reads where it is held, as the policy has each reader there. The project-wide checks left
 (`environment.manage`, `grant.manage`, `project.manage`) have one column,
@@ -513,8 +521,7 @@ Tests (packages/server/test/roles.test.ts): "rule 4: a personal token on
 a whole project…", "rule 4: who reads through a reference…", "a
 reference takes its value and nature from its source…", "a reference to
 a sensitive source is use-only where it lives…", "a person
-gives a service account a role on a whole project only if…", and "a
-service token weighed before prod was protected…".
+gives a service account a role on a whole project only if…".
 
 ### What changes the policy
 

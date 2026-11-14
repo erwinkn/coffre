@@ -1,7 +1,35 @@
 import { randomUUID } from 'node:crypto';
 
-import { isScope, managesService, runsInstance, type Permission, type Place, type RoleDefinition, type Scope, type ServiceAccount } from '@coffre/core/access';
-import type { Account, AccountLink, AccountUnlink, Answers, Asked, CredentialEnd, Presented, SigninChanges } from '@coffre/core/vault';
+import {
+  allows,
+  assignableToEnvironment,
+  definitionOf,
+  delegable,
+  heldColumns,
+  holds as holdsAt,
+  isScope,
+  issuedGrant,
+  issuesCredential,
+  managesService,
+  MAX_PERSONAL_TOKEN_MINUTES,
+  MAX_SCOPE_PLACES,
+  ownsProject,
+  PERMISSIONS,
+  protectedWithin,
+  ROLE_ID,
+  ROLES,
+  runsInstance,
+  scopeDefinition,
+  type Holdings,
+  type Permission,
+  type Place,
+  type Policy,
+  type RoleDefinition,
+  type Scope,
+  type ScopeGrant,
+  type ServiceAccount,
+} from '@coffre/core/access';
+import type { Account, AccountLink, AccountUnlink, Answers, Asked, CredentialEnd, Presented, SigninChanges, TokenCreate } from '@coffre/core/vault';
 import { credentials, environments, grants, identities, policy, principals, projects, roles } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
@@ -275,6 +303,9 @@ function settingOf(seen: ServiceSeen): Scope | null {
  */
 function manages(caller: Asking, seen: ServiceSeen, unsealed: Unsealed<ReturnType<typeof serviceParts> & ReturnType<typeof callerParts>>, member: string, at: number): boolean | 'tampered' {
   if (runs(caller)) return true;
+  // A credential with a scope manages no service, as 0.14.7 gave a non-person no setting (`serviceSettingFor`): a
+  // service's token that holds `grant.manage` would make another's tokens, or a new one of its own past its revocation.
+  if (!onSession(caller)) return false;
   if (unsealed.held + unsealed.places + unsealed.beside > 0) return 'tampered';
   const account = serviceOf(seen, member, at);
   const setting = settingOf(seen);
@@ -452,5 +483,301 @@ function accountUnlink(input: Presented & AccountUnlink, vault: Deciding): Opera
   };
 }
 
+/** A service's token lasts 366 days at most, as 0.14.7's (`MAX_SERVICE_TOKEN_DAYS`). */
+const SERVICE_MINUTES = 366 * 24 * 60;
+/** Where a fork inherits from, three deep, as a use reads it (use.ts). */
+const MAX_PARENTS = 3;
+/** A place's slug as one is made (`SLUG` in places.ts): a tombstone's `~` names none. */
+const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
+/** An environment a handle stands in for, by path: `market/dev`, or `market/dev@me` for its person's personal config of it. */
+const HANDLE_PATH = /^([a-z0-9][a-z0-9-]{0,62})\/([a-z0-9][a-z0-9-]{0,62})(@me)?$/;
+/** Each kind's prefix, which its hint starts with (`tokenHint` in @coffre/core/identity). */
+const PREFIX = { personal: 'coffre_pat_', handle: 'coffre_use_', service: 'coffre_svc_' } as const;
+
+/** A label as 0.14.7 took one, printed in lists and terminals: trimmed, 1 to 120 characters, no control character. */
+const labelled = (value: unknown): value is string => text(value) && value.length <= 120 && value !== '' && value === value.trim() && !/\p{Cc}/u.test(value);
+
+/** What a handle reads and uses, and no more: it writes nothing (0.14.7's `HANDLE_HOLDS`). */
+const HANDLE_HOLDS: RoleDefinition = { name: 'Handle', description: 'Read and use, as its person does.', permissions: ['secret.read', 'secret.use'], protected: ['secret.read', 'secret.use'] };
+/**
+ * The roles a handle's scope is made under: `viewer` where its person
+ * reads, `contributor` where they only use, each keeping what they hold
+ * there of reading and using, in each column (`heldColumns`), whatever an
+ * Owner made of the roles.
+ */
+const HANDLE_ROLES: Policy['roles'] = { viewer: HANDLE_HOLDS, contributor: HANDLE_HOLDS };
+
+/** A place asked, by slug, with the role asked there. */
+type Wanted = { project: string; environment: string | null; role: string };
+
+/** A scope as the app names it, `{ "market/dev": "viewer" }`, copied: 1 to 1,000 places, each a project or one of its environments by slug, and a role's id. */
+function scopeAsked(value: unknown): Wanted[] | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0 || entries.length > MAX_SCOPE_PLACES) return undefined;
+  const wanted: Wanted[] = [];
+  for (const [path, role] of entries) {
+    const [project, environment, ...more] = path.split('/');
+    if (more.length > 0 || !SLUG.test(project!) || !(environment === undefined || SLUG.test(environment)) || typeof role !== 'string' || !ROLE_ID.test(role)) return undefined;
+    wanted.push({ project: project!, environment: environment ?? null, role });
+  }
+  return wanted;
+}
+
+/** A handle's environments as the app names them, copied: 1 to 1,000 paths. */
+function pathsAsked(value: unknown): { project: string; environment: string; personal: boolean }[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_SCOPE_PLACES) return undefined;
+  const paths = [...value].map((path: unknown) => (typeof path === 'string' ? HANDLE_PATH.exec(path) : null));
+  if (!paths.every((match) => match !== null)) return undefined;
+  return paths.map((match) => ({ project: match![1]!, environment: match![2]!, personal: match![3] !== undefined }));
+}
+
+/** A grant of a scope, and the place it is on as the caller names it. */
+type Issued = { grant: ScopeGrant; path: string };
+
+/**
+ * A scope as the credential's row seals it, which a use reads
+ * (`isCredentialScope`): each place by id, in order, both columns of what
+ * it holds, and, a service's, whether it reads the sensitive values there.
+ * 0.14.7's `storedScope`.
+ */
+function sealedScope(issued: readonly Issued[]): ScopeGrant[] {
+  const key = (grant: ScopeGrant) => `${grant.projectId}/${grant.environmentId ?? ''}`;
+  return issued
+    .map(({ grant }) => grant)
+    .sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0))
+    .map((grant) => {
+      const { permissions, protected: guarded } = scopeDefinition(grant);
+      return { projectId: grant.projectId, environmentId: grant.environmentId, role: grant.role, permissions: { normal: [...permissions], protected: [...guarded] }, ...(grant.sensitive === undefined ? {} : { sensitive: grant.sensitive }) };
+    });
+}
+
+/** The roles of a project's grants a read found, by id: a role with no row is no role. */
+const definitionsOf = (rows: readonly Row<typeof roles>[]) =>
+  Object.fromEntries(rows.filter((row) => !row.instance).map((row): [string, RoleDefinition] => [row.id, { name: row.name, description: row.description, permissions: row.permissions as Permission[], protected: row.protected as Permission[] }]));
+
+/**
+ * Make a token (`TokenCreate`): one row written, the credential, its scope
+ * sealed on it, by place id, from paths resolved through the rows read.
+ * 0.14.7's `issuePersonalToken`, `issueHandle` and `issueServiceToken`.
+ *
+ * - A personal token: a person on a session, each role one that manages no
+ *   access and that they hold all of at its place, and in a project's
+ *   protected environments (`personalScope`); each grant keeps what the
+ *   role holds and they hold there, column by column (`issuedGrant`).
+ * - A handle: a person on a session or a personal token; each environment
+ *   named and each parent it inherits from that they read or use, `viewer`
+ *   where they read and `contributor` where they only use; never past the
+ *   personal token it is made on, in what it reaches or when it ends.
+ * - A service's token: whoever manages the service (`managesService`), each
+ *   grant one the service holds and the caller could give it
+ *   (`issuesCredential`); every grant it holds when none is asked; and the
+ *   sensitive values of a project only from an Owner of it (`ownsProject`).
+ *   Its scope is always written, never null: what was asked, or what the
+ *   read found it holds.
+ *
+ * Rows hidden from the read: one with a MAC that is not the vault's
+ * refuses, `tampered`, wherever it is. One taken away for the decision,
+ * and put back after: the caller's grant, a role, a place or a parent,
+ * and the token reaches less, or is refused. A protected environment's
+ * row: a service's grant on its project takes holding the role in the
+ * maker's protected column whatever is protected (`givesService`, D241),
+ * so the row decides nothing there; a personal token made without it, which
+ * would have been refused, keeps what its person holds in that column on
+ * the whole project (`heldColumns`), and so uses, and never reads, where
+ * they only use. A service's grant is
+ * the one that would let a caller manage the service when they would not
+ * (the "Not caught within the minute" item of docs/design/0.16.md): the
+ * service holds dev and prod, the caller is a Developer of dev, and the
+ * prod grant is taken away while they mint. The token they make holds its
+ * sealed scope and no more, each grant of it one they hold every
+ * permission of (`issuesCredential`): dev, and never prod, once the grant
+ * is back. What is left is a token under a service's name that its maker
+ * did not manage, reaching nothing they did not, named in a kept
+ * `token.create` entry with them as its actor.
+ */
+function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation<Parts, Answers['token.create']> {
+  const shown = presented(input);
+  const { kind, credential: token, hint } = input;
+  const service = kind === 'service' ? (input as { member: unknown }).member : null;
+  const most = kind === 'service' ? SERVICE_MINUTES : MAX_PERSONAL_TOKEN_MINUTES;
+  const wanted = kind === 'handle' || (kind === 'service' && (input as { scope: unknown }).scope === null) ? null : scopeAsked((input as { scope: unknown }).scope);
+  const paths = kind === 'handle' ? pathsAsked((input as { paths: unknown }).paths) : null;
+  if (!(kind === 'personal' || kind === 'handle' || kind === 'service')
+    || !text(token?.token) || !HASH.test(token.token) || !Number.isInteger(token.minutes) || token.minutes < 1 || token.minutes > most
+    || !(labelled(token.label) || (kind === 'service' && token.label === null))
+    || !text(hint) || !new RegExp(`^${PREFIX[kind]}…[A-Za-z0-9_-]{4}$`).test(hint)
+    || (kind === 'service' ? !(typeof service === 'string' && text(service) && MEMBER.test(service) && service.startsWith('token:')) || (wanted === undefined) : kind === 'handle' ? paths === undefined : wanted == null)) {
+    throw new TypeError("a token is made of a kind, personal, handle or service, from its token's SHA-256 and its hint; for a week at most, a service's 366 days; with a label, a service's or none; and a scope of 1 to 1,000 places by path, a handle's environments, or a service account and its scope or none");
+  }
+  // Drawn here: a decision draws nothing.
+  const id = randomUUID();
+  const member = service as string | null;
+  // What is asked about, by slug: each project, and each environment with its project.
+  const asked: { project: string; environment: string | null }[] = paths ?? wanted ?? [];
+  const slugs = [...new Set(asked.map((place) => place.project))];
+  const pairs = asked.filter((place): place is { project: string; environment: string } => place.environment !== null);
+  const named = sql`(SELECT p.id FROM projects p WHERE p.slug = ANY(${sql.param(slugs)}::text[]))`;
+  // Each project and environment pair through the two unique keys, so each is an index lookup; a handle's with the parents each inherits from.
+  const onEnvironments = sql`(SELECT e.id FROM unnest(${sql.param(pairs.map((place) => place.project))}::text[], ${sql.param(pairs.map((place) => place.environment))}::text[]) AS a(project, environment) JOIN projects p ON p.slug = a.project JOIN environments e ON e.project_id = p.id AND e.slug = a.environment)`;
+  const chain = sql`(WITH RECURSIVE chain (id, parent_id, depth) AS (
+    SELECT e.id, e.parent_id, 0 FROM environments e WHERE e.id IN ${onEnvironments}
+    UNION SELECT e.id, e.parent_id, chain.depth + 1 FROM environments e JOIN chain ON e.id = chain.parent_id WHERE chain.depth < ${MAX_PARENTS}
+  ) SELECT id FROM chain)`;
+  const read = {
+    // The caller's grants and roles in every project the token would reach, and the environments protected there.
+    ...callerParts(shown.token, member === null ? named : sql`(${named} UNION ${projectsOf(member)})`),
+    project: part(projects, sql`${projects.slug} = ANY(${sql.param(slugs)}::text[])`),
+    environment: part(environments, sql`${environments.id} IN ${kind === 'handle' ? chain : onEnvironments}`),
+    // The roles asked: what each holds is its row.
+    asked: part(roles, sql`NOT ${roles.instance} AND ${roles.id} = ANY(${sql.param([...new Set((wanted ?? []).map((place) => place.role))])}::text[])`),
+    ...serviceParts(member),
+    // The projects of the service's grants, by which the token's answer names the places it holds. Each place a service's
+    // token reaches is in one of them, so `beside` reads every environment the decision weighs, whatever its row says.
+    holding: part(projects, member === null ? sql`false` : sql`${projects.id} IN ${projectsOf(member)}`),
+  };
+  type Read = Seen<typeof read>;
+  /** A place asked, as far as the rows read have it. */
+  const placeOf = (seen: Read, project: string, environment: string | null) => {
+    const there = seen.project.find((row) => row.slug === project);
+    if (there === undefined) return undefined;
+    if (environment === null) return { place: { projectId: there.id } as Place, path: there.slug, object: `project:${there.id}` };
+    const at = seen.environment.find((row) => row.projectId === there.id && row.slug === environment);
+    return at && { place: { projectId: there.id, environmentId: at.id, environmentSlug: at.slug } as Place, path: `${there.slug}/${at.slug}`, object: `environment:${at.id}`, row: at };
+  };
+  const NO_ACCESS: Refusal = { refused: 'no_access' };
+  return {
+    read,
+    denied: refusedTo('token.create', shown, vault.workloads, {
+      objects: (seen: Read) => [
+        ...seen.account.map((row) => `principal:${row.id}`),
+        ...asked.flatMap(({ project, environment }) => {
+          const found = placeOf(seen, project, environment);
+          return found === undefined ? [] : [found.object];
+        }),
+      ],
+    }),
+    decide(seen: Read, at: number, unsealed: Unsealed<typeof read>) {
+      const caller = asking(seen, shown, vault, at);
+      if ('refused' in caller) return caller;
+      if (caller.workload !== null) return { refused: 'workload_cannot_issue' };
+      // A row written behind the vault is not a row that is absent, wherever it is: one grant less, one role less, an environment unprotected.
+      if (Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
+      const holder = held(caller);
+      let principal = caller.principal;
+      let generation = caller.credential.generation;
+      let ends = at + token.minutes * 60_000;
+      let issued: Issued[];
+      let places: { environmentId: string; personal: boolean }[] | null = null;
+
+      if (kind === 'personal' || kind === 'handle') {
+        if (!caller.principal.startsWith('user:')) return { refused: 'not_a_person' };
+        // A personal token is made on a session: a token never makes another. A handle on a personal token too, within it.
+        if (!(onSession(caller) || (kind === 'handle' && caller.credential.kind === 'personal'))) return NO_ACCESS;
+      }
+      if (kind === 'personal') {
+        const policy: Policy = { ...holder.policy, roles: { ...definitionsOf(seen.asked), ...holder.policy.roles } };
+        const person: Holdings & { policy: Policy } = { ...holder, policy };
+        // As 0.14.7 told them: a role there is not, one its place does not take, or one that manages access; then a place that is not there; then one beyond them.
+        if (!wanted!.every(({ role, environment }) => delegable(role, policy) && (environment === null || assignableToEnvironment(role, policy)))) return { refused: 'invalid' };
+        const found = wanted!.map(({ project, environment, role }) => ({ role, at: placeOf(seen, project, environment) }));
+        if (found.some(({ at: there }) => there === undefined)) return NO_ACCESS;
+        issued = [];
+        for (const { role, at: there } of found) {
+          const { place, path } = there!;
+          const definition = definitionOf(policy, role)!;
+          // All the role gives them there, its protected column in a protected environment, and in each protected environment of a project.
+          const beyond = [place, ...protectedWithin(policy, place)].some((spot) => PERMISSIONS.some((permission) => holdsAt(definition, permission, spot, person) && !allows(person, permission, spot)));
+          if (beyond) return NO_ACCESS;
+          issued.push({ grant: issuedGrant({ projectId: place.projectId, environmentId: place.environmentId ?? null, role }, policy, heldColumns(person, place)), path });
+        }
+      } else if (kind === 'handle') {
+        // Each environment it reaches, by id, and whether its person reads there: each named, and each parent that they read or use.
+        const reached = new Map<string, { place: Place; path: string; reads: boolean }>();
+        places = [];
+        for (const { project, environment, personal } of paths!) {
+          const there = placeOf(seen, project, environment);
+          if (there === undefined) return NO_ACCESS;
+          reached.set(there.row!.id, { place: there.place, path: there.path, reads: allows(holder, 'secret.read', there.place) });
+          if (!places.some((made) => made.environmentId === there.row!.id && made.personal === personal)) places.push({ environmentId: there.row!.id, personal });
+          let child = there.row!;
+          for (let depth = 0; child.parentId !== null && depth < MAX_PARENTS; depth += 1) {
+            // In the same project, as its key holds it (`environments_parent_in_project`); a deleted one's tombstone is no parent.
+            const parent = seen.environment.find((row) => row.id === child.parentId && !row.slug.includes('~'));
+            if (parent === undefined) break;
+            const place: Place = { projectId: parent.projectId, environmentId: parent.id, environmentSlug: parent.slug };
+            const reads = allows(holder, 'secret.read', place);
+            if (reads || allows(holder, 'secret.use', place)) reached.set(parent.id, { place, path: `${project}/${parent.slug}`, reads });
+            child = parent;
+          }
+        }
+        const policy: Policy = { ...holder.policy, roles: HANDLE_ROLES };
+        issued = [];
+        for (const { place, path, reads } of reached.values()) {
+          // Use is what a handle exercises: where its person only uses, that is all it needs of them.
+          const needs = reads ? PERMISSIONS.filter((permission) => holdsAt(ROLES.viewer, permission, place, holder)) : ['secret.use' as const];
+          if (!needs.every((permission) => allows(holder, permission, place))) return NO_ACCESS;
+          issued.push({ grant: issuedGrant({ projectId: place.projectId, environmentId: place.environmentId ?? null, role: reads ? 'viewer' : 'contributor' }, policy, heldColumns(holder, place)), path });
+        }
+        // Never past the personal token it is made on.
+        if (caller.credential.kind === 'personal') ends = Math.min(ends, caller.credential.expiresAt.getTime());
+      } else {
+        if (vault.workloads?.useOnly === true) return { refused: 'use_only' };
+        const manager = manages(caller, seen, unsealed, member!, at);
+        if (manager !== true) return manager === 'tampered' ? { refused: 'tampered' } : NO_ACCESS;
+        const account = serviceOf(seen, member!, at);
+        if (account === null) return { refused: 'unknown_principal' };
+        const row = seen.account.find((other) => other.id === member)!;
+        [principal, generation] = [row.id, row.generation];
+        const policy: Policy = { ...holder.policy, roles: { ...definitionsOf(seen.heldAs), ...definitionsOf(seen.asked), ...holder.policy.roles } };
+        const issuer: Holdings & { policy: Policy } = { ...holder, policy };
+        // A place it holds, by path: its project's slug, and its environment's.
+        const pathOf = (place: Place) => {
+          const project = seen.holding.find((other) => other.id === place.projectId)?.slug ?? place.projectId;
+          return place.environmentId == null ? project : `${project}/${place.environmentSlug}`;
+        };
+        let scope: { role: string; place: Place; path: string }[];
+        if (wanted === null) {
+          scope = account.grants.map(({ role, place }) => ({ role, place, path: pathOf(place) }));
+        } else {
+          if (!wanted!.every(({ role, environment }) => definitionOf(policy, role) !== undefined && (environment === null || assignableToEnvironment(role, policy)))) return { refused: 'invalid' };
+          const found = wanted!.map(({ project, environment, role }) => ({ role, at: placeOf(seen, project, environment) }));
+          if (found.some(({ at: there }) => there === undefined)) return NO_ACCESS;
+          scope = found.map(({ role, at: there }) => ({ role, place: there!.place, path: there!.path }));
+        }
+        // Nothing it is given later reaches a token made before: it needs a grant first.
+        if (scope.length === 0) return { refused: 'no_grants' };
+        // The role as it is now, all each grant keeps: the caller gives it, and the service holds, every permission of it.
+        if (!issuesCredential(issuer, settingOf(seen), caller.principal, account, scope)) return NO_ACCESS;
+        issued = scope.map(({ role, place, path }) => ({
+          grant: { ...issuedGrant({ projectId: place.projectId, environmentId: place.environmentId ?? null, role }, policy), sensitive: ownsProject(issuer, place.projectId) },
+          path,
+        }));
+      }
+
+      const now = new Date(at);
+      const expiresAt = new Date(ends);
+      const scope = sealedScope(issued);
+      return {
+        writes: [put(credentials, {
+          id, kind, tokenHash: Buffer.from(token.token, 'hex'), tokenHint: hint, previousTokenHash: null, generation, principal, identityId: null,
+          scope: JSON.stringify(scope), places: places === null ? null : JSON.stringify(places), label: token.label, createdAt: now, createdBy: caller.principal, expiresAt,
+          lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
+          jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
+        })],
+        entry: {
+          ...by(caller, shown),
+          // A run's handle comes and goes with it, and ages out with the uses; a token is kept.
+          kept: kind !== 'handle',
+          action: 'token.create',
+          objects: [...new Set([`principal:${caller.principal}`, `credential:${caller.credential.id}`, `credential:${id}`, `principal:${principal}`, ...scope.map((grant) => (grant.environmentId === null ? `project:${grant.projectId}` : `environment:${grant.environmentId}`))])],
+          detail: { credential: id, kind, principal, expiresAt: expiresAt.toISOString(), scope, ...(places === null ? {} : { places }) },
+        },
+        answer: { principal, credential: id, expiresAt: expiresAt.toISOString(), scope: Object.fromEntries(issued.map(({ grant, path }) => [path, grant.role]).sort(([a], [b]) => (a! < b! ? -1 : 1))) },
+      };
+    },
+  };
+}
+
 /** The changes of sign-in and of credentials (docs/design/0.16.md, "Signing in"). */
-export const signinOperations: Operations<SigninChanges> = { signin, 'credential.end': credentialEnd, 'account.link': accountLink, 'account.unlink': accountUnlink };
+export const signinOperations: Operations<SigninChanges> = { signin, 'credential.end': credentialEnd, 'account.link': accountLink, 'account.unlink': accountUnlink, 'token.create': tokenCreate };
