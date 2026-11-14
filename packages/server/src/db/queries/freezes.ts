@@ -42,10 +42,11 @@ type Raw = {
  * workload's session of its generation neither revoked nor past its end.
  * With `weighed`, each service account they are of, with its live grants
  * and their roles, by which the app weighs whether the caller manages it:
- * at most one past `most` grants in all. One statement. Sessions are found
- * from the active service accounts, each's by its id on an index the
- * credentials' member leads, never among a person's, whatever the
- * database's collation.
+ * at most one past `most` grants in all. One statement. It reads no
+ * person's row, whatever the database's collation: the active service
+ * accounts come from their own partial index (`principals_services_idx`,
+ * whose predicate both of their branches repeat), and each's sessions by
+ * its id, on an index the credentials' member leads.
  */
 export async function freezes(db: Queryable, opts: { weighed: boolean; most: number; now: Date }): Promise<Freezes> {
   const { weighed, most, now } = opts;
@@ -53,7 +54,7 @@ export async function freezes(db: Queryable, opts: { weighed: boolean; most: num
     WITH frozen AS (
       SELECT 'instance' AS target, NULL::text AS service, workloads_frozen_at AS frozen_at FROM policy WHERE only_row AND workloads_frozen_at IS NOT NULL
       UNION ALL
-      SELECT p.id, p.id, p.frozen_at FROM principals p WHERE p.frozen_at IS NOT NULL AND p.status = 'active'
+      SELECT p.id, p.id, p.frozen_at FROM principals p WHERE p.status = 'active' AND p.id LIKE 'token:%' AND p.frozen_at IS NOT NULL
       UNION ALL
       SELECT 'binding:' || b.id, p.id, b.frozen_at
         FROM bindings b JOIN principals p ON p.id = b.principal AND p.generation = b.generation AND p.status = 'active'
@@ -66,7 +67,7 @@ export async function freezes(db: Queryable, opts: { weighed: boolean; most: num
           WHERE c.principal = p.id AND c.generation = p.generation AND c.revoked_at IS NULL AND c.expires_at > ${now}
             AND c.frozen_at IS NOT NULL AND c.kind = 'workload' AND c.not_after > ${now}
           OFFSET 0) c
-        WHERE p.id LIKE 'token:%' AND p.status = 'active'
+        WHERE p.status = 'active' AND p.id LIKE 'token:%'
     ),
     listed AS (SELECT * FROM frozen ORDER BY service NULLS FIRST, target LIMIT ${most + 1}),
     weighed AS (SELECT m.id, m.status, m.status_changed_by, m.generation FROM principals m WHERE ${weighed} AND m.id IN (SELECT service FROM listed)),

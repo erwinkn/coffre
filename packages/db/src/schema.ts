@@ -334,6 +334,8 @@ export const principals = pgTable(
     check('principals_generation_check', sql`${table.generation} >= 0`),
     check('principals_frozen_check', sql`${table.frozenAt} IS NULL OR ${table.id} LIKE 'token:%'`),
     macCheck('principals_mac_check', table.mac),
+    // The active service accounts, found without reading a person's row: under a collation other than C, the primary key cannot find a prefix.
+    index('principals_services_idx').on(table.id).where(sql`${table.status} = 'active' AND ${table.id} LIKE 'token:%'`),
   ],
 );
 

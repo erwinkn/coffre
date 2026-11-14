@@ -333,6 +333,8 @@ ALTER TABLE principals
     ADD CONSTRAINT principals_generation_check CHECK (generation >= 0),
     ADD CONSTRAINT principals_frozen_check CHECK (frozen_at IS NULL OR id LIKE 'token:%');
 --> statement-breakpoint
+CREATE INDEX principals_services_idx ON principals (id) WHERE status = 'active' AND id LIKE 'token:%';
+--> statement-breakpoint
 
 ALTER TABLE vault_grants RENAME TO grants;
 --> statement-breakpoint
