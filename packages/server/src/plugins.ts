@@ -7,7 +7,7 @@
 // and decides nothing on"), and the vault decides on its own rows.
 import { CoffreError, type CoffreClient } from '@coffre/client';
 import { hashToken, type BindingPolicy, type Constraints, type GateCount } from '@coffre/core/identity';
-import type { Peeked, Presented, Used as VaultUsed } from '@coffre/core/vault';
+import type { Peeked, Presented, Upstream, Used as VaultUsed } from '@coffre/core/vault';
 import { isUnreachable } from '@coffre/db/dialect';
 
 import { ApiError, refusal, toErrorBody } from './api/errors.ts';
@@ -176,8 +176,8 @@ export class WorkloadRefused extends CoffreError {
   }
 }
 
-/** What a plugin opens values for (`PluginContext.use`): the keys by name, why, and the name of what they are used for, which the log says. */
-export type UseAsked = { path: string; keys: readonly string[]; purpose: 'use' | 'expose'; upstream: string };
+/** What a plugin opens values for (`PluginContext.use`): the keys by name, why, and what they are used for and where they go, which the log says (`Upstream`). */
+export type UseAsked = { path: string; keys: readonly string[]; purpose: 'use' | 'expose'; upstream: Upstream };
 
 /**
  * Values a plugin opened, by key; those that are plain, no secret, which an
@@ -232,9 +232,9 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
 }
 
 /** The plugin's answer to a WebSocket asked for under its prefix; null when no plugin takes it. */
-export function pluginSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | SocketSession> | null {
+export function pluginSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): Promise<Response | SocketSession> | null {
   const routes = socketRoutes(request, runtime.plugins);
-  return routes === undefined ? null : routes.socket!(request, pluginContext(request, runtime, sourceIp));
+  return routes === undefined ? null : routes.socket!(request, pluginContext(request, runtime, sourceIp, track));
 }
 
 /** Whether a plugin takes WebSockets at `request`'s path, deciding nothing about the request itself. */
@@ -331,6 +331,7 @@ function placeOf(path: string): { project: string; environment: string; mine: bo
 /** What a workload caller stands on, kept by the context of the request it was made for: `use` takes back only those. */
 type Standing = { token: string; proof: string; sourceIp: string | null };
 
+/** `track`: work the response must not cut short, a limit's alert (`gated`). */
 function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): PluginContext {
   // The workload callers this request's context made: the only ones its `use` takes.
   const standings = new WeakMap<WorkloadUse, Standing>();
@@ -358,6 +359,8 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
         const { proven, hdr } = await gated(asked, runtime, token, parsed, { id: row.id, principal: row.principal, jkt: row.jkt }, {
           ...(at.body === undefined ? {} : { content: { headers: asked.headers, body: at.body } }),
           ...(counts === undefined ? {} : { counts }),
+          sourceIp,
+          track,
         });
         const live = (row.places ?? []).filter((place) => place !== null);
         const path = at.place ?? (live.length === 1 && (row.places ?? []).length === 1 ? live[0]!.path : null);
@@ -400,7 +403,7 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
     stands: async (caller, asked) => {
       const [place, shown] = askedAs(caller, asked.path);
       // Read now: a check that answers from the vault's memory could miss a revocation made within it (`UseInput.fresh`).
-      const answer = await runtime.vault.peek({ ...shown, ...place, keys: [...asked.keys], purpose: 'use', upstream: asked.upstream, fresh: true });
+      const answer = await runtime.vault.peek({ ...shown, ...place, keys: [...asked.keys], purpose: 'use', upstream: { credential: asked.upstream }, fresh: true });
       return !('refused' in answer) && asked.keys.every((key) => answer.items.some((item) => item.key === key && !('refused' in item)));
     },
   };
@@ -439,7 +442,7 @@ function usedOf(answer: VaultUsed, asked: UseAsked, mine: boolean, word: (error:
     values[item.key] = item.value;
     if (item.nature === 'plain') plain.push(item.key);
   }
-  if (missing.length > 0) throw thrown(new ApiError('conflict', `${asked.path} holds no ${missing.join(', ')}, which ${asked.upstream} needs`));
+  if (missing.length > 0) throw thrown(new ApiError('conflict', `${asked.path} holds no ${missing.join(', ')}, which ${asked.upstream.credential} needs`));
   return {
     values,
     plain,

@@ -73,7 +73,7 @@
   "scripts": {
     "build": "tsdown && cp -r src/migrations dist/migrations",
     "typecheck": "tsc --noEmit",
-    "test": "node --conditions=coffre:source --test",
+    "test": "node --conditions=coffre:source --test 'test/*.test.ts'",
     "db:generate": "node --conditions=coffre:source src/baseline.ts",
     "db:migrate": "node --conditions=coffre:source src/migrate-main.ts",
     "db:check": "cd src && drizzle-kit check --config drizzle.postgres.config.ts",

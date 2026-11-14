@@ -133,8 +133,8 @@ export type UseInput = Presented & {
   keys: string[] | null;
   /** `use`: the value is used for the caller, by the credential proxy, and never handed back. Any other hands it back. */
   purpose: Purpose;
-  /** The upstream credential the values are used for, by its name in the deployment's configuration (`stripe`). Null for none. */
-  upstream: string | null;
+  /** What the values are used for (`Upstream`): null for none. */
+  upstream: Upstream | null;
   /**
    * Read the rows now, never from the vault's memory (`memorySeconds`): an
    * answer that must see a change just made (`coffre run`'s plan after the
@@ -143,6 +143,17 @@ export type UseInput = Presented & {
    */
   fresh?: boolean;
 };
+
+/**
+ * The upstream credential a use is for, by its name in the deployment's
+ * configuration (`stripe`), and where the proxy sends the values, which the
+ * use's entry keeps on the app's word, as 0.14.7's app logged it: the host
+ * (`api.stripe.com`, a presigned URL's), and `egress` when the request
+ * leaves through the deployment's egress. Signing, verifying, a cipher and
+ * a tunnel name no host: they send nothing anywhere, or the host is in the
+ * value.
+ */
+export type Upstream = { credential: string; host?: string; egress?: true };
 
 /**
  * Why someone reads, which the log shows. `use`: the credential proxy

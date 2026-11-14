@@ -22,7 +22,7 @@ const target = fileURLToPath(new URL('../src/api.ts', import.meta.url));
  * a part of a route's input or output, or a type a file of the 0.16 table
  * exports, never one of 0.14's that the server's tsconfig excludes. A type
  * whose route is unserved (`unserved.ts`) has none: it comes back with the
- * route, as `KeysPlan` will.
+ * route.
  */
 const NAMED = {
   AccessValue: "RouteInput<'PATCH /access/:member'>[string]",
@@ -43,6 +43,7 @@ const NAMED = {
   IdentityRow: 'db/queries/signin.ts',
   ImpactLine: 'api/routes/roles.ts',
   InheritResult: "RouteOutput<'PATCH /secrets/:project/:environment/:key'>",
+  KeysPlan: 'api/routes/bindings.ts',
   ListedReference: "RouteOutput<'GET /references'>['references'][number]",
   Me: "RouteOutput<'GET /me'>",
   Member: 'api/routes/members.ts',

@@ -731,19 +731,22 @@ test('the release itself moves a deployment by its own template, asking no other
 
 // --- with pnpm itself ----------------------------------------------------------------
 
-/** Whether pnpm runs here, at the version a project asks for: online, or from a cache. */
-function pnpmAt(version: string): boolean {
+/**
+ * Whether pnpm runs here, at the version a project asks for: online, or from a cache. `global`
+ * asks of a global command: pnpm 12 runs those itself, though the project names another pnpm.
+ */
+function pnpmAt(version: string, global = false): boolean {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-pnpm-probe-'));
   try {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'probe', private: true, packageManager: `pnpm@${version}` }));
-    const ran = spawnSync('pnpm', ['--version'], { cwd: dir, encoding: 'utf8', env: { ...process.env, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' }, timeout: 60_000 });
+    const ran = spawnSync('pnpm', global ? ['--global', '--version'] : ['--version'], { cwd: dir, encoding: 'utf8', env: { ...process.env, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' }, timeout: 60_000 });
     return ran.status === 0 && ran.stdout.trim() === version;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-const needsPnpm = (...versions: string[]) => ({ skip: versions.every(pnpmAt) ? false : `needs pnpm ${versions.join(' and ')}` });
+const needsPnpm = (...versions: string[]) => ({ skip: versions.every((version) => pnpmAt(version)) ? false : `needs pnpm ${versions.join(' and ')}` });
 
 test('a deployment moved from pnpm 10 to 11 installs without a terminal, its node_modules purged', needsPnpm('10.15.0', '11.8.0'), async () => {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-majors-'));
@@ -815,7 +818,7 @@ test('when no version old enough fits, resolving again says which, and puts the 
   }
 });
 
-test("pnpm 11's own global install, as it lays it out: found by asking pnpm, though it lives in the store's links/", needsPnpm('11.8.0'), () => {
+test("pnpm 11's own global install, as it lays it out: found by asking pnpm, though it lives in the store's links/", { skip: pnpmAt('11.8.0', true) ? false : 'needs pnpm 11.8.0 for global installs' }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-pnpm-global-'));
   try {
     // A stand-in @coffre/cli, which says where it runs from as the real one finds itself: its real path.

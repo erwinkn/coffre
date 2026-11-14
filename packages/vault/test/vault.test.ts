@@ -3,6 +3,7 @@
 // use.test.ts holds what a use decides; this holds what crosses.
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
+import { inspect } from 'node:util';
 
 import { allows } from '@coffre/core/access';
 import type { UseInput } from '@coffre/core/vault';
@@ -69,7 +70,9 @@ test('a use that is not what the contract says is a fault, before any read', asy
   const bad: Partial<Record<keyof UseInput, unknown>>[] = [
     { token: 'ada-cli' }, { token: tokenOf('ada-cli').toString('hex').toUpperCase() }, { project: 7 }, { environment: 'x'.repeat(257) }, { mine: 'yes' },
     { keys: ['A', 7] }, { keys: sparse }, { keys: 'A' }, { keys: Array.from({ length: 1001 }, (_, i) => `K${i}`) }, { keys: ['A\0'] },
-    { purpose: 'copy' }, { purpose: 7 }, { ip: 7 }, { request: {} }, { proof: 7 }, { upstream: 'x'.repeat(257) },
+    { purpose: 'copy' }, { purpose: 7 }, { ip: 7 }, { request: {} }, { proof: 7 }, { upstream: 'stripe' }, { upstream: { credential: 'x'.repeat(257) } },
+    { upstream: { credential: 'stripe', egress: false } }, { upstream: { credential: 'stripe', path: '/v1' } },
+    ...['API.stripe.com', `${'a'.repeat(250)}.com`, 'api.stripe.com:443', '[not:ipv6]', ':', '', 'xn--bcher-kva.de/x', 'bücher.de', 'a%41.example', '2001:db8::1'].map((host) => ({ upstream: { credential: 'stripe', host } })),
   ];
   for (const more of bad) {
     await assert.rejects(vault.use(reveal('ada-cli', ['DATABASE_URL'], more as Partial<UseInput>)), TypeError, JSON.stringify(more).slice(0, 60));
@@ -82,6 +85,11 @@ test('a use that is not what the contract says is a fault, before any read', asy
   assert.ok(!('refused' in every) && every.values.map(({ key }) => key).join() === 'DATABASE_URL,EMPTY', JSON.stringify(every));
   const thousand = await vault.use(reveal('ada-cli', Array.from({ length: 1000 }, (_, i) => `K${i}`)));
   assert.ok(!('refused' in thousand) && thousand.values.length === 1000);
+  // A host as a URL names it, whatever the deployment's upstream is.
+  for (const host of ['api.stripe.com', 'api_internal.example', 'xn--bcher-kva.de', '192.0.2.10', '[2001:db8::1]', `${'a'.repeat(249)}.com`]) {
+    const used = await vault.use(reveal('ada-cli', ['DATABASE_URL'], { upstream: { credential: 'stripe', host, egress: true } }));
+    assert.ok(!('refused' in used), host);
+  }
 });
 
 test('who a request is crosses as JSON: what it holds, as the app decides on it, and a refusal as an answer', async () => {
@@ -134,4 +142,31 @@ test('a wake-up that fails costs the caller nothing: the entry is written, and t
   // The rejection is caught, not left for the process: said in the log, once each.
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(logged.mock.callCount(), 2);
+});
+
+test("what the vault logs of a failure quotes no value: not a query's parameter, a cast it could not make, or a row a constraint refused", async (t) => {
+  const canary = 'coffre-canary-not-for-the-log';
+  const failed = (work: () => Promise<unknown>) => work().then(() => assert.fail('the query ran'), (thrown: unknown) => thrown);
+  const errors = [
+    await failed(() => world.owner.select({ v: sql`${canary}` }).from(sql`no_such_table`)),
+    await failed(() => world.owner.execute(sql`SELECT ${canary}::uuid`)),
+    await failed(() => world.owner.transaction(async (tx) => {
+      await tx.execute(sql`CREATE TEMPORARY TABLE kept (key text CONSTRAINT kept_key_unique UNIQUE) ON COMMIT DROP`);
+      await tx.execute(sql`INSERT INTO kept VALUES (${canary}), (${canary})`);
+    })),
+  ];
+  // Each quotes it, as it is: the log is what leaves it out.
+  for (const error of errors) assert.ok(inspect(error, { depth: null }).includes(canary));
+  const logged = t.mock.method(console, 'error', () => {});
+  for (const error of errors) {
+    const failing = openLocalVault(world.db, prepared, { now: world.now, wake: () => { throw error; } });
+    prepared.memory.logged.clear();
+    assert.ok(!('refused' in (await failing.use(reveal('ada-cli', ['DATABASE_URL'])))));
+  }
+  assert.equal(logged.mock.callCount(), 3);
+  const said = logged.mock.calls.map((call) => call.arguments);
+  assert.ok(!inspect(said, { depth: null }).includes(canary), 'a value in the log');
+  // What went wrong, by Postgres's code and names.
+  assert.deepEqual(said.map(([, line]) => (line as { cause: { code: string } }).cause.code), ['42P01', '22P02', '23505']);
+  assert.equal((said[2]![1] as { cause: { constraint: string } }).cause.constraint, 'kept_key_unique');
 });

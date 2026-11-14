@@ -11,13 +11,9 @@
   // files they import are gone (the v0.14.7 tag has them, and 0.14's tests). Each goes from this list when its area
   // is moved or rewritten; one named here that no longer exists fails the suite.
   "exclude": [
-    // Workloads' sign-in and renewal, their alerts, and the AWS proof (W422).
-    "src/alerts.ts",
-    "src/auth-routes.ts",
+    // What is left of workloads' 0.14 routes.
     "src/api/workloads.ts",
     "src/db/workloads.ts",
-    "src/workload-sessions.ts",
-    "src/workloads/aws.ts",
 
     // The Node entry, in 0.16.1 (docs/design/0.16.md, "Node in 0.16.0").
     "src/node.ts",

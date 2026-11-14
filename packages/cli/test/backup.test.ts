@@ -75,7 +75,7 @@ test('0.16 refuses backup, restore and verify backup at once: exit 1, its reason
       clearTimeout(killer);
       child.stdin.destroy();
       assert.equal(code, 1, `coffre ${words}: ${stderr}`);
-      assert.equal(stderr, `coffre: coffre ${words} is not in 0.16 yet: it reads 0.14's audit log and envelopes, which a 0.16 database does not hold\n`);
+      assert.equal(stderr, `coffre: coffre ${words} is not in 0.16 yet: it reads 0.14's audit log and envelopes, which a 0.16 database does not hold. pg_dump and pg_restore back up and restore one (docs/restore.md)\n`);
       assert.deepEqual(readdirSync(here), [], `coffre ${words} wrote nothing`);
       const help = spawnSync(process.execPath, ['--conditions=coffre:source', main, ...words.split(' '), '--help'], { cwd: here, encoding: 'utf8' });
       assert.equal(help.status, 0, help.stderr);

@@ -214,7 +214,7 @@ test("DFNS's SDK signs a user action through coffre: the key stays there, the si
 
   // Each signature one use of the vault, naming the signer, and nothing kept.
   assert.deepEqual(await callsOf(() => signer.sign({ challenge: 'second', challengeIdentifier: 'x' } as UserActionChallenge)), ['use']);
-  assert.deepEqual(app.inputs.at(-1), { ...(app.inputs.at(-1) as object), keys: ['DFNS_PRIVATE_KEY'], purpose: 'use', upstream: 'dfns-key' });
+  assert.deepEqual(app.inputs.at(-1), { ...(app.inputs.at(-1) as object), keys: ['DFNS_PRIVATE_KEY'], purpose: 'use', upstream: { credential: 'dfns-key' } });
   // The vault logs a credential's use of a key once a minute: both signatures, one entry, which names no message.
   assert.deepEqual(await loggedFor('dfns-key'), [{ action: 'secret.read', purpose: 'use', keys: ['DFNS_PRIVATE_KEY'] }]);
 });

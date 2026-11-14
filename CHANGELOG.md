@@ -6,12 +6,29 @@
   Node comes back in 0.16.1: `@coffre/server` exports no `./node`, so a
   Node deployment that updates fails at its import of
   `@coffre/server/node`. Stay on 0.14 until 0.16.1.
-- **Known gaps of 0.16 so far.** MCP's `admit_member` adds a service
-  account only for whoever runs the instance: a person the instance's
-  service-account setting lets add one is refused until 0.16 serves that
-  setting again (`GET /api/me` says `setsUpServices: false`). A token's or a
-  binding's preview (`?dryRun=1`) answers what it would reach, but not the
-  places whose sensitive values it will not read (`withheld`).
+- **Known gaps of 0.16 so far.** A token's or a binding's preview
+  (`?dryRun=1`) answers what it would reach, but not the places whose
+  sensitive values it will not read (`withheld`).
+- **A workload's alerts, as 0.14.7 said them.** The first request a
+  credential's limit refuses in its window is the deployment's `limit`
+  alert, once per workload, credential and window, on a WebSocket too. A
+  token signed by a key no binding holds is alerted once an hour per
+  service for the whole deployment, counted in the service's gate, where
+  0.16 had capped it per isolate. 0.14.7's 60 credentials a minute per
+  binding is not kept (D177): a CI sign-in has one limit, per source
+  address.
+- **Who sets up service accounts, as in 0.14.7.** `GET /api/me` says
+  `setsUpServices` for a person the instance's service-account setting
+  lets give one something, and `serviceSetup`, the setting, as 0.14.7 did,
+  still in one statement; so MCP's `admit_member` and the pages offer it
+  to them again. A workload lookup costs one statement less.
+- **A member with an edited sign-in account is not removed.** When a
+  database writer has edited one of a member's sign-in accounts' rows,
+  removing them is refused `tampered` (500), where 0.14.7 removed them:
+  let back in, they could sign in again with it. Whoever runs the instance
+  can still take away their role and grants. The deployment's configured
+  Owner is refused 409 `configured_owner` where 0.14.7 said 403
+  `not_allowed`.
 - **The Vault KV adapter is back** (`vaultKv()`, `docs/vault.md`): External
   Secrets Operator, `vault kv get` and the rest read through `/v1` as on
   0.14, a read the API's reveal as the token's holder (one vault `use`),
@@ -48,6 +65,26 @@
   typecheck until the line goes. `auditChainKey` stays, as the key the
   sign-in state and Access sessions are sealed under.
 
+- **A proxied use's entry says where the value went again.** As in 0.14.7,
+  it names the host and whether the request left through the deployment's
+  egress, and one key sent through two credentials or to two hosts within
+  the minute is two entries. `UseInput.upstream` is `{ credential, host?,
+  egress?: true }`, no longer the credential's name alone. A presigned
+  URL's method, path and expiry are no longer logged: an entry stands for a
+  minute of the credential's uses, and says only what holds for all of them.
+- **A workload signs in with its key again.** `POST /api/auth/workload`
+  (a platform's ID token, or a signed `GetCallerIdentity`), `POST
+  /api/auth/workload/renew` and `POST /api/auth/logout` with the session's
+  DPoP proof are served on 0.16, each decided by the vault. A binding's
+  `sources` outside the request's address now refuse `no_match` (0.14.7:
+  `source`), an AWS proof signed in the future `too_old` (0.14.7:
+  `not_yet_valid`), and a session's token sent to `logout` as a bearer is
+  refused 401 `workload`.
+- **Re-keying's preview is served again.** `POST
+  /members/:member/bindings/keys?dryRun=1` (`coffre trust … --replace-keys`
+  without `--apply`) answers 0.14.7's `KeysPlan`: the keys as checked, the
+  bindings on the issuer they would replace, and the places whose sensitive
+  values the new bindings would withhold. It was 501.
 - **The vault is told of workloads too.** It decides each CI run's
   sign-in now, on its own configuration: a deployment that trusts
   workloads adds `workloads: {}` to `vault(env => …)` in

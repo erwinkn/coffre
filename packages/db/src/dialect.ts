@@ -61,9 +61,11 @@ const UNREACHABLE = new Set([
 /**
  * Workers' words for a connection lost, and Hyperdrive's for one it could
  * not make ("Server connection attempt failed: destination_unavailable";
- * local workerd's says only "connection attempt failed").
+ * local workerd's says only "connection attempt failed"), and Workers' for
+ * a call it cancelled as hung ("… detected that your Worker's code had
+ * hung"): the vault's, or its database's, that never answered.
  */
-const UNREACHABLE_WORDS = /connection terminated|network connection lost|connect(ion)? timeout|connection attempt failed/i;
+const UNREACHABLE_WORDS = /connection terminated|network connection lost|connect(ion)? timeout|connection attempt failed|code had hung/i;
 
 /** Hyperdrive's words for a pool with no connection to give. */
 const POOL_FULL_WORDS = /open slot in the pool|acquire a connection from the pool/i;
@@ -220,4 +222,67 @@ export function canonicalTimestamp(raw: string): string {
     Date.UTC(+year, +month - 1, +day, +hour, +minute, +second) - offsetMinutes * 60_000,
   );
   return `${utc.toISOString().slice(0, 19)}.${fraction.padEnd(6, '0')}Z`;
+}
+
+// What a log line says about an error: never a value a request sent or a
+// row holds. Logged as it is, an error shows only its stack on Workers,
+// without its message, and on Node all of what Postgres said. So each error
+// is logged as a plain object: its name and message, Postgres's code and the
+// names it gives (`table`, `constraint`, …), the same for its cause, and its
+// stack's frames. Postgres's own words are left out, `message`, `detail`,
+// `hint` and `where` alike: each may quote a value (`invalid input syntax
+// for type uuid: "…"`, `Key (key)=(…) already exists`), and so are the
+// parameters Drizzle's message quotes after its SQL.
+
+/** The fields a Postgres error gives that name and never quote, each by the name a log line gives it. */
+const POSTGRES_NAMES = [
+  ['severity', 'severity'],
+  ['code', 'code'],
+  ['position', 'position'],
+  ['schema_name', 'schema'],
+  ['table_name', 'table'],
+  ['column_name', 'column'],
+  ['data type_name', 'dataType'],
+  ['constraint_name', 'constraint'],
+  ['routine', 'routine'],
+] as const;
+
+/** A SQLSTATE: its class, two characters, then three. Node's own codes (`EPIPE`) are none. */
+const SQLSTATE = /^(?:[0-5][0-9A-Z]|F0|HV|P0|XX)[0-9A-Z]{3}$/;
+
+/** How many causes deep a log line follows an error. */
+const DEPTH = 4;
+
+/** `error` as a log line says it: by Postgres's code and names alone, never its words or a query's parameters. */
+export function logged(error: unknown, depth = 0): unknown {
+  if (!(error instanceof Error)) return error;
+  const fields = error as Error & Record<string, unknown>;
+  // Postgres's, by its code, which an error rebuilt across a call keeps, when its severity is gone.
+  const postgres = typeof fields.severity === 'string' || (typeof fields.code === 'string' && SQLSTATE.test(fields.code));
+  // Drizzle's message ends with its parameters, read from its field or, past a call that kept only the words, from those.
+  const message = postgres ? "Postgres's words are left out: they may quote a value" : error.message.split('\nparams: ')[0]!;
+  const out: Record<string, unknown> = { name: error.name, message };
+  for (const [field, name] of POSTGRES_NAMES) {
+    if (fields[field] !== undefined) out[name] = fields[field];
+  }
+  if (error.cause !== undefined && depth < DEPTH) out.cause = logged(error.cause, depth + 1);
+  if (depth === 0) {
+    // What the words said, kept as a fixed word: 58000 is Hyperdrive's empty pool and many another failure.
+    const failure = poolFull(error) ? 'pool full' : gaveUp(error) ? 'gave up waiting' : isUnreachable(error) ? 'unreachable' : undefined;
+    if (failure !== undefined) out.failure = failure;
+    const frames = framesOf(error);
+    if (frames !== undefined) out.stack = frames;
+  }
+  return out;
+}
+
+/**
+ * The stack's frames alone. It begins with the message, the parameters
+ * with it, whose lines may look like frames (`\n    at …`): so the frames
+ * are read past the message, and a stack that no longer holds it is left out.
+ */
+function framesOf(error: Error): string | undefined {
+  const at = error.stack?.indexOf(error.message) ?? -1;
+  if (at < 0) return undefined;
+  return error.stack!.slice(at + error.message.length).split('\n').filter((line) => /^\s+at /.test(line)).join('\n');
 }
