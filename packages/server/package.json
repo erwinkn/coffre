@@ -62,7 +62,7 @@
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "typecheck:skeleton": "tsc --noEmit -p tsconfig.skeleton.json",
-    "test": "node --conditions=coffre:source --test $(node ../../scripts/test-files.mjs 'test/**/*.test.ts')"
+    "test": "files=$(node ../../scripts/test-files.mjs 'test/**/*.test.ts') && node --conditions=coffre:source --test $files"
   },
   "dependencies": {
     "@coffre/client": "workspace:*",
