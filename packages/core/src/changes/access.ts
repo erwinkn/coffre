@@ -13,8 +13,8 @@ export type AccessAnswers = {
   'member.put': Standing & { created: boolean };
   /** How many grants went with them. */
   'member.remove': { revoked: number };
-  /** What became of each place, in the order asked. */
-  'access.grant': { changes: AccessChange[] };
+  /** What became of each place, in the order asked; with `admit`, whether this change admitted the service account. */
+  'access.grant': { changes: AccessChange[]; created?: boolean };
   /** The role as it is now: null once deleted. */
   'policy.change': { role: RoleDefinition | null };
   /** The setting as the row holds it, projects by id. */
@@ -46,7 +46,10 @@ export type ScopeInput = { projects: Filter; environments: Filter };
  * Owner of the whole instance stays one (`last_owner`), and one the
  * deployment names comes in and stays as one (`configured_owner`). A
  * service account holds no instance role but `member`: asked one, refused
- * `invalid`. A refused put is logged as `member.add`, as 0.14.7 logged it.
+ * `invalid`. A person who does not run the instance, on a session, sets up
+ * a service account, as `member`, where they could give it something
+ * (`setsUpServices`), and brings back one they removed. A refused put is
+ * logged as `member.add`, as 0.14.7 logged it.
  *
  * A member, by principal: a person, `user:<email>` in lowercase, or a
  * service account, `token:<name>`, 256 characters at most. `scope` is where
@@ -59,7 +62,8 @@ export type MemberPut = { op: 'member.put'; principal: string; role: InstanceRol
 /**
  * Remove a member: their grants go, their sign-in accounts are revoked, and
  * their generation moves on, which ends every session, token and binding
- * issued before.
+ * issued before. Whoever runs the instance removes a member; a person on a
+ * session, a service account they manage (`managesService`).
  */
 export type MemberRemove = { op: 'member.remove'; principal: string };
 
@@ -75,15 +79,25 @@ export type MemberRemove = { op: 'member.remove'; principal: string };
  * before a removal is replaced in place. Refused `no_access` where a place
  * is not there or not theirs; to whoever manages every place asked,
  * `not_a_member`, `removed`, and `invalid` for a role there is not, a
- * project's on an environment or an end gone. A service account's grants
- * are not given here yet (`no_access`). 1 to 1,000 places; past the
- * shapes above the call is a fault, not a refusal: the app checks them
- * first.
+ * project's on an environment or an end gone.
+ *
+ * A service account's grants, where the caller does not manage access: a
+ * person on a session gives it what they could give it (`givesService`),
+ * and takes away what it holds, if they manage it (`managesService`): they
+ * could give it all it holds. `admit` admits it in the same change when
+ * it is not a member, or brings it back, all or none, as 0.14.7's
+ * `setAccess` did: by someone who could set one up (`setsUpServices`), it
+ * holds nothing before and is theirs; one removed, only its remover or
+ * whoever runs the instance brings back. A row these weigh that the vault
+ * did not write refuses, `tampered`. 1 to 1,000 places; past the shapes
+ * above, or `admit` of a person, the call is a fault, not a refusal: the
+ * app checks them first.
  */
 export type AccessGrant = {
   op: 'access.grant';
   principal: string;
   changes: { project: string; environment: string | null; role: Role | null; expiresAt: string | null }[];
+  admit?: boolean;
 };
 
 /**
