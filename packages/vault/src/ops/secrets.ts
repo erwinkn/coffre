@@ -44,10 +44,9 @@ function valid(item: KeyWrite): boolean {
  * return `secret.read` too: the value serves again, to whoever reads the
  * environment now, granted since it was archived included, so only whoever
  * could read it brings it back. 0.14 asked that of a secret, `secret.use`
- * of a sensitive value and nothing more of a plain one or of none; a
- * change reads only rows under the MAC, and a value's nature is on its
- * version's row, which has none, so the return asks the most of them. A
- * key that was a reference holds its own value from a write on.
+ * of a sensitive value and nothing more of a plain one or of none; this
+ * asks `secret.read` of each. A key that was a reference holds its own value
+ * from a write on.
  */
 function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation<Parts, Answers['secret.write']> {
   const shown = presented(input);
@@ -116,14 +115,15 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         // An archived key keeps its name: it is brought back, not written over.
         if (was?.archivedAt != null && value !== undefined && archived !== false) return { refused: 'archived' };
         const ids = fresh.get(key)!;
-        const { mac: _, ...kept } = was ?? { mac: null, id: ids.secret, projectId: place.id, environmentId: environment.id, key, createdAt: now, updatedAt: now, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: null };
+        const { mac: _, ...kept } = was ?? { mac: null, id: ids.secret, projectId: place.id, environmentId: environment.id, key, createdAt: now, updatedAt: now, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: null, nature: null, recipe: null, pairId: null, pairHalf: null };
         let secret: Fresh<typeof secrets> = { ...kept, archivedAt: archived === undefined ? kept.archivedAt : archived ? (kept.archivedAt ?? now) : null, folder: folder === undefined ? kept.folder : folder };
         const line: Record<string, unknown> = { key, secret: secret.id };
         if (value !== undefined) {
           const version = kept.versions + 1;
-          secret = { ...secret, versions: version, currentVersion: version, updatedAt: now, sourceId: null };
+          // Typed, not generated: no recipe for Regenerate, and in no pair.
+          secret = { ...secret, versions: version, currentVersion: version, updatedAt: now, sourceId: null, nature, recipe: null, pairId: null, pairHalf: null };
           sealed.push({
-            version: { id: ids.version, secretId: secret.id, version, createdAt: now, createdBy: caller.principal, recipe: null, pairId: null, pairHalf: null, plaintext: nature === 'plain' ? value : null, sensitive: nature === 'sensitive' },
+            version: { id: ids.version, secretId: secret.id, version, createdAt: now, createdBy: caller.principal, plaintext: nature === 'plain' ? value : null, sensitive: nature === 'sensitive' },
             text: Buffer.from(value),
           });
           // `source`: the secret it referred to until now.

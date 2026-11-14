@@ -165,6 +165,20 @@ export const secrets = pgTable(
     // A reference: the secret whose value this one's is, read live through it
     // by whoever reads this one's environment (docs/design/environments.md).
     sourceId: uuid('source_id'),
+    // How its current value is kept: 'plain', 'secret' or 'sensitive'. Null
+    // when it has no value of its own. Here, under the MAC, so that a change
+    // reads it: its version's row says it too, as its encryption names it.
+    nature: text({ enum: ['plain', 'secret', 'sensitive'] }),
+    // How a client made its current value, `bytes:32:hex`
+    // (`@coffre/core/recipe`), when it was generated rather than typed:
+    // Regenerate makes the next one the same way. Null for a typed value, so
+    // writing one by hand clears it. Under the MAC: a writer who could edit
+    // it could have the next value made one byte long.
+    recipe: text(),
+    // A generated key pair's two keys, written together, share an id, and
+    // each says which half it holds: 'private' or 'public'.
+    pairId: uuid('pair_id'),
+    pairHalf: text('pair_half'),
     mac: mac(),
   },
   (table) => [
@@ -172,6 +186,9 @@ export const secrets = pgTable(
     check('secrets_key_check', sql`${table.key} ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'`),
     check('secrets_versions_check', sql`${table.versions} >= 0 AND (${table.currentVersion} IS NULL OR (${table.currentVersion} = ${table.versions} AND ${table.versions} > 0))`),
     check('secrets_source_check', sql`${table.sourceId} IS NULL OR (${table.sourceId} <> ${table.id} AND ${table.currentVersion} IS NULL)`),
+    check('secrets_nature_check', sql`(${table.nature} IS NULL) = (${table.currentVersion} IS NULL) AND (${table.nature} IS NULL OR ${table.nature} IN ('plain', 'secret', 'sensitive'))`),
+    check('secrets_recipe_check', sql`(${table.recipe} IS NULL AND ${table.pairId} IS NULL) OR ${table.currentVersion} IS NOT NULL`),
+    check('secrets_pair_check', sql`(${table.pairId} IS NULL) = (${table.pairHalf} IS NULL) AND (${table.pairHalf} IS NULL OR ${table.pairHalf} IN ('private', 'public'))`),
     folderCheck('secrets_folder_check', table.folder),
     macCheck('secrets_mac_check', table.mac),
     foreignKey({
@@ -216,14 +233,6 @@ export const secretVersions = pgTable(
     kekVersion: text('kek_version').notNull(),
     createdAt: at('created_at').notNull(),
     createdBy: text('created_by').notNull(),
-    // How a client made this value, `bytes:32:hex` (`@coffre/core/recipe`),
-    // when it was generated rather than typed: Regenerate makes the next one
-    // the same way. Null for a typed value, so writing one by hand clears it.
-    recipe: text(),
-    // A generated key pair's two versions, written together, share an id,
-    // and each says which half it holds: 'private' or 'public'.
-    pairId: uuid('pair_id'),
-    pairHalf: text('pair_half'),
     // The value itself, for a plain one: a key marked not secret, an account's
     // id, which whoever lists the environment sees. Null for a secret. A copy
     // for the pages, under no MAC: a use opens the ciphertext, never this.
@@ -238,7 +247,6 @@ export const secretVersions = pgTable(
     check('secret_versions_version_check', sql`${table.version} > 0`),
     check('secret_versions_iv_check', sql`octet_length(${table.iv}) = 12`),
     check('secret_versions_auth_tag_check', sql`octet_length(${table.authTag}) = 16`),
-    check('secret_versions_pair_check', sql`(${table.pairId} IS NULL) = (${table.pairHalf} IS NULL) AND (${table.pairHalf} IS NULL OR ${table.pairHalf} IN ('private', 'public'))`),
     check('secret_versions_plain_check', sql`${table.plaintext} IS NULL OR NOT ${table.sensitive}`),
     foreignKey({
       name: 'secret_versions_secret_id_fkey',

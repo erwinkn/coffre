@@ -88,8 +88,8 @@ test('every sealed table has a row that reads back as the vault sealed it', asyn
     [dismissedKeys, { environmentId: environment, key: 'OLD_KEY', dismissedAt: at, dismissedBy: ada, restoredAt: null, restoredBy: null }],
     [environments, { id: parent, projectId: project, slug: 'prod', name: 'Production', createdAt: at, archivedAt: at, parentId: null, owner: null, protected: true, frozenCredentials: ['stripe', 'aws'] }],
     [environments, { id: environment, projectId: project, slug: 'ada', name: 'Ada’s', createdAt: at, archivedAt: null, parentId: parent, owner: ada, protected: false, frozenCredentials: [] }],
-    [secrets, { id: source, projectId: project, environmentId: parent, key: 'STRIPE_KEY', createdAt: at, updatedAt: at, versions: 3, currentVersion: 3, archivedAt: at, folder: 'Payments', sourceId: null }],
-    [secrets, { id: secret, projectId: project, environmentId: environment, key: 'STRIPE_KEY', createdAt: at, updatedAt: at, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: source }],
+    [secrets, { id: source, projectId: project, environmentId: parent, key: 'STRIPE_KEY', createdAt: at, updatedAt: at, versions: 3, currentVersion: 3, archivedAt: at, folder: 'Payments', sourceId: null, nature: 'sensitive', recipe: 'ecdsa:p-256', pairId: randomUUID(), pairHalf: 'private' }],
+    [secrets, { id: secret, projectId: project, environmentId: environment, key: 'STRIPE_KEY', createdAt: at, updatedAt: at, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: source, nature: null, recipe: null, pairId: null, pairHalf: null }],
     [principals, { ...member(ada, 'owner'), scope: '{"projects":"all","environments":{"only":["prod"]}}' }],
     [principals, { ...member(service), frozenAt: at }],
     [grants, { id: randomUUID(), principal: ada, generation: 0, projectId: project, environmentId: null, role: 'contributor', expiresAt: at, grantedAt: at, grantedBy: ada }],
@@ -393,8 +393,8 @@ test('a change that keeps losing answers busy', async () => {
 test('a value is the current version of a secret the same change writes, in an environment it read, or the change is a fault', async () => {
   const [place, id] = [randomUUID(), randomUUID()];
   const environment: Fresh<typeof environments> = { id: place, projectId: randomUUID(), slug: 'prod', name: 'prod', createdAt: at, archivedAt: null, parentId: null, owner: null, protected: false, frozenCredentials: [] };
-  const secret = (versions: number, currentVersion: number | null): Fresh<typeof secrets> => ({ id, projectId: environment.projectId, environmentId: place, key: 'A', createdAt: at, updatedAt: at, versions, currentVersion, archivedAt: null, folder: null, sourceId: null });
-  const version = (of: string, number: number, plaintext: string | null = null) => ({ version: { id: randomUUID(), secretId: of, version: number, createdAt: at, createdBy: ada, recipe: null, pairId: null, pairHalf: null, plaintext, sensitive: false }, text: Buffer.from('x') });
+  const secret = (versions: number, currentVersion: number | null, nature: Fresh<typeof secrets>['nature'] = currentVersion === null ? null : 'secret'): Fresh<typeof secrets> => ({ id, projectId: environment.projectId, environmentId: place, key: 'A', createdAt: at, updatedAt: at, versions, currentVersion, archivedAt: null, folder: null, sourceId: null, nature, recipe: null, pairId: null, pairHalf: null });
+  const version = (of: string, number: number, plaintext: string | null = null, sensitive = false) => ({ version: { id: randomUUID(), secretId: of, version: number, createdAt: at, createdBy: ada, plaintext, sensitive }, text: Buffer.from('x') });
   const here = put(environments, environment);
   const tries: [string, Write[], ReturnType<typeof version>, RegExp][] = [
     ['no secret written', [here], version(id, 1), /current version of a secret it writes/],
@@ -404,7 +404,11 @@ test('a value is the current version of a secret the same change writes, in an e
     ['a secret left with no value', [here, put(secrets, secret(1, null))], version(id, 1), /current version/],
     ['an environment neither read nor written', [put(secrets, secret(1, 1))], version(id, 1), /that it read/],
     ['an environment of another project', [put(environments, { ...environment, projectId: randomUUID() }), put(secrets, secret(1, 1))], version(id, 1), /of its project/],
-    ['a plain copy that is not the value', [here, put(secrets, secret(1, 1))], version(id, 1, 'y'), /copy is the value/],
+    ['a plain copy that is not the value', [here, put(secrets, secret(1, 1, 'plain'))], version(id, 1, 'y'), /copy is the value/],
+    // What its secret's row says of the value, which the next change reads, is what it is sealed as.
+    ['a plain value of a secret its row says is a secret', [here, put(secrets, secret(1, 1))], version(id, 1, 'x'), /sealed as plain .* says secret/],
+    ['a secret value of a secret its row says is sensitive', [here, put(secrets, secret(1, 1, 'sensitive'))], version(id, 1), /sealed as secret .* says sensitive/],
+    ['a sensitive value of a secret its row says is plain', [here, put(secrets, secret(1, 1, 'plain'))], version(id, 1, null, true), /sealed as sensitive .* says plain/],
   ];
   for (const [what, writes, value, why] of tries) {
     await assert.rejects(change(vault, { read: nothing, decide: () => ({ writes, values: [value], entry: said('test.write'), answer: null }) }), why, what);
@@ -413,7 +417,7 @@ test('a value is the current version of a secret the same change writes, in an e
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT 1 FROM secrets UNION ALL SELECT 1 FROM secret_versions`), []);
   // And as it should be: written with its secret and its environment, plain or not.
   const project = put(projects, { id: environment.projectId, slug: 'market', name: 'Market', createdAt: at, archivedAt: null, folder: null });
-  const done = await change(vault, { read: nothing, decide: () => ({ writes: [project, here, put(secrets, secret(1, 1))], values: [version(id, 1, 'x')], entry: said('test.write'), answer: null }) });
+  const done = await change(vault, { read: nothing, decide: () => ({ writes: [project, here, put(secrets, secret(1, 1, 'plain'))], values: [version(id, 1, 'x')], entry: said('test.write'), answer: null }) });
   assert.ok('answer' in done);
   // An environment the change drops is no place for a value, though it read it.
   const next = version(id, 2);
