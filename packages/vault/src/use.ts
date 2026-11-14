@@ -428,14 +428,16 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
       request: ask.request,
       ip: ask.ip,
       objects: [...new Set(objects)],
-      detail: { purpose: ask.purpose, ...ask.upstream, ...more, keys: items.map((item) => ({ key: name(item), secret: item.held.id, version: item.version.version, ...(item.asked === item.held ? {} : { through: item.asked.id }) })) },
+      detail: { purpose: ask.purpose, ...more, keys: items.map((item) => ({ key: name(item), secret: item.held.id, version: item.version.version, ...(item.asked === item.held ? {} : { through: item.asked.id }) })) },
     }, written, []);
     const who = [`principal:${caller.principal}`, `credential:${caller.credential.id}`];
     const entry = said([`project:${project.id}`, `environment:${environment.id}`, ...who, ...fresh.flatMap((item) => [`secret:${item.held.id}`, `secret:${item.asked.id}`])], fresh, (item) => item.key,
-      // After an outage, this credential's proxied uses that no entry says: since when, and how many (`use`).
-      unlogged === undefined ? {} : { unlogged: { since: new Date(unlogged.at).toISOString(), uses: unlogged.uses } });
+      // The upstream it was used for, the holder's alone to know of; after an outage, this credential's proxied uses
+      // that no entry says: since when, and how many (`use`).
+      { ...ask.upstream, ...(unlogged === undefined ? {} : { unlogged: { since: new Date(unlogged.at).toISOString(), uses: unlogged.uses } }) });
     // A read through a reference is its source's to know of too, as 0.14.7 logged it: an entry in each source
-    // environment, which whoever reads that environment's log reads, whatever they read of the holder's.
+    // environment, which whoever reads that environment's log reads, whatever they read of the holder's. It names
+    // the source and the reference alone: not the holder's places, nor the upstream the holder used it for.
     const sources = new Map<string, Given[]>();
     for (const item of fresh) if (item.asked !== item.held && item.held.environmentId !== environment.id) sources.set(item.held.environmentId, [...(sources.get(item.held.environmentId) ?? []), item]);
     const entries = [entry, ...[...sources.values()].map((items) => said([`project:${items[0]!.held.projectId}`, `environment:${items[0]!.held.environmentId}`, ...who, ...items.map((item) => `secret:${item.held.id}`)], items, (item) => item.held.key))];

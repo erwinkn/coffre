@@ -263,6 +263,15 @@ test('a reference is read where it lives and counted where its value is held; on
   assert.ok(entry!.objects.includes(`secret:${w.link.id}`) && entry!.objects.includes(`secret:${w.token.id}`));
   // And in the source's log, by the source's own places and key, with nothing of the holder's place: one statement still.
   assert.deepEqual([source!.objects.filter((object) => !object.startsWith('credential:')), source!.detail.keys, source!.request, more], [[`project:${w.billing.id}`, `environment:${w.billed.id}`, `principal:${ada}`, `secret:${w.token.id}`], [{ key: 'API_TOKEN', secret: w.token.id, version: 1, through: w.link.id }], entry!.request, []]);
+  // Used through the credential proxy: the upstream is the holder's to know of, and its entry's alone.
+  const upstream: Upstream = { credential: 'openai', host: 'api.openai.com', egress: true };
+  assert.deepEqual(await got(ask('ada', 'market/prod', ['LINK'], { purpose: 'use', upstream })), { LINK: 'billing-token' });
+  const [, , used, usedSource, ...after] = await logged();
+  assert.deepEqual([used!.detail, usedSource!.detail, after], [
+    { purpose: 'use', ...upstream, keys: [{ key: 'LINK', secret: w.token.id, version: 1, through: w.link.id }] },
+    { purpose: 'use', keys: [{ key: 'API_TOKEN', secret: w.token.id, version: 1, through: w.link.id }] },
+    [],
+  ]);
 
   const archived = await value(vault, secret(w.billed, 'RETIRED', { archivedAt: new Date(0) }), 'x');
   const chained = secret(w.billed, 'CHAINED', { sourceId: w.token.id });
