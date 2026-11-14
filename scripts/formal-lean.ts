@@ -45,8 +45,7 @@ import {
 import { deriveLogKey, GENESIS_HASH, entryHash, entryMac, sealEntry, verifyEntries, type LogFields, type LogKey, type StoredEntry } from '../packages/core/src/audit/chain.ts';
 import { encodeAad, type SecretContext } from '../packages/core/src/context.ts';
 import { handsBack, type RefusalCode } from '../packages/core/src/vault.ts';
-import { keyRefusals, referenceRefusal, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from '../packages/vault/src/decide.ts';
-import type { EnvironmentRow } from '../packages/vault/src/store.ts';
+import { keyRefusals, referenceRefusal, sensitiveRefusals, useOnlyRefusals, type EnvironmentRow, type Reader, type SecretPlace } from '../packages/vault/src/decide.ts';
 
 const [oracle, ...flags] = process.argv.slice(2);
 if (oracle === undefined || !flags.every((flag) => flag === '--long' || /^--seed=\d+$/.test(flag))) {

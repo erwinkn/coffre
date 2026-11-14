@@ -14,10 +14,6 @@
 // or not; coffre never makes the role, and never revokes the group from it.
 import { parseArgs } from 'node:util';
 
-import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core/access';
-import { shownMember } from '@coffre/core/schemas';
-import { openDatabase } from '@coffre/db/connect';
-import { everyProjectPreview, readGrants, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
 import { AfterMigrations, backupLoginProblem, DatabaseAhead, migrateDatabase, migrationStatus, NotOwner } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
@@ -155,7 +151,6 @@ async function migrateDeployment(
       throw new MigrateError(migrationFailure(error));
     }
     out.write(`${s.green('✓')} ${where} is up to date, at coffre ${deployment.version}'s schema: ${count(applied.length, 'migration')}, the last ${applied.at(-1)}; ${reasserted(options)}\n`);
-    out.write(describeFirstRun(await previewFirstRun(url)));
     return;
   }
   if (notOwner !== null) throw new MigrateError(`${notOwner.message}. Nothing was changed`);
@@ -169,156 +164,6 @@ async function migrateDeployment(
   } finally {
     steps.end();
   }
-  out.write(describeFirstRun(await previewFirstRun(url)));
-}
-
-/** What this version does to 0.4's and 0.5's rows when it first runs, which the database says: what `coffre migrate` shows. */
-export type FirstRun = {
-  everyProject: EveryProjectPreview[];
-  unsealed: Unsealed[];
-  /** The members who hold a live grant on a project or an environment now. */
-  holding: ReadonlySet<string>;
-};
-
-/**
- * What the vault will make of the grants on every project of 0.4 still
- * there, and the tokens and bindings the app will seal, read with the
- * owner's login.
- */
-async function previewFirstRun(url: URL): Promise<FirstRun> {
-  const { db, close } = await openDatabase(url.href);
-  try {
-    const at = new Date();
-    const [everyProject, unsealed, grants] = await Promise.all([
-      everyProjectPreview(db, at.getTime()),
-      unsealedCredentials(db, at),
-      readGrants(db, { liveAt: at.getTime() }),
-    ]);
-    return { everyProject, unsealed, holding: new Set(grants.filter((grant) => grant.projectId !== null).map((grant) => grant.principal)) };
-  } finally {
-    await close();
-  }
-}
-
-export function describeFirstRun({ everyProject, unsealed, holding }: FirstRun): string {
-  // What a member holds once the vault has converted: their grants on a place, and what it makes of those on every project, unless it leaves them.
-  const converted = everyProject.filter((preview) => !preview.reported && preview.conversion.grants.length > 0).map((preview) => preview.principal);
-  const holds = new Set([...holding, ...converted]);
-  const scopeless = unsealed.filter((row) => row.scope === null);
-  return describeEveryProject(everyProject) +
-    describeUnsealed(scopeless, new Set(scopeless.map((row) => row.principal).filter((principal) => !holds.has(principal)))) +
-    describeIssuers(unsealed);
-}
-
-/**
- * The tokens and trust bindings of 0.4, which carry no scope of their own,
- * by account: when this version first checks a credential, each keeps what
- * its account holds then (`sealScopes` in @coffre/server), and nothing the
- * account is given after reaches it. An account that holds nothing then
- * (`empty`) seals them reaching nothing, for good. Nothing when there are none.
- *
- *   service:ci-web   2 tokens and 1 trust binding
- *   service:idle     1 token, which will reach nothing: grant the account before you deploy, or reissue it after
- */
-export function describeUnsealed(unsealed: readonly Unsealed[], empty: ReadonlySet<string> = new Set()): string {
-  if (unsealed.length === 0) return '';
-  const lines = [
-    '',
-    'Service tokens and trust bindings now carry their own scope, and what an account is given later reaches none made before.',
-    "When this version first checks a credential, each of these keeps what its account holds then, after any conversion above:",
-  ];
-  for (const principal of [...new Set(unsealed.map((row) => row.principal))]) {
-    const theirs = unsealed.filter((row) => row.principal === principal);
-    const nothing = empty.has(principal)
-      ? `, which will reach nothing: grant the account before you deploy, or reissue ${theirs.length === 1 ? 'it' : 'them'} after`
-      : '';
-    lines.push(`  ${shownMember(principal)}: ${credentialsInWords(theirs)}${nothing}`);
-  }
-  lines.push('Grant or revoke before you deploy to choose what they keep; to change one after, issue another and revoke it.', '');
-  return lines.join('\n');
-}
-
-/**
- * The tokens and trust bindings of a release before 0.11, by account, and
- * who issued them: when this version first checks a credential, each reads
- * the sensitive values of a place only where whoever issued it is an Owner
- * of its project then (`sealScopes` in @coffre/server, R32). Nothing when
- * there are none.
- *
- *   service:ci-web   2 tokens and 1 trust binding, issued by erwin@acme.example
- */
-export function describeIssuers(unsealed: readonly Unsealed[]): string {
-  if (unsealed.length === 0) return '';
-  const lines = [
-    '',
-    'A service token or trust binding now reads a sensitive value only where an Owner of its project issued it.',
-    'When this version first checks a credential, each of these reads them where whoever issued it is an Owner of the project then, project by project:',
-  ];
-  for (const principal of [...new Set(unsealed.map((row) => row.principal))]) {
-    const theirs = unsealed.filter((row) => row.principal === principal);
-    lines.push(`  ${shownMember(principal)}: ${credentialsInWords(theirs)}, issued by ${[...new Set(theirs.map((row) => row.createdBy))].join(', ')}`);
-  }
-  lines.push("Anyone else's, one whose issuer has left included, read every other value; an Owner of the project issues one that reads them too.", '');
-  return lines.join('\n');
-}
-
-/** Tokens and bindings, counted: `2 tokens and 1 trust binding`. */
-function credentialsInWords(rows: readonly Unsealed[]): string {
-  const tokens = rows.filter((row) => row.kind === 'token').length;
-  const bindings = rows.length - tokens;
-  return [tokens === 0 ? null : count(tokens, 'token'), bindings === 0 ? null : count(bindings, 'trust binding')].filter((part) => part !== null).join(' and ');
-}
-
-/**
- * The grants on every project of 0.4, each with what the vault replaces it
- * by when this version first runs, and what that reaches less: nothing when
- * there are none.
- *
- *   user:ada@acme.example   developer on dev in every project → Developer, All projects · dev only
- *   service:ci              viewer on every project → viewer on market, billing; not projects made later
- *   user:bo@acme.example    viewer on every project → viewer on market, billing/dev; not projects made later;
- *                           viewer on billing only through its environments, not those made later
- *   service:deploy          maintainer on every project → maintainer on market, billing; not projects made later;
- *                           loses access-manager on billing (keeps maintainer)
- *   service:old             viewer on every project → left as it is: the vault reported their row tampered with
- *                           (if the vault finds that report forged, it makes: viewer on market, billing; not projects made later)
- */
-export function describeEveryProject(previews: readonly EveryProjectPreview[]): string {
-  if (previews.length === 0) return '';
-  const lines = ['', 'Grants on every project are gone in this version. When it first runs, the vault replaces them:'];
-  for (const { principal, before, conversion, paths, reported } of previews) {
-    const was = before.map((grant) => `${grant.role} on ${grant.place === '*' ? 'every project' : `${grant.place.slice(2)} in every project`}`).join(', ');
-    const role = conversion.role === 'member' ? [] : [unscoped(conversion.scope) ? INSTANCE_ROLES[conversion.role].name : `${INSTANCE_ROLES[conversion.role].name}, ${scopeInWords(conversion.scope)}`];
-    const byRole = new Map<string, string[]>();
-    for (const grant of conversion.grants) byRole.set(grant.role, [...(byRole.get(grant.role) ?? []), paths[grant.environmentId ?? grant.projectId] ?? grant.projectId]);
-    const grants = [...byRole].map(([held, places]) => `${held} on ${places.join(', ')}`);
-    const narrower = conversion.narrowed.flatMap((loss) => {
-      switch (loss.kind) {
-        case 'later-projects':
-          return [];
-        case 'environments': {
-          const project = paths[loss.projectId] ?? loss.projectId;
-          const log = roleGrants(loss.role, 'audit.read') ? `, nor ${project}'s own log entries` : '';
-          return [`${loss.role} on ${project} only through its environments, not those made later${log}`];
-        }
-        case 'lost': {
-          const until = loss.keptUntil === null ? '' : ` until ${new Date(loss.keptUntil).toISOString().slice(0, 10)}`;
-          return [`loses ${loss.lost} on ${paths[loss.environmentId ?? loss.projectId] ?? loss.projectId} (keeps ${loss.kept}${until})`];
-        }
-      }
-    });
-    const later = conversion.narrowed.some((loss) => loss.kind === 'later-projects') ? ['not projects made later'] : [];
-    const after = [[...role, ...grants].join(', and ') || 'nothing', ...later, ...narrower].join('; ');
-    // Whether the vault's report is its own, only the vault can tell: either way, what it does is said.
-    const then = reported ? `left as it is: the vault reported their row tampered with (if the vault finds that report forged, it makes: ${after})` : after;
-    lines.push(`  ${shownMember(principal)}: ${was} → ${then}`);
-  }
-  lines.push(
-    "Those of a member whose row the vault finds tampered with stay as they are: migrate holds no key to check a row, nor whether a report is the vault's own.",
-    'Revoke or regrant any of them before you deploy to choose otherwise (docs/design/instance-roles.md).',
-    '',
-  );
-  return lines.join('\n');
 }
 
 /** Apply `pending` to the database, asking first unless told yes. */

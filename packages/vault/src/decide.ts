@@ -1,6 +1,5 @@
 import { allows, ownsProject, readsSensitive, useOnly, withinCredential, type HeldKey, type Holdings, type Permission, type Place } from '@coffre/core/access';
 import { handsBack, type Access, type RefusalCode } from '@coffre/core/vault';
-import type { EnvironmentRow } from './store.ts';
 
 /**
  * How the vault decides each key of one call, and each reference one makes,
@@ -8,6 +7,16 @@ import type { EnvironmentRow } from './store.ts';
  * `#keys` and `reference` reads, locks and logs around them. Pure, so that `formal/lean` holds them to its model
  * case by case (`pnpm formal:lean`, docs/formal.md).
  */
+
+/** An environment as a decision reads it. */
+export type EnvironmentRow = {
+  projectId: string;
+  slug: string;
+  owner: string | null;
+  parentId: string | null;
+  deleted: boolean;
+  archived: boolean;
+};
 
 /** What a decision reads of someone: whether they are a member, what they hold now, and what they would with their lapsed grants. */
 export type Reader = { status: Access['status']; live: Holdings; all: Holdings };
