@@ -306,16 +306,21 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
     reader: part(secrets, sql`${secrets.id} IN ${readers}`),
     readerPlace: part(environments, sql`${environments.id} IN (SELECT r.environment_id FROM secrets r WHERE r.id IN ${readers})`),
     readerProject: part(projects, sql`${projects.id} IN (SELECT r.project_id FROM secrets r WHERE r.id IN ${readers})`),
-    // Each version restored, its key's newest, by number, as the key's sealed row counts them; and the newest copy of the
-    // value restored, of the same first date, which a mark or a restore made.
+    // Each version restored, its key's newest, by number, as the key's sealed row counts them; and the copy of the value
+    // restored that says its nature, of the same first date, which a mark or a restore made: the newest. Unless two values
+    // may share that date, which a version past the first written at it (`created_at = first_written_at`) says, a value
+    // written in the same millisecond or after the clock went back: then the strictest, as it cannot be told which is whose.
     version: part(secretVersions, sql`(${secretVersions.secretId}, ${secretVersions.version}) IN (SELECT s.id, r.version FROM secrets s
       JOIN unnest(${sql.param(restores.map((each) => each.key))}::text[], ${sql.param(restores.map((each) => each.version))}::int[]) AS r (key, version) ON r.key = s.key
       WHERE s.project_id = ${project} AND s.environment_id = ${here}
       UNION SELECT s.id, s.versions FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(restores.map((each) => each.key))}::text[])
-      UNION SELECT c.secret_id, max(c.version) FROM secret_versions c JOIN secret_versions f ON f.secret_id = c.secret_id AND f.first_written_at = c.first_written_at
-        JOIN secrets s ON s.id = f.secret_id
+      UNION SELECT f.secret_id, (SELECT c.version FROM secret_versions c WHERE c.secret_id = f.secret_id AND c.first_written_at = f.first_written_at
+          ORDER BY CASE WHEN EXISTS (SELECT 1 FROM secret_versions o JOIN secret_versions e ON e.secret_id = o.secret_id AND e.first_written_at = o.first_written_at AND e.version < o.version
+            WHERE o.secret_id = f.secret_id AND o.first_written_at = f.first_written_at AND o.created_at = o.first_written_at)
+          THEN c.sensitive::int * 2 + (c.plaintext IS NULL)::int ELSE 0 END DESC, c.version DESC LIMIT 1)
+        FROM secret_versions f JOIN secrets s ON s.id = f.secret_id
         JOIN unnest(${sql.param(restores.map((each) => each.key))}::text[], ${sql.param(restores.map((each) => each.version))}::int[]) AS r (key, version) ON r.key = s.key AND r.version = f.version
-        WHERE s.project_id = ${project} AND s.environment_id = ${here} GROUP BY c.secret_id)`),
+        WHERE s.project_id = ${project} AND s.environment_id = ${here})`),
     marked: marked.part,
     // Each version a value replaces, by its id: the decision holds it to the sealed row of what the key reads now.
     replaced: part(secretVersions, sql`${secretVersions.id} = ANY(${sql.param(replacing)}::uuid[])`),
@@ -515,12 +520,17 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           // reference, or one broken), only the version's row says it, under no MAC: its encryption is held to it (`vouched`).
           const unsaid = restore !== undefined && kept.currentVersion !== kept.versions ? newest : undefined;
           if (unsaid !== undefined && unsaid !== from) vouched.push(unsaid);
-          // The newest copy of the value restored, by its first date, a mark's or a restore's: it comes back no looser than
-          // that, as 0.14.7 found it by its ciphertext. A value made sensitive in place is sensitive in its older versions too.
+          // The copy of the value restored that the read found to say its nature, by its first date, a mark's or a restore's: it
+          // comes back no looser than that, as 0.14.7 found it by its ciphertext. A value made sensitive in place is sensitive
+          // in its older versions too. Of the versions of that date read, the strictest, the newest of those: the copy the
+          // read picked, or the newest of the key, which is that copy when of that date. Each one's encryption is held to it.
           // Its first date has no MAC: one moved or deleted behind the vault hides the copy (docs/design/0.16.md, "A version is restored").
-          const copy = from && seen.version.filter((row) => row.secretId === kept.id && row.firstWrittenAt.getTime() === from.firstWrittenAt.getTime())
-            .reduce((newer, row) => (row.version > newer.version ? row : newer), from);
-          if (copy !== undefined && copy !== from && copy !== unsaid) vouched.push(copy);
+          const dated = from === undefined ? [] : seen.version.filter((row) => row.secretId === kept.id && row.firstWrittenAt.getTime() === from.firstWrittenAt.getTime());
+          const copy = from && dated.reduce((pick, row) => {
+            const [a, b] = [natureOf(row), natureOf(pick)];
+            return a !== b ? (stricterOf(a, b) === a ? row : pick) : row.version > pick.version ? row : pick;
+          }, from);
+          for (const row of dated) if (row !== from && row !== unsaid) vouched.push(row);
           const sticks = natures.some((row) => row?.nature === 'sensitive') || unsaid?.sensitive === true;
           // In a personal config, a value typed over a plain one, its own or the one it reads now, stays plain: nobody but its owner lists it (0.14.7's `bareLevel`).
           // A generated one is a secret.

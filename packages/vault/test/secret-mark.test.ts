@@ -291,6 +291,26 @@ test('a restore comes back no looser than its value\'s newest copy: a value mark
   assert.equal(await restore('ada-cli', 'DEE_KEY', 2), 'plain');
 });
 
+test('two values first written in the same millisecond: a restore of either comes back at the strictest of that date, never looser', async () => {
+  const restore = async (version: number) => {
+    const done = await vault.change(writing('ada-cli', [{ key: 'SAME_MS', restore: version }]));
+    assert.ok('answer' in done, JSON.stringify(done));
+    return done.answer.keys.SAME_MS!.nature;
+  };
+  // The clock never moves: a secret, marked sensitive, then another value written over it as a secret, all at one instant.
+  for (const each of [{ key: 'SAME_MS', value: 'original', nature: 'secret' }, { key: 'SAME_MS', nature: 'sensitive' }, { key: 'SAME_MS', value: 'different', nature: 'secret' }] as const) {
+    assert.ok('answer' in await vault.change(writing('ada-cli', [each])), JSON.stringify(each));
+  }
+  ids.SAME_MS = (await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM secrets WHERE key = 'SAME_MS'`))[0]!.id;
+  assert.equal(new Set((await versionsOf('SAME_MS')).flatMap((row) => [row.created, row.first])).size, 1, 'one instant');
+  // v1's value comes back sensitive, as v2 marked it, though v3, a value of its own, says a secret.
+  assert.equal(await restore(1), 'sensitive');
+  assert.equal(await opened('SAME_MS', 4), 'original');
+  // And v3's too: which version is whose cannot be told, so each comes back at the strictest.
+  assert.equal(await restore(3), 'sensitive');
+  assert.equal(await opened('SAME_MS', 5), 'different');
+});
+
 /** `count` keys of `size` bytes each, in a new environment of market's: its slug. */
 const big = async (slug: string, count: number, size: number) => {
   const place = environment(market, slug);
