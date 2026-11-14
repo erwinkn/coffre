@@ -244,7 +244,8 @@ export async function verifyKeys(cli: Cli): Promise<string> {
 
 /**
  * Everything the API does, the CLI does: with the admin's `coffre login`
- * session, a project and its environment, a secret set and renamed, a
+ * session, a project and its environment, made twice, the second time
+ * changing nothing, a secret set and renamed, a
  * service admitted and granted, a token issued into a 0600 file, then
  * piped to `coffre login --token` in a CLI of the service's own, read
  * with, revoked after its preview, and refused from then on; the grant
@@ -268,6 +269,10 @@ export async function manageByCli(cli: Cli): Promise<string> {
     const value = `cli-value-${randomBytes(8).toString('hex')}`;
     await coffre(['projects', 'create', 'conformance-cli', '--name', 'CLI']);
     await coffre(['environments', 'create', 'conformance-cli/ci']);
+    // Made again, as a script that makes what it needs does: the server refuses it, `exists`, and the CLI says nothing changed.
+    const again = (await coffre(['projects', 'create', 'conformance-cli'])) + (await coffre(['environments', 'create', 'conformance-cli/ci']));
+    expect(again.includes('conformance-cli exists already: nothing changed') && again.includes('conformance-cli/ci exists already: nothing changed'),
+      'making a project or an environment that is there already did not say nothing changed', again);
     await coffre(['set', 'conformance-cli/ci/API_KEY'], value);
     await coffre(['rename', 'conformance-cli/ci/API_KEY', 'API_TOKEN']);
     const refused = await coffre(['grant', 'conformance-cli', 'conformance-deploy', '--role', 'viewer', '--env', 'ci', '--service'], undefined, 1);
