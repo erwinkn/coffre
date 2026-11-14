@@ -1,15 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 
 import {
   defineSignin,
   github,
+  githubApp,
   google,
   microsoft,
   oidc,
   publicOrigin,
 } from '../src/identity/signin/config.ts';
 import type { SigninProvider } from '../src/identity/signin/types.ts';
+import { signin } from '../src/identity/auth.ts';
 
 const TENANT = '6f1c2a3b-4d5e-4f60-8a9b-0c1d2e3f4a5b';
 const CREDENTIALS = { clientId: 'id', clientSecret: 'secret' };
@@ -240,4 +243,44 @@ test("a deployment's own provider is checked like coffre's", () => {
   assert.throws(() => define({ ...own, label: ' ' }), /sign-in provider acme needs a label/);
   assert.throws(() => define({ ...own, brand: 'okta' as never }), /acme's brand must be one of github, google, microsoft, oidc/);
   assert.throws(() => define({ ...own, finish: undefined as never }), /acme needs start\(\) and finish\(\)/);
+});
+
+/** Two limiters, as a deployment passes them: on Workers, rate-limiting bindings. */
+const limiter = { limit: async () => ({ success: true }) };
+const LIMITS = { perSource: limiter, total: limiter };
+const withWorkloads = (workloads: unknown, publicUrl = 'https://secrets.acme.example') =>
+  defineSignin({ publicUrl, providers: [github(CREDENTIALS)], workloads: workloads as never }).workloads;
+
+test('workloads take both their limits, each a limiter, and type-check every option', () => {
+  for (const limits of [undefined, {}, { perSource: limiter }, { total: limiter }, { perSource: limiter, total: {} }, { perSource: 30, total: limiter }]) {
+    assert.throws(() => withWorkloads({ limits }), /workloads need their limits, per source and in total/, JSON.stringify(limits));
+  }
+  assert.deepEqual(withWorkloads({ limits: LIMITS }), { allowLoopback: false, limits: LIMITS, github: null, useOnly: false, noReads: false, alert: null });
+  assert.equal(defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github(CREDENTIALS)] }).workloads, null);
+  // A flag is true or false, not a string a config file would leave: 'false' would turn it on.
+  for (const flag of ['useOnly', 'noReads']) {
+    assert.throws(() => withWorkloads({ limits: LIMITS, [flag]: 'false' }), new RegExp(`workloads\\.${flag} is true or false`));
+    assert.equal((withWorkloads({ limits: LIMITS, [flag]: true }) as Record<string, unknown>)[flag], true);
+  }
+  assert.throws(() => withWorkloads({ limits: LIMITS, alert: 'https://hooks.acme.example' }), /workloads\.alert is a function, given each alert/);
+  const alert = () => {};
+  assert.equal(withWorkloads({ limits: LIMITS, alert })!.alert, alert);
+  // The GitHub App is githubApp()'s, for github.com.
+  const privateKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+  assert.throws(() => withWorkloads({ limits: LIMITS, github: { appId: 1001, privateKey } }), /workloads\.github is the deployment's GitHub App: githubApp/);
+  const app = githubApp({ appId: 1001, privateKey });
+  assert.equal(withWorkloads({ limits: LIMITS, github: app })!.github, app);
+  assert.throws(() => withWorkloads({ limits: LIMITS, github: githubApp({ appId: 1001, privateKey, apiUrl: 'https://github.acme.example/api/v3' }) }), /workloads\.github is for github\.com/);
+});
+
+test('loopback issuers are for development: an instance off loopback refuses them, as signin() resolves it too', () => {
+  const at = (publicUrl: string) => withWorkloads({ limits: LIMITS, allowLoopbackIssuersForDevelopment: true }, publicUrl);
+  assert.throws(() => at('https://secrets.acme.example'), /workloads\.allowLoopbackIssuersForDevelopment is for an instance on loopback, and https:\/\/secrets\.acme\.example is not one: turn it off/);
+  assert.throws(() => at('https://127.0.0.1.nip.io'), /is not one/);
+  for (const publicUrl of ['http://127.0.0.1:3000', 'http://localhost:3000', 'http://[::1]:3000']) assert.equal(at(publicUrl)!.allowLoopback, true, publicUrl);
+  // As a deployment writes it: signin() takes it, and the instance's own URL decides.
+  const auth = signin({ providers: [github(CREDENTIALS)], workloads: { limits: LIMITS, allowLoopbackIssuersForDevelopment: true } });
+  assert.throws(() => auth.resolve('https://secrets.acme.example'), /is not one: turn it off/);
+  const local = auth.resolve('http://127.0.0.1:3082');
+  assert.equal(local.mode === 'signin' && local.signin.workloads?.allowLoopback, true);
 });
