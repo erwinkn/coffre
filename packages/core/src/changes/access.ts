@@ -1,4 +1,4 @@
-import type { Filter, InstanceRole, Role, Scope } from '../access.ts';
+import type { Filter, InstanceRole, Role, RoleDefinition, Scope } from '../access.ts';
 import type { AccessChange } from '../vault.ts';
 
 /**
@@ -6,7 +6,7 @@ import type { AccessChange } from '../vault.ts';
  * (`packages/vault/src/ops/access.ts`). A workload's session makes none of
  * them, whatever its scope holds (`workload_cannot_issue`), as 0.14 refused.
  */
-export type AccessChanges = MemberAdd | MemberRestore | MemberRole | MemberRemove | AccessGrant;
+export type AccessChanges = MemberAdd | MemberRestore | MemberRole | MemberRemove | AccessGrant | RoleEdit | SettingsEdit;
 
 export type AccessAnswers = {
   /** The role and scope written, the scope's projects by id as the row holds them: null is everywhere. */
@@ -17,6 +17,10 @@ export type AccessAnswers = {
   'member.remove': { revoked: number };
   /** What became of each place, in the order asked. */
   'access.grant': { changes: AccessChange[] };
+  /** The role as it is now: null once deleted. */
+  'policy.change': { role: RoleDefinition | null };
+  /** The setting as the row holds it, projects by id. */
+  'settings.change': { serviceAccounts: Scope };
 };
 
 export type Standing = { role: InstanceRole; scope: Scope | null };
@@ -77,3 +81,27 @@ export type AccessGrant = {
   principal: string;
   changes: { project: string; environment: string | null; role: Role | null; expiresAt: string | null }[];
 };
+
+/**
+ * A role defined, edited, put back or deleted (`policy.change`), by an
+ * Owner of the whole instance on a session, as 0.14 allowed: a project role
+ * (`instance` false), one that ships or one an Owner makes, or one of the
+ * instance's that ships (Admin, Auditor). Owner, and the instance's Member,
+ * are never edited. `definition` null puts a role that ships back as it
+ * ships, and deletes one an Owner made, refused `role_granted` while a
+ * grant names it. A project role that holds what only a project has
+ * (`PROJECT_ONLY_PERMISSIONS`) is refused `invalid` while a grant on an
+ * environment names it. `was` is the role as the caller saw it, null for
+ * none: one that changed since is refused `policy_changed`, so that a
+ * change is made from the role its preview was. An id is a role's as
+ * `ROLE_ID` has it; a definition one `definitionProblem` passes: past those
+ * the call is a fault, not a refusal: the app checks them first.
+ */
+export type RoleEdit = { op: 'policy.change'; instance: boolean; role: Role; definition: RoleDefinition | null; was: RoleDefinition | null };
+
+/**
+ * Where people set up service accounts themselves (`settings.change`,
+ * `ServiceSetting`): projects and environments by slug, 1,000 a list at
+ * most. Whoever runs the instance sets it, as 0.14 allowed.
+ */
+export type SettingsEdit = { op: 'settings.change'; serviceAccounts: ScopeInput };
