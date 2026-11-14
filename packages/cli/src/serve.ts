@@ -26,7 +26,12 @@ import { addressOf, forwarder, proofOf, PROOFS } from './workload.ts';
  * `url`, the session flag's, if given before the command; `fetching`, the
  * fetch for the instance at an origin, timed under `--verbose`.
  */
-export async function serve(args: string[], sessionUrl: string | undefined, fetching: (instance: string) => typeof fetch): Promise<void> {
+export async function serve(
+  args: string[],
+  sessionUrl: string | undefined,
+  fetching: (instance: string) => typeof fetch,
+  beforeProof: (origin: string) => Promise<void>,
+): Promise<void> {
   const { values } = parse(
     args,
     { url: { type: 'string' }, service: { type: 'string' }, proof: { type: 'string' }, place: { type: 'string' }, listen: { type: 'string' }, tunnel: { type: 'string', multiple: true } },
@@ -45,6 +50,8 @@ export async function serve(args: string[], sessionUrl: string | undefined, fetc
     return { name, where };
   });
   const proof = await proofOf(values.proof, process.env);
+  // Behind Cloudflare Access, the proof is not sent (`browsersOnly`).
+  await beforeProof(origin);
   const say = (line: string) => process.stderr.write(`${line}\n`);
 
   const coffre: Workload = await workload({ url: origin, service: values.service, proof, place: values.place, log: say, sigterm: false, fetch: fetching(origin) });

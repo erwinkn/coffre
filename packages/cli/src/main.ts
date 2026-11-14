@@ -302,6 +302,7 @@ function momentary(status: number, body: { error?: unknown; reason?: unknown } |
 async function signIn(origin: string, service: string, given?: string): Promise<{ issued: { token: string; expiresAt: string }; idTokens: string[] }> {
   // Each ID token it asked for, to hide from the log: one whose exchange failed may still be good until it expires.
   const idTokens: string[] = [];
+  await noMachineBehindAccess(origin);
   for (let attempt = 0; ; attempt++) {
     const token = await idToken(given, process.env, origin, fetching(origin));
     idTokens.push(token);
@@ -559,8 +560,10 @@ async function login(args: string[]): Promise<void> {
     if (handed !== null) fail(`${file} names ${origin}, and a secret goes only where you name it: \`coffre login ${origin} ${handed}\``);
     process.stderr.write(`Signing in to ${origin}, which ${file} names\n`);
   }
-  // A person's session there is not replaced unseen, and left valid on the server: they sign out first.
   const kept = readStore().instances[origin];
+  // 0.14's session behind Access there: refused before a secret is read.
+  if (kept !== undefined && (kept.mode === 'cloudflare' || kept.kind === 'access')) fail(browsersOnly(origin));
+  // A person's session there is not replaced unseen, and left valid on the server: they sign out first.
   if (machine.length > 0 && kept !== undefined && kept.kind === undefined) {
     fail(`signed in to ${origin} as ${kept.principal?.id ?? 'a person'}: \`coffre logout ${origin}\` first, or sign the run in from a home of its own`);
   }
@@ -772,12 +775,16 @@ async function saveRun(to: Target, session: Omit<Session, 'principal' | 'obtaine
   printMe(me);
 }
 
-/** `coffre login <url> --token`: a bearer token, asked for, and kept as the session. */
-/** A machine's sign-in, its secret read but not yet sent anywhere: behind Access, 0.16.0 signs in none, so it stops here. */
+/**
+ * Before a machine's secret goes to `origin` (a bearer token, a run's ID
+ * token, a workload's proof): one unauthenticated `GET /api/auth`. Behind
+ * Access, 0.16.0 signs in no machine, so it stops here, the secret unsent.
+ */
 async function noMachineBehindAccess(origin: string): Promise<void> {
   if ((await askMode(origin)) === 'cloudflare') fail(browsersOnly(origin));
 }
 
+/** `coffre login <url> --token`: a bearer token, asked for, and kept as the session. */
 async function tokenLogin(origin: string): Promise<void> {
   const token = await readSecret({ label: 'Bearer token', hint: 'coffre_svc_… or coffre_pat_…, from `coffre tokens issue` or the service\'s page. Hidden as you type.' }).catch((error: unknown) =>
     fail((error as Error).message),
@@ -795,7 +802,6 @@ async function runLogin(origin: string, service: string, ask: boolean): Promise<
   const given = ask
     ? await readSecret({ label: 'ID token', hint: `The run's ID token, for the audience ${origin}. Hidden as you type.` }).catch((error: unknown) => fail((error as Error).message))
     : undefined;
-  await noMachineBehindAccess(origin);
   const { issued } = await signIn(origin, service, given).catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
   await saveRun(
     { origin, by: 'run', credential: { kind: 'token', token: issued.token } },
@@ -1383,12 +1389,15 @@ async function run(args: string[]): Promise<void> {
   // A service, key-bound where the instance has it: the session's environments unless named, and nothing but its key in memory.
   const to = target();
   if (flags.proof !== undefined && to.credential.kind !== 'workload') fail('--proof is how a service proves itself: coffre --service <name> run --proof …');
-  const bound =
-    to.credential.kind === 'workload'
-      ? await keyBound(to.origin, to.credential.service, await proofOf(flags.proof, process.env), positionals, (line) => process.stderr.write(`${line}\n`), fetching(to.origin)).catch(
-          (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
-        )
-      : null;
+  let bound: Awaited<ReturnType<typeof keyBound>> | null = null;
+  if (to.credential.kind === 'workload') {
+    const proof = await proofOf(flags.proof, process.env);
+    // Behind Access, its proof is not sent.
+    await noMachineBehindAccess(to.origin);
+    bound = await keyBound(to.origin, to.credential.service, proof, positionals, (line) => process.stderr.write(`${line}\n`), fetching(to.origin)).catch(
+      (error: unknown) => fail(error instanceof Error ? error.message : String(error)),
+    );
+  }
   const paths = bound?.places ?? environmentPaths(positionals);
   // A person's app gets placeholders, where the instance has the proxy; a service account, the values.
   const placed = bound === null ? await placeholders(paths) : null;
@@ -2088,7 +2097,7 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   untrust: (args) => manage.untrust(connect, args),
   freeze: (args) => freeze(connect, args),
   unfreeze: (args) => unfreeze(connect, args),
-  serve: (args) => serve(args, sessionFlags.url, fetching),
+  serve: (args) => serve(args, sessionFlags.url, fetching, noMachineBehindAccess),
   audit,
   verify,
   'verify instance': (args) => verify(['instance', ...args]),

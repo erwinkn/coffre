@@ -130,6 +130,8 @@ export async function fakeCoffre(options: FakeOptions = {}) {
     const body = await read(req);
     const record = (outcome: string) => log.push(`${req.method} ${url.pathname} ${outcome}`);
 
+    // How it signs in, asked with no credential before a proof is sent: coffre's own, not Cloudflare Access.
+    if (req.method === 'GET' && url.pathname === '/api/auth') return answer(res, { status: 200, body: { signin: { providers: [] }, access: null } });
     if (req.method === 'POST' && url.pathname === '/api/auth/workload') {
       const proof = req.headers.dpop;
       const verified = typeof proof === 'string' ? await verifyProof(proof, { method: 'POST', url: url.href, skewSeconds: 60 }) : null;

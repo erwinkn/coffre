@@ -146,7 +146,9 @@ test('a CI run the instance cannot sign in yet asks again, with a fresh ID token
   assert.equal(signed.status, 0, signed.stderr);
   assert.match(signed.stdout, /^service:deploy \(service account\)/);
   assert.deepEqual(signIns(busy.seen), ['/runner', '/api/auth/oidc', '/runner', '/api/auth/oidc']);
-  assert.deepEqual(signed.stderr.replace(/ in \d+(\.\d)? m?s/g, ' in t').split('\n').slice(0, 5), [
+  assert.deepEqual(signed.stderr.replace(/ in \d+(\.\d)? m?s/g, ' in t').split('\n').slice(0, 6), [
+    // How it signs in, asked with no credential, before the runner is asked for an ID token.
+    'coffre: GET /api/auth: 200 in t',
     'coffre: GET /runner: 200 in t',
     'coffre: POST /api/auth/oidc: 503 in t',
     'coffre: the instance could not answer POST /api/auth/oidc: asking again in t',
@@ -462,6 +464,19 @@ test('behind Cloudflare Access, the CLI says in a sentence that 0.16.0 signs peo
     assert.equal(run.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`, args.join(' '));
     assert.deepEqual(seen, ['GET /api/auth'], `${args.join(' ')}: only how to sign in asked`);
   }
+  // A machine with no session here, a CI run by its ID token or a workload by its proof: Access is asked about first, and nothing else goes there, the runner's ID token not even asked for.
+  const runner = { ACTIONS_ID_TOKEN_REQUEST_URL: `${origin}/runner?x=1`, ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'runner-bearer' };
+  for (const args of [
+    ['--url', origin, '--service', 'deploy', 'whoami'],
+    ['--url', origin, '--service', 'deploy', 'run', '--proof', 'oidc', 'market/dev', '--', 'true'],
+    ['serve', '--url', origin, '--service', 'deploy', '--proof', 'oidc'],
+  ]) {
+    seen.length = 0;
+    const run = await cli(home, args, 'id.token.secret\n', undefined, false, runner);
+    assert.equal(run.status, 1, args.join(' '));
+    assert.equal(run.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`, args.join(' '));
+    assert.deepEqual(seen, ['GET /api/auth'], `${args.join(' ')}: only how to sign in asked`);
+  }
   seen.length = 0;
   assert.ok(!existsSync(join(home, '.coffre', 'credentials.json')), 'nothing saved');
   // 0.14's sessions there, a person's by cloudflared and an Access service token's: refused before any request.
@@ -475,8 +490,13 @@ test('behind Cloudflare Access, the CLI says in a sentence that 0.16.0 signs peo
     const set = await cli(home, ['set', 'market/prod/KEY'], '');
     assert.equal(set.status, 1);
     assert.equal(set.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`);
+    // A machine's login there: refused before its secret is read, so before anything is asked of the instance.
+    for (const args of [['--token'], ['--service', 'deploy', '--id-token']]) {
+      const machine = await cli(home, ['login', origin, ...args], 'coffre_svc_ci\n');
+      assert.equal(machine.status, 1, args.join(' '));
+      assert.equal(machine.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`, args.join(' '));
+    }
     // A CI run's ID token, from GitHub's runner here, is neither asked for nor sent there.
-    const runner = { ACTIONS_ID_TOKEN_REQUEST_URL: `${origin}/runner?x=1`, ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'runner-bearer' };
     const service = await cli(home, ['--service', 'deploy', 'whoami'], '', undefined, false, runner);
     assert.equal(service.status, 1);
     assert.equal(service.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`);
