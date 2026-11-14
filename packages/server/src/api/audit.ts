@@ -17,11 +17,13 @@ import { memberOf } from './routes/members.ts';
  * the tiles that prove what the page shows, against that head:
  *
  *   proven     its body is the leaf the head's tree holds at its place
- *   unproven   past the head's size: signed since the vault's read, there
- *              with an older head put back, or planted; a reload settles
- *              the first. Every entry, when no head stands
+ *   unproven   past the head in both trees: signed since the vault's
+ *              read, there with an older head put back, or planted; a
+ *              reload settles the first. Every entry, when no head stands
  *   failed     within the head, and not what it signed: edited, or its
- *              tiles are
+ *              tiles are; or at a place no entry the head numbered can
+ *              stand, past its own tree and within the other (its tree
+ *              and leaf are columns a writer edits, not under the tree)
  *
  * A page of the whole log, unfiltered, also says what its stretch lacks
  * (`holes`). A filtered one cannot: it reads `log_index`, which nothing
@@ -209,7 +211,8 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
     else shown.push({ row, body });
   }
   const stretch = read.slice(0, taken);
-  const more = taken < read.length || read.length >= reading;
+  // Nothing is numbered below 0: a stretch that reached it is the log's end.
+  const more = (taken < read.length || read.length >= reading) && stretch.at(-1)?.seq !== 0;
   const next = more && stretch.length > 0 ? stretch.at(-1)!.seq : null;
 
   const ids = { projects: new Set<string>(), environments: new Set<string>(), secrets: new Set<string>(), credentials: new Set<string>() };
@@ -223,7 +226,7 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
     }
     if (typeof body.credential === 'string' && UUID.test(body.credential)) ids.credentials.add(body.credential);
   }
-  const proving = head === null ? [] : shown.flatMap(({ row }) => (row.leaf < sizeOf(head, row.kept) ? [row] : []));
+  const proving = head === null ? [] : shown.flatMap(({ row }) => (placed(head, row) === 'within' ? [row] : []));
   const found = await logProofs(ctx.db, tilesOf(head, proving), {
     projects: [...ids.projects],
     environments: [...ids.environments],
@@ -323,6 +326,18 @@ const detailOf = (body: Body): Record<string, unknown> => (typeof body.detail ==
 const decisionOf = (body: Body): 'allow' | 'deny' => (typeof detailOf(body).refused === 'string' ? 'deny' : 'allow');
 const sizeOf = (head: SignedHead, kept: boolean) => (kept ? head.keptSize : head.agingSize);
 
+/**
+ * Where the head puts an entry, by the counts it says come before it (its
+ * own tree's, its leaf; the other's, its seq less its leaf): within its
+ * tree, past both, or neither, a place no entry the signer numbered holds.
+ * The head numbered `size` entries: one past its own tree and within the
+ * other, or the reverse, was moved there.
+ */
+function placed(head: SignedHead, row: LogRow): 'within' | 'past' | 'nowhere' {
+  if (row.leaf < sizeOf(head, row.kept)) return 'within';
+  return row.seq - row.leaf >= sizeOf(head, !row.kept) ? 'past' : 'nowhere';
+}
+
 /** The tiles that prove each entry, by tree: one read for the page. */
 function tilesOf(head: SignedHead | null, rows: readonly LogRow[]): TileAt[] {
   if (head === null) return [];
@@ -353,9 +368,11 @@ function prover(head: SignedHead | null, tiles: { kept: Map<string, Buffer>; agi
     kept: { nodes: remembered(nodesFrom(tiles.kept)), size: head.keptSize, root: Buffer.from(head.keptRoot, 'hex') },
     aging: { nodes: remembered(nodesFrom(tiles.aging)), size: head.agingSize, root: Buffer.from(head.agingRoot, 'hex') },
   };
-  return ({ kept, leaf, body }) => {
+  return (row) => {
+    const { kept, leaf, body } = row;
+    const where = placed(head, row);
+    if (where !== 'within') return where === 'past' ? 'unproven' : 'failed';
     const { nodes, size, root } = trees[kept ? 'kept' : 'aging'];
-    if (leaf >= size) return 'unproven';
     try {
       return verifyInclusion(leafHash(Buffer.from(body)), leaf, size, inclusionProof(nodes, leaf, size), root) ? 'proven' : 'failed';
     } catch {
@@ -382,7 +399,7 @@ function prover(head: SignedHead | null, tiles: { kept: Map<string, Buffer>; agi
  * it off the page. The signer's re-check finds the deletion by leaf.
  */
 export function holesOf(head: SignedHead, top: 'head' | LogRow | null, stretch: readonly LogRow[], more: boolean): AuditHole[] {
-  const within = (row: LogRow) => row.leaf < sizeOf(head, row.kept);
+  const within = (row: LogRow) => placed(head, row) === 'within';
   const before = (row: LogRow) => ({ kept: row.kept ? row.leaf : row.seq - row.leaf, aging: row.kept ? row.seq - row.leaf : row.leaf });
   const holes: AuditHole[] = [];
   /** The counts of each tree below `above`: what the next entry down must make up. */

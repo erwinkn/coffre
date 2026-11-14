@@ -74,13 +74,14 @@ export async function logStretch(db: Queryable, at: { objects: readonly string[]
   }
   if (objects.length === 0) return [];
   const below = before === null ? sql`` : sql`AND seq < ${before}`;
-  // Each object's newest, merged: Postgres reads them as one Merge Append and stops at `rows`.
+  // Each object's newest, merged: Postgres reads them as one Merge Append, drops an entry two objects share as they
+  // come, and stops at `rows` distinct ones, so a shared entry costs the page none of its stretch.
   const each: SQL[] = objects.map((object) => sql`(SELECT seq FROM log_index WHERE object = ${object} ${below} ORDER BY seq DESC LIMIT ${rows})`);
   return rowsOf<LogRow>(
     db,
     sql`
       SELECT l.seq::float8 AS seq, l.kept, l.leaf::float8 AS leaf, l.body
-      FROM (SELECT DISTINCT seq FROM (SELECT seq FROM (${sql.join(each, sql` UNION ALL `)}) each ORDER BY seq DESC LIMIT ${rows}) newest) found
+      FROM (SELECT DISTINCT seq FROM (${sql.join(each, sql` UNION ALL `)}) each ORDER BY seq DESC LIMIT ${rows}) found
       JOIN log l ON l.seq = found.seq
       ORDER BY l.seq DESC`,
   );

@@ -22,7 +22,8 @@ export const auditRoutes = {
       decision: z.enum(['allow', 'deny']).optional(),
       // `?detail=1` includes sign-ins and technical steps, `DETAIL_ACTIONS`.
       detail: z.enum(['1', 'true']).optional(),
-      before: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+      // Entries below this seq: a page's `next`, 0 included, below which nothing is.
+      before: z.coerce.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
       limit: z.coerce.number().int().min(1).max(500).default(100),
     }),
     run: (ctx, { input: { path, detail, ...rest } }): Promise<AuditPage> =>

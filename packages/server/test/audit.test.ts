@@ -158,6 +158,22 @@ test('an entry edited within the head fails its proof, and so does one whose til
   assert.deepEqual((await page('aud-cli'))[0].entries.slice(0, 2).map((entry) => entry.proof), ['failed', 'failed']);
 });
 
+test("an entry moved past its own tree but within the other fails: its tree and leaf are columns a writer edits, and no entry the head numbered stands there", async () => {
+  const [{ keptSize }] = (await rowsOf<{ keptSize: number }>(world.owner, sql`SELECT kept_size::float8 AS "keptSize" FROM log_head`)) as [{ keptSize: number }];
+  const [refusal, read] = (await log()).map(({ seq }) => seq) as [number, number];
+  // Ada's refusal, a use, its reason edited and filed as the kept tree's next: past that tree, within the uses'.
+  await world.owner.execute(sql`UPDATE log SET body = replace(body, '"no_access"', '"bulk_limit"'), kept = true, leaf = ${keptSize} WHERE seq = ${refusal}`);
+  const [moved] = await page('aud-cli');
+  assert.deepEqual([moved.entries[0]!.reason, moved.entries[0]!.proof], ['bulk_limit', 'failed']);
+  // Where it stood, the uses' tree lacks one.
+  assert.deepEqual(moved.holes, [{ above: null, below: read, kept: 0, aging: 1 }]);
+  // Numbered past the head too, it stands where one signed since would: the page cannot tell, and says so; the hole stays.
+  await world.owner.execute(sql`UPDATE log SET seq = ${refusal + 1} WHERE seq = ${refusal}`);
+  const [past] = await page('aud-cli');
+  assert.deepEqual([past.entries[0]!.reason, past.entries[0]!.proof], ['bulk_limit', 'unproven']);
+  assert.deepEqual(past.holes, [{ above: null, below: read, kept: 0, aging: 1 }]);
+});
+
 test('a deleted entry is a hole on a page of the whole log, by tree; a filtered page cannot see it', async () => {
   const entries = await log();
   const written = entries.find((entry) => entry.action === 'secret.write' && entry.kept)!;
@@ -198,6 +214,22 @@ test('pages tile the log: each goes on from the last, a hole at the edge between
     next = listed.next;
   } while (next !== null && filtered.length < 20);
   assert.deepEqual(filtered, brief((await page('bo-cli', '?path=market'))[0]));
+  // An entry two of a reader's places name (Bo's read: market and market/dev) comes once, and costs its page no other.
+  const scoped: string[] = [];
+  next = null;
+  do {
+    const [listed]: [Page, string[], number] = await page('al-cli', `?limit=1${next === null ? '' : `&before=${next}`}`);
+    scoped.push(...brief(listed));
+    next = listed.next;
+  } while (next !== null && scoped.length < 20);
+  assert.deepEqual(scoped, brief((await page('al-cli'))[0]));
+  // A stretch that reached the log's first entry is its end, filtered or not; and 0, below which nothing is, is a cursor.
+  const [denied] = await page('aud-cli', '?decision=deny&limit=5');
+  assert.deepEqual([brief(denied), denied.more, denied.next], [['project.create proven'], false, null]);
+  for (const query of ['?before=0', '?path=market&before=0']) {
+    const [bottom] = await page('aud-cli', query);
+    assert.deepEqual([bottom.entries, bottom.more, bottom.next], [[], false, null], query);
+  }
   // A page that shows nothing of what it read goes on from where it stopped: below Ada's refusal, Bo's read and the token.
   const refusal = (await page('aud-cli'))[0].entries[0]!.seq;
   const [empty] = await page('aud-cli', `?decision=deny&limit=1&before=${refusal}`);
