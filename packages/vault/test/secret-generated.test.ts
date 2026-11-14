@@ -234,15 +234,17 @@ const renaming = (key: string, replaces?: Replaces, to = 'DB_URL'): Presented & 
 test('any change of a key but a reset may say what it replaces, a rename too: made over what the key reads now, `stale` over anything else', async () => {
   const was = await listed('prod', 'DATABASE_URL');
   await written(vault.change(writing([{ key: 'DATABASE_URL', value: 'postgres://new' }])));
-  // A version written since: an archiving, a restore, a reference and a rename over the one before are each refused, and write nothing.
+  // A version written since: an archiving, a restore, a reference, a mark and a rename over the one before are each refused, and write nothing.
   const before = await versions();
   for (const change of [writing([{ key: 'DATABASE_URL', archived: true, replaces: was }]), writing([{ key: 'DATABASE_URL', restore: 1, replaces: was }]),
-    writing([{ key: 'DATABASE_URL', ref: { project: 'billing', environment: 'prod', key: 'STRIPE_KEY' }, replaces: was }]), renaming('DATABASE_URL', was)]) {
+    writing([{ key: 'DATABASE_URL', ref: { project: 'billing', environment: 'prod', key: 'STRIPE_KEY' }, replaces: was }]),
+    writing([{ key: 'DATABASE_URL', nature: 'sensitive', replaces: was }]), renaming('DATABASE_URL', was)]) {
     assert.deepEqual(await vault.change(change), { refused: 'stale' }, JSON.stringify(change).slice(0, 160));
   }
   assert.deepEqual([await versions(), (await said('prod', 'DATABASE_URL'))!.version], [before, 2]);
-  // Over what it reads now, each is made: a restore, then a rename, an archiving, and its return over nothing, which an archived key reads here.
+  // Over what it reads now, each is made: a restore, a mark, then a rename, an archiving, and its return over nothing, which an archived key reads here.
   await written(vault.change(writing([{ key: 'DATABASE_URL', restore: 1, replaces: await listed('prod', 'DATABASE_URL') }])));
+  await written(vault.change(writing([{ key: 'DATABASE_URL', nature: 'sensitive', replaces: await listed('prod', 'DATABASE_URL') }])));
   assert.ok('answer' in (await vault.change(renaming('DATABASE_URL', await listed('prod', 'DATABASE_URL')))));
   const kept = await listed('prod', 'DB_URL');
   await written(vault.change(writing([{ key: 'DB_URL', archived: true, replaces: kept }])));

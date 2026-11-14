@@ -457,6 +457,14 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       let loosened = false;
       for (const { key, value, nature: asked, generated, replaces, restore, ref, archived, folder, inherit } of items) {
         const was = held.get(key) ?? null;
+        if (replaces !== undefined) {
+          // What the key reads now, as a listing found it: its own live value, or where it holds none live, what it inherits,
+          // which nothing past a parent archived is. Checked first, a mark's too, and before an archived key is refused, as in 0.14.7: a key archived
+          // since it was listed is one whose listed version is no longer read, which a client knows to list again.
+          const now = was !== null && was.archivedAt === null ? was : passedDown(key, 'read');
+          if (now === undefined) return { refused: 'unreadable' };
+          if (stale(replaces, now, seen.replaced)) return { refused: 'stale' };
+        }
         if (value === undefined && asked !== undefined) {
           // A mark, of a value the environment holds: one it inherits, or a reference's, is marked where it is held.
           if (was === null) {
@@ -502,14 +510,6 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         const down = inherit === undefined && !(was?.archivedAt != null && (value !== undefined || restore !== undefined || ref !== undefined) && archived !== false) ? null : passedDown(key, 'reset');
         if (down === undefined) return { refused: 'unreadable' };
         if (inherit !== undefined && down === null) return { refused: 'not_inherited' };
-        if (replaces !== undefined) {
-          // What the key reads now, as a listing found it: its own live value, or where it holds none live, what it inherits,
-          // which nothing past a parent archived is. Checked before an archived key is refused, as in 0.14.7: a key archived
-          // since it was listed is one whose listed version is no longer read, which a client knows to list again.
-          const now = was !== null && was.archivedAt === null ? was : passedDown(key, 'read');
-          if (now === undefined) return { refused: 'unreadable' };
-          if (stale(replaces, now, seen.replaced)) return { refused: 'stale' };
-        }
         // An archived key keeps its name: it is brought back, not written over. In a fork, one reset to what a parent passes
         // down is an override set aside, which a value, a version or a reference written over it makes one again, as in 0.14.
         if (inherit === undefined && down === null && was?.archivedAt != null && (value !== undefined || restore !== undefined || ref !== undefined) && archived !== false) return { refused: 'archived' };
