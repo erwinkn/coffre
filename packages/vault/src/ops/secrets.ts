@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { allows, useOnly, withinCredential, type Permission } from '@coffre/core/access';
-import type { Answers, KeyWrite, Nature, Presented, ReferenceBreak, SecretPath, SecretRefile, SecretRename, SecretsChanges, SecretWrite } from '@coffre/core/vault';
+import type { Answers, KeyOutcome, KeyWrite, Nature, Presented, ReferenceBreak, SecretPath, SecretRefile, SecretRename, SecretsChanges, SecretWrite } from '@coffre/core/vault';
 import { dismissedKeys, environments, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
@@ -172,6 +172,14 @@ function valid(item: KeyWrite): boolean {
  * asked of a key not there. It holds no reference, and a value typed there
  * with no nature over a plain one, its own or the one it reads now, stays
  * plain (0.14.7's `bareLevel`): nobody but its owner lists it.
+ *
+ * It answers what it does to each key (`KeyOutcome`), the dry run's answer
+ * (`weigh`): a value typed over the key's own live one, as it is kept, is
+ * `compare`, with the version it is written over, since only opening both
+ * tells them apart (0.14's `dryRunSecrets` opened it there). The app asks a
+ * use for that version (purpose `compare`), which logs it read; the
+ * decision opens nothing, and the write writes the value again, as 0.14's
+ * did.
  */
 function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation<Parts, Answers['secret.write']> {
   const shown = presented(input);
@@ -336,6 +344,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       const lines: Record<string, unknown>[] = [];
       const leaves = new Map<string, Fresh<typeof secrets>>();
       const answered: [string, { version: number; nature: Nature }][] = [];
+      const outcomes: [string, KeyOutcome][] = [];
       const referring = new Set<string>();
       const versions = new Map(seen.version.map((row) => [`${row.secretId} ${row.version}`, row]));
       for (const { key, value, nature: asked, restore, ref, archived, folder, inherit } of items) {
@@ -404,6 +413,13 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           writes.push(amended(dismissedKeys, removal, { restoredAt: now, restoredBy: caller.principal }));
           line.dismissed = false;
         }
+        // What the write does to the key, as a dry run tells it. A value typed over a value of the key's own, typed and kept as
+        // it is written, is the same or not only by opening that version, if nothing else changes: the line says only its next
+        // version and nature, no return (`archived`), no reference ended (`source`), no folder and no dismissal.
+        const same = value !== undefined && was !== null && was.currentVersion !== null && was.recipe === null && was.pairId === null
+          && was.nature === secret.nature && Object.keys(line).length === 4;
+        outcomes.push([key, was === null ? 'added' : same ? { compare: { secret: was.id, version: was.currentVersion! } }
+          : line.archived === true ? 'archived' : Object.keys(line).length === 2 ? 'unchanged' : 'changed']);
         // What changes nothing writes nothing: archived already, filed where it is.
         if (Object.keys(line).length === 2) continue;
         writes.push(put(secrets, secret, was));
@@ -459,7 +475,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           detail: { ...(mine ? { personal: named.slug } : {}), ...(made === undefined ? {} : { made: made.slug }), keys: lines },
         },
         // As entries: a key named `__proto__` is a key like any other.
-        answer: { keys: Object.fromEntries(answered) },
+        answer: { keys: Object.fromEntries(answered), outcomes: Object.fromEntries(outcomes) },
       };
     },
   };

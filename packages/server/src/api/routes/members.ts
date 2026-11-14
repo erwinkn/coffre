@@ -4,7 +4,7 @@ import { instanceRole, roleId, scopeInput, slug } from '@coffre/core/schemas';
 import type { AccessChange, Called } from '@coffre/core/vault';
 import { z } from 'zod';
 
-import { members, projectNamed, projectSlugs, type Definition, type GrantRow, type MemberRow } from '../../db/queries/members.ts';
+import { members, projectNamed, projectSlugs, reportOf, type Definition, type GrantRow, type MemberRow } from '../../db/queries/members.ts';
 import type { PlaceRow } from '../../db/queries/places.ts';
 import { can, canAnywhere, permissionsAt, placeOf, projectsReached, type Place } from '../caller.ts';
 import { changed } from '../change.ts';
@@ -44,6 +44,9 @@ export function wellFormed(text: string): boolean {
 export const typeOf = (member: string): 'user' | 'service' => (member.startsWith('user:') ? 'user' : 'service');
 const idOf = (member: string) => member.slice(member.indexOf(':') + 1);
 
+/** By code unit, as 0.14.7 sorted a report. */
+const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
 const notServed = (what: string) => new ApiError('not_implemented', `${what} is not served yet`);
 
 /** A grant as a member's lists show it. */
@@ -79,8 +82,11 @@ export type Member = {
   grants: MemberGrant[];
 };
 
+/** What a member's row says of where they stand. */
+type Standing = Pick<MemberRow, 'id' | 'status' | 'role' | 'scope'>;
+
 /** Where an instance role applies, as the row keeps it: everywhere for none; one that does not read as a scope reaches nothing, as the vault takes it. */
-function scopeOf(row: MemberRow): Scope {
+function scopeOf(row: Standing): Scope {
   if (row.scope === null) return EVERYWHERE;
   try {
     const scope: unknown = JSON.parse(row.scope);
@@ -92,10 +98,10 @@ function scopeOf(row: MemberRow): Scope {
 }
 
 /** Someone's instance role: a person's, while active. */
-export const roleOf = (row: MemberRow): InstanceRole => (row.status === 'active' && typeOf(row.id) === 'user' ? (row.role as InstanceRole) : 'member');
+export const roleOf = (row: Standing): InstanceRole => (row.status === 'active' && typeOf(row.id) === 'user' ? (row.role as InstanceRole) : 'member');
 
 /** Where their role applies: everywhere for a member, who holds nothing by it. */
-export const standingOf = (row: MemberRow): Scope => (roleOf(row) === 'member' ? EVERYWHERE : scopeOf(row));
+export const standingOf = (row: Standing): Scope => (roleOf(row) === 'member' ? EVERYWHERE : scopeOf(row));
 
 /** A scope as the API shows it: projects by slug, those still there, sorted. */
 export function scopeView(scope: Scope, slugs: Record<string, string>): Scope {
@@ -283,16 +289,52 @@ export const memberRoutes = {
         });
       }
       listed.sort((a, b) => a.principalType.localeCompare(b.principalType) || a.principalId.localeCompare(b.principalId));
-      // Those removed, so they can be found and let back in. What each of them saw that is still current comes with the member report: null until then.
-      const removed = rows.filter((row) => row.status === 'removed').map((row) => ({ principalType: typeOf(row.id), principalId: idOf(row.id), toRotate: null }));
+      // Those removed, so they can be found and let back in, each with how many keys they still know the value of (`seenBy`).
+      const removed = rows.filter((row) => row.status === 'removed').map((row) => ({ principalType: typeOf(row.id), principalId: idOf(row.id), toRotate: row.toRotate ?? 0 }));
       return { members: listed, removed };
     },
   }),
 
-  /** 0.14's member report: what someone holds, saw and issued, and what to rotate once they leave. It comes with the offboarding design (docs/design/0.16.md, "Still to design"). */
+  /**
+   * Who someone is to the instance, what still lets them in, and the keys
+   * whose current value they know, to rotate once they leave: 0.14.7's
+   * member report, for whoever runs the instance, removed members
+   * included. A key is to rotate when they saw it on or after its value was
+   * first written, or wrote that value themselves (`seenBy`). One call to
+   * the vault and one statement, from their own rows. The tokens they
+   * issued, their personal tokens and connected apps are not read here yet,
+   * and the references they made need who made a reference, which 0.16
+   * keeps nowhere: each null, "not listed", which the client's type allows.
+   */
   ...route('GET /members/:member', {
-    run: async () => {
-      throw notServed("a member's report");
+    run: async (ctx, { params }) => {
+      const principal = memberOf(params.member);
+      const who = await ctx.caller();
+      if (!runsInstance(who.holds)) throw refusal('no_access');
+      const row = await reportOf(ctx.db, principal, new Date());
+      if (row === null) throw new ApiError('not_found', 'no such member');
+      const exposed = row.keys.filter((key) => key.rotate)
+        .sort((a, b) => compare(a.project, b.project) || compare(a.environment, b.environment) || compare(a.key, b.key))
+        .map((key) => ({ project: key.project, environment: key.environment, key: key.key, version: key.version, how: key.wrote ? 'wrote' as const : 'read' as const, at: key.at! }));
+      const removed = row.status === 'removed';
+      return {
+        principalType: typeOf(principal),
+        principalId: idOf(principal),
+        status: row.status,
+        instanceRole: roleOf(row),
+        scope: scopeView(standingOf(row), row.scopeSlugs),
+        declared: false,
+        removedAt: removed ? row.statusChangedAt : null,
+        removedBy: removed ? idOf(row.statusChangedBy) : null,
+        live: row.live,
+        exposed,
+        rotated: row.keys.length - exposed.length,
+        issuedTokens: null,
+        apps: null,
+        personalTokens: null,
+        references: null,
+        personal: row.personal,
+      };
     },
   }),
 

@@ -477,8 +477,8 @@ function RemovalPreview({ principal, open }: { principal: DirectoryPrincipal; op
       : 'Its bearer tokens and trust bindings stop working, and its project access is revoked at once.';
   }
   const { live } = report;
-  // Named, as an app's name is what its person knows it by: "2 connected apps (Claude, Cursor)".
-  const apps = `${plural(live.apps, 'connected app')}${report.apps.length > 0 ? ` (${report.apps.map((app) => app.name).join(', ')})` : ''}`;
+  // Named, as an app's name is what its person knows it by: "2 connected apps (Claude, Cursor)", where the report lists them.
+  const apps = `${plural(live.apps, 'connected app')}${report.apps !== null && report.apps.length > 0 ? ` (${report.apps.map((app) => app.name).join(', ')})` : ''}`;
   const revokes = person
     ? [
         plural(live.grants, 'grant'),
@@ -495,7 +495,7 @@ function RemovalPreview({ principal, open }: { principal: DirectoryPrincipal; op
       {report.exposed.length === 0
         ? `No value ${person ? 'they' : 'it'} saw is still current.`
         : `${plural(report.exposed.length, 'value')} ${person ? 'they' : 'it'} saw ${report.exposed.length === 1 ? 'is' : 'are'} still current: ${person ? 'their' : 'its'} page lists them, to rotate.`}
-      {report.issuedTokens.length > 0 &&
+      {report.issuedTokens !== null && report.issuedTokens.length > 0 &&
         ` ${plural(report.issuedTokens.length, 'bearer token')} ${person ? 'they' : 'it'} issued still ${report.issuedTokens.length === 1 ? 'works' : 'work'}.`}{' '}
       {person ? 'Their' : 'Its'} past actions stay in the audit log.
     </>

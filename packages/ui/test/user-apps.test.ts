@@ -36,3 +36,7 @@ test('nobody is shown the tab for someone unknown, or without MCP, or unless the
   // Nor to an admin whose scope narrows anything: the report is the instance's.
   assert.equal(hasAppsTab(shell({ scope: { projects: { only: ['market'] }, environments: 'all' } as never, runsInstance: false }), report('active')), false);
 });
+
+test("a report that does not list a member's apps (0.16's, so far) opens no tab, so /apps sends the loader to their access", () => {
+  assert.equal(hasAppsTab(shell(), { ok: true, report: { status: 'active', apps: null } } as never), false);
+});

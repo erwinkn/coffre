@@ -260,6 +260,8 @@ export const secretVersions = pgTable(
       columns: [table.secretId],
       foreignColumns: [secrets.id],
     }).onDelete('restrict'),
+    // The versions someone wrote, from their own rows: what the member report asks of a member's writes.
+    index('secret_versions_created_by_idx').on(table.createdBy, table.secretId),
   ],
 );
 

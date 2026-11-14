@@ -81,7 +81,7 @@ const held = async (key: string, environmentId = prod.id) =>
 const lines = async () => ((await written()).detail as { keys: Record<string, unknown>[] }).keys.map(({ secret: _, ...line }) => line);
 
 test('a key made a reference reads its source\'s value, as it changes, and its entry names both ends', async () => {
-  assert.deepEqual(await vault.change(writing('ada-cli', { NEW: 'billing/prod/STRIPE_KEY' })), { answer: { keys: {} } });
+  assert.deepEqual(await vault.change(writing('ada-cli', { NEW: 'billing/prod/STRIPE_KEY' })), { answer: { keys: {}, outcomes: { NEW: 'added' } } });
   assert.deepEqual(await held('NEW'), { key: 'NEW', source_id: stripe.id, versions: 0, current_version: null, nature: null, archived: false });
   const entry = await written();
   assert.equal(entry.action, 'secret.write');
@@ -98,7 +98,7 @@ test('a key with a value made a reference keeps it as history; re-pointed, the e
   assert.deepEqual(await lines(), [{ key: 'DATABASE_URL', refers: flag.id }, { key: 'LINK', refers: signing.id, source: stripe.id }]);
   assert.deepEqual(await given('bo-cli', ['DATABASE_URL', 'LINK']), [[1, 'on'], 'sensitive']);
   // Its next value is numbered after its history, and is its own: a bare one over a plain source is a secret.
-  assert.deepEqual(await vault.change(writing('ada-cli', { DATABASE_URL: { value: 'postgres://new' } })), { answer: { keys: { DATABASE_URL: { version: 2, nature: 'secret' } } } });
+  assert.deepEqual(await vault.change(writing('ada-cli', { DATABASE_URL: { value: 'postgres://new' } })), { answer: { keys: { DATABASE_URL: { version: 2, nature: 'secret' } }, outcomes: { DATABASE_URL: 'changed' } } });
   assert.deepEqual(await lines(), [{ key: 'DATABASE_URL', version: 2, nature: 'secret', source: flag.id }]);
   assert.deepEqual(await given('bo-cli', ['DATABASE_URL']), [[2, 'postgres://new']]);
 
@@ -200,7 +200,7 @@ test('a reference is broken by whoever writes its key or manages access where it
   for (const object of [`secret:${link.id}`, `secret:${stripe.id}`, `project:${billing.id}`, `environment:${there.id}`]) assert.ok(entry.objects.includes(object), entry.objects.join());
   assert.deepEqual(await given('bo-cli', ['LINK']), ['no_value']);
   assert.deepEqual(await vault.change(breaking('ada-cli', 'LINK')), { refused: 'no_reference' });
-  assert.deepEqual(await vault.change(writing('ada-cli', { LINK: { value: 'own' } })), { answer: { keys: { LINK: { version: 1, nature: 'secret' } } } });
+  assert.deepEqual(await vault.change(writing('ada-cli', { LINK: { value: 'own' } })), { answer: { keys: { LINK: { version: 1, nature: 'secret' } }, outcomes: { LINK: 'changed' } } });
 
   // A manager of billing's access, who reads nothing in market, breaks what reads billing's keys.
   assert.ok('answer' in await vault.change(writing('ada-cli', { NEW: 'billing/prod/STRIPE_KEY' })));

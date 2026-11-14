@@ -2612,7 +2612,29 @@
           "notNull": true
         }
       },
-      "indexes": {},
+      "indexes": {
+        "secret_versions_created_by_idx": {
+          "name": "secret_versions_created_by_idx",
+          "columns": [
+            {
+              "expression": "created_by",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "secret_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "secret_versions_secret_id_fkey": {
           "name": "secret_versions_secret_id_fkey",
