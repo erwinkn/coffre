@@ -10,7 +10,7 @@ import { bindings, credentials, environments, policy, principals, projects } fro
 import { sql, type SQL } from 'drizzle-orm';
 
 import { callerFrom, callerParts, ID, live as standing, refusedTo } from '../caller.ts';
-import { amended, part, put, type Operation, type Parts, type Seen, type Unsealed } from '../change.ts';
+import { amended, part, put, WRITE_MS, type Operation, type Parts, type Seen, type Unsealed } from '../change.ts';
 import type { Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
@@ -20,8 +20,11 @@ import { HASH, presented, text, traced } from './input.ts';
 const RUN_MS = 5 * 60_000;
 /** How long a workload's session lives past its sign-in and each renewal, unless its hard end is sooner: 0.14's `SESSION_MS`. */
 const SESSION_MS = 60 * 60_000;
-/** How close to its expiry a session may still be renewed, 0.14's `RENEW_MARGIN_MS`: one that comes later revives nothing. */
-const RENEW_MARGIN_MS = 5_000;
+/**
+ * How close to its expiry a session may still be renewed, 0.14's `RENEW_MARGIN_MS` (5 s): a session is renewed only while
+ * it has longer left than a write's statement may run, so a renewal lands before the session ends and revives nothing.
+ */
+const RENEW_MARGIN_MS = WRITE_MS;
 /** A key's thumbprint (RFC 7638): the SHA-256 of its JWK, in base64url. */
 const THUMBPRINT = /^[A-Za-z0-9_-]{43}$/;
 /** No project: a change about none, where only the caller's own rows weigh. */
@@ -313,9 +316,11 @@ function workloadSignin(input: Asked<'workload.signin'>, vault: Deciding): Opera
  * are the read. A frozen session renews, as in 0.14, so that lifting the
  * freeze restores it; one stopped for anything else is told why, and a
  * narrowed one renews nothing, as it ends with its parent. Within five
- * seconds of its expiry it is refused `expired`: a renewal that comes late
- * revives nothing. At its hard end already, nothing moves. Its entry ages
- * out; 0.14 logged none, and moved no binding's last use, nor does this.
+ * seconds of its expiry it is refused `expired`, and its decision holds
+ * until then (`until`): a write that starts later writes nothing, and the
+ * change, decided again, is refused, so a renewal revives nothing. At its
+ * hard end already, nothing moves. Its entry ages out; 0.14 logged none,
+ * and moved no binding's last use, nor does this.
  */
 function workloadRenew(input: Presented & WorkloadRenew, vault: Deciding): Operation<Parts, Answers['workload.renew']> {
   const shown = presented(input);
@@ -336,6 +341,7 @@ function workloadRenew(input: Presented & WorkloadRenew, vault: Deciding): Opera
       const expiresAt = new Date(moved ? next : session.expiresAt.getTime());
       return {
         writes: moved ? [amended(credentials, session, { expiresAt })] : [],
+        until: session.expiresAt.getTime() - RENEW_MARGIN_MS,
         entry: {
           kept: false,
           action: 'workload.renew', actor: caller.principal, credential: session.id, request: shown.request, ip: shown.ip,

@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { after, beforeEach, test } from 'node:test';
+import { setTimeout as wait } from 'node:timers/promises';
 
 import { CARRIED, canonicalClaims } from '@coffre/core/identity';
 import type { Asked, Presented } from '@coffre/core/vault';
@@ -12,7 +13,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { bindings, credentials } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
-import { prepare, written } from '../src/change.ts';
+import { CHANGE_LOCK, prepare, WRITE_MS, written } from '../src/change.ts';
 import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
@@ -599,6 +600,40 @@ test("a session renews itself with its key's proof: an hour on, never past its h
   assert.equal(await outcome(renew('r-1')), 'expired');
   world.tick(4_000);
   assert.equal(await outcome(renew('r-1')), 'unauthenticated');
+  assert.deepEqual(await checked(), []);
+});
+
+test('a renewal holds until five seconds before its session ends: a write that starts later writes nothing, and the change, decided again, is refused', async () => {
+  await workloadWorld();
+  const made = await vault.change(signin({ aws: AWS_ANSWER }, 'l-1'));
+  assert.ok(!('refused' in made));
+  const expiresAt = new Date(made.answer.expiresAt).getTime();
+  const deciding = { workloads: world.workloads, owners: [] };
+  const untouched = await sessions();
+  let logged = (await entries()).length;
+  // Decided with the margin and 40 ms left, written 80 ms later by the database's clock: nothing is written, no entry.
+  world.tick(expiresAt - world.now() - WRITE_MS - 40);
+  const late = await prepare(world, OPERATIONS['workload.renew'](renew('l-1'), deciding));
+  assert.ok(!('refused' in late));
+  await wait(80);
+  assert.equal(await written(world, late), 'moved');
+  assert.deepEqual([await sessions(), (await entries()).length], [untouched, logged]);
+  // The review's case, end to end: decided with 6 s left, its write waits behind the change lock past the second it held
+  // for, while the vault's clock moves on. Decided again 3 s on, it is too late to renew; 7 s on, the session is no one.
+  for (const [moves, answer, said] of [[3_000, 'expired', [{ refused: 'expired' }]], [7_000, 'unauthenticated', []]] as const) {
+    world.tick(expiresAt - world.now() - 6_000);
+    const asked = await world.owner.transaction(async (holder) => {
+      await holder.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
+      const asked = outcome(renew('l-1'));
+      await wait(1_200);
+      world.tick(moves);
+      return { asked };
+    });
+    assert.equal(await asked.asked, answer);
+    // The session is as it was, and what it logged is the refusal alone: no one's, none.
+    assert.deepEqual([await sessions(), (await entries()).slice(logged).map((entry) => entry.detail)], [untouched, said]);
+    logged += said.length;
+  }
   assert.deepEqual(await checked(), []);
 });
 
