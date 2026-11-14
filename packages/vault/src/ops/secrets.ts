@@ -294,10 +294,12 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
 /**
  * A folder of one environment's keys renamed, or emptied (0.14's
  * `refileSecrets`): every key filed there, archived ones too, in one
- * change, by whoever writes keys there, as filing one key takes. The keys
- * are read by the folder. Half a folder renamed would be two folders: a
- * key's row edited behind the vault may be one filed there, so the refile
- * is refused, `unreadable`, rather than leave it behind. A folder with no
+ * change, by whoever writes keys there, as filing one key takes. Half a
+ * folder renamed would be two folders, and a row's folder is only known
+ * once its MAC holds: a row edited behind the vault may have been filed
+ * there, or moved out, so the environment's keys are read whole, and one
+ * row that does not hold refuses the refile, `unreadable`, rather than
+ * leave a key behind. A folder with no
  * key in it is `no_folder`, to whoever may write there; to anyone else, as
  * for a place that is not there, `no_access`.
  */
@@ -313,7 +315,8 @@ function secretRefile(input: Presented & SecretRefile, vault: Deciding): Operati
     ...callerParts(shown.token, project),
     project: part(projects, sql`${projects.slug} = ${projectSlug}`),
     environment: part(environments, sql`${environments.projectId} = ${project} AND ${environments.slug} = ${environmentSlug}`),
-    filed: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} = ${here} AND ${secrets.folder} = ${from}`),
+    // Every key of the environment, not those its rows say are in the folder: a row moved out behind the vault says it is not.
+    keys: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} = ${here}`),
   };
   const placed = (seen: Seen<typeof read>) => {
     const place = seen.project.find((row) => row.slug === projectSlug && live(row));
@@ -336,8 +339,8 @@ function secretRefile(input: Presented & SecretRefile, vault: Deciding): Operati
       const { place, environment } = placed(seen);
       // As for a write: a personal config holds keys only its owner files, which no route serves yet.
       if (place === undefined || environment === undefined || environment.owner !== null || !caller.may('secret.write', environment)) return { refused: 'no_access' };
-      if (unsealed.filed > 0) return { refused: 'unreadable' };
-      const there = seen.filed.filter((row) => row.environmentId === environment.id && row.folder === from);
+      if (unsealed.keys > 0) return { refused: 'unreadable' };
+      const there = seen.keys.filter((row) => row.environmentId === environment.id && row.folder === from);
       if (there.length === 0) return { refused: 'no_folder' };
       const moved = there.map((row) => row.key).sort();
       return {

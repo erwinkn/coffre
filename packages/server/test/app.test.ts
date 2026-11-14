@@ -298,6 +298,13 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
 
   // A folder renamed: every key in it, archived ones too, by whoever writes there; then emptied, and gone.
   assert.equal((await call('ada-cli', 'PATCH', 'folders/market/prod/db', { name: 'data' }))[0][0], 403);
+  // A key moved out of it behind the vault: none is left behind, so none moves.
+  const behind = (folder: string) => world.owner.execute(sql`UPDATE secrets SET folder = ${folder} WHERE key = 'FLAG' AND environment_id = (SELECT e.id FROM environments e JOIN projects p ON p.id = e.project_id WHERE p.slug = 'market' AND e.slug = 'prod')`);
+  await behind('hidden');
+  const [[tampered, said]] = await call('bo-cli', 'PATCH', 'folders/market/prod/db', { name: 'data' });
+  assert.deepEqual([tampered, said.error, said.reason], [409, 'conflict', 'unreadable']);
+  await behind('db');
+  assert.deepEqual(await filed(), { DATABASE_URL: ['db', false], FLAG: ['db', false], OLD: ['db', true] });
   const [[renamed, moved], asked, queried] = await call('bo-cli', 'PATCH', 'folders/market/prod/db', { name: 'data' });
   assert.deepEqual([renamed, asked, queried], [200, ['change'], 0], JSON.stringify(moved));
   assert.deepEqual({ ...moved, operationId: 'x' }, { operationId: 'x', folder: 'data', moved: ['DATABASE_URL', 'FLAG', 'OLD'] });

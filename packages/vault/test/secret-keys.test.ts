@@ -234,6 +234,12 @@ test('a folder of keys is renamed, merged or emptied whole, archived keys too, b
   assert.deepEqual(await refile('bo-cli', 'data', null), { refused: 'unreadable' });
   assert.equal((await key('DATABASE_URL'))!.folder, 'data');
   await world.owner.execute(sql`UPDATE secrets SET folder = NULL WHERE environment_id = ${prod.id} AND key = 'STRIPE_KEY'`);
+  // Nor is one filed there and moved out behind the vault: its row no longer says it is in the folder.
+  await world.owner.execute(sql`UPDATE secrets SET folder = 'hidden' WHERE environment_id = ${prod.id} AND key = 'OLD'`);
+  const kept = await count('log_pending');
+  assert.deepEqual(await refile('bo-cli', 'data', 'elsewhere'), { refused: 'unreadable' });
+  assert.deepEqual([(await key('DATABASE_URL'))!.folder, (await key('PRIMARY'))!.folder, await count('log_pending')], ['data', 'data', kept]);
+  await world.owner.execute(sql`UPDATE secrets SET folder = 'data' WHERE environment_id = ${prod.id} AND key = 'OLD'`);
   // Emptied, each key stays where it is, in no folder; and that folder is gone.
   assert.deepEqual(await refile('bo-cli', 'data', null), { answer: { moved: ['DATABASE_URL', 'OLD', 'PRIMARY'] } });
   assert.deepEqual([(await key('DATABASE_URL'))!.folder, (await key('OLD'))!.folder, (await key('PRIMARY'))!.folder], [null, null, null]);
