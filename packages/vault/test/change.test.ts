@@ -123,7 +123,7 @@ test('every sealed table has a row that reads back as the vault sealed it', asyn
   await done(writing(...written.map(([table, row]) => put(table, row as never))));
 
   // The schema's own mark of one: a MAC that may be empty, as the upgrade leaves it. The log's MACs never are.
-  const sealed = Object.values(schema).filter((table: unknown): table is Sealed => is(table, PgTable) && 'mac' in table && (table.mac as { hasDefault: boolean }).hasDefault);
+  const sealed = (Object.values(schema) as unknown[]).filter((table): table is Sealed => is(table, PgTable) && 'mac' in table && (table.mac as { hasDefault: boolean }).hasDefault);
   assert.deepEqual(sealed.map((table) => shapeOf(table).name).sort(), [...new Set(written.map(([table]) => shapeOf(table).name))].sort(), 'a sealed table this test writes no row of');
   for (const table of sealed) {
     const wrote = written.filter(([its]) => its === table);
@@ -567,7 +567,7 @@ test('a decision that writes around its read is a fault, not a change', async ()
   const elsewhere = { id: randomUUID(), slug: 'gone', name: 'Gone', createdAt: at, archivedAt: at, folder: null } as Row<typeof projects>;
   await assert.rejects(change(vault, { read: nothing, decide: () => ({ writes: [], erase: { projects: [elsewhere] }, entry: said('test'), answer: null }) }), /erases the values of a place its decision read/);
   // Postgres would store each as another value, a row the vault never sealed: a UUID in small letters, a number as a text.
-  const grant = { id: randomUUID(), principal: ada, projectId: randomUUID(), environmentId: null, role: 'viewer', expiresAt: null, grantedAt: at, grantedBy: ada };
+  const grant = { id: randomUUID(), principal: ada, generation: 0, projectId: randomUUID(), environmentId: null, role: 'viewer', expiresAt: null, grantedAt: at, grantedBy: ada };
   await assert.rejects(change(vault, writing(put(grants, { ...grant, id: grant.id.toUpperCase() }))), /grants\.id: .* is not a uuid as Postgres stores one/);
   await assert.rejects(change(vault, writing(put(grants, { ...grant, role: 5 as never }))), /grants\.role: 5 is not a text as Postgres stores one/);
   await assert.rejects(change(vault, writing(put(grants, { ...grant, grantedAt: new Date(Number.NaN) }))), /grants\.granted_at: null is not a time as Postgres stores one/);
