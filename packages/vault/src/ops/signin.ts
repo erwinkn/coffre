@@ -36,7 +36,7 @@ import { credentials, deviceLogins, environments, grants, identities, policy, pr
 import { sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, refusedTo, type Asking } from '../caller.ts';
-import { amended, part, put, type Operation, type Parts, type Refusal, type Seen, type Unsealed, type Write } from '../change.ts';
+import { amended, part, put, WRITE_MS, type Operation, type Parts, type Refusal, type Seen, type Unsealed, type Write } from '../change.ts';
 import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
@@ -868,15 +868,16 @@ function deviceDecide(input: Presented & DeviceDecide, vault: Deciding): Operati
       // A person, as themselves, on a session: a token approving one would make a session with all its person holds (0.14.7).
       if (!onSession(caller)) return { refused: 'no_access' };
       if (unsealed.login > 0) return { refused: 'tampered' };
-      const row = seen.login.find((other) => other.decidedAt === null && other.expiresAt.getTime() > at);
+      // Decided only with a write's time left before it expires (`WRITE_MS`): a write that starts by `until` may wait on a lock that long.
+      const row = seen.login.find((other) => other.decidedAt === null && heldUntil(other) > at);
       if (row === undefined) return { refused: 'unknown_code' };
       const now = new Date(at);
       return {
         writes: [amended(deviceLogins, row, approve
           ? { decidedAt: now, decision: 'approved', principal: caller.principal, generation: caller.credential.generation }
           : { decidedAt: now, decision: 'denied' })],
-        // Decided while it waits: a write that lands after its 10 minutes is decided again, and refused.
-        until: row.expiresAt.getTime(),
+        // Decided while it waits: a write that would start too late to land within its 10 minutes is decided again, and refused.
+        until: heldUntil(row),
         entry: {
           ...by(caller, shown),
           // Part of a session's coming, which ages out (D231).
@@ -889,6 +890,15 @@ function deviceDecide(input: Presented & DeviceDecide, vault: Deciding): Operati
       };
     },
   };
+}
+
+/**
+ * The last instant a change of a device login may start its write and still
+ * land before the login expires: its expiry, less the time a write is given
+ * (`WRITE_MS`, change.ts), which a row lock may take whole.
+ */
+function heldUntil(login: { expiresAt: Date }): number {
+  return login.expiresAt.getTime() - WRITE_MS;
 }
 
 /**
@@ -924,7 +934,8 @@ function deviceRedeem(input: Asked<'device.redeem'>): Operation<Parts, Answers['
       if (unsealed.login + unsealed.approver > 0) return { refused: 'tampered' };
       const [row] = seen.login;
       // Approved or not, one past its 10 minutes is good for nothing: one the CLI never collected stays no key to a session.
-      if (row === undefined || row.consumedAt !== null || row.expiresAt.getTime() <= at) return { refused: 'expired' };
+      // As for a decision, a write's time before it expires is already past it.
+      if (row === undefined || row.consumedAt !== null || heldUntil(row) <= at) return { refused: 'expired' };
       if (row.decision === null) return { refused: 'pending' };
       // Approved before its approver was last removed: they were let back in with nothing from before.
       const who = seen.approver.find((other) => other.id === row.principal);
@@ -940,8 +951,8 @@ function deviceRedeem(input: Asked<'device.redeem'>): Operation<Parts, Answers['
             jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
           }),
         ],
-        // Collected while its code is good.
-        until: row.expiresAt.getTime(),
+        // Collected while its code is good, the write's own time included.
+        until: heldUntil(row),
         entry: {
           // A session's coming ages out with the uses (D231).
           kept: false,

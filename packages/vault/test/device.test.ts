@@ -12,7 +12,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { principals } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
-import { commit, prepare } from '../src/change.ts';
+import { commit, prepare, WRITE_MS } from '../src/change.ts';
 import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
@@ -254,12 +254,12 @@ test('two people deciding one device login at once: the first decides it, and th
   assert.deepEqual(await vault.change(redeem('dev-1', 'ada-cli-2')), { refused: 'denied' });
 });
 
-test('a decision or a collection made in a device login\'s last moments is written only if it starts before it expires, by the database\'s clock', async () => {
+test('a decision or a collection made in a device login\'s last moments is written only if it starts a write\'s time before it expires, by the database\'s clock', async () => {
   await made(start('dev-1', 'BCDF-GHJK'));
   await made(start('dev-2', 'CDFG-HJKL'));
   await made(decide('ada-web', 'CDFG-HJKL'));
-  // 50 ms before both expire, by the vault's clock: each is decided, and its write waits longer than that.
-  world.tick(TTL_MS - 50);
+  // 50 ms before what is left is a write's time, by the vault's clock: each is decided, and its write waits longer than that.
+  world.tick(TTL_MS - WRITE_MS - 50);
   const late = [await prepare(world, OPERATIONS['device.decide'](decide('ada-web', 'BCDF-GHJK'), deciding)), await prepare(world, OPERATIONS['device.redeem'](redeem('dev-2', 'ada-cli-2'), deciding))];
   assert.ok(late.every((prepared) => !('refused' in prepared)));
   await sleep(120);
@@ -267,6 +267,37 @@ test('a decision or a collection made in a device login\'s last moments is writt
   world.tick(120);
   assert.deepEqual([await vault.change(decide('ada-web', 'BCDF-GHJK')), await vault.change(redeem('dev-2', 'ada-cli-2'))], [{ refused: 'unknown_code' }, { refused: 'expired' }]);
   assert.equal(await who('ada-cli-2'), 'unauthenticated');
+});
+
+test('a write that starts in time and then waits on a lock still lands before the device login expires, and its last seconds decide nothing', async () => {
+  await made(start('dev-1', 'BCDF-GHJK'));
+  await made(start('dev-2', 'CDFG-HJKL'));
+  await made(decide('ada-web', 'CDFG-HJKL'));
+  // 200 ms before the last write's time: collected, while a writer holds the row for longer than that.
+  world.tick(TTL_MS - WRITE_MS - 200);
+  const began = Date.now();
+  const late = await prepare(world, OPERATIONS['device.redeem'](redeem('dev-2', 'ada-cli-2'), deciding));
+  assert.ok(!('refused' in late));
+  let release!: () => void;
+  let held!: () => void;
+  const holding = new Promise<void>((resolve) => (held = resolve));
+  const locked = world.owner.transaction(async (tx) => {
+    await tx.execute(sql`SELECT 1 FROM device_logins WHERE user_code = 'CDFG-HJKL' FOR UPDATE`);
+    held();
+    await new Promise<void>((resolve) => (release = resolve));
+  });
+  await holding;
+  const written = commit(world, late);
+  await sleep(450);
+  release();
+  await locked;
+  assert.equal(await written, true);
+  // Landed within the 200 ms and the write's time it was decided with: before the code expired.
+  assert.ok(Date.now() - began < 200 + WRITE_MS);
+  assert.equal(await who('ada-cli-2'), `${ada} cli`);
+  // In the code's last write's time, a decision and a collection are refused, though it has not expired yet.
+  world.tick(200);
+  assert.deepEqual([await vault.change(decide('ada-web', 'BCDF-GHJK')), await vault.change(redeem('dev-1', 'ada-cli-3'))], [{ refused: 'unknown_code' }, { refused: 'expired' }]);
 });
 
 test('a device login that is not what the contract says is a fault, before anything is read', async () => {
