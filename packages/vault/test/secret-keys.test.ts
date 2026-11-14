@@ -218,7 +218,7 @@ test('an item that is not what the contract says is a fault, before any read', a
   const bad: unknown[][] = [
     [{ key: 'A' }], [{ key: 'A', archived: true, value: 'x', nature: 'secret' }], [{ key: 'A', archived: 'yes' }], [{ key: 'A', nature: 'secret', archived: true }],
     [{ key: 'A', value: 'x' }], [{ key: 'A', generated: { recipe: 'bytes:32' }, archived: false }],
-    ...['', ' db', 'db ', 'a/b', 'a\nb', 'x'.repeat(65), 7, '\ud83d'].map((folder) => [{ key: 'A', folder }]),
+    ...['', ' db', 'db ', 'a/b', 'a\nb', 'x'.repeat(65), '\u00a0db', '\u{1f5c2}'.repeat(33), 7, '\ud83d'].map((folder) => [{ key: 'A', folder }]),
     [{ key: 'A', value: 'x', nature: 'plain', generated: { recipe: 'bytes:32' } }], [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'bytes:0' } }],
     [{ key: 'A', value: 'x', nature: 'secret', generated: 'bytes:32' }], [{ key: 'A', value: 'x', nature: 'secret', generated: { recipe: 'bytes:32', pair } }],
     // A pair is written whole: both halves, naming each other, with one recipe.

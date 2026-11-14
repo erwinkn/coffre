@@ -22,8 +22,8 @@ const NATURES = ['secret', 'sensitive', 'plain'];
 /** Text as Postgres stores it and a reader gets it back: no NUL, no half of a surrogate pair. */
 const wellFormed = (value: string) => !value.includes('\0') && Buffer.from(value).toString() === value;
 const written = (value: unknown): value is string => typeof value === 'string' && value.length <= VALUE_LENGTH && wellFormed(value);
-/** A folder as the table's check has it (`secrets_folder_check`): 1 to 64 characters, no slash or control character, no space at either end. */
-const filed = (value: unknown) => value === null || (typeof value === 'string' && wellFormed(value) && [...value].length >= 1 && [...value].length <= 64 && !/[/\p{Cc}]/u.test(value) && !value.startsWith(' ') && !value.endsWith(' '));
+/** A folder as the app's routes have it (`folderName`), within the table's check: 1 to 64 UTF-16 units, no slash or control character, nothing `trim` takes away. */
+const filed = (value: unknown) => value === null || (typeof value === 'string' && wellFormed(value) && value.length >= 1 && value.length <= 64 && !/[/\p{Cc}]/u.test(value) && value === value.trim());
 
 const wrong = () => new TypeError('a write names a place by its slugs and 1 to 2,000 keys, each once, with a value of well-formed text, 64 Ki characters at most and 1 MiB in all, its nature and how it was generated, an archiving or a folder');
 

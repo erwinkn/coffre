@@ -35,9 +35,9 @@ export type KeyWrite = { key: string; archived?: boolean; folder?: string | null
  * each once and named as a key is (`[A-Za-z_][A-Za-z0-9_]{0,127}`); a value
  * is well-formed text with no NUL, 64 Ki characters at most, and the values
  * of one write 1 MiB of UTF-8 in all; a recipe is one `recipeProblem`
- * takes; a folder 1 to 64 characters, with no slash or control character
- * and no space at either end. Past any of these the call is a fault, not a
- * refusal: the app checks them first.
+ * takes; a folder 1 to 64 UTF-16 units, with no slash or control character
+ * and nothing `trim` removes at either end (`folderName`). Past any of these
+ * the call is a fault, not a refusal: the app checks them first.
  */
 export type SecretWrite = {
   op: 'secret.write';
