@@ -300,7 +300,7 @@ test("a handle for dev@me stands in for the personal config: its own values, and
 async function contributor(): Promise<{ mine: string; onDev: string }> {
   const CORA = 'user:cora';
   const coras = environment(market, 'dev-cora', { parentId: dev.id, owner: CORA });
-  const scope = JSON.stringify([{ projectId: market.id, environmentId: dev.id, role: 'contributor', permissions: { normal: ['secret.read', 'secret.use'], protected: ['secret.read', 'secret.use'] } }]);
+  const scope = JSON.stringify([{ projectId: market.id, environmentId: dev.id, role: 'contributor', permissions: { normal: ['secret.use'], protected: ['secret.use'] } }]);
   const [mine, onDev] = [generateToken('handle'), generateToken('handle')];
   const handled = (token: string, personal: boolean) => credential(token, CORA, { kind: 'handle', scope, places: JSON.stringify([{ environmentId: dev.id, personal }]), expiresAt: new Date(Date.now() + 3_600_000) });
   await write(
