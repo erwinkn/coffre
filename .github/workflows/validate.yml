@@ -162,9 +162,8 @@ jobs:
       # Every shard's counterexamples in one run, rather than the first failing's.
       fail-fast: false
       matrix:
-        # scripts/formal.sh shard_of; the longest, Tampering, is 7 to 11 minutes. 4g, not the script's 1g: Tampering
-        # took 11 on a 4-core, 16 GB runner at 1g and 7 at 4g or 8g, and 11 to 12 at 12g, or at 8g with 2 or 8 workers.
-        shard: [tampering, large, rest]
+        # scripts/formal.sh shard_of. 4g, not the script's 1g, which the largest scenarios outgrew on a 4-core, 16 GB runner.
+        shard: [large, rest]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
