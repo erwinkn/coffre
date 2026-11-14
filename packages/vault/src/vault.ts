@@ -56,15 +56,22 @@ function asked(input: UseInput): Ask {
   return { ...presented(input), project, environment, mine, keys: keys as string[] | null, purpose, upstream: to, fresh };
 }
 
-/** A host as a URL's `hostname` spells it: lower case, a name, an IPv4 address or a bracketed IPv6 one. */
-const HOSTNAME = /^(?=.{1,253}$)[a-z0-9.:[\]-]+$/;
+/** A host exactly as a URL's `hostname` spells it, 253 characters at most: no port, lower case, IPv6 bracketed, a name in punycode. */
+function hostname(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 253) return false;
+  try {
+    return new URL(`https://${value}/`).hostname === value;
+  } catch {
+    return false;
+  }
+}
 
 /** A use's upstream, rebuilt from its fields alone; undefined for one the contract does not have. */
 function upstreamOf(value: unknown): Upstream | null | undefined {
   if (value === null) return null;
   if (typeof value !== 'object' || Array.isArray(value)) return undefined;
   const { credential, host, egress, ...rest } = value as Record<string, unknown>;
-  if (Object.keys(rest).length > 0 || !text(credential) || !(host === undefined || (typeof host === 'string' && HOSTNAME.test(host))) || !(egress === undefined || egress === true)) return undefined;
+  if (Object.keys(rest).length > 0 || !text(credential) || !(host === undefined || hostname(host)) || !(egress === undefined || egress === true)) return undefined;
   return { credential, ...(host === undefined ? {} : { host }), ...(egress === true ? { egress } : {}) };
 }
 

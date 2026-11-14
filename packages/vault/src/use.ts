@@ -403,8 +403,8 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
     read.push(item);
   }
 
-  // What this credential has not been logged reading in the last minute, for this upstream credential and host: an entry stands for every use it marks.
-  const mark = ({ held, version }: Given) => JSON.stringify([caller.credential.id, ask.purpose, held.id, version.version, ask.upstream?.credential ?? null, ask.upstream?.host ?? null]);
+  // What this credential has not been logged reading in the last minute, for this upstream credential, host and egress: an entry stands for every use it marks.
+  const mark = ({ held, version }: Given) => JSON.stringify([caller.credential.id, ask.purpose, held.id, version.version, ask.upstream?.credential ?? null, ask.upstream?.host ?? null, ask.upstream?.egress === true]);
   const fresh = read.filter((item) => (memory.logged.get(mark(item))?.at ?? -Infinity) + LOGGED_MS <= at);
   const { workload } = caller;
   const answered: Answer = { principal: caller.principal, credential: caller.credential.id, expiresAt: new Date(endOf(caller.credential, found.seen.ancestor)).toISOString(), values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };

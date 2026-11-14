@@ -306,11 +306,18 @@ test('a version is given only as the nature its secret\'s row says: one that dis
 test('a proxied use is logged once a minute for each upstream credential and host, which its entry names, with whether it went through the egress', async () => {
   const use = (upstream: Upstream) => got(ask('ci', 'market/prod', ['FLAG'], { purpose: 'use', upstream }));
   const stripe: Upstream = { credential: 'stripe', host: 'api.stripe.com', egress: true };
-  for (const upstream of [stripe, stripe, { credential: 'stripe', host: 'files.stripe.com' }, { credential: 'github' }, { credential: 'github' }]) assert.deepEqual(await use(upstream), { FLAG: 'on' });
+  // The same credential and host through the egress and not, in either order (a forwarded request and a presign): one entry each.
+  const direct: Upstream = { credential: 'stripe', host: 'api.stripe.com' };
+  for (const upstream of [stripe, stripe, direct, direct, { credential: 'stripe', host: 'files.stripe.com' }, { credential: 'github' }, { credential: 'github' }]) assert.deepEqual(await use(upstream), { FLAG: 'on' });
+  vault.tick(60_000);
+  for (const upstream of [direct, stripe]) assert.deepEqual(await use(upstream), { FLAG: 'on' });
   assert.deepEqual((await logged()).map(({ detail }) => [detail.credential, detail.host, detail.egress]), [
     ['stripe', 'api.stripe.com', true],
+    ['stripe', 'api.stripe.com', undefined],
     ['stripe', 'files.stripe.com', undefined],
     ['github', undefined, undefined],
+    ['stripe', 'api.stripe.com', undefined],
+    ['stripe', 'api.stripe.com', true],
   ]);
 });
 
