@@ -276,7 +276,7 @@ test('a removal revokes the member\'s sign-in accounts, so that back in, they bi
   assert.ok('answer' in (await remove('fay-cli', bo)));
   const entry = await written();
   assert.ok(entry.objects.includes(`identity:${account.id}`) && !entry.objects.includes(`identity:${before.id}`), entry.objects.join());
-  assert.equal(named(entry).filter((name) => name === 'identities replaced').length, 1);
+  assert.deepEqual(named(entry).filter((name) => name.startsWith('identities')), ['identities read', 'identities replaced'], 'the one revoked before is read, by the member alone, and left');
   assert.ok('answer' in (await restore('fay-cli', bo)));
   const now = await accounts();
   assert.deepEqual(now.find((found) => found.id === account.id), { id: account.id, generation: 0, revoked_by: fay, revoked: true }, 'revoked, of the generation before');
@@ -424,6 +424,17 @@ test('a removal beside a new grant of the member\'s starts over, and takes that 
   assert.equal(await commit(world, prepared), false, 'a grant came since its read');
   assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 3 } });
   assert.equal(await count('grants'), 0);
+});
+
+test('a removal beside a sign-in that binds an account of the member\'s starts over, and revokes that account too', async () => {
+  const deciding = { workloads: world.workloads, owners: world.owners };
+  const prepared = await prepare(world, OPERATIONS['member.remove']({ ...shown('fay-cli'), op: 'member.remove', principal: bo }, deciding));
+  assert.ok(!('refused' in prepared));
+  const bound = identity(bo, { email: 'bo@acme.example' });
+  await write(world, ...rows('identities', bound));
+  assert.equal(await commit(world, prepared), false, 'an account came since its read');
+  assert.ok('answer' in (await remove('fay-cli', bo)));
+  assert.deepEqual(await rowsOf(world.owner, sql`SELECT revoked_by FROM identities WHERE id = ${bound.id}`), [{ revoked_by: fay }]);
 });
 
 test('a row written around the vault is no row: an Owner edited in place or forged counts for nothing, and a scope\'s project edited names none', async () => {

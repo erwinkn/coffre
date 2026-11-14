@@ -1,7 +1,7 @@
 import { EVERYWHERE, isInstanceRole, isScope, normalScope, ownsInstance, runsInstance, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { AccessAnswers, AccessChanges, MemberAdd, MemberRemove, MemberRestore, MemberRole, Presented, ScopeInput, Standing } from '@coffre/core/vault';
 import { grants, identities, principals, projects } from '@coffre/db/schema';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, refusedTo, type Asking, type Shown } from '../caller.ts';
 import { drop, part, put, type Operation, type Parts, type Refusal, type Seen } from '../change.ts';
@@ -268,7 +268,9 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
     member: part(principals, eq(principals.id, principal)),
     owners: owners(),
     held: part(grants, eq(grants.principal, principal)),
-    accounts: part(identities, and(eq(identities.principal, principal), isNull(identities.revokedAt))),
+    // Every account of theirs, revoked or not and of any generation, by the member alone: one a sign-in binds between
+    // this read and the write is found by the write's read again, and the removal starts over and revokes it too.
+    accounts: part(identities, eq(identities.principal, principal)),
   };
   return {
     read,
@@ -285,17 +287,19 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
 
       const now = new Date(at);
       const generation = was.generation + 1;
+      // Those not revoked yet: one revoked before keeps when and by whom.
+      const live = seen.accounts.filter((account) => account.revokedAt === null);
       const revoked = seen.held.map((grant) => ({ project: grant.projectId, environment: grant.environmentId, role: grant.role, expiresAt: grant.expiresAt?.toISOString() ?? null }));
       return {
         writes: [
           put(principals, { ...withoutMac(was), status: 'removed', role: 'member', scope: null, generation, statusChangedAt: now, statusChangedBy: caller.principal }, was),
           ...seen.held.map((grant) => drop(grants, grant)),
-          ...seen.accounts.map((account) => put(identities, { ...withoutMac(account), revokedAt: now, revokedBy: caller.principal }, account)),
+          ...live.map((account) => put(identities, { ...withoutMac(account), revokedAt: now, revokedBy: caller.principal }, account)),
         ],
         entry: said('member.remove', caller, shown, [
           `principal:${principal}`,
           ...seen.held.map((grant) => (grant.projectId === null ? `environment:${grant.environmentId}` : `project:${grant.projectId}`)),
-          ...seen.accounts.map((account) => `identity:${account.id}`),
+          ...live.map((account) => `identity:${account.id}`),
         ], { member: principal, generation, revoked }),
         answer: { revoked: revoked.length },
       };
