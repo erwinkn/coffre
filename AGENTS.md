@@ -13,7 +13,7 @@ entries in the shared log), `packages/client` (the typed API client the CLI and 
 (`coffre`, including `coffre init`), `packages/conformance` (`@coffre/conformance`:
 `coffre-conformance`, which boots a deployment and holds it to what it must never do,
 and the dev IdP, `@coffre/conformance/idp`, the local stand-in for Cloudflare Access,
-GitHub and OIDC), and `packages/core` (`@coffre/core`: access rules, the audit chain,
+GitHub and OIDC), and `packages/core` (`@coffre/core`: access rules, the log's Merkle trees,
 envelope encryption, vault keys, identity and sign-in, and the contract between server and
 vault in `src/vault.ts`). `examples/workers` and `examples/node` are deployments,
 exactly what `coffre init` writes (a test diffs them); each one's `app/` is a
@@ -133,11 +133,22 @@ and is off again for 0.16.0, which upgrades 0.14 in place and offline, so
 while npm's newest `@coffre/cli` is below 0.16.0, and holds 0.16.0 from
 0.16.1 on, by itself.
 
-**Transactions and the vault.** No app database transaction may stay open across
-any vault call. Prepare outside SQL; commit app writes and their audit together,
-taking the audit head before application rows. Reads commit their app audit before
-returning values. The integration fixture tracks transactions and rejects vault
-calls made inside them, including errors swallowed by handlers or background jobs.
+**Transactions and the vault.** The app's database login only reads: the
+vault writes every row and every log entry (`docs/design/0.16.md`, "Four
+rules"), so the app opens no transaction. A vault change reads its rows in
+a short transaction of its own, then, with none open, runs its `check` (a
+signature, asynchronous on Workers) and decides synchronously on what it
+read, and writes its rows and its entry in one more. Each is `bounded` in
+`packages/vault/src/change.ts`: its lock waits and run are capped, and
+nothing is awaited inside it. A row read that moved by the write starts the
+change over.
+
+**Reviews.** coffre's adversary can write any row of its database but holds
+none of the vault's keys (`docs/design/0.16.md`, "What it promises"). A
+finding that needs that write access is not a P1 or a P2: an edge case in
+which someone with database access can cheat is accepted and documented in
+the design's [Decisions](docs/design/0.16.md#decisions) (D237, D240, D241,
+D244), and work continues.
 
 **What an isolate keeps.** On Workers, every call opens its own database
 and its I/O belongs to it; the isolate keeps state between calls (the vault's
@@ -161,8 +172,8 @@ opened several Hyperdrive connections at once was now and then cancelled
 as hung on Cloudflare (`packages/vault/test/workers.test.ts` counts them).
 A request asks the vault about its caller once: a page's render checks its
 credential once for all its API calls (`pageClient`), and a read of values
-asks nothing first when the app kept the vault's last answer, which its
-unwrap checks (`Accesses`).
+is one `use`, which asks it again: the vault's own memory of a use's rows
+(`memorySeconds`) is the only one.
 
 **Tests / checks.**
 `Validate` runs the full CI suite except for a proven, synchronized version

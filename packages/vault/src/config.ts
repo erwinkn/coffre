@@ -38,9 +38,9 @@ export type ResolvedVaultConfig = {
    */
   owners: readonly string[];
   /**
-   * The seeds of the vault's own keys, which MAC its log entries, seal member
-   * rows and sign checkpoints: the first signs; every one verifies what it
-   * signed, so a rotation leaves earlier records verifying.
+   * The seeds of the vault's own keys, which MAC its log entries and seal its
+   * rows: the first signs; every one verifies, so a rotation leaves earlier
+   * records verifying.
    */
   signingKeys: readonly Uint8Array[];
   bulkLimit: BulkLimit;
@@ -73,7 +73,7 @@ export type VaultConfig = {
   kek: Kek;
   /**
    * Older KEKs, still unwrapping what they wrapped until a rewrap moves it
-   * on, and verifying what the vault wrote under them before the rotation.
+   * on, and verifying what is signed under them, before the rotation or after.
    */
   previousKeks?: readonly Kek[];
   /**
@@ -229,8 +229,8 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
  * primary KEK stands for. It verifies with the keys every local KEK stands
  * for too, the previous ones included: a KEK rotation changes the derived
  * signing key, and what the old one signed before the rotation must still
- * verify, for as long as the old KEK stays configured. Nothing after it does
- * (`#settle` in vault.ts).
+ * verify, for as long as the old KEK stays configured. So does anything it
+ * signs after: there is no cutoff until rotation is built (docs/keys.md).
  */
 function signingKeys(given: string | undefined, keks: { provider: KekProvider; signingKey: Buffer | null }[]): Buffer[] {
   const derived = keks.flatMap((entry) => (entry.signingKey === null ? [] : [entry.signingKey]));
