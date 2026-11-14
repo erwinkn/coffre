@@ -31,6 +31,7 @@ beforeEach(async () => {
   await emptyDatabase(world.owner);
   world.memory.reads.clear();
   world.memory.logged.clear();
+  world.refused.clear();
   market = project('market');
   const shelved = project('shelved', { archivedAt: new Date(Date.UTC(2026, 10, 1)) });
   prod = environment(market, 'prod');
@@ -67,8 +68,16 @@ const making = (label: string, slug: string): Presented & ProjectCreate => ({ ..
 const adding = (label: string, slug: string, more: { parent?: string | null; protected?: boolean; project?: string } = {}): Presented & EnvironmentCreate =>
   ({ ...shown(label), op: 'environment.create', project: more.project ?? 'market', environment: slug, mine: false, parent: more.parent ?? null, protected: more.protected ?? false });
 const mine = (label: string, of: string, more: { project?: string } = {}): Presented & EnvironmentCreate => ({ ...shown(label), op: 'environment.create', project: more.project ?? 'market', environment: of, mine: true });
-const count = async (table: 'log_pending' | 'projects' | 'environments') => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM ${sql.identifier(table)}`))[0]!.n;
-const counts = async () => [await count('log_pending'), await count('projects'), await count('environments'), world.woken.length];
+const count = async (table: 'projects' | 'environments') => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM ${sql.identifier(table)}`))[0]!.n;
+const kept = async () => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM log_pending WHERE kept`))[0]!.n;
+/** What is made: the entries kept, the projects and the environments. A refusal's entry ages out, and is none of them. */
+const counts = async () => [await kept(), await count('projects'), await count('environments')];
+/** The refusals logged, oldest first: who was refused what, where as they named it, and the rows it was about beyond who asked. */
+const denied = async () => (await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(world.owner, sql`SELECT kept, body, mac FROM log_pending WHERE NOT kept ORDER BY id`))
+  .map((row) => entryOf(world.keys, row)!)
+  // A read ages out too: a refusal is the entry that says why not.
+  .filter((entry) => typeof entry.detail === 'object' && entry.detail !== null && 'refused' in entry.detail)
+  .map((entry) => [entry.action, entry.actor, entry.detail, entry.objects.filter((object) => !object.startsWith('principal:') && !object.startsWith('credential:'))]);
 const written = async () => {
   const [row] = await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(world.owner, sql`SELECT kept, body, mac FROM log_pending WHERE kept ORDER BY id DESC LIMIT 1`);
   return entryOf(world.keys, row!)!;
@@ -93,7 +102,7 @@ const answered = <A>(result: { answer: A } | { refused: string }): A => {
 test('an Owner of the instance makes a project, an environment in it, and writes and reads there', async () => {
   const before = await counts();
   const { id } = answered(await vault.change(making('dee-cli', 'payments')));
-  assert.deepEqual(await counts(), [before[0]! + 1, before[1]! + 1, before[2], before[3]! + 1]);
+  assert.deepEqual([...(await counts()), world.woken.length], [before[0]! + 1, before[1]! + 1, before[2], 1]);
   const [row] = await rowsOf<{ slug: string; name: string; archived_at: Date | null; folder: string | null }>(world.owner, sql`SELECT slug, name, archived_at, folder FROM projects WHERE id = ${id}`);
   assert.deepEqual(row, { slug: 'payments', name: 'payments', archived_at: null, folder: null });
   const entry = await written();
@@ -120,6 +129,15 @@ test('a project is made only by an Admin or Owner of the instance whose scope ta
   assert.deepEqual(await vault.change(making('dee-cli', 'market')), { refused: 'exists' });
   assert.deepEqual(await vault.change(making('dee-cli', 'shelved')), { refused: 'exists' }, "an archived project's slug");
   assert.deepEqual(await counts(), before);
+  // Each who stands is logged refused, once in the minute: Dee once, by her personal token, though refused three times. Not the handle, nor a token nobody holds.
+  const asked = { project: 'payments', refused: 'no_access' };
+  assert.deepEqual(await denied(), [['project.create', ada, asked, []], ['project.create', fay, asked, []], ['project.create', dee, asked, []], ['project.create', api, asked, []]]);
+  // A minute on, Dee is logged again, with the project there under that slug; one archived is not.
+  world.tick(60_000);
+  assert.deepEqual(await vault.change(making('dee-cli', 'market')), { refused: 'exists' });
+  world.tick(60_000);
+  assert.deepEqual(await vault.change(making('dee-cli', 'shelved')), { refused: 'exists' });
+  assert.deepEqual((await denied()).slice(4), [['project.create', dee, { project: 'market', refused: 'exists' }, [`project:${market.id}`]], ['project.create', dee, { project: 'shelved', refused: 'exists' }, []]]);
   // A scope that keeps all but some projects takes in new ones.
   await amend(world, 'principals', sql`id = ${fay}`, { scope: JSON.stringify({ projects: { except: [market.id] }, environments: 'all' }) });
   assert.ok('answer' in (await vault.change(making('fay-cli', 'payments'))));
@@ -142,6 +160,24 @@ test('an environment is made by whoever manages the project\'s environments, in 
   assert.deepEqual(await refused('cy-cli', 'prod'), { refused: 'no_access' });
   assert.deepEqual(await refused('dee-handle', 'dev'), { refused: 'unauthenticated' });
   assert.deepEqual(await counts(), before);
+  // Logged once a minute for each who stands, in the place as they named it, found from the project as far as it is there.
+  const dev = { environment: 'dev', refused: 'no_access' };
+  assert.deepEqual(await denied(), [
+    ['environment.create', cy, { project: 'market', ...dev }, [`project:${market.id}`]],
+    ['environment.create', bo, { project: 'market', ...dev }, [`project:${market.id}`]],
+    ['environment.create', eve, { project: 'market', ...dev }, [`project:${market.id}`]],
+    ['environment.create', ada, { project: 'nowhere', ...dev }, []],
+    ['environment.create', dee, { project: 'shelved', ...dev }, []],
+  ]);
+  // A minute on, Ada is logged again, with the environment there under that slug, so that its page finds it; one archived is not, as a project's.
+  world.tick(60_000);
+  assert.deepEqual(await refused('ada-cli', 'prod'), { refused: 'exists' });
+  world.tick(60_000);
+  assert.deepEqual(await refused('ada-cli', 'old'), { refused: 'exists' });
+  assert.deepEqual((await denied()).slice(5), [
+    ['environment.create', ada, { project: 'market', environment: 'prod', refused: 'exists' }, [`project:${market.id}`, `environment:${prod.id}`]],
+    ['environment.create', ada, { project: 'market', environment: 'old', refused: 'exists' }, [`project:${market.id}`]],
+  ]);
 
   const made = answered(await vault.change(adding('ada-cli', 'dev', { protected: true })));
   assert.deepEqual(await environmentRow(made.id), { slug: 'dev', parent_id: null, owner: null, protected: true, project_id: market.id });
@@ -180,6 +216,12 @@ test('a fork inherits from a live environment its maker reads, three deep at mos
   // Ada manages market's environments and, where one is protected, does not read it: she does not fork it.
   assert.deepEqual(await refused('ada-cli', 'guarded'), { refused: 'no_access' });
   assert.deepEqual(await counts(), before);
+  // Ada is logged once in the minute, with the parent she named, found as the environment it is.
+  const [deep] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM environments WHERE project_id = ${market.id} AND slug = 'deep'`);
+  assert.deepEqual(await denied(), [['environment.create', ada, { project: 'market', environment: 'next', parent: 'deep', refused: 'too_deep' }, [`project:${market.id}`, `environment:${deep!.id}`]]]);
+  world.tick(60_000);
+  assert.deepEqual(await refused('ada-cli', 'nowhere'), { refused: 'no_access' });
+  assert.deepEqual((await denied()).slice(1), [['environment.create', ada, { project: 'market', environment: 'next', parent: 'nowhere', refused: 'no_access' }, [`project:${market.id}`]]]);
   // A parent above it that is no row, edited around the vault, breaks the chain: a row that is not there never shortens it.
   await world.owner.execute(sql`UPDATE environments SET name = 'Staging!' WHERE slug = 'staging'`);
   assert.deepEqual(await refused('ada-cli', 'qa'), { refused: 'broken_chain' });
@@ -208,6 +250,14 @@ test('a personal config is a person\'s, of an environment they read or use, one 
   assert.deepEqual(await vault.change(mine('bo-cli', 'orphan')), { refused: 'broken_chain' });
   assert.deepEqual(await vault.change(mine('bo-cli', 'prod', { project: 'shelved' })), { refused: 'no_access' });
   assert.deepEqual(await counts(), before);
+  // A personal config is named by the environment it is of, the page its maker was on: logged once a minute for each who stands.
+  const of = [`project:${market.id}`, `environment:${prod.id}`];
+  assert.deepEqual(await denied(), [
+    ['environment.create', bo, { project: 'market', environment: 'prod', refused: 'exists' }, of],
+    ['environment.create', ada, { project: 'market', environment: 'prod', refused: 'exists' }, of],
+    ['environment.create', api, { project: 'market', environment: 'prod', refused: 'not_a_person' }, of],
+    ['environment.create', eve, { project: 'market', environment: 'prod', refused: 'no_access' }, of],
+  ]);
   // A viewer of one protected environment reads it: a personal config takes nothing more. It is protected through its environment, not by its own row.
   const hers = answered(await vault.change(mine('eve-cli', 'guarded')));
   assert.equal(hers.protected, false);
@@ -241,7 +291,7 @@ test('two makings of one place decided on the same rows: the second finds the fi
     const [first, second] = await race(inputs);
     assert.equal(await commit(world, first as never), true);
     assert.equal(await commit(world, second as never), false, 'a row it read for has come');
-    assert.deepEqual(await counts(), [before[0]! + 1, before[1]! + (inputs[0]!.op === 'project.create' ? 1 : 0), before[2]! + (inputs[0]!.op === 'project.create' ? 0 : 1), before[3]! + 1]);
+    assert.deepEqual(await counts(), [before[0]! + 1, before[1]! + (inputs[0]!.op === 'project.create' ? 1 : 0), before[2]! + (inputs[0]!.op === 'project.create' ? 0 : 1)]);
     // Asked again, as `change` does by itself, it is refused.
     assert.deepEqual(await vault.change(inputs[1] as never), { refused: 'exists' });
   }

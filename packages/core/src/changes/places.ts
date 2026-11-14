@@ -1,11 +1,14 @@
 /** The changes of projects and environments (`packages/vault/src/ops/places.ts`). */
-export type PlacesChanges = ProjectCreate | EnvironmentCreate;
+export type PlacesChanges = ProjectCreate | EnvironmentCreate | ProjectEdit | EnvironmentEdit;
+
+/** An edit answers the place's id; asked for what is so already, it changes nothing, and is logged all the same. */
+type Edited = { id: string };
 
 export type PlacesAnswers = {
   'project.create': { id: string };
   /** Its slug is the one asked for, or, for a personal config, the one made for it, which only a list for deletion shows. */
   'environment.create': { id: string; slug: string; protected: boolean };
-};
+} & { [K in ProjectEdit['op'] | EnvironmentEdit['op']]: Edited };
 
 /**
  * Make a project, as an Admin or Owner of the instance whose scope takes in
@@ -36,4 +39,59 @@ export type ProjectCreate = {
 export type EnvironmentCreate = { op: 'environment.create'; project: string; environment: string } & (
   | { mine: false; parent: string | null; protected: boolean }
   | { mine: true }
+);
+
+/**
+ * A project edited, archived or not, by whoever manages it
+ * (`project.manage`), on a project there or archived: a deleted one's
+ * tombstone is no project.
+ *
+ * - `project.update`: its slug, to one free as a new project's is.
+ * - `project.archive`: refused, `referenced`, while a reference held
+ *   outside it reads a value in it (D41): archiving would stop that read.
+ * - `project.restore`.
+ * - `project.move`: filed in a folder, 1 to 64 characters with no `/`, no
+ *   control character and no space at either end, or in none.
+ */
+export type ProjectEdit = { project: string } & (
+  | { op: 'project.update'; slug: string }
+  | { op: 'project.archive' }
+  | { op: 'project.restore' }
+  | { op: 'project.move'; folder: string | null }
+);
+
+/**
+ * An environment edited, there or archived, by whoever manages its
+ * project's environments (`environment.manage`), unless said otherwise. A
+ * personal config is edited by none of these: it is archived and restored
+ * with its environment, and protected through it.
+ *
+ * - `environment.update`: its slug, to one free in the project and none of
+ *   a project's pages. Scopes name environments by slug, so this moves who
+ *   an instance role reaches there.
+ * - `environment.archive`, with its personal configs: refused while a live
+ *   fork inherits from it (`inherited`), or a reference held outside it
+ *   reads a value in it (`referenced`).
+ * - `environment.restore`, with its personal configs: refused while an
+ *   environment it inherits from is archived or deleted (`parent_archived`),
+ *   or one is not there to say (`broken_chain`).
+ * - `environment.protect`: each role holds there what its protected column
+ *   says, for people (docs/design/roles.md). Never by a workload's session
+ *   (`workload_cannot_issue`), which changes no one's access.
+ * - `environment.unprotect`: as protecting, and by an Owner of its project
+ *   alone, by a grant on it or an instance role whose scope takes in all
+ *   of it, on no credential's scope (`ownsProject`, R30).
+ * - `upstream.freeze`: the deployment's upstream credential of that name,
+ *   `stripe`, used by nobody in this live environment, by whoever writes
+ *   there (`secret.write`); `upstream.thaw` lifts it, by an Owner of the
+ *   project (docs/design/workload-access.md, section 8.2).
+ */
+export type EnvironmentEdit = { project: string; environment: string } & (
+  | { op: 'environment.update'; slug: string }
+  | { op: 'environment.archive' }
+  | { op: 'environment.restore' }
+  | { op: 'environment.protect' }
+  | { op: 'environment.unprotect' }
+  | { op: 'upstream.freeze'; upstream: string }
+  | { op: 'upstream.thaw'; upstream: string }
 );
