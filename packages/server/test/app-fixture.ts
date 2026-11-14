@@ -1,11 +1,12 @@
 // The app on the 0.16 contract, in process, for the server's tests: the
 // real vault over the suite's database, through JSON as over any transport,
-// and the app's own login for what its pages list. `calls` and `statements`
-// say what one request cost.
+// and the app's own login for what its pages list. `calls`, `statements`
+// and `sent` say what one request cost (`request-cost.test.ts` holds each
+// route to its budget).
 import { github, signin, type Auth } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
-import type { Database } from '@coffre/db';
-import { openDatabase } from '@coffre/db/connect';
+import { createDatabase, type Database } from '@coffre/db';
+import { checkDatabaseUrl, postgresClient } from '@coffre/db/connect';
 import { APP_URL, openConfiguredVault, type TestVault } from '@coffre/vault/testing';
 
 import type { PageContext } from '../src/app.ts';
@@ -13,6 +14,7 @@ import { resolveConfig } from '../src/config.ts';
 import { createRuntime } from '../src/runtime.ts';
 import { requestScope } from '../src/scope.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
+import { watched } from './db/postgres-pool.ts';
 
 export const PUBLIC_URL = 'https://secrets.acme.example';
 /** The session's cookie, as an HTTPS deployment names it. */
@@ -33,6 +35,12 @@ export type TestApp = {
   answered: unknown[][];
   /** The work coffre told the platform to keep the request alive for, oldest first: the request's own, and what outlives its response. */
   tracked: Promise<unknown>[];
+  /**
+   * What the app's connection sent: every statement, a transaction's own
+   * BEGIN and COMMIT and what it ran between them included, and the rows
+   * they answered. `statements` counts a transaction as one.
+   */
+  readonly sent: { readonly statements: number; readonly rows: number };
   /** A request, as a deployment's Start app answers one: coffre's middleware around coffre's route. */
   request(path: string, init?: RequestInit): Promise<Response>;
   /** A page's render for a request, with what coffre hands it. */
@@ -51,7 +59,14 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
   const { world, vault } = await openConfiguredVault({ kek: { id: 'app-test', key: Buffer.alloc(32, 9).toString('base64') }, owners: ['root@acme.example'], ...(workloads === undefined ? {} : { workloads }) });
   const url = new URL(APP_URL);
   if (database !== undefined) url.pathname = `/${database}`;
-  const app = await openDatabase(url.href);
+  checkDatabaseUrl(url.href);
+  const sent = { statements: 0, rows: 0 };
+  // As `openDatabase` opens it, watched.
+  const client = watched(postgresClient(url.href, { max: 10, idle_timeout: 10 }), ({ rows }) => {
+    sent.statements += 1;
+    sent.rows += rows;
+  });
+  const app = { db: createDatabase(client), close: () => client.end() };
   const calls: string[] = [];
   let statements = 0;
   const executed: unknown[] = [];
@@ -97,6 +112,7 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
     executed,
     answered,
     tracked,
+    sent,
     request(path, init) {
       const request = new Request(`${PUBLIC_URL}${path}`, init);
       return scope.respond(request, () => scope.route(request));
