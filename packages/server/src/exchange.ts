@@ -49,7 +49,8 @@ import { IssuerUnavailable, verifyWithKeys } from './workloads/keys.ts';
  * (`unknownKeyAlert`). Each refusal is one line of the log, once a minute
  * per reason and service, in this isolate.
  *
- * Not yet: 0.14.7's count of what one binding issued a minute (60).
+ * 0.14.7's 60 credentials a minute per binding is not kept (D177): the
+ * limit per source address bounds a flood.
  */
 export async function exchangeToken(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): Promise<Response> {
   const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
