@@ -8,7 +8,7 @@ import { CoffreError } from '@coffre/client';
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect } from '../report.ts';
+import { expect, until, PUBLISHED_SECONDS } from '../report.ts';
 import type { Cli } from './cli.ts';
 import type { Person } from './people.ts';
 import { query } from './storage.ts';
@@ -72,7 +72,8 @@ export async function deletion(deployment: Deployment, cli: Cli, admin: Person):
   expect((await admin.api.projects.list()).projects.every((project) => !project.slug.startsWith(PROJECT)), 'a deleted project is still listed');
   expect((await admin.api.members.get(SERVICE)).live.grants === 0, 'a grant on the deleted project is still live');
   const revealed = await admin.api.secrets.reveal(`${tombstone!.slug}/prod`).then(() => null, (error: unknown) => error);
-  expect(revealed instanceof CoffreError && revealed.status === 404, 'a deleted project is still revealed by its tombstone', revealed);
+  // 0.16 refuses the tombstone's slug as no path at all (400), where 0.14 found nothing there (404).
+  expect(revealed instanceof CoffreError && (revealed.status === 404 || revealed.status === 400), 'a deleted project is still revealed by its tombstone', revealed);
 
   // Its slug is another project's now; the log tells the two apart.
   const fresh = value();
@@ -81,15 +82,25 @@ export async function deletion(deployment: Deployment, cli: Cli, admin: Person):
   await admin.api.secrets.set(`${PROJECT}/prod`, { API_KEY: fresh });
   expect((await projectId(deployment, PROJECT)) !== id, 'the new project took the deleted one\'s row');
   expect((await admin.api.secrets.reveal(`${PROJECT}/prod/API_KEY`)).values.API_KEY === fresh, 'the new project does not read its own value');
-  const { entries } = await admin.api.audit.list({ path: tombstone!.slug, limit: 500 });
-  expect(entries.some((entry) => entry.action === 'project.delete' && entry.decision === 'allow'), 'the deletion is not in the log under its tombstone', entries.slice(0, 5));
+  // The page lists the deletion once the signer has published it, within its minute.
+  type Page = Awaited<ReturnType<typeof admin.api.audit.list>>;
+  let page: Page | Error | undefined;
+  const deleted = () => page !== undefined && !(page instanceof Error) && page.entries.some((entry) => entry.action === 'project.delete' && entry.decision === 'allow');
+  await until('the deletion on the log under its tombstone', async () => {
+    page = await admin.api.audit.list({ path: tombstone!.slug, limit: 500 }).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
+    return page instanceof Error || deleted();
+  }, PUBLISHED_SECONDS).catch(() => undefined);
+  expect(!(page instanceof Error), 'the log cannot be read under the tombstone\'s slug', page instanceof Error ? page.message : page);
+  expect(deleted(), 'the deletion is not in the log under its tombstone', (page as Page | undefined)?.entries.slice(0, 5));
 
   // An environment alone, the same way.
   await admin.api.environments.update(`${PROJECT}/prod`, { archived: true });
   await run(['environments', 'delete', `${PROJECT}/prod`, '--apply']);
-  await admin.api.environments.create(`${PROJECT}/prod`, { name: 'prod, again' });
+  await admin.api.environments.create(`${PROJECT}/prod`, {});
+  // 0.16 names a place by its slug alone (0.14.7 kept a display name): the new prod is told from the deleted one by holding no key.
   const environments = (await admin.api.projects.list()).projects.find((project) => project.slug === PROJECT)?.environments ?? [];
-  expect(environments.length === 1 && environments[0]!.name === 'prod, again', 'a deleted environment is still listed, or its slug is not free', environments);
+  expect(environments.length === 1 && environments[0]!.slug === 'prod' && environments[0]!.details?.secretCount === 0,
+    'a deleted environment is still listed, or its slug is not free', environments);
   expect((await sealed(deployment, (await projectId(deployment, PROJECT))!)).sealed === 0, 'a deleted environment still holds a value');
   return `${PROJECT} and ${PROJECT}/prod deleted by the CLI: 5 versions erased, a grant revoked, both unlisted and their slugs reused`;
 }

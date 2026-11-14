@@ -15,7 +15,7 @@ import type { AuditEntryView } from '@coffre/client';
 import { bearer } from '../browser.ts';
 import type { Deployment } from '../harness.ts';
 import { GITHUB_RUN } from '../idp/index.ts';
-import { expect, Skip, until } from '../report.ts';
+import { expect, Skip, until, PUBLISHED_SECONDS } from '../report.ts';
 import { Cli } from './cli.ts';
 import { DEV, type Canaries, type Person } from './people.ts';
 
@@ -98,7 +98,7 @@ export async function runSignsIn(deployment: Deployment, admin: Person, canaries
   await until('the exchange and the read in the log', async () => {
     ({ entries } = await admin.api.audit.list({ actor: RUNNER, detail: '1' }));
     return exchangedIn() !== undefined && readIn() !== undefined;
-  }, 90).catch(() => undefined);
+  }, PUBLISHED_SECONDS).catch(() => undefined);
   const [exchanged, read] = [exchangedIn(), readIn()];
   expect(exchanged !== undefined && read !== undefined, 'the exchange or the read is not in the log', entries.map((entry) => entry.action));
   expect(typeof exchanged.metadata.credential === 'string', 'the exchange did not log its credential', exchanged.metadata);
@@ -153,7 +153,7 @@ export async function runsRefused(deployment: Deployment, admin: Person): Promis
   await until('an exchange taken after the refusals in the log', async () => {
     exchanges = (await admin.api.audit.list({ actor: RUNNER, detail: '1' })).entries.filter((entry) => entry.action === 'token.exchange');
     return exchanges.some((entry) => Date.parse(entry.occurredAt) >= to);
-  }, 90);
+  }, PUBLISHED_SECONDS);
   const logged = exchanges.filter((entry) => Date.parse(entry.occurredAt) >= from && Date.parse(entry.occurredAt) < to).length;
   expect(logged === 0, `${logged} refused exchanges were logged as exchanges`);
   return `${cases.length + 1} refused, each for its reason, none saying what the binding expects, none logged: ${cases.map(([what]) => what).join(', ')}, for another service`;

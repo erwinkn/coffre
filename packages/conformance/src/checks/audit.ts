@@ -9,9 +9,9 @@ import { judgeProofs, type AuditEntryView, type CoffreClient, type ProofJudgment
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, until } from '../report.ts';
-import { LOG_REFUSAL, logRefuses, query } from './storage.ts';
-import { DEV, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
+import { expect, until, PUBLISHED_SECONDS } from '../report.ts';
+import { LOG_REFUSAL, logBodies, logRefuses, query, type Body } from './storage.ts';
+import { canary, DEV, PROJECT, replaced, valuesIn, type Canaries, type People } from './people.ts';
 
 /**
  * Every returned value read, committed by the vault under the response's
@@ -20,18 +20,28 @@ import { DEV, PROJECT, valuesIn, type Canaries, type People } from './people.ts'
  */
 export async function revealAudited(deployment: Deployment, { admin, reader }: People, canaries: Canaries, purpose: 'reveal' | 'run'): Promise<string> {
   const path = purpose === 'reveal' ? `${DEV}/API_KEY` : DEV;
+  // 0.16 logs the first use of a version in a minute, by credential and purpose (docs/design/0.16.md, "What it
+  // promises"): a version the reader read a moment ago gets no new entry. Each value read is written afresh first.
+  const fresh = Object.fromEntries(Object.keys(purpose === 'reveal' ? { API_KEY: '' } : valuesIn(canaries, DEV)).map((key) => [key, canary()]));
+  await admin.api.secrets.set(DEV, fresh);
+  for (const [key, value] of Object.entries(fresh)) replaced(canaries, `${DEV}/${key}`, value);
   const { operationId, values } = await reader.api.secrets.reveal(path);
   expect(typeof operationId === 'string' && operationId.length > 0, 'the read returned no operation id');
   const expected = purpose === 'reveal' ? { API_KEY: canaries[`${DEV}/API_KEY`] } : valuesIn(canaries, DEV);
   expect(JSON.stringify(Object.entries(values).sort()) === JSON.stringify(Object.entries(expected).sort()), 'the read returned different values', values);
-  const entries = await everyAuditEntry(admin.api);
-  const bundle = entries.filter((entry) => entry.operationId === operationId);
+  // 0.16 answers a change or a read with its request's id as its operation, and its entry names that request. The page
+  // lists what the signer has published, within its minute.
+  let bundle: AuditEntryView[] = [];
+  await until('the read on the audit page', async () => {
+    bundle = (await everyAuditEntry(admin.api)).filter((entry) => entry.requestId === operationId);
+    return bundle.length > 0;
+  }, PUBLISHED_SECONDS).catch(() => undefined);
   expect(bundle.length === 1, 'the read of one place is not logged as one entry', bundle);
   const [entry] = bundle as [AuditEntryView];
   const read = entry.secrets ?? [{ key: entry.key, version: entry.version }];
   expect(JSON.stringify(read.map((secret) => secret.key).sort()) === JSON.stringify(Object.keys(expected).sort()), 'the read does not list each value once', entry);
   expect(entry.author === 'vault' && entry.action === 'secret.read' && entry.decision === 'allow', "the read's entry is not the vault's allowed read", entry);
-  expect(entry.metadata.purpose === purpose && entry.requestId !== null, 'the read does not name its request and its purpose', entry);
+  expect(entry.metadata.purpose === purpose, 'the read does not name its purpose', entry);
   const { keys: listed } = await admin.api.secrets.list(DEV);
   for (const secret of read) {
     expect(secret.version === listed.find((key) => key.key === secret.key)?.version, `the entry for ${String(secret.key)} names another version`, entry);
@@ -40,16 +50,14 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
     expect(own.entries.some((found) => found.seq === entry.seq), `the read is not in ${String(secret.key)}'s log`, own.entries.slice(0, 5));
   }
   await using(deployment.database(), async (sql) => {
-    const rows = await query<{ author: string; action: string; decision: string; request_id: string | null; secret_id: string | null; metadata: string }>(sql,
-      'SELECT author, action, decision, request_id, secret_id, metadata FROM audit_log WHERE operation_id = $1', [operationId]);
+    const rows = (await logBodies(sql)).filter((body) => body.request === operationId);
     expect(rows.length === 1, 'the committed read is not one entry', rows);
-    const [row] = rows as [(typeof rows)[number]];
-    expect(row.author === 'vault' && row.action === 'secret.read' && row.decision === 'allow' && row.request_id !== null, 'the committed read is not the vault release', row);
-    const metadata = JSON.parse(row.metadata) as { purpose: string; version?: number; secrets?: { secretId: string; version: number }[] };
-    const committed = metadata.secrets ?? [{ secretId: row.secret_id!, version: metadata.version! }];
-    expect(metadata.purpose === purpose && committed.length === Object.keys(expected).length, 'the committed read does not name its purpose and each secret', row);
+    const [row] = rows as [Body];
+    const committed = (row.detail.keys ?? []) as { secret: string; version: number }[];
+    expect(row.action === 'secret.read' && row.detail.refused === undefined, 'the committed read is not the vault release', row);
+    expect(row.detail.purpose === purpose && committed.length === Object.keys(expected).length, 'the committed read does not name its purpose and each secret', row);
     for (const secret of committed) {
-      const [current] = await query<{ current_version: number }>(sql, 'SELECT current_version FROM secrets WHERE id = $1', [secret.secretId]);
+      const [current] = await query<{ current_version: number }>(sql, 'SELECT current_version FROM secrets WHERE id = $1', [secret.secret]);
       expect(current?.current_version === secret.version, 'the committed read names another version', row);
     }
   });
@@ -74,7 +82,7 @@ export async function auditProven({ admin }: People): Promise<string> {
   await until('a page past the race between its head and its log', async () => {
     judged = judgeProofs(await admin.api.audit.list({ detail: '1', limit: 200 }));
     return !judged.racing;
-  }, 90).catch((error: unknown) => {
+  }, PUBLISHED_SECONDS).catch((error: unknown) => {
     if (judged === undefined) throw error;
   });
   const { head, proven, failed, misplaced, missing } = judged!;
@@ -107,7 +115,7 @@ export async function auditPageProofs({ admin }: People): Promise<string> {
     html = await page.text();
     proofs = [...html.matchAll(/data-proof="([a-z]+)"/g)].map((match) => match[1]);
     return status !== 200 || proofs.length === 0 || proofs.some((proof) => proof !== 'unproven');
-  }, 90);
+  }, PUBLISHED_SECONDS);
   expect(status === 200 && !html.includes('Verifying'), 'the audit page was not sent with its proofs', { status });
   const proven = proofs.filter((proof) => proof === 'proven').length;
   expect(proven > 0, "the audit page's rows say no proof, or none proven", { status, proofs: proofs.slice(0, 10) });
@@ -117,60 +125,58 @@ export async function auditPageProofs({ admin }: People): Promise<string> {
 }
 
 /**
- * Every version the app says it stored names the vault's entry for the key
- * it was sealed with, `key.wrap` for a write and `key.rewrap` for a restore,
- * a mark and a loosening:
- * the same member, request and operation, the same secret and version. And
- * every value read is the vault's to log: the app keeps no reads of its own.
+ * Every version stored is the vault's write: one entry of the log names
+ * it, its secret and its number, among the keys the change wrote: a
+ * `secret.write` or `secret.loosen`, or the `environment.create` of a fork
+ * that copied it, naming who wrote it and the request. 0.14's app and vault each logged their
+ * half of a write, the app's naming the vault's seal of its key; in 0.16
+ * the vault writes the version and its one entry together, and the app
+ * writes nothing (docs/design/0.16.md, "Four rules").
  */
+const WRITES = new Set(['secret.write', 'secret.loosen', 'environment.create']);
+
 export async function writesAgree(deployment: Deployment): Promise<string> {
   return using(deployment.database(), async (sql) => {
-    const entries = await sql.query<{
-      seq: number | string; author: string; action: string; decision: string; actor: string; metadata: string;
-      project_id: string | null; environment_id: string | null; secret_id: string | null;
-      request_id: string | null; operation_id: string | null; related_seq: string | number | null;
-    }>('SELECT * FROM audit_log ORDER BY seq');
-    const bySeq = new Map(entries.map((entry) => [String(entry.seq), entry]));
-    const writes = entries.filter((entry) => entry.author === 'app' && entry.decision === 'allow'
-      && (entry.action === 'secret.write' || entry.action === 'secret.restore' || entry.action === 'secret.loosen'));
-    for (const entry of entries.filter((row) => row.author === 'app' && row.decision === 'allow')) {
-      expect(entry.action !== 'secret.read', 'the app logged an allowed read of a value', entry);
-    }
-    for (const entry of writes) {
-      // A write of a new value wraps a new key; a restore, a mark (which says the version it `kept`) and a loosening rewrap one.
-      const seal = entry.action === 'secret.write' && JSON.parse(entry.metadata).kept === undefined ? 'key.wrap' : 'key.rewrap';
-      const key = entry.related_seq === null ? undefined : bySeq.get(String(entry.related_seq));
-      expect(key !== undefined && key.author === 'vault' && key.action === seal && key.decision === 'allow',
-        `a ${entry.action} names no ${seal} of the vault's`, { entry, key });
-      for (const field of ['actor', 'request_id', 'operation_id', 'project_id', 'environment_id'] as const) {
-        expect(entry[field] === key[field], `the write and its seal have different ${field}`, { entry, key });
+    const written = new Map<string, number>();
+    for (const body of await logBodies(sql)) {
+      if (!WRITES.has(body.action) || body.detail.refused !== undefined) continue;
+      // Each is someone's, through one request the server passed the vault (docs/design/0.16.md, "The server").
+      const named = (field: unknown) => typeof field === 'string' && field !== '';
+      expect(named(body.actor) && named(body.request), `a committed ${body.action} names no actor or no request`, body);
+      for (const line of (body.detail.keys ?? []) as { secret?: string; version?: number }[]) {
+        if (line.version === undefined) continue;
+        const name = `${line.secret} ${line.version}`;
+        written.set(name, (written.get(name) ?? 0) + 1);
       }
-      expect(entry.operation_id !== null && entry.request_id !== null, 'the committed write has no operation or request', entry);
-      const metadata = JSON.parse(entry.metadata) as { version: number; key: string };
-      const sealed = JSON.parse(key.metadata) as { secretId?: string; version: number; subject: string };
-      expect((sealed.secretId ?? key.secret_id) === entry.secret_id && sealed.version === metadata.version
-        && sealed.subject.split('/').at(-1) === metadata.key, 'the write names a seal of another secret or version', { entry, key });
     }
     const versions = await query<{ secret_id: string; version: number }>(sql,
       `SELECT v.secret_id, v.version FROM secret_versions v JOIN secrets s ON s.id = v.secret_id
        JOIN projects p ON p.id = s.project_id WHERE p.slug = $1`, [PROJECT]);
     expect(versions.length > 0, 'no stored versions were inspected');
     for (const version of versions) {
-      const matching = writes.filter((entry) => entry.secret_id === version.secret_id
-        && (JSON.parse(entry.metadata) as { version: number }).version === version.version);
-      expect(matching.length === 1, 'a stored version has no unique app write entry', { version, matching });
+      const entries = written.get(`${version.secret_id} ${version.version}`) ?? 0;
+      expect(entries === 1, 'a stored version has no unique write entry', { version, entries });
     }
-    return `${versions.length} stored versions, each with one app write naming the vault's seal in the same operation`;
+    return `${versions.length} stored versions, each written by one entry of the vault's, naming its actor and request`;
   });
 }
 
 /**
  * No value leaves without its entry: with the audit log refusing writes (a
  * trigger, as a full disk or a lost connection would), the vault cannot log
- * the read, so a reveal fails and carries nothing.
+ * the read, so a reveal fails and carries nothing. The vault logs a
+ * credential's read of a version once a minute (docs/design/0.16.md, "What
+ * it promises"), so the reveal asks for a key written just before, which no
+ * entry has said yet; it is archived after.
  */
+const UNLOGGED = 'NO_AUDIT_NO_VALUE';
+
 export async function noAuditNoValue(deployment: Deployment, { admin }: People, canaries: Canaries): Promise<string> {
   let status = 0;
+  // Not a place's value for the checks after (it is gone at the end), but one for the scans to look for.
+  const value = canary();
+  canaries[`unlogged ${DEV}/${UNLOGGED}`] = value;
+  await admin.api.secrets.set(DEV, { [UNLOGGED]: value });
   await using(deployment.database(), (sql) => logRefuses(sql, async () => {
     const before = deployment.output().split(LOG_REFUSAL).length;
     const response = await admin.browser.send('POST', '/api/reveals', { path: DEV });
@@ -180,12 +186,14 @@ export async function noAuditNoValue(deployment: Deployment, { admin }: People, 
     expect(status === 500 && body.error === 'internal_error' && body.reason === undefined,
       'the unlogged reveal did not fail as internal_error', { status, body });
     expect(body.message === 'something went wrong; see the server log', 'the audit failure exposed another reason', body);
-    expect(!Object.values(canaries).some((value) => text.includes(value)), 'a reveal that could not be logged carried a value', text);
+    expect(!text.includes(value), 'a reveal that could not be logged carried the value it could not log', text);
+    expect(!Object.values(canaries).some((known) => text.includes(known)), 'a reveal that could not be logged carried a value', text);
     // A lost vault gives the same public error; the trigger must be its cause.
     await until('the injected audit refusal in the processes\' output', async () => deployment.output().split(LOG_REFUSAL).length > before, 5);
   }, 'secret.read'));
   const after = await admin.api.secrets.reveal(DEV);
-  expect(after.values.API_KEY === canaries[`${DEV}/API_KEY`], 'reveals did not come back once the log took writes again');
+  expect(after.values.API_KEY === canaries[`${DEV}/API_KEY`] && after.values[UNLOGGED] === value, 'reveals did not come back once the log took writes again');
+  await admin.api.secrets.set(DEV, { [UNLOGGED]: null });
   return `a reveal the audit log would not take: ${status} internal_error, its injected cause in the log, and no value`;
 }
 

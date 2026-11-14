@@ -318,25 +318,13 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       idp,
       owner: OWNER,
       fresh: false,
-      // `serve` runs the job as it starts, and every five minutes after: so restart the server, then wait for the
-      // run's end, as the Cron trigger's request does on Workers: the vault's checkpoint entry, or the run's failure.
-      // The head is read once the old server is gone, and the checkpoint must reach past it: one the old run asked for
-      // and the vault commits late signs only what came before, so it counts for nothing.
+      // `serve` runs the job as it starts, and every five minutes after: so restart the server, as the Cron trigger's
+      // request does on Workers. 0.14's run ended with the vault's checkpoint entry, which this waited for; 0.16's app has
+      // no job left, the signer's minute does the upkeep (docs/design/0.16.md, "The server"), so the server answering is its end.
       async scheduled() {
-        await using(postgres(owner), async (sql) => {
-          await halt(server);
-          const [head] = await sql.query<{ next_seq: string }>('SELECT next_seq FROM audit_chain_head').catch(() => []);
-          const started = (server = startServer());
-          await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
-          await until(
-            'the scheduled run',
-            async () =>
-              Buffer.concat(started.output).toString('utf8').includes('scheduled job failed') ||
-              (await sql.query("SELECT 1 FROM audit_log WHERE action = 'audit.checkpoint' AND related_seq >= $1 LIMIT 1", [head?.next_seq ?? 0])).length > 0,
-            60,
-            alive,
-          );
-        });
+        await halt(server);
+        server = startServer();
+        await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
       },
       async restart() {
         await halt(server);

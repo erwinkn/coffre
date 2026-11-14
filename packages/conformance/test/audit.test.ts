@@ -5,21 +5,43 @@ import { writesAgree } from '../src/checks/audit.ts';
 import type { Deployment } from '../src/harness.ts';
 import { scratch } from './scratch.ts';
 
-test('a stored version without a write entry fails conformance', async (t) => {
+/** A write entry's attribution, as the vault writes it: who, and through which request. */
+const BY = '"actor":"user:writer@acme.example","request":"request-1"';
+
+async function versions(t: test.TestContext, written: number[], by = BY): Promise<Deployment> {
   const database = await scratch(t);
   const sql = await database();
+  const keys = written.map((version) => `{"key":"API_KEY","secret":"secret","version":${version}}`).join(',');
   await sql.exec(`
     CREATE TABLE projects (id TEXT, slug TEXT);
-    CREATE TABLE environments (id TEXT, project_id TEXT, slug TEXT);
-    CREATE TABLE secrets (id TEXT, project_id TEXT, environment_id TEXT, key TEXT);
+    CREATE TABLE secrets (id TEXT, project_id TEXT, key TEXT);
     CREATE TABLE secret_versions (id TEXT, secret_id TEXT, version INTEGER);
-    CREATE TABLE audit_log (seq INTEGER, author TEXT, action TEXT, decision TEXT);
+    CREATE TABLE log (seq BIGINT, body TEXT);
+    CREATE TABLE log_pending (id BIGINT, body TEXT);
     INSERT INTO projects VALUES ('project', 'conformance');
-    INSERT INTO environments VALUES ('env', 'project', 'dev');
-    INSERT INTO secrets VALUES ('secret', 'project', 'env', 'API_KEY');
-    INSERT INTO secret_versions VALUES ('version', 'secret', 1);
+    INSERT INTO secrets VALUES ('secret', 'project', 'API_KEY');
+    INSERT INTO secret_versions VALUES ('v1', 'secret', 1), ('v2', 'secret', 2);
+    INSERT INTO log VALUES (0, '{"action":"secret.write",${by}${by === '' ? '' : ','}"detail":{"keys":[${keys}]}}');
+    INSERT INTO log_pending VALUES (1, '{"action":"secret.write",${BY},"detail":{"keys":[{"key":"API_KEY","secret":"secret","version":2}]}}');
   `);
   await sql.close();
-  const deployment = { database } as Deployment;
-  await assert.rejects(writesAgree(deployment), /a stored version has no unique app write entry/);
+  return { database } as Deployment;
+}
+
+test('every stored version with its one write entry, signed or waiting, passes conformance', async (t) => {
+  await writesAgree(await versions(t, [1]));
+});
+
+test('a stored version without a write entry fails conformance', async (t) => {
+  await assert.rejects(writesAgree(await versions(t, [])), /a stored version has no unique write entry/);
+});
+
+test('a stored version written twice fails conformance', async (t) => {
+  await assert.rejects(writesAgree(await versions(t, [1, 2])), /a stored version has no unique write entry/);
+});
+
+test('a committed write that names no actor or no request fails conformance', async (t) => {
+  for (const by of ['', '"actor":null,"request":null', '"actor":"user:writer@acme.example"', '"request":"request-1"', '"actor":"","request":"request-1"']) {
+    await assert.rejects(writesAgree(await versions(t, [1], by)), /names no actor or no request/, by);
+  }
 });

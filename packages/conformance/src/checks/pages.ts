@@ -315,8 +315,7 @@ export async function pastedValues(deployment: Deployment, admin: Person, browse
  * A refused sign-in, said once: the page coffre sends the browser back to
  * shows why, rendered by the server, then takes it out of the address, so a
  * reload is a clean retry. The refusal is a real one: a member's address
- * that GitHub now gives another account, which names the provider the
- * address already signs in with.
+ * that GitHub now gives another account, said bare: 0.16 names no provider.
  */
 export async function signinErrorOnce(deployment: Deployment, admin: Person, browser: string | null): Promise<string> {
   const executable = chromeOrSkip(browser);
@@ -329,9 +328,10 @@ export async function signinErrorOnce(deployment: Deployment, admin: Person, bro
   const refused = await signIn(deployment, visitor, email);
   expect(!refused.ok && refused.error === 'account_mismatch', 'another GitHub account with a member\'s address was not refused as account_mismatch', refused);
   const back = new URL(refused.location, deployment.origin);
-  expect(back.searchParams.get('with') === 'github', `the refusal does not name the provider the address signs in with: ${refused.location}`);
+  // 0.16's refusal is bare: it names no provider (docs/design/0.16.md, "Operations", signing in), where 0.14.7 added `with` and `via`.
+  expect(back.pathname === '/login' && back.search === '?error=account_mismatch', `the refusal is not sent back to /login?error=account_mismatch: ${refused.location}`);
 
-  const said = 'already signs in with another GitHub account';
+  const said = 'already signs in with a different account';
   const html = await visitor.fetch(refused.location);
   expect(html.status === 200 && (await html.text()).includes(said), `${refused.location}, without scripts, does not say the address ${said}`, html.status);
   const chrome = await Chrome.open(executable);
