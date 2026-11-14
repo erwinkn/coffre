@@ -136,8 +136,12 @@ export type IssuedServiceToken = {
   scope: Record<string, string> | null;
 };
 
-/** A reference someone made, live ones first, as their report lists it: who made it and when are what the list is by. */
-export type MadeReference = Omit<ReferenceView, 'createdBy' | 'createdAt' | 'endedBy' | 'endedAt'> & {
+/**
+ * A reference someone made, live ones first, as their report lists it: who made it and when are what the list is by.
+ * The report lists ended references too, so a state may also be `replaced`, which no live reference has.
+ */
+export type MadeReference = Omit<ReferenceView, 'state' | 'createdBy' | 'createdAt' | 'endedBy' | 'endedAt'> & {
+  state: ReferenceView['state'] | 'replaced';
   createdBy: string;
   createdAt: string;
   endedBy: string | null;
