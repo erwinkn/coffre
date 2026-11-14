@@ -178,10 +178,9 @@ const release = { name: 'Release', description: 'Ships.', permissions: ['secret.
  * that a round leaves the instance as it found it, but for the places it
  * made and the versions it wrote.
  *
- * Not served yet, and priced here once they are: the freezes standing
- * (`GET /freezes`), a workload's session approved, a binding's enrollments,
- * a workload's own exchange (`POST /api/auth/workload`), and the
- * credential proxy.
+ * Not served yet, and priced here once they are: a workload's session
+ * approved, a binding's enrollments, a workload's own exchange
+ * (`POST /api/auth/workload`), and the credential proxy.
  */
 const requests: Record<string, Entry> = {
   // A caller's own view: one `caller`, then the page's statements, scoped by its answer.
@@ -348,6 +347,11 @@ const requests: Record<string, Entry> = {
   'DELETE /instance-roles/:role': { request: () => api('cy-cli', 'DELETE', '/instance-roles/auditor'), calls: ['change'], statements: 0 },
   'PUT /settings': { request: () => api('cy-cli', 'PUT', '/settings', { serviceAccounts: {} }), calls: ['change'], statements: 0 },
   'POST /freezes': { request: () => api('cy-cli', 'POST', '/freezes', { target: 'service:ci', reason: 'the key leaked in a build log' }), calls: ['change'], statements: 0 },
+  // The freezes standing, ci's among them: whoever runs the instance sees each unweighed; a manager of ci, and someone
+  // who manages nothing, read the services' grants by which each is weighed, in the same statement.
+  'GET /freezes': { request: () => api('cy-cli', 'GET', '/freezes'), calls: ['caller'], statements: 1, fixed: true },
+  'GET /freezes, by a manager of the service': { request: () => api('bo-cli', 'GET', '/freezes'), calls: ['caller'], statements: 1, fixed: true },
+  'GET /freezes, by someone who manages nothing': { request: () => api('dee-cli', 'GET', '/freezes'), calls: ['caller'], statements: 1, fixed: true },
   'DELETE /freezes/:target': { request: () => api('cy-cli', 'DELETE', `/freezes/${encodeURIComponent(ci)}`), calls: ['change'], statements: 0 },
 };
 

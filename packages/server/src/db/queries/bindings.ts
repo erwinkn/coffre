@@ -57,11 +57,39 @@ type Raw = {
   status: string;
   status_changed_by: string;
   setting: string | null;
-  grants: { project_id: string; environment_id: string | null; project: string | null; environment: string | null; role: string; name: string | null; permissions: string[] | null; protected: string[] | null }[];
+  grants: RawGrant[];
   bindings: { id: string; profile: string; issuer: string; jwks_uri: string; jwks: string | null; claims: string; scope: string | null; policy: string | null; label: string | null; created_at: string; created_by: string; last_used_at: string | null }[];
   paths: Record<string, string>;
   keys: Record<string, string>;
 };
+
+/** A grant as `liveGrants` reads it. */
+export type RawGrant = { project_id: string; environment_id: string | null; project: string | null; environment: string | null; role: string; name: string | null; permissions: string[] | null; protected: string[] | null };
+
+/**
+ * The live grants of the principal row aliased `m`, of its generation, with
+ * their places' slugs and their project roles' rows, as JSON: what
+ * `managesService` weighs a service account by.
+ */
+export const liveGrants = (now: Date) => sql`(SELECT coalesce(json_agg(json_build_object(
+    'project_id', coalesce(g.project_id, e.project_id), 'environment_id', g.environment_id,
+    'project', pr.slug, 'environment', e.slug, 'role', g.role,
+    'name', r.name, 'permissions', r.permissions, 'protected', r.protected)), '[]')
+  FROM grants g
+  LEFT JOIN environments e ON e.id = g.environment_id
+  LEFT JOIN projects pr ON pr.id = coalesce(g.project_id, e.project_id)
+  LEFT JOIN roles r ON r.id = g.role AND NOT r.instance
+  WHERE g.principal = m.id AND g.generation = m.generation AND (g.expires_at IS NULL OR g.expires_at > ${now}))`;
+
+/** A grant `liveGrants` read, as the app weighs it. */
+export const grantRow = (grant: RawGrant): ServiceGrantRow => ({
+  projectId: grant.project_id,
+  environmentId: grant.environment_id,
+  project: grant.project,
+  environment: grant.environment,
+  role: grant.role,
+  definition: grant.name === null ? null : { name: grant.name, permissions: grant.permissions ?? [], protected: grant.protected ?? [] },
+});
 
 /** Any id a binding's scope or policy names: the places and keys looked up for its listing, whatever the text around them. */
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
@@ -85,15 +113,7 @@ export async function serviceBindings(db: Queryable, member: string, now: Date):
     )
     SELECT m.status, m.status_changed_by,
       (SELECT service_accounts FROM policy WHERE only_row) AS setting,
-      (SELECT coalesce(json_agg(json_build_object(
-          'project_id', coalesce(g.project_id, e.project_id), 'environment_id', g.environment_id,
-          'project', pr.slug, 'environment', e.slug, 'role', g.role,
-          'name', r.name, 'permissions', r.permissions, 'protected', r.protected)), '[]')
-        FROM grants g
-        LEFT JOIN environments e ON e.id = g.environment_id
-        LEFT JOIN projects pr ON pr.id = coalesce(g.project_id, e.project_id)
-        LEFT JOIN roles r ON r.id = g.role AND NOT r.instance
-        WHERE g.principal = m.id AND g.generation = m.generation AND (g.expires_at IS NULL OR g.expires_at > ${now})) AS grants,
+      ${liveGrants(now)} AS grants,
       (SELECT coalesce(json_agg(json_build_object(
           'id', b.id, 'profile', b.profile, 'issuer', b.issuer, 'jwks_uri', b.jwks_uri, 'jwks', b.jwks, 'claims', b.claims,
           'scope', b.scope, 'policy', b.policy, 'label', b.label, 'created_at', b.created_at, 'created_by', b.created_by,
@@ -113,14 +133,7 @@ export async function serviceBindings(db: Queryable, member: string, now: Date):
     status: row.status,
     admittedBy: row.status_changed_by,
     setting: row.setting,
-    grants: row.grants.map((grant) => ({
-      projectId: grant.project_id,
-      environmentId: grant.environment_id,
-      project: grant.project,
-      environment: grant.environment,
-      role: grant.role,
-      definition: grant.name === null ? null : { name: grant.name, permissions: grant.permissions ?? [], protected: grant.protected ?? [] },
-    })),
+    grants: row.grants.map(grantRow),
     bindings: row.bindings.map((binding) => ({
       id: binding.id,
       profile: binding.profile,

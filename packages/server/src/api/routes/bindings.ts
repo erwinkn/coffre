@@ -100,7 +100,7 @@ function lists(who: Called, member: string, found: ServiceBindings | null): bool
  * weighed as the vault weighs it, on its rows as they stand. It decides
  * nothing: the vault weighs it again on its own.
  */
-function manages(who: Called, found: ServiceBindings | null): boolean {
+export function manages(who: Called, found: Pick<ServiceBindings, 'status' | 'admittedBy' | 'setting' | 'grants'> | null): boolean {
   if (runsInstance(who.holds)) return true;
   if (!who.principal.startsWith('user:') || who.holds.credentialScope != null || found === null || found.status !== 'active') return false;
   let setting: unknown = null;
