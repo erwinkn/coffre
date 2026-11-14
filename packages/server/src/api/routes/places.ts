@@ -1,4 +1,4 @@
-import type { Answers, Called, Change, EnvironmentEdit, EnvironmentEdited, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
+import type { Answers, Asked, Called, Change, EnvironmentEdit, EnvironmentEdited, ProjectEdit, ProjectEdited, Unasked } from '@coffre/core/vault';
 import { ownsProject, runsInstance, type Permission } from '@coffre/core/access';
 import { displayName, environmentSlug, folderName, personalOf, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
@@ -17,9 +17,14 @@ import { route } from '../route.ts';
  * slug as one.
  */
 
-/** A change of the vault's, worded: its answer, or its refusal thrown with `what` it was about. */
-async function changed<O extends Change['op']>(ctx: ApiContext, change: Extract<Change, { op: O }>, what: string): Promise<Answers[O]> {
-  const answer = await ctx.vault.change<O>({ ...ctx.shown, ...change });
+/**
+ * A change of the vault's, worded: its answer, or its refusal thrown with
+ * `what` it was about. Every change here is asked, with what the request
+ * showed; TypeScript cannot narrow `Asked<O>` for an `O` it does not know yet,
+ * so the input is cast to it.
+ */
+async function changed<O extends Exclude<Change['op'], Unasked>>(ctx: ApiContext, change: Extract<Change, { op: O }>, what: string): Promise<Answers[O]> {
+  const answer = await ctx.vault.change<O>({ ...ctx.shown, ...change } as Asked<O>);
   if ('refused' in answer) throw refusal(answer.refused, what);
   return answer.answer;
 }
