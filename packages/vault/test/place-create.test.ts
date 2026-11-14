@@ -105,7 +105,7 @@ test('an Owner of the instance makes a project, an environment in it, and writes
   const made = answered(await vault.change(adding('dee-cli', 'live', { project: 'payments' })));
   assert.deepEqual(made, { id: made.id, slug: 'live', protected: false });
   assert.deepEqual(await environmentRow(made.id), { slug: 'live', parent_id: null, owner: null, protected: false, project_id: id });
-  assert.ok('answer' in (await vault.change({ ...shown('dee-cli'), op: 'secret.write', project: 'payments', environment: 'live', values: [{ key: 'TOKEN', value: 'tok', nature: 'secret' }] })));
+  assert.ok('answer' in (await vault.change({ ...shown('dee-cli'), op: 'secret.write', project: 'payments', environment: 'live', keys: [{ key: 'TOKEN', value: 'tok', nature: 'secret' }] })));
   assert.deepEqual(await given(reveal('dee-cli', 'payments/live', ['TOKEN'])), ['tok']);
 });
 
