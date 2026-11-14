@@ -20,8 +20,8 @@ const target = fileURLToPath(new URL('../src/api.ts', import.meta.url));
  * The named types the client re-exports, beside the route map: what callers
  * hold on to and pass around, such as the pages' views of a member. Each is
  * a type a server file exports, or a part of a route's input or output.
- * 0.14's `IdentityRow`, `SessionRow` and `TokenPlan` come back with the
- * routes that answer them, which 0.16 does not serve yet.
+ * 0.14's `TokenPlan` comes back with the route that answers it, which
+ * 0.16 does not serve yet.
  */
 const NAMED = {
   AccessValue: 'api/access.ts',
@@ -40,6 +40,7 @@ const NAMED = {
   DismissedKey: 'api/missing.ts',
   DryRunOutcome: 'api/routes/secrets.ts',
   DryRunResult: 'api/routes/secrets.ts',
+  IdentityRow: 'db/queries/signin.ts',
   InheritResult: 'api/secrets.ts',
   Me: "RouteOutput<'GET /me'>",
   Member: 'api/routes/members.ts',
@@ -58,6 +59,7 @@ const NAMED = {
   RolesView: 'api/routes/roles.ts',
   EnvironmentView: 'api/projects.ts',
   SecretKey: 'api/secrets.ts',
+  SessionRow: 'db/queries/signin.ts',
   SecretVersion: 'api/secrets.ts',
   SetResult: 'api/secrets.ts',
   TokenRow: 'db/queries/tokens.ts',

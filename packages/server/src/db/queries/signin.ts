@@ -46,3 +46,81 @@ export async function waitingDeviceLogin(db: Queryable, userCode: string, at: Da
   if (row === undefined) return null;
   return { userCode: row.user_code, clientLabel: row.client_label, clientIp: row.client_ip, createdAt: new Date(row.created_at).toISOString(), expiresAt: new Date(row.expires_at).toISOString() };
 }
+
+/** A session of the caller's own, as `GET /sessions` shows it: never its value. `current` is the one the request came on. */
+export type SessionRow = {
+  id: string;
+  kind: 'browser' | 'cli';
+  label: string | null;
+  hint: string;
+  /** The provider of the account it was opened with; null for a CLI session approved from a device login. */
+  provider: string | null;
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+  current: boolean;
+};
+
+/** An account of the caller's own, as `GET /identities` shows it. */
+export type IdentityRow = { id: string; provider: string; email: string | null; createdAt: string; lastSignInAt: string | null };
+
+const iso = (value: Date | string | null) => (value === null ? null : new Date(value).toISOString());
+
+/**
+ * A person's live sessions, browsers' and CLIs', the one last used first:
+ * one statement, on the credentials' live index. Live as the vault takes
+ * one (`callerOf`): of the person's generation, not revoked, frozen or
+ * past `at`, never issued by a trust binding, and opened with an account
+ * that is still linked where it names one (a browser's always does). Rows
+ * as they are, their MACs unchecked: a list decides nothing, and ending
+ * one is the vault's (`credential.end`).
+ */
+export async function liveSessions(db: Queryable, principal: string, at: Date): Promise<Omit<SessionRow, 'current'>[]> {
+  const rows = await rowsOf<{
+    id: string; kind: 'browser' | 'cli'; label: string | null; token_hint: string | null; provider: string | null;
+    created_at: Date | string; expires_at: Date | string; last_used_at: Date | string | null; last_used_ip: string | null;
+  }>(
+    db,
+    sql`
+      SELECT c.id, c.kind, c.label, c.token_hint, i.provider, c.created_at, c.expires_at, c.last_used_at, c.last_used_ip
+      FROM principals m
+      JOIN credentials c ON c.principal = m.id AND c.generation = m.generation
+      LEFT JOIN identities i ON i.id = c.identity_id AND i.principal = c.principal AND i.generation = c.generation
+      WHERE m.id = ${principal} AND m.status = 'active'
+        AND c.revoked_at IS NULL AND c.expires_at > ${at.toISOString()}::timestamptz AND c.frozen_at IS NULL
+        AND c.kind IN ('browser', 'cli') AND c.created_by NOT LIKE 'binding:%'
+        AND (CASE WHEN c.identity_id IS NULL THEN c.kind = 'cli' ELSE i.id IS NOT NULL AND i.revoked_at IS NULL END)
+      ORDER BY coalesce(c.last_used_at, c.created_at) DESC, c.id`,
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    label: row.label,
+    hint: row.token_hint ?? '',
+    provider: row.provider,
+    createdAt: iso(row.created_at)!,
+    expiresAt: iso(row.expires_at)!,
+    lastUsedAt: iso(row.last_used_at),
+    lastUsedIp: row.last_used_ip,
+  }));
+}
+
+/**
+ * A person's linked accounts, the oldest first: one statement, on the
+ * identities' member index. Linked: of the person's generation and not
+ * revoked. Rows as they are, their MACs unchecked: unlinking one is the
+ * vault's (`account.unlink`).
+ */
+export async function linkedIdentities(db: Queryable, principal: string): Promise<IdentityRow[]> {
+  const rows = await rowsOf<{ id: string; provider: string; email: string | null; created_at: Date | string; last_sign_in_at: Date | string | null }>(
+    db,
+    sql`
+      SELECT i.id, i.provider, i.email, i.created_at, i.last_sign_in_at
+      FROM principals m
+      JOIN identities i ON i.principal = m.id AND i.generation = m.generation
+      WHERE m.id = ${principal} AND m.status = 'active' AND i.revoked_at IS NULL
+      ORDER BY i.created_at, i.id`,
+  );
+  return rows.map((row) => ({ id: row.id, provider: row.provider, email: row.email, createdAt: iso(row.created_at)!, lastSignInAt: iso(row.last_sign_in_at) }));
+}

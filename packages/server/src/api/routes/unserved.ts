@@ -31,9 +31,6 @@ export const unservedRoutes = {
   // A GitHub or GitLab repository looked up for a binding, and those the deployment's GitHub App is installed on.
   ...unserved('GET /workloads/lookup', 'looking up a repository'),
   ...unserved('GET /workloads/repositories', "the GitHub App's repositories"),
-  // A person's own sessions and sign-in accounts, listed: ending one is served (routes/tokens.ts, routes/signin.ts).
-  ...unserved('GET /sessions', 'the sessions listed'),
-  ...unserved('GET /identities', 'the sign-in accounts listed'),
   // MCP: a change an app asked for, on the page where its person decides it. Connecting an app and the apps connected are served (routes/oauth.ts).
   ...unserved('GET /approvals/:id', "an app's change to approve"),
   ...unserved('POST /approvals/:id', "deciding an app's change"),
