@@ -71,10 +71,14 @@ export type Signin = { op: 'signin'; account: Account; session: NewCredential; r
  *   handle, which is the proxy's; one that does not is told
  *   `unauthenticated`, which the app answers as signed out all the same.
  * - `credential` an id (`token.revoke`), by what the route named it as
- *   (`of`), and only on a session, since a credential with a scope holds
- *   nothing of the instance's own (`runsInstance` in @coffre/core/access):
+ *   (`of`), and by the callers 0.14.7's route reached: no personal token
+ *   but on the handles route. A credential with a scope holds nothing of
+ *   the instance's own (`runsInstance` in @coffre/core/access), so a
+ *   service's token ends its own service's alone, or one of a service it
+ *   manages:
  *   - `of` null: one of the caller's own, any kind, or anyone's for whoever
- *     runs the instance (`DELETE /sessions/:id`);
+ *     runs the instance (`DELETE /sessions/:id`, which a workload's session
+ *     does not reach);
  *   - `of` `'handle'`: a handle of the caller's own, and nothing else, on
  *     a personal token too (`DELETE /handles/:id`, `coffre run` ending its
  *     own);

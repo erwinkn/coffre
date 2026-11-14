@@ -214,6 +214,8 @@ function serviceParts(member: string | null) {
     heldAt: part(environments, of((id) => sql`${environments.id} IN (SELECT g.environment_id FROM grants g WHERE g.principal = ${id})`)),
     // The roles its grants name: what the caller must hold of each is the role's row, and a role with no row is no role.
     heldAs: part(roles, of((id) => sql`NOT ${roles.instance} AND ${roles.id} IN (SELECT g.role FROM grants g WHERE g.principal = ${id})`)),
+    // Every environment of the projects it holds something in, whatever its row says: the caller's read takes those that say they are protected, and one whose flag was edited behind the vault would leave it unseen.
+    beside: part(environments, service === null ? sql`false` : sql`${environments.projectId} IN ${projectsOf(service)}`),
     setting: part(policy, service === null ? sql`false` : sql`${policy.onlyRow}`),
   };
 }
@@ -265,13 +267,15 @@ function settingOf(seen: ServiceSeen): Scope | null {
  * whoever runs the instance; else a person who holds everything it holds,
  * where the instance's setting lets people set service accounts up, or who
  * admitted it while it holds nothing (`managesService`). `tampered` when
- * that would rest on a row that is not there: a grant of the service's
- * hidden is one less it holds, and a protected environment hidden is one
- * where the caller holds more. Either would let them manage it more easily.
+ * that would rest on a row written behind the vault: a grant of the
+ * service's is one less it holds, and an environment of its projects may
+ * be protected, where the caller holds less. Either would let them manage
+ * it more easily. A row deleted for the decision is not found this way (see
+ * `credentialEnd`).
  */
 function manages(caller: Asking, seen: ServiceSeen, unsealed: Unsealed<ReturnType<typeof serviceParts> & ReturnType<typeof callerParts>>, member: string, at: number): boolean | 'tampered' {
   if (runs(caller)) return true;
-  if (unsealed.held + unsealed.places > 0) return 'tampered';
+  if (unsealed.held + unsealed.places + unsealed.beside > 0) return 'tampered';
   const account = serviceOf(seen, member, at);
   const setting = settingOf(seen);
   if (account === null || setting === null) return false;
@@ -291,9 +295,13 @@ function manages(caller: Asking, seen: ServiceSeen, unsealed: Unsealed<ReturnTyp
  * Rows hidden from the read: the caller's, or the credential's, make it a
  * refusal. The instance's policy row, the service account's row, or a
  * place one of its grants is on, make the caller manage it less, or not
- * at all. A grant of the service account's, or an environment the
- * caller's project protects, would make them manage it more easily: one
- * written behind the vault refuses, `tampered` (`manages`).
+ * at all. A grant of the service account's, or an environment of its
+ * projects that is protected, would make them manage it more easily: one
+ * written behind the vault refuses, `tampered` (`manages`). One deleted
+ * for the decision and put back after is not found, and the caller ends a
+ * token they would not have: what a database writer gets that way is a
+ * credential ended, which the credential's own row, edited or deleted,
+ * ends as well.
  */
 function credentialEnd(input: Presented & CredentialEnd, vault: Deciding): Operation<Parts, Answers['credential.end']> {
   const shown = presented(input);
@@ -326,11 +334,13 @@ function credentialEnd(input: Presented & CredentialEnd, vault: Deciding): Opera
         row = seen.target.find((other) => other.revokedAt === null && other.expiresAt.getTime() > at);
         const own = row?.principal === caller.principal;
         // One answer for a credential that is not there, is ended already, or is not the caller's to end.
-        const theirs = row !== undefined && (of === 'handle'
+        // Who reaches each route, as 0.14.7: a handle's, any credential of its person; the others, any but a personal token, and the sessions route no workload's session either.
+        const reaches = of === 'handle' || (caller.credential.kind !== 'personal' && (of !== null || caller.credential.kind !== 'workload'));
+        const theirs = row !== undefined && reaches && (of === 'handle'
           ? own && row.kind === 'handle'
-          : onSession(caller) && (of === null
+          : of === null
             ? own || runs(caller)
-            : row.principal === member && TOKENS.includes(row.kind) && (own || manages(caller, seen, unsealed, row.principal, at))));
+            : row.principal === member && TOKENS.includes(row.kind) && (own || manages(caller, seen, unsealed, row.principal, at)));
         if (theirs === 'tampered') return { refused: 'tampered' };
         if (!theirs) return { refused: 'unknown_credential' };
       }

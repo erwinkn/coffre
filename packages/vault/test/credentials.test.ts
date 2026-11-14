@@ -16,7 +16,7 @@ import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
 import { Signer } from '../src/signer.ts';
 import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
-import { amend, credential, environment, grant, identity, instance, principal, project, role, rows, TABLES, tokenOf, user, write } from './world.ts';
+import { amend, binding, credential, environment, grant, identity, instance, principal, project, role, rows, session, TABLES, tokenOf, user, write } from './world.ts';
 
 const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
@@ -63,6 +63,7 @@ beforeEach(async () => {
     credential('cy-cli', cy),
     credential('dee-web', dee, { kind: 'browser', identityId: deeGithub.id, generation: 1 }),
     credential('ci-token', ci, { scope: '[]', createdBy: bo }),
+    credential('ci-other', ci, { scope: '[]', createdBy: bo }),
     credential('bare-token', bare, { scope: '[]', createdBy: ada }),
   ];
   for (const row of made) ids[row.label!] = row.id;
@@ -172,10 +173,35 @@ test('a handle of their own ends on the handles route, from a personal token too
   assert.deepEqual(await checked(), []);
 });
 
-test("a credential with a scope ends no other: a personal token ends neither its person's session nor their token", async () => {
-  for (const asked of [end('ada-pat', ids['ada-cli']!), end('ada-pat', ids['ada-web']!, { member: ada }), end('ci-token', ids['bare-token']!, { member: bare }), end('ci-token', ids['ci-token']!, { member: ci })]) {
-    assert.deepEqual(await vault.change(asked), { refused: 'unknown_credential' }, JSON.stringify(asked.of));
+test("a personal token ends nothing by id but its person's handle; a service's token ends its own service's, on either route, and no other's", async () => {
+  for (const asked of [end('ada-pat', ids['ada-cli']!), end('ada-pat', ids['ada-pat']!), end('ada-pat', ids['ada-web']!, { member: ada }), end('ci-token', ids['bare-token']!, { member: bare }), end('ci-token', ids['ada-cli']!)]) {
+    assert.deepEqual(await vault.change(asked), { refused: 'unknown_credential' }, `${asked.token} ${JSON.stringify(asked.of)}`);
   }
+  assert.deepEqual(await vault.change(end('ci-token', ids['ci-other']!)), { answer: { credential: ids['ci-other'] } });
+  const entry = (await entries()).at(-1)!;
+  assert.deepEqual([entry.kept, entry.actor, entry.detail.kind], [true, ci, 'service']);
+  assert.deepEqual(await vault.change(end('ci-token', ids['ci-token']!, { member: ci })), { answer: { credential: ids['ci-token'] } });
+  assert.deepEqual(await revoked(), ['ada-ended', 'ci-other', 'ci-token']);
+  assert.deepEqual(await checked(), []);
+});
+
+test("a workload's session ends its service's tokens on the members route, as 0.14.7's reached it, and nothing on the sessions route", async () => {
+  const bound = binding(ci, { profile: 'kubernetes', policy: '{}' });
+  await write(world, ...rows('bindings', bound), ...rows('credentials', session('ci-pod', bound)));
+  const pod = (credential: string, of: Asked<'credential.end'>['of']) => ({ ...end('ci-pod', credential, of), proof: 'ci-pod' }) as Asked<'credential.end'>;
+  assert.deepEqual(await vault.change(pod(ids['ci-other']!, null)), { refused: 'unknown_credential' });
+  assert.deepEqual(await vault.change(pod(ids['ci-other']!, { member: ci })), { answer: { credential: ids['ci-other'] } });
+  assert.deepEqual(await revoked(), ['ada-ended', 'ci-other']);
+  assert.deepEqual(await checked(), []);
+});
+
+test('an environment unprotected behind the vault refuses, tampered: it may be protected, where whoever would manage the service holds less', async () => {
+  // A role that only uses what it holds in a protected environment: a Maker of all market, as ci is, holds less in prod than ci's grant gives.
+  await write(world, ...rows('roles', role(false, 'maker', ['secret.read', 'secret.use', 'secret.write'], ['secret.use'])), ...rows('grants', grant(ci, 'maker', { project: { id: ids.market! } }), grant(bo, 'maker', { project: { id: ids.market! } })));
+  assert.deepEqual(await vault.change(end('bo-cli', ids['ci-token']!, { member: ci })), { refused: 'unknown_credential' });
+  // prod's row, edited to say it is not protected: the caller's read, which takes the protected ones, no longer finds it.
+  await world.owner.execute(sql`UPDATE environments SET protected = false WHERE id = ${ids.prod!}`);
+  assert.deepEqual(await vault.change(end('bo-cli', ids['ci-token']!, { member: ci })), { refused: 'tampered' });
   assert.deepEqual(await revoked(), ['ada-ended']);
 });
 
@@ -236,7 +262,8 @@ test('where the setting keeps people out, only whoever runs the instance manages
   await write(world, ...rows('environments', staging), ...rows('grants', grant(ci, 'viewer', { environment: staging }), grant(bo, 'developer', { project: { id: ids.market! } })));
   for (const [table, where] of [['policy', sql`true`], ['principals', sql`id = ${ci}`], ['environments', sql`id = ${staging.id}`], ['roles', sql`NOT instance AND id = 'viewer'`]] as const) {
     const undo = await forged(table, where);
-    assert.deepEqual(await vault.change(end('bo-cli', ids['ci-token']!, { member: ci })), { refused: 'unknown_credential' }, table);
+    // An environment of the service's projects written behind the vault may be a protected one: that refusal says so.
+    assert.deepEqual(await vault.change(end('bo-cli', ids['ci-token']!, { member: ci })), { refused: table === 'environments' ? 'tampered' : 'unknown_credential' }, table);
     // Put back as the vault wrote it: the next one is tried alone, and it stands again.
     await undo();
     assert.ok(!('refused' in await prepare(world, OPERATIONS['credential.end'](end('bo-cli', ids['ci-token']!, { member: ci }), deciding))), table);
