@@ -130,9 +130,16 @@ export type Denied = Omit<Said, 'kept' | 'actor'> & { actor: string };
  * `used` is a trust binding the decision read, which the change is a use
  * of: its last use moves on to the entry's date, in the change's own
  * statement, so if and only if the change is made. No MAC covers that date
- * (rows.ts), so the row stays as every other change read it.
+ * (rows.ts), so the row stays as every other change read it. `until` is
+ * the instant, on the clock the decision was given (`at`), past which it
+ * would not be made: a session renewed only while it has seconds left. A
+ * write waits after its decision, for a connection and for the change lock,
+ * and time changes no row. So the write is made only if its statement
+ * starts within `until - at` of the read, by the database's clock at both
+ * ends, which the vault's need not agree with; and otherwise the change
+ * starts over, as behind a row that changed, and is decided at a later time.
  */
-export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; once?: Buffer; used?: Row<typeof bindings>; entry: Said; answer: A };
+export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; once?: Buffer; used?: Row<typeof bindings>; until?: number; entry: Said; answer: A };
 
 export type Operation<P extends Parts, A, C = undefined> = {
   read: P;
@@ -193,9 +200,12 @@ const LOCK_WAIT_MS = 2000;
  * well inside the minute the signer takes it in (`FRESH_MS` in signer.ts).
  * The wait for that connection comes before, and is the pool's to bound:
  * Hyperdrive's does, at 15 seconds; postgres.js's own, on Node, does not
- * (docs/design/0.16.md).
+ * (docs/design/0.16.md). An operation whose decision holds until a time
+ * (`Plan.until`) leaves this much before what it must land ahead of: the
+ * write's statement starts by then and ends within this, with its commit
+ * right behind.
  */
-const WRITE_MS = 5000;
+export const WRITE_MS = 5000;
 
 /**
  * The database had no turn for it in time: a wait that gave up, its cause,
@@ -250,17 +260,19 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
 
 /**
  * Parts read in one statement: each part's rows whose MAC is the vault's,
- * `named` by table and key, and `tokens`, every row the statement found by
- * its part and MAC, the vault's or not.
+ * `named` by table and key, `tokens`, every row the statement found by
+ * its part and MAC, the vault's or not, and `readAt`, the database's clock
+ * as it read them, in milliseconds (none when it found no row): a number,
+ * which no session's settings read another way.
  */
-export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'keys'>, read: P): Promise<{ seen: Seen<P>; unsealed: Unsealed<P>; named: Map<object, string>; tokens: string[] }> {
+export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'keys'>, read: P): Promise<{ seen: Seen<P>; unsealed: Unsealed<P>; named: Map<object, string>; tokens: string[]; readAt: number | undefined }> {
   const parts = Object.entries(read);
   if (parts.length === 0) throw new Error('a read names at least one part');
   // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts). Bounded as a
   // change's write is: a lock someone holds on a table it reads makes the call busy, and never holds it, nor the signer's upkeep.
-  const found = await bounded<{ part: string; row: Wire }>(
+  const found = await bounded<{ part: string; row: Wire; read_at: number }>(
     vault.db,
-    sql`SELECT part, row, clock_timestamp() AS read_at FROM (${sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `)}) parts`,
+    sql`SELECT part, row, (extract(epoch FROM clock_timestamp()) * 1000)::float8 AS read_at FROM (${sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `)}) parts`,
   );
   const seen = Object.fromEntries(parts.map(([name]) => [name, [] as object[]]));
   const unsealed = Object.fromEntries(parts.map(([name]) => [name, 0]));
@@ -278,13 +290,13 @@ export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'ke
     seen[name]!.push(row);
     named.set(row, nameOf(table, row));
   }
-  return { seen: seen as Seen<P>, unsealed: unsealed as Unsealed<P>, named, tokens };
+  return { seen: seen as Seen<P>, unsealed: unsealed as Unsealed<P>, named, tokens, readAt: found[0] && Number(found[0].read_at) };
 }
 
 /** A change's read and its decision. */
 export async function prepare<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>): Promise<Prepared<A> | (Refusal & { said?: Denied | null })> {
   const parts = Object.entries(operation.read);
-  const { seen, unsealed, named: read, tokens } = await readParts(vault, operation.read);
+  const { seen, unsealed, named: read, tokens, readAt } = await readParts(vault, operation.read);
   const checked = (operation.check === undefined ? undefined : await operation.check(seen, unsealed)) as C;
   // After the read, and the check: the entry's date is the decision's, and the write is sent next.
   const at = vault.now();
@@ -319,7 +331,9 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
     else (was === null ? group.inserts : group.updates).push({ ...toWire(table, row), mac: `\\x${mac!.toString('hex')}` });
   }
   // What it read and left, by the MAC it carried: the same twice.
-  const { once, used } = plan;
+  const { once, used, until } = plan;
+  // The time a decision goes by is a row's, an expiry it read: a decision that read no row has none to hold until.
+  if (until !== undefined && !(Number.isFinite(until) && until > at && Number.isFinite(readAt))) throw new Error('a change holds until a time after its decision, by a row it read');
   if (used !== undefined) {
     if (read.get(used) !== nameOf(bindings, used)) throw new Error('a change is a use of a binding its decision read');
     // Postgres writes a row once in a statement: which of two writes it kept would be anyone's guess.
@@ -356,7 +370,9 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
 
   // The same rows, read again by the same conditions: one that changed, went or came since makes the lists differ.
   const again = sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || encode(${table}.mac, 'hex') FROM ${table} WHERE ${where}`), sql` UNION ALL `);
-  const statements: SQL[] = [sql`same AS (SELECT (SELECT coalesce(array_agg(x ORDER BY x COLLATE "C"), '{}') FROM (${again}) seen (x)) = ${sql.param(tokens.sort())}::text[] AS ok)`];
+  // And in time, for a decision that holds until one: counted from the read, which came before the decision, so never past it.
+  const inTime = until === undefined ? sql`` : sql` AND extract(epoch FROM clock_timestamp()) * 1000 < ${readAt! + (until - at)}::float8`;
+  const statements: SQL[] = [sql`same AS (SELECT (SELECT coalesce(array_agg(x ORDER BY x COLLATE "C"), '{}') FROM (${again}) seen (x)) = ${sql.param(tokens.sort())}::text[]${inTime} AS ok)`];
   // Spent only if the rows have not moved, so that a change that starts over does not find its own; and then everything
   // else is written only if it was not spent before: each write below selects from it, and so writes nothing without it.
   const when = sql`${new Date(dated).toISOString()}::timestamptz`;
@@ -395,8 +411,8 @@ function label(name: string): string {
 
 /**
  * Whether a prepared change's write was made. False when nothing was
- * written: a row it read has changed since, or its proof was spent before
- * (`written` says which). The lock is taken by a statement of its own,
+ * written: a row it read has changed since, the time its decision held
+ * until has passed, or its proof was spent before (`written` says which). The lock is taken by a statement of its own,
  * ahead of the write: a statement sees the database as of when it starts,
  * so a write that took the lock itself would compare against rows from
  * before it waited (`bounded`).
@@ -407,8 +423,9 @@ export async function commit<A>(vault: Running, prepared: Prepared<A>): Promise<
 
 /**
  * A prepared change's write: made; `moved`, a row it read has changed
- * since, which starts the change over; or `spent`, its proof was spent
- * before, which refuses it. Only the first writes anything. A row that
+ * since or the time its decision held until has passed, either of which
+ * starts the change over; or `spent`, its proof was spent before, which
+ * refuses it. Only the first writes anything. A row that
  * moved is told first: its proof was not this write's to spend yet.
  */
 export async function written<A>(vault: Running, prepared: Prepared<A>): Promise<'made' | 'moved' | 'spent'> {
@@ -469,5 +486,5 @@ export async function change<P extends Parts, A, C = undefined>(vault: Running, 
     // Not logged: a proof comes with a change nobody asks, and a refusal nobody who stands asked writes nothing (D236).
     if (outcome === 'spent') return REPLAYED;
   }
-  throw new Busy(`a change started ${ATTEMPTS} times over, each time behind another change to the rows it read`);
+  throw new Busy(`a change started ${ATTEMPTS} times over, each time behind another change to the rows it read, or too late for its decision`);
 }

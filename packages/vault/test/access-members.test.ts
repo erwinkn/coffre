@@ -52,9 +52,9 @@ beforeEach(async () => {
 
 const shown = (label: string): Presented => ({ token: tokenOf(label).toString('hex'), proof: null, request: 'req-1', ip: '192.0.2.7' });
 const asked = <O extends Change['op']>(label: string, change: Extract<Change, { op: O }>) => vault.change<O>({ ...shown(label), ...change } as never);
-const add = (label: string, who: string, role = 'member', scope: unknown = null) => asked(label, { op: 'member.add', principal: who, role, scope } as never);
-const restore = (label: string, who: string, role = 'member', scope: unknown = null) => asked(label, { op: 'member.restore', principal: who, role, scope } as never);
-const setRole = (label: string, who: string, role: string, scope: unknown = null) => asked(label, { op: 'member.role', principal: who, role, scope } as never);
+const put = (label: string, who: string, role: string | null = null, scope: unknown = null) => asked(label, { op: 'member.put', principal: who, role, scope } as never);
+/** A put's answer: the standing it leaves, and whether it admitted or brought back the member (`created`), or set their role. */
+const as = (created: boolean, role: string, scope: unknown = null) => ({ answer: { role, scope, created } });
 const remove = (label: string, who: string) => asked(label, { op: 'member.remove', principal: who } as never);
 
 const reveal = (label: string): UseInput => ({ ...shown(label), project: 'market', environment: 'prod', mine: false, keys: ['DATABASE_URL'], purpose: 'reveal', upstream: null });
@@ -88,65 +88,61 @@ async function nothingWritten(run: () => Promise<void>) {
 
 test('whoever runs the instance admits a member, with any role but Owner, which only an Owner of the whole instance gives, its scope kept by project id', async () => {
   const fresh = user('new');
-  assert.deepEqual(await add('fay-cli', fresh), { answer: { role: 'member', scope: null } });
+  assert.deepEqual(await put('fay-cli', fresh), as(true, 'member'));
   assert.deepEqual(await row(fresh), { id: fresh, status: 'active', role: 'member', scope: null, generation: 0 });
   const entry = await written();
   assert.deepEqual([entry.action, entry.actor, (entry.detail as { member: string }).member], ['member.add', fay, fresh]);
-  // Who asked and what makes them run the instance, and the member's row, made: none of anyone's grants, nor any Owner.
-  assert.deepEqual(named(entry), ['credentials read', 'principals made', 'principals read', 'roles read']);
+  // Who asked and what makes them run the instance, the Owners (Ada, Cy, Dee) a put of an active member would count, and the member's row, made: none of anyone's grants.
+  assert.deepEqual(named(entry), ['credentials read', 'principals made', 'principals read', 'principals read', 'principals read', 'principals read', 'roles read']);
   assert.ok(entry.objects.includes(`principal:${fresh}`), entry.objects.join());
   assert.equal(world.woken.length, 1);
 
   const scope = { projects: { only: ['market'] }, environments: { only: ['prod', 'dev', 'dev'] } };
   const stored = { projects: { only: [market.id] }, environments: { only: ['dev', 'prod'] } };
-  assert.deepEqual(await add('ada-cli', user('dev'), 'developer', scope), { answer: { role: 'developer', scope: stored } });
+  assert.deepEqual(await put('ada-cli', user('dev'), 'developer', scope), as(true, 'developer', stored));
   assert.deepEqual(JSON.parse((await row(user('dev')))!.scope!), stored);
   assert.ok(named(await written()).includes('projects read'), 'the project its scope names, by the slug it was named by');
   // A scope that narrows nothing is no scope; an Owner of the whole instance makes another.
-  assert.deepEqual(await add('ada-cli', user('own'), 'owner', { projects: { except: [] }, environments: 'all' }), { answer: { role: 'owner', scope: null } });
-  assert.deepEqual(await add('fay-cli', api.replace('api', 'ci')), { answer: { role: 'member', scope: null } }, 'a service account');
+  assert.deepEqual(await put('ada-cli', user('own'), 'owner', { projects: { except: [] }, environments: 'all' }), as(true, 'owner'));
+  assert.deepEqual(await put('fay-cli', api.replace('api', 'ci')), as(true, 'member'), 'a service account');
   // An Admin gives any role but Owner, Admin included, as 0.14 did.
-  assert.deepEqual(await add('fay-cli', user('ops'), 'admin'), { answer: { role: 'admin', scope: null } });
-  assert.deepEqual(await add('fay-cli', user('mo'), 'developer', { projects: { only: ['market'] }, environments: 'all' }), { answer: { role: 'developer', scope: { projects: { only: [market.id] }, environments: 'all' } } });
+  assert.deepEqual(await put('fay-cli', user('ops'), 'admin'), as(true, 'admin'));
+  assert.deepEqual(await put('fay-cli', user('mo'), 'developer', { projects: { only: ['market'] }, environments: 'all' }), as(true, 'developer', { projects: { only: [market.id] }, environments: 'all' }));
 });
 
-test('an admission is refused to whoever may not make it, and of someone the instance has, and writes nothing', async () => {
+test('an admission is refused to whoever may not make it, and writes nothing', async () => {
   await nothingWritten(async () => {
-    assert.deepEqual(await add('fay-cli', user('new'), 'owner'), { refused: 'no_access' }, 'an Admin makes no Owner');
-    assert.deepEqual(await add('fay-cli', user('new'), 'owner', { projects: { only: ['market'] }, environments: 'all' }), { refused: 'no_access' }, 'nor an Owner of one project');
-    assert.deepEqual(await add('sam-cli', user('new')), { refused: 'no_access' }, 'an Admin of one project runs no instance');
-    assert.deepEqual(await add('dee-cli', user('new'), 'owner'), { refused: 'no_access' }, 'nor does an Owner of one project');
-    assert.deepEqual(await add('ada-pat', user('new')), { refused: 'no_access' }, 'a token runs no instance, whoever made it');
-    assert.deepEqual(await add('bo-cli', 'token:mine'), { refused: 'no_access' }, 'a person who does not run the instance sets up no service account yet');
-    assert.deepEqual(await add('nobody', user('new')), { refused: 'unauthenticated' });
-    assert.deepEqual(await add('ex-cli', user('new')), { refused: 'unauthenticated' });
-    assert.deepEqual(await add('fay-cli', bo), { refused: 'exists' });
-    assert.deepEqual(await add('fay-cli', ex), { refused: 'removed' });
-    assert.deepEqual(await add('ada-cli', user('new'), 'developer', { projects: { only: ['nowhere'] }, environments: 'all' }), { refused: 'no_access' }, 'a scope naming no project there is');
-    await assert.rejects(add('ada-cli', user('new'), 'developer', { projects: { except: ['gone~deleted-2026-11-01'] }, environments: 'all' }), TypeError, 'nor one deleted, by its tombstone');
-    assert.deepEqual(await restore('fay-cli', bo), { refused: 'exists' });
-    assert.deepEqual(await restore('fay-cli', user('new')), { refused: 'not_a_member' });
-    assert.deepEqual(await restore('fay-cli', ex, 'owner'), { refused: 'no_access' }, 'an Admin brings back no Owner');
-    assert.deepEqual(await restore('bo-cli', ex), { refused: 'no_access' });
+    assert.deepEqual(await put('fay-cli', user('new'), 'owner'), { refused: 'no_access' }, 'an Admin makes no Owner');
+    assert.deepEqual(await put('fay-cli', user('new'), 'owner', { projects: { only: ['market'] }, environments: 'all' }), { refused: 'no_access' }, 'nor an Owner of one project');
+    assert.deepEqual(await put('sam-cli', user('new')), { refused: 'no_access' }, 'an Admin of one project runs no instance');
+    assert.deepEqual(await put('dee-cli', user('new'), 'owner'), { refused: 'no_access' }, 'nor does an Owner of one project');
+    assert.deepEqual(await put('ada-pat', user('new')), { refused: 'no_access' }, 'a token runs no instance, whoever made it');
+    assert.deepEqual(await put('bo-cli', 'token:mine'), { refused: 'no_access' }, 'a person who does not run the instance sets up no service account yet');
+    assert.deepEqual(await put('nobody', user('new')), { refused: 'unauthenticated' });
+    assert.deepEqual(await put('ex-cli', user('new')), { refused: 'unauthenticated' });
+    assert.deepEqual(await put('ada-cli', user('new'), 'developer', { projects: { only: ['nowhere'] }, environments: 'all' }), { refused: 'no_access' }, 'a scope naming no project there is');
+    await assert.rejects(put('ada-cli', user('new'), 'developer', { projects: { except: ['gone~deleted-2026-11-01'] }, environments: 'all' }), TypeError, 'nor one deleted, by its tombstone');
+    assert.deepEqual(await put('fay-cli', ex, 'owner'), { refused: 'no_access' }, 'an Admin brings back no Owner');
+    assert.deepEqual(await put('bo-cli', ex), { refused: 'no_access' });
   });
-  assert.deepEqual(await restore('fay-cli', ex, 'admin'), { answer: { role: 'admin', scope: null } }, 'but any other role');
+  assert.deepEqual(await put('fay-cli', ex, 'admin'), as(true, 'admin'), 'but any other role');
 });
 
 test('a service account holds no instance role but member, and one removed comes back by whoever runs the whole instance, whoever removed it', async () => {
   assert.deepEqual(await remove('ada-cli', api), { answer: { revoked: 0 } });
   await nothingWritten(async () => {
-    assert.deepEqual(await restore('bo-cli', api), { refused: 'no_access' }, 'one who does not run the instance');
-    assert.deepEqual(await restore('sam-cli', api), { refused: 'no_access' }, 'nor one who runs part of it');
-    for (const role of ['admin', 'owner', 'developer']) await assert.rejects(restore('ada-cli', api, role), TypeError, role);
-    await assert.rejects(setRole('ada-cli', api, 'member'), TypeError);
+    assert.deepEqual(await put('bo-cli', api), { refused: 'no_access' }, 'one who does not run the instance');
+    assert.deepEqual(await put('sam-cli', api), { refused: 'no_access' }, 'nor one who runs part of it');
+    // Refused, not a fault: the route answers it as 0.14.7 did (`service_cannot_hold_role`).
+    for (const role of ['admin', 'owner', 'developer']) assert.deepEqual(await put('ada-cli', api, role), { refused: 'invalid' }, role);
   });
-  assert.deepEqual(await restore('fay-cli', api), { answer: { role: 'member', scope: null } }, 'Ada removed it; Fay runs the instance');
+  assert.deepEqual(await put('fay-cli', api), as(true, 'member'), 'Ada removed it; Fay runs the instance');
   assert.deepEqual(await row(api), { id: api, status: 'active', role: 'member', scope: null, generation: 1 });
 });
 
 test('a member brought back starts with no grant, in the generation their removal moved on to: what they held before stays dead', async () => {
   assert.equal(await uses('ex-cli'), 'unauthenticated');
-  assert.deepEqual(await restore('fay-cli', ex), { answer: { role: 'member', scope: null } });
+  assert.deepEqual(await put('fay-cli', ex), as(true, 'member'));
   assert.deepEqual(await row(ex), { id: ex, status: 'active', role: 'member', scope: null, generation: 1 });
   assert.equal((await written()).action, 'member.restore');
   world.tick(2000);
@@ -157,68 +153,66 @@ test('a member brought back starts with no grant, in the generation their remova
 
 test('an Owner of the whole instance sets a person\'s role and its scope, and a use by them holds it within the vault\'s memory', async () => {
   assert.equal(await uses('eve-cli'), 'no_access');
-  assert.deepEqual(await setRole('ada-cli', eve, 'developer'), { answer: { role: 'developer', scope: null } });
+  assert.deepEqual(await put('ada-cli', eve, 'developer'), as(false, 'developer'));
   const entry = await written();
   assert.equal(entry.action, 'member.role');
   // It counts the Owners, every one of them, as it may have to keep one: their rows are named with the caller's and the member's.
   assert.deepEqual(named(entry), ['credentials read', 'principals read', 'principals read', 'principals read', 'principals replaced', 'roles read']);
   world.tick(2000);
   assert.equal(await uses('eve-cli'), 'postgres://market');
-  assert.deepEqual(await setRole('ada-cli', eve, 'developer', { projects: { only: ['billing'] }, environments: 'all' }), { answer: { role: 'developer', scope: { projects: { only: [billing.id] }, environments: 'all' } } });
+  assert.deepEqual(await put('ada-cli', eve, 'developer', { projects: { only: ['billing'] }, environments: 'all' }), as(false, 'developer', { projects: { only: [billing.id] }, environments: 'all' }));
   assert.equal(await uses('eve-cli'), 'postgres://market', 'within the memory, the read before');
   world.tick(2000);
   assert.equal(await uses('eve-cli'), 'no_access');
   // An Owner steps down while another owns the whole instance.
-  assert.deepEqual(await setRole('cy-cli', cy, 'admin'), { answer: { role: 'admin', scope: null } });
+  assert.deepEqual(await put('cy-cli', cy, 'admin'), as(false, 'admin'));
 });
 
 test('an Admin sets any role but an Owner\'s, Admin included, never their own', async () => {
-  assert.deepEqual(await setRole('fay-cli', eve, 'admin'), { answer: { role: 'admin', scope: null } }, 'an Admin makes another');
-  assert.deepEqual(await setRole('fay-cli', eve, 'developer', { projects: { only: ['market'] }, environments: 'all' }), { answer: { role: 'developer', scope: { projects: { only: [market.id] }, environments: 'all' } } });
-  assert.deepEqual(await setRole('fay-cli', sam, 'admin'), { answer: { role: 'admin', scope: null } }, 'and widens another Admin\'s scope');
+  assert.deepEqual(await put('fay-cli', eve, 'admin'), as(false, 'admin'), 'an Admin makes another');
+  assert.deepEqual(await put('fay-cli', eve, 'developer', { projects: { only: ['market'] }, environments: 'all' }), as(false, 'developer', { projects: { only: [market.id] }, environments: 'all' }));
+  assert.deepEqual(await put('fay-cli', sam, 'admin'), as(false, 'admin'), 'and widens another Admin\'s scope');
   await nothingWritten(async () => {
-    assert.deepEqual(await setRole('fay-cli', eve, 'owner'), { refused: 'no_access' }, 'makes no Owner');
-    assert.deepEqual(await setRole('fay-cli', eve, 'owner', { projects: { only: ['market'] }, environments: 'all' }), { refused: 'no_access' }, 'not even of one project');
-    assert.deepEqual(await setRole('fay-cli', ada, 'admin'), { refused: 'no_access' }, 'changes no Owner of the whole instance');
-    assert.deepEqual(await setRole('fay-cli', dee, 'admin'), { refused: 'no_access' }, 'nor of one project');
-    assert.deepEqual(await setRole('fay-cli', fay, 'owner'), { refused: 'no_access' }, 'their own, up');
-    assert.deepEqual(await setRole('fay-cli', fay, 'developer'), { refused: 'no_access' }, 'their own, down');
-    assert.deepEqual(await setRole('dee-cli', dee, 'owner'), { refused: 'no_access' }, 'an Owner of one project runs no instance');
+    assert.deepEqual(await put('fay-cli', eve, 'owner'), { refused: 'no_access' }, 'makes no Owner');
+    assert.deepEqual(await put('fay-cli', eve, 'owner', { projects: { only: ['market'] }, environments: 'all' }), { refused: 'no_access' }, 'not even of one project');
+    assert.deepEqual(await put('fay-cli', ada, 'admin'), { refused: 'no_access' }, 'changes no Owner of the whole instance');
+    assert.deepEqual(await put('fay-cli', dee, 'admin'), { refused: 'no_access' }, 'nor of one project');
+    assert.deepEqual(await put('fay-cli', fay, 'owner'), { refused: 'no_access' }, 'their own, up');
+    assert.deepEqual(await put('fay-cli', fay, 'developer'), { refused: 'no_access' }, 'their own, down');
+    assert.deepEqual(await put('dee-cli', dee, 'owner'), { refused: 'no_access' }, 'an Owner of one project runs no instance');
   });
 });
 
 test('a role asked as it is changes nothing, and whoever runs the instance may ask it, their own or an Owner\'s', async () => {
   const before = JSON.stringify(await members());
-  assert.deepEqual(await setRole('fay-cli', fay, 'admin'), { answer: { role: 'admin', scope: null } }, 'an Admin, their own');
-  assert.deepEqual(await setRole('fay-cli', ada, 'owner'), { answer: { role: 'owner', scope: null } }, 'an Owner\'s, by an Admin');
+  assert.deepEqual(await put('fay-cli', fay, 'admin'), as(false, 'admin'), 'an Admin, their own');
+  assert.deepEqual(await put('fay-cli', ada, 'owner'), as(false, 'owner'), 'an Owner\'s, by an Admin');
   assert.equal(JSON.stringify(await members()), before, 'no member\'s row moved');
   const entry = await written();
   assert.deepEqual([entry.action, entry.detail], ['member.role', { member: ada, role: 'owner', scope: null, unchanged: true }], 'its entry says nothing changed, and reads as no promotion');
   assert.ok(named(entry).every((name) => name.endsWith(' read')), 'and wrote no row');
-  assert.deepEqual(await setRole('fay-cli', ada, 'owner', { projects: { only: ['market'] }, environments: 'all' }), { refused: 'no_access' }, 'but not narrowed');
+  assert.deepEqual(await put('fay-cli', ada, 'owner', { projects: { only: ['market'] }, environments: 'all' }), { refused: 'no_access' }, 'but not narrowed');
 });
 
 test('an Owner\'s role is set by an Owner of the whole instance alone, never the last one\'s away, and never a named Owner\'s, and a refusal writes nothing', async () => {
   await nothingWritten(async () => {
-    assert.deepEqual(await setRole('sam-cli', eve, 'developer'), { refused: 'no_access' }, 'an Admin of one project');
-    assert.deepEqual(await setRole('dee-cli', eve, 'developer'), { refused: 'no_access' }, 'an Owner of one project');
-    assert.deepEqual(await setRole('ada-pat', eve, 'developer'), { refused: 'no_access' }, 'an Owner\'s token');
-    assert.deepEqual(await setRole('ada-cli', user('new'), 'developer'), { refused: 'not_a_member' });
-    assert.deepEqual(await setRole('ada-cli', ex, 'developer'), { refused: 'removed' });
-    assert.deepEqual(await setRole('ada-cli', eve, 'developer', { projects: { except: ['nowhere'] }, environments: 'all' }), { refused: 'no_access' });
+    assert.deepEqual(await put('sam-cli', eve, 'developer'), { refused: 'no_access' }, 'an Admin of one project');
+    assert.deepEqual(await put('dee-cli', eve, 'developer'), { refused: 'no_access' }, 'an Owner of one project');
+    assert.deepEqual(await put('ada-pat', eve, 'developer'), { refused: 'no_access' }, 'an Owner\'s token');
+    assert.deepEqual(await put('ada-cli', eve, 'developer', { projects: { except: ['nowhere'] }, environments: 'all' }), { refused: 'no_access' });
   });
-  assert.ok('answer' in (await setRole('ada-cli', cy, 'owner', { projects: { only: ['market'] }, environments: 'all' })), 'Cy, an Owner of market alone from now');
+  assert.ok('answer' in (await put('ada-cli', cy, 'owner', { projects: { only: ['market'] }, environments: 'all' })), 'Cy, an Owner of market alone from now');
   await nothingWritten(async () => {
-    assert.deepEqual(await setRole('ada-cli', ada, 'admin'), { refused: 'last_owner' });
-    assert.deepEqual(await setRole('ada-cli', ada, 'owner', { projects: 'all', environments: { only: ['prod'] } }), { refused: 'last_owner' }, 'narrowed, she would own no whole instance');
+    assert.deepEqual(await put('ada-cli', ada, 'admin'), { refused: 'last_owner' });
+    assert.deepEqual(await put('ada-cli', ada, 'owner', { projects: 'all', environments: { only: ['prod'] } }), { refused: 'last_owner' }, 'narrowed, she would own no whole instance');
   });
-  assert.deepEqual(await setRole('ada-cli', ada, 'owner'), { answer: { role: 'owner', scope: null } }, 'as she is: she stays the Owner');
+  assert.deepEqual(await put('ada-cli', ada, 'owner'), as(false, 'owner'), 'as she is: she stays the Owner');
 
   const named = openLocalVault(world.db, { ...world, owners: ['cy@acme.example'] }, { wake: world.wake, now: world.now });
-  const cyBack = await named.change({ ...shown('ada-cli'), op: 'member.role', principal: cy, role: 'owner', scope: null });
-  assert.deepEqual(cyBack, { answer: { role: 'owner', scope: null } });
+  const cyBack = await named.change({ ...shown('ada-cli'), op: 'member.put', principal: cy, role: 'owner', scope: null });
+  assert.deepEqual(cyBack, as(false, 'owner'));
   await nothingWritten(async () => {
-    assert.deepEqual(await named.change({ ...shown('cy-cli'), op: 'member.role', principal: cy, role: 'admin', scope: null }), { refused: 'configured_owner' });
+    assert.deepEqual(await named.change({ ...shown('cy-cli'), op: 'member.put', principal: cy, role: 'admin', scope: null }), { refused: 'configured_owner' });
     assert.deepEqual(await named.change({ ...shown('ada-cli'), op: 'member.remove', principal: cy }), { refused: 'configured_owner' });
   });
 });
@@ -227,15 +221,15 @@ test('a person the deployment names an Owner is admitted as one, or not at all',
   const named = openLocalVault(world.db, { ...world, owners: ['boss@acme.example'] }, { wake: world.wake, now: world.now });
   const boss = user('boss');
   await nothingWritten(async () => {
-    assert.deepEqual(await named.change({ ...shown('fay-cli'), op: 'member.add', principal: boss, role: 'member', scope: null }), { refused: 'configured_owner' });
-    assert.deepEqual(await named.change({ ...shown('ada-cli'), op: 'member.add', principal: boss, role: 'owner', scope: { projects: { only: ['market'] }, environments: 'all' } }), { refused: 'configured_owner' });
+    assert.deepEqual(await named.change({ ...shown('fay-cli'), op: 'member.put', principal: boss, role: 'member', scope: null }), { refused: 'configured_owner' });
+    assert.deepEqual(await named.change({ ...shown('ada-cli'), op: 'member.put', principal: boss, role: 'owner', scope: { projects: { only: ['market'] }, environments: 'all' } }), { refused: 'configured_owner' });
   });
-  assert.deepEqual(await named.change({ ...shown('ada-cli'), op: 'member.add', principal: boss, role: 'owner', scope: null }), { answer: { role: 'owner', scope: null } });
+  assert.deepEqual(await named.change({ ...shown('ada-cli'), op: 'member.put', principal: boss, role: 'owner', scope: null }), as(true, 'owner'));
 });
 
 test('a removed person the deployment names an Owner comes back as one, which only an Owner of the whole instance gives', async () => {
   const named = openLocalVault(world.db, { ...world, owners: ['ex@acme.example'] }, { wake: world.wake, now: world.now });
-  const back = (label: string, role: string, scope: unknown = null) => named.change({ ...shown(label), op: 'member.restore', principal: ex, role, scope } as never);
+  const back = (label: string, role: string, scope: unknown = null) => named.change({ ...shown(label), op: 'member.put', principal: ex, role, scope } as never);
   await nothingWritten(async () => {
     assert.deepEqual(await back('fay-cli', 'member'), { refused: 'configured_owner' }, 'an Admin, as anything but an Owner');
     assert.deepEqual(await back('fay-cli', 'admin'), { refused: 'configured_owner' });
@@ -243,7 +237,7 @@ test('a removed person the deployment names an Owner comes back as one, which on
     assert.deepEqual(await back('ada-cli', 'admin'), { refused: 'configured_owner' });
     assert.deepEqual(await back('ada-cli', 'owner', { projects: { only: ['market'] }, environments: 'all' }), { refused: 'configured_owner' }, 'an Owner of one project');
   });
-  assert.deepEqual(await back('ada-cli', 'owner'), { answer: { role: 'owner', scope: null } });
+  assert.deepEqual(await back('ada-cli', 'owner'), as(true, 'owner'));
   assert.deepEqual(await row(ex), { id: ex, status: 'active', role: 'owner', scope: null, generation: 1 });
 });
 
@@ -277,7 +271,7 @@ test('a removal revokes the member\'s sign-in accounts, so that back in, they bi
   const entry = await written();
   assert.ok(entry.objects.includes(`identity:${account.id}`) && !entry.objects.includes(`identity:${before.id}`), entry.objects.join());
   assert.deepEqual(named(entry).filter((name) => name.startsWith('identities')), ['identities read', 'identities replaced'], 'the one revoked before is read, by the member alone, and left');
-  assert.ok('answer' in (await restore('fay-cli', bo)));
+  assert.ok('answer' in (await put('fay-cli', bo)));
   const now = await accounts();
   assert.deepEqual(now.find((found) => found.id === account.id), { id: account.id, generation: 0, revoked_by: fay, revoked: true }, 'revoked, of the generation before');
   assert.deepEqual(now.find((found) => found.id === before.id), untouched);
@@ -306,7 +300,7 @@ test('a grant hidden from a removal and put back once the member is brought back
   const [{ hidden }] = (await rowsOf<{ hidden: string }>(world.owner, sql`WITH gone AS (DELETE FROM grants WHERE principal = ${bo} RETURNING *) SELECT json_agg(gone)::text AS hidden FROM gone`)) as [{ hidden: string }];
   assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 0 } });
   await world.owner.execute(sql`INSERT INTO grants SELECT * FROM json_populate_recordset(NULL::grants, ${hidden}::json)`);
-  assert.deepEqual(await restore('fay-cli', bo), { answer: { role: 'member', scope: null } });
+  assert.deepEqual(await put('fay-cli', bo), as(true, 'member'));
   assert.deepEqual(await row(bo), { id: bo, status: 'active', role: 'member', scope: null, generation: 1 });
   assert.deepEqual(await rowsOf(world.owner, sql`SELECT generation FROM grants WHERE principal = ${bo}`), [{ generation: 0 }, { generation: 0 }]);
   await write(world, ...rows('credentials', credential('bo-again', bo, { generation: 1 })));
@@ -322,12 +316,12 @@ test('grants of two memberships before, kept and put back after the second retur
   // Generation 0's grants on market and on prod; the writer keeps the one on market.
   const [{ first }] = (await rowsOf<{ first: string }>(world.owner, sql`SELECT json_agg(g)::text AS first FROM grants g WHERE principal = ${bo} AND project_id IS NOT NULL`)) as [{ first: string }];
   assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 2 } });
-  assert.deepEqual(await restore('fay-cli', bo), { answer: { role: 'member', scope: null } });
+  assert.deepEqual(await put('fay-cli', bo), as(true, 'member'));
   // Generation 1 is given prod, genuinely, and the writer keeps that too.
   await write(world, ...rows('grants', grant(bo, 'developer', { environment: prod }, { generation: 1 })));
   const second = await saved();
   assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 1 } });
-  assert.deepEqual(await restore('fay-cli', bo), { answer: { role: 'member', scope: null } });
+  assert.deepEqual(await put('fay-cli', bo), as(true, 'member'));
   assert.equal((await row(bo))!.generation, 2);
   await putBack(first);
   await putBack(second);
@@ -355,7 +349,7 @@ test('a removed member whose rows are deleted around the vault is admitted anew 
   const [{ saved }] = await rowsOf<{ saved: unknown }>(world.owner, sql`SELECT to_jsonb(c) AS saved FROM credentials c WHERE principal = ${bo}`) as [{ saved: unknown }];
   await world.owner.execute(sql`DELETE FROM credentials WHERE principal = ${bo}`);
   await world.owner.execute(sql`DELETE FROM principals WHERE id = ${bo}`);
-  assert.deepEqual(await add('fay-cli', bo), { answer: { role: 'member', scope: null } });
+  assert.deepEqual(await put('fay-cli', bo), as(true, 'member'));
   assert.equal((await row(bo))!.generation, 0);
   await world.owner.execute(sql`INSERT INTO credentials SELECT * FROM jsonb_populate_record(NULL::credentials, ${JSON.stringify(saved)}::jsonb)`);
   world.tick(2000);
@@ -381,33 +375,70 @@ test('a removal is refused to whoever may not make it, of an Owner but by an Own
   await nothingWritten(async () => assert.deepEqual(await remove('ada-cli', ada), { refused: 'last_owner' }));
 });
 
+test('a put does what the member\'s row calls for: of an active member with no role, nothing; of one removed and given a role, it brings them back with it', async () => {
+  const onMarket = { projects: { only: [market.id] }, environments: 'all' };
+  assert.deepEqual(await put('ada-cli', eve, 'developer', { projects: { only: ['market'] }, environments: 'all' }), as(false, 'developer', onMarket));
+  // Eve, asked with no role: her role and scope kept, no row written, and the entry says so.
+  const before = JSON.stringify(await members());
+  assert.deepEqual(await put('fay-cli', eve), as(false, 'developer', onMarket));
+  assert.equal(JSON.stringify(await members()), before);
+  const entry = await written();
+  assert.deepEqual([entry.action, entry.detail], ['member.role', { member: eve, role: 'developer', scope: onMarket, unchanged: true }]);
+  assert.ok(named(entry).every((name) => name.endsWith(' read')), 'and wrote no row');
+  // An Admin asking it of themselves changes nothing, so nothing is refused.
+  assert.deepEqual(await put('fay-cli', fay), as(false, 'admin'));
+  // Ex, removed, given a role: brought back with it, in the generation the removal moved on to, as 0.14.7 did.
+  assert.deepEqual(await put('fay-cli', ex, 'developer'), as(true, 'developer'));
+  assert.deepEqual(await row(ex), { id: ex, status: 'active', role: 'developer', scope: null, generation: 1 });
+  assert.equal((await written()).action, 'member.restore');
+  // Someone the instance never had, given a role: added with it; asked again, they are active, and nothing moves.
+  const fresh = user('new');
+  assert.deepEqual(await put('fay-cli', fresh, 'developer'), as(true, 'developer'));
+  assert.equal((await written()).action, 'member.add');
+  assert.deepEqual(await put('fay-cli', fresh, 'developer'), as(false, 'developer'));
+  assert.deepEqual((await written()).detail, { member: fresh, role: 'developer', scope: null, unchanged: true });
+});
+
+test('two puts of one new member side by side: one adds them, the other starts over and finds them active', async () => {
+  const deciding = { workloads: world.workloads, owners: world.owners };
+  const fresh = user('new');
+  const op = (label: string, role: 'developer' | null) => OPERATIONS['member.put']({ ...shown(label), op: 'member.put', principal: fresh, role, scope: null }, deciding);
+  const [first, second] = await Promise.all([prepare(world, op('fay-cli', null)), prepare(world, op('ada-cli', 'developer'))]);
+  assert.ok(!('refused' in first!) && !('refused' in second!), 'each decided alone, on no row: two admissions');
+  assert.equal(await commit(world, first), true);
+  assert.equal(await commit(world, second), false, 'the member\'s row is not the none it read');
+  assert.deepEqual(await put('ada-cli', fresh, 'developer'), as(false, 'developer'), 'again, a role set');
+  assert.equal((await written()).action, 'member.role');
+  assert.deepEqual(await row(fresh), { id: fresh, status: 'active', role: 'developer', scope: null, generation: 0 });
+});
+
 test('two Owners demoting each other side by side: the second starts over, finds itself no Owner, and one stays', async () => {
   const deciding = { workloads: world.workloads, owners: world.owners };
-  const op = (label: string, who: string) => OPERATIONS['member.role']({ ...shown(label), op: 'member.role', principal: who, role: 'admin', scope: null }, deciding);
+  const op = (label: string, who: string) => OPERATIONS['member.put']({ ...shown(label), op: 'member.put', principal: who, role: 'admin', scope: null }, deciding);
   const [first, second] = await Promise.all([prepare(world, op('ada-cli', cy)), prepare(world, op('cy-cli', ada))]);
   assert.ok(!('refused' in first!) && !('refused' in second!), 'each decided alone, with another Owner left');
   assert.equal(await commit(world, first), true);
   assert.equal(await commit(world, second), false, 'the Owners it counted are no longer the ones it read');
-  assert.deepEqual(await setRole('cy-cli', ada, 'admin'), { refused: 'no_access' });
+  assert.deepEqual(await put('cy-cli', ada, 'admin'), { refused: 'no_access' });
   assert.deepEqual((await members()).filter((member) => member.role === 'owner' && member.scope === null).map((member) => member.id), [ada]);
 });
 
 test('a caller whose instance role has no row runs no instance, as `project.create` takes it', async () => {
   await world.owner.execute(sql`DELETE FROM roles WHERE instance AND id = 'admin'`);
   await nothingWritten(async () => {
-    assert.deepEqual(await add('fay-cli', user('new')), { refused: 'no_access' });
-    assert.deepEqual(await restore('fay-cli', ex), { refused: 'no_access' });
-    assert.deepEqual(await setRole('fay-cli', eve, 'developer'), { refused: 'no_access' });
+    assert.deepEqual(await put('fay-cli', user('new')), { refused: 'no_access' });
+    assert.deepEqual(await put('fay-cli', ex), { refused: 'no_access' });
+    assert.deepEqual(await put('fay-cli', eve, 'developer'), { refused: 'no_access' });
     assert.deepEqual(await remove('fay-cli', eve), { refused: 'no_access' });
   });
-  assert.deepEqual(await setRole('ada-cli', eve, 'developer'), { answer: { role: 'developer', scope: null } }, 'an Owner, whose row is there, still does');
+  assert.deepEqual(await put('ada-cli', eve, 'developer'), as(false, 'developer'), 'an Owner, whose row is there, still does');
 });
 
 test('a service account\'s row that reads Owner keeps no Owner of the whole instance: the last person who owns it stays', async () => {
   await write(world, ...rows('principals', principal('token:x', { role: 'owner' })));
   assert.ok('answer' in (await remove('ada-cli', cy)));
   await nothingWritten(async () => {
-    assert.deepEqual(await setRole('ada-cli', ada, 'admin'), { refused: 'last_owner' }, 'token:x is counted for no one');
+    assert.deepEqual(await put('ada-cli', ada, 'admin'), { refused: 'last_owner' }, 'token:x is counted for no one');
     assert.deepEqual(await remove('ada-cli', ada), { refused: 'last_owner' });
   });
 });
@@ -415,19 +446,19 @@ test('a service account\'s row that reads Owner keeps no Owner of the whole inst
 test('a removal and a demotion side by side, each counting on the other Owner: the second starts over and keeps the last one', async () => {
   const deciding = { workloads: world.workloads, owners: world.owners };
   const removing = OPERATIONS['member.remove']({ ...shown('ada-cli'), op: 'member.remove', principal: cy }, deciding);
-  const stepping = OPERATIONS['member.role']({ ...shown('cy-cli'), op: 'member.role', principal: ada, role: 'admin', scope: null }, deciding);
+  const stepping = OPERATIONS['member.put']({ ...shown('cy-cli'), op: 'member.put', principal: ada, role: 'admin', scope: null }, deciding);
   const [first, second] = await Promise.all([prepare(world, removing), prepare(world, stepping)]);
   assert.ok(!('refused' in first!) && !('refused' in second!), 'Ada counts on herself staying, Cy\'s demotion of her on Cy');
   assert.equal(await commit(world, first), true);
   assert.equal(await commit(world, second), false, 'Cy\'s row, and the Owners it counted, are not the ones it read');
-  assert.deepEqual(await setRole('cy-cli', ada, 'admin'), { refused: 'unauthenticated' }, 'Cy, removed, asks nothing');
-  assert.deepEqual(await setRole('ada-cli', ada, 'admin'), { refused: 'last_owner' });
+  assert.deepEqual(await put('cy-cli', ada, 'admin'), { refused: 'unauthenticated' }, 'Cy, removed, asks nothing');
+  assert.deepEqual(await put('ada-cli', ada, 'admin'), { refused: 'last_owner' });
   assert.deepEqual((await members()).filter((member) => member.status === 'active' && member.role === 'owner' && member.scope === null).map((member) => member.id), [ada]);
 });
 
 test('three Owners stepping down at once: each decided alone, and the last one is refused', async () => {
-  assert.ok('answer' in (await setRole('ada-cli', fay, 'owner')));
-  const results = await Promise.all(['ada-cli', 'cy-cli', 'fay-cli'].map((label) => setRole(label, user(label.slice(0, -4)), 'admin')));
+  assert.ok('answer' in (await put('ada-cli', fay, 'owner')));
+  const results = await Promise.all(['ada-cli', 'cy-cli', 'fay-cli'].map((label) => put(label, user(label.slice(0, -4)), 'admin')));
   assert.deepEqual(results.filter((result) => 'refused' in result), [{ refused: 'last_owner' }]);
   assert.equal((await members()).filter((member) => member.role === 'owner' && member.scope === null).length, 1);
 });
@@ -457,26 +488,26 @@ test('a row written around the vault is no row: an Owner edited in place or forg
   // Cy's row, edited: no MAC of the vault's, so no Owner to keep, and no caller either.
   await world.owner.execute(sql`UPDATE principals SET created_by = 'user:mallory@acme.example' WHERE id = ${cy}`);
   await nothingWritten(async () => {
-    assert.deepEqual(await setRole('ada-cli', ada, 'admin'), { refused: 'last_owner' });
+    assert.deepEqual(await put('ada-cli', ada, 'admin'), { refused: 'last_owner' });
     assert.deepEqual(await remove('ada-cli', ada), { refused: 'last_owner' });
-    assert.deepEqual(await setRole('cy-cli', eve, 'developer'), { refused: 'unauthenticated' });
-    assert.deepEqual(await setRole('ada-cli', cy, 'admin'), { refused: 'not_a_member' });
+    assert.deepEqual(await put('cy-cli', eve, 'developer'), { refused: 'unauthenticated' });
+    // Nor someone new: admitted over it, the write would fail.
+    assert.deepEqual(await put('ada-cli', cy, 'admin'), { refused: 'tampered' });
+    assert.deepEqual(await put('fay-cli', cy), { refused: 'tampered' });
   });
   // A forged Owner, with a MAC that is not the vault's.
   await world.owner.execute(sql`INSERT INTO principals (id, status, role, generation, created_at, created_by, status_changed_at, status_changed_by, mac) VALUES (${user('mallory')}, 'active', 'owner', 0, now(), 'x', now(), 'x', decode(repeat('00', 36), 'hex'))`);
-  await nothingWritten(async () => assert.deepEqual(await setRole('ada-cli', ada, 'admin'), { refused: 'last_owner' }));
+  await nothingWritten(async () => assert.deepEqual(await put('ada-cli', ada, 'admin'), { refused: 'last_owner' }));
   // A project edited around the vault is no project for a scope to name.
   await world.owner.execute(sql`UPDATE projects SET name = 'Billing!' WHERE id = ${billing.id}`);
-  await nothingWritten(async () => assert.deepEqual(await setRole('ada-cli', eve, 'developer', { projects: { only: ['billing'] }, environments: 'all' }), { refused: 'no_access' }));
-  // Admitting someone whose row someone edited is a fault, not a refusal: the engine replaces no row it cannot read.
-  await assert.rejects(add('fay-cli', cy), /principals_pkey|duplicate key/);
+  await nothingWritten(async () => assert.deepEqual(await put('ada-cli', eve, 'developer', { projects: { only: ['billing'] }, environments: 'all' }), { refused: 'no_access' }));
 });
 
 test('a workload\'s session that is stopped or narrowed is told so, as for any change, and changes no member', async () => {
   const bound = binding(api, { profile: 'kubernetes', scope: '[]', policy: '{}' });
   const pod = session('pod', bound);
   await write(world, ...rows('bindings', bound), ...rows('credentials', pod, session('tool', bound, { ancestors: JSON.stringify([pod.id]) })));
-  const by = (label: string) => vault.change({ ...shown(label), proof: label, op: 'member.add', principal: user('new'), role: 'member', scope: null });
+  const by = (label: string) => vault.change({ ...shown(label), proof: label, op: 'member.put', principal: user('new'), role: 'member', scope: null });
   await nothingWritten(async () => {
     assert.deepEqual(await by('pod'), { refused: 'workload_cannot_issue' });
     assert.deepEqual(await by('tool'), { refused: 'narrowed' });
@@ -487,25 +518,28 @@ test('a workload\'s session that is stopped or narrowed is told so, as for any c
 
 test('a member change that is not what the contract says is a fault, before any read', async () => {
   const bad: unknown[] = [
-    { op: 'member.add', principal: 'ada@acme.example', role: 'member', scope: null },
-    { op: 'member.add', principal: 'user:Ada@acme.example', role: 'member', scope: null },
-    { op: 'member.add', principal: 'user: ada', role: 'member', scope: null },
-    { op: 'member.add', principal: `user:${'a'.repeat(260)}`, role: 'member', scope: null },
-    { op: 'member.add', principal: user('new'), role: 'boss', scope: null },
-    { op: 'member.add', principal: user('new'), role: 'toString', scope: null },
-    { op: 'member.add', principal: user('new'), role: 'member', scope: { projects: 'all', environments: 'all' } },
-    { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: 'all' } },
-    { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: 'all', environments: 'all', more: 1 } },
-    { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: { only: 'market' }, environments: 'all' } },
-    { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: { only: [''] }, environments: 'all' } },
-    { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: 'all', environments: { except: ['Prod'] } } },
-    { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: 'all', environments: { only: ['URGENT rotate at https://evil.example'] } } },
-    { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: { only: ['a'], except: ['b'] }, environments: 'all' } },
-    { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: { only: Array.from({ length: 1001 }, (_, i) => `p${i}`) }, environments: 'all' } },
-    { op: 'member.add', principal: 'token:ci', role: 'developer', scope: null },
-    { op: 'member.add', principal: user('new'), role: 'member' },
-    { op: 'member.role', principal: api, role: 'member', scope: null },
-    { op: 'member.restore', principal: 7, role: 'member', scope: null },
+    { op: 'member.put', principal: 'ada@acme.example', role: 'member', scope: null },
+    { op: 'member.put', principal: 'user:Ada@acme.example', role: 'member', scope: null },
+    { op: 'member.put', principal: 'user: ada', role: 'member', scope: null },
+    { op: 'member.put', principal: `user:${'a'.repeat(260)}`, role: 'member', scope: null },
+    { op: 'member.put', principal: user('new'), role: 'boss', scope: null },
+    { op: 'member.put', principal: user('new'), role: 'toString', scope: null },
+    { op: 'member.put', principal: user('new'), role: 'member', scope: { projects: 'all', environments: 'all' } },
+    { op: 'member.put', principal: user('new'), role: 'developer', scope: { projects: 'all' } },
+    { op: 'member.put', principal: user('new'), role: 'developer', scope: { projects: 'all', environments: 'all', more: 1 } },
+    { op: 'member.put', principal: user('new'), role: 'developer', scope: { projects: { only: 'market' }, environments: 'all' } },
+    { op: 'member.put', principal: user('new'), role: 'developer', scope: { projects: { only: [''] }, environments: 'all' } },
+    { op: 'member.put', principal: user('new'), role: 'developer', scope: { projects: 'all', environments: { except: ['Prod'] } } },
+    { op: 'member.put', principal: user('new'), role: 'developer', scope: { projects: 'all', environments: { only: ['URGENT rotate at https://evil.example'] } } },
+    { op: 'member.put', principal: user('new'), role: 'developer', scope: { projects: { only: ['a'], except: ['b'] }, environments: 'all' } },
+    { op: 'member.put', principal: user('new'), role: 'developer', scope: { projects: { only: Array.from({ length: 1001 }, (_, i) => `p${i}`) }, environments: 'all' } },
+    { op: 'member.put', principal: user('new'), role: 'member' },
+    { op: 'member.put', principal: user('new'), role: null, scope: { projects: 'all', environments: 'all' } },
+    { op: 'member.put', principal: 7, role: 'member', scope: null },
+    // The three it replaced are no operations.
+    { op: 'member.add', principal: user('new'), role: 'member', scope: null },
+    { op: 'member.restore', principal: ex, role: 'member', scope: null },
+    { op: 'member.role', principal: eve, role: 'developer', scope: null },
     { op: 'member.remove', principal: 'nobody' },
   ];
   for (const change of bad) await assert.rejects(vault.change({ ...shown('ada-cli'), ...(change as object) } as never), TypeError, JSON.stringify(change).slice(0, 80));
@@ -515,20 +549,21 @@ test('a member change that is not what the contract says is a fault, before any 
 test('a refusal is logged once a minute for who asked and what, naming the member only by a row the read found', async () => {
   const fresh = user('new');
   const onMarket = { projects: { only: ['market'] }, environments: 'all' };
-  assert.deepEqual(await add('bo-cli', fresh), { refused: 'no_access' }, 'a member admits nobody');
-  assert.deepEqual(await add('bo-cli', user('other')), { refused: 'no_access' }, 'again in the minute');
+  assert.deepEqual(await put('bo-cli', fresh), { refused: 'no_access' }, 'a member admits nobody');
+  assert.deepEqual(await put('bo-cli', user('other')), { refused: 'no_access' }, 'again in the minute');
   assert.deepEqual(await remove('bo-cli', eve), { refused: 'no_access' });
-  assert.deepEqual(await add('fay-cli', fresh, 'owner', onMarket), { refused: 'no_access' }, 'an Admin makes no Owner');
-  assert.deepEqual(await setRole('sam-cli', bo, 'developer'), { refused: 'no_access' });
-  assert.deepEqual(await restore('ada-cli', 'user:rotate-now@evil.example'), { refused: 'not_a_member' }, 'someone the instance never had');
+  assert.deepEqual(await put('fay-cli', fresh, 'owner', onMarket), { refused: 'no_access' }, 'an Admin makes no Owner');
+  assert.deepEqual(await put('sam-cli', bo, 'developer'), { refused: 'no_access' });
+  assert.deepEqual(await put('dee-cli', 'user:rotate-now@evil.example'), { refused: 'no_access' }, 'someone the instance never had, by an Owner of one project');
   assert.deepEqual(await remove('nobody', bo), { refused: 'unauthenticated' });
   const denied = await refusals();
   assert.deepEqual(denied.map((entry) => [entry.action, entry.actor, entry.detail, entry.objects.slice(2)]), [
     ['member.add', bo, { refused: 'no_access' }, []],
     ['member.remove', bo, { refused: 'no_access' }, [`principal:${eve}`]],
     ['member.add', fay, { refused: 'no_access' }, [`project:${market.id}`]],
-    ['member.role', sam, { refused: 'no_access' }, [`principal:${bo}`]],
-    ['member.restore', ada, { refused: 'not_a_member' }, []],
+    // Every refused put is logged as an admission, whatever the row, as 0.14.7 logged it.
+    ['member.add', sam, { refused: 'no_access' }, [`principal:${bo}`]],
+    ['member.add', dee, { refused: 'no_access' }, []],
   ]);
   assert.deepEqual(denied.map((entry) => entry.objects.slice(0, 2)), denied.map((entry) => [`principal:${entry.actor}`, `credential:${entry.credential}`]));
   assert.ok(denied.every((entry) => entry.rows.length === 0 && !JSON.stringify(entry).includes('evil')));

@@ -135,6 +135,23 @@ export function definitionOf(policy: Policy, role: Role): RoleDefinition | undef
   return own(policy.roles, role);
 }
 
+/**
+ * What a grant's role gives at the grant's place, as `policy` defines it:
+ * its definition, but nothing on an environment while the role holds a
+ * permission only a project takes (`assignableToEnvironment`), as a
+ * credential's scope never holds one there (`isCredentialScope`). Every
+ * reading of a grant's role goes through it, so that a role widened past
+ * what its environment grants take, around a grant hidden from the
+ * widening, gives that grant nothing until it is narrowed back:
+ *
+ *   Eve: viewer-plus on market/dev        reads market/dev
+ *   viewer-plus widened to grant.manage   Eve holds nothing at market/dev
+ */
+export function grantDefinition(policy: Policy, grant: GrantPlace & { role: Role }): RoleDefinition | undefined {
+  if (grant.environmentId != null && !assignableToEnvironment(grant.role, policy)) return undefined;
+  return definitionOf(policy, grant.role);
+}
+
 /** A record's own value at `key`: `constructor` or `__proto__` names nothing. */
 function own<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
   return Object.hasOwn(record, key) ? record[key] : undefined;
@@ -483,7 +500,7 @@ export type ScopeGrant = GrantPlace & { role: Role; permissions?: Columns; sensi
  *   Developer widened to read in prod  the token still only uses prod
  */
 export function issuedGrant(grant: GrantPlace & { role: Role }, policy: Policy = DEFAULT_POLICY, held?: Columns): ScopeGrant {
-  const definition = definitionOf(policy, grant.role);
+  const definition = grantDefinition(policy, grant);
   const within = (column: readonly Permission[] = [], cap?: readonly Permission[]) => (cap === undefined ? [...column] : column.filter((permission) => cap.includes(permission)));
   return {
     projectId: grant.projectId,
@@ -680,7 +697,7 @@ export function allows(holder: Holdings, permission: Permission, place: Place): 
   if (holder.credentialScope != null && !scopeHolds(holder, permission, place)) return false;
   const policy = holder.policy ?? DEFAULT_POLICY;
   if (inScope(holder.scope, place) && holds(own(policy.instanceRoles, holder.role), permission, place, holder)) return true;
-  return holder.grants.some((grant) => covers(grant, place) && holds(definitionOf(policy, grant.role), permission, place, holder));
+  return holder.grants.some((grant) => covers(grant, place) && holds(grantDefinition(policy, grant), permission, place, holder));
 }
 
 /**
@@ -843,7 +860,7 @@ export function givesService(holder: Holdings, setting: ServiceSetting | null, r
   if (mayManageAccess(holder, place)) return true;
   const policy = holder.policy ?? DEFAULT_POLICY;
   // What the grant holds: its role as the policy defines it, or what a credential kept of it (`issuesCredential`).
-  const definition = kept ?? definitionOf(policy, role);
+  const definition = kept ?? grantDefinition(policy, { projectId: place.projectId, environmentId: place.environmentId ?? null, role });
   // A role that holds nothing is given by whoever manages access there alone: by anyone else, it would be a grant an
   // Owner could fill in later, and under a policy the vault cannot read, every role but Owner's holds nothing.
   if (definition === undefined || definition.permissions.length === 0) return false;
@@ -910,7 +927,7 @@ export function issuesCredential(
   const policy = holder.policy ?? DEFAULT_POLICY;
   const held: Holdings = { ...NOTHING, policy, service: true, grants: account.grants.map(({ role, place }) => ({ projectId: place.projectId, environmentId: place.environmentId ?? null, role })) };
   return scope.every(({ role, place, kept }) => givesService(holder, setting, role, place, kept)
-    && ((kept ?? definitionOf(policy, role))?.permissions.every((permission) => allows(held, permission, place)) ?? false));
+    && ((kept ?? grantDefinition(policy, { projectId: place.projectId, environmentId: place.environmentId ?? null, role }))?.permissions.every((permission) => allows(held, permission, place)) ?? false));
 }
 
 /**

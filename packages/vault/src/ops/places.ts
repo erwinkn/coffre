@@ -7,11 +7,12 @@ import type { Answers, EnvironmentCreate, EnvironmentEdit, EnvironmentEdited, Fo
 import { environments, projects, secrets } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { callerFrom, callerParts, live, refusedTo, type Asking } from '../caller.ts';
+import { callerParts, live, refusedTo, type Asking } from '../caller.ts';
 import { part, put, type Operation, type Parts, type Plan, type Refusal, type Seen } from '../change.ts';
 import type { Said } from '../entry.ts';
 import type { Fresh, Row, Sealed } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
+import { asking, NOWHERE } from './asking.ts';
 import type { Operations } from './index.ts';
 import { presented, text } from './input.ts';
 
@@ -35,19 +36,6 @@ const chainFrom = (project: SQL, slug: string, depth: number) =>
 
 const NO_ACCESS: Refusal = { refused: 'no_access' };
 
-/**
- * Who asks, as every operation here takes them: one whose credential
- * stands, and changes things. A workload's session that stands and is
- * stopped is told why; a narrowed one uses values and changes nothing.
- */
-function asking(seen: Seen<ReturnType<typeof callerParts>>, shown: ReturnType<typeof presented>, vault: Deciding, at: number): Asking | Refusal {
-  const caller = callerFrom(seen, shown, vault.workloads, at);
-  if (caller === null) return { refused: 'unauthenticated' };
-  if (caller.workload?.stop != null) return { refused: caller.workload.stop };
-  if (caller.workload?.narrowed === true) return { refused: 'narrowed' };
-  return caller;
-}
-
 /** The entry's fields every operation here gives the same way. */
 const by = (caller: Asking, shown: ReturnType<typeof presented>) => ({ kept: true, actor: caller.principal, credential: caller.credential.id, request: shown.request, ip: shown.ip });
 
@@ -64,7 +52,7 @@ function projectCreate(input: Presented & ProjectCreate, vault: Deciding): Opera
 
   const read = {
     // About no project yet: the caller's instance role is all that decides.
-    ...callerParts(shown.token, sql`(SELECT NULL::uuid WHERE false)`),
+    ...callerParts(shown.token, NOWHERE),
     // The slug is free: read, so that two makings of one at once see each other's.
     taken: part(projects, sql`${projects.slug} = ${slug}`),
   };

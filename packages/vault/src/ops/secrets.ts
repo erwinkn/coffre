@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { allows, useOnly, type Permission } from '@coffre/core/access';
-import type { Answers, KeyWrite, Nature, Presented, ReferenceBreak, SecretPath, SecretsChanges, SecretWrite } from '@coffre/core/vault';
+import type { Answers, KeyWrite, Nature, Presented, ReferenceBreak, SecretPath, SecretRefile, SecretsChanges, SecretWrite } from '@coffre/core/vault';
 import { dismissedKeys, environments, projects, secrets } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
@@ -292,6 +292,77 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
 }
 
 /**
+ * A folder of one environment's keys renamed, or emptied (0.14's
+ * `refileSecrets`): every key filed there, archived ones too, in one
+ * change, by whoever writes keys there, as filing one key takes. Half a
+ * folder renamed would be two folders, and a row's folder is only known
+ * once its MAC holds: a row edited behind the vault may have been filed
+ * there, or moved out, so the environment's keys are read whole, and one
+ * row that does not hold refuses the refile, `unreadable`, rather than
+ * leave a key behind. A folder with no
+ * key in it is `no_folder`, to whoever may write there; to anyone else, as
+ * for a place that is not there, `no_access`.
+ */
+function secretRefile(input: Presented & SecretRefile, vault: Deciding): Operation<Parts, Answers['secret.refile']> {
+  const shown = presented(input);
+  const { project: projectSlug, environment: environmentSlug, folder: from, to } = input;
+  if (!text(projectSlug) || !text(environmentSlug) || from === null || !filed(from) || to === undefined || !filed(to)) {
+    throw new TypeError('a folder of keys is named by its place\'s slugs and its name, and renamed to one of 1 to 64 characters, with no "/", no control character and no space at either end, or emptied');
+  }
+  const project = sql`(SELECT p.id FROM projects p WHERE p.slug = ${projectSlug})`;
+  const here = sql`(SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${environmentSlug})`;
+  const read = {
+    ...callerParts(shown.token, project),
+    project: part(projects, sql`${projects.slug} = ${projectSlug}`),
+    environment: part(environments, sql`${environments.projectId} = ${project} AND ${environments.slug} = ${environmentSlug}`),
+    // Every key of the environment, not those its rows say are in the folder: a row moved out behind the vault says it is not.
+    keys: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} = ${here}`),
+  };
+  const placed = (seen: Seen<typeof read>) => {
+    const place = seen.project.find((row) => row.slug === projectSlug && live(row));
+    return { place, environment: place && seen.environment.find((row) => row.projectId === place.id && row.slug === environmentSlug && live(row)) };
+  };
+  return {
+    read,
+    denied: refusedTo('secret.refile', shown, vault.workloads, {
+      where: { project: projectSlug, environment: environmentSlug },
+      objects: (seen: Seen<typeof read>) => {
+        const { place, environment } = placed(seen);
+        return [...(place === undefined ? [] : [`project:${place.id}`]), ...(environment === undefined ? [] : [`environment:${environment.id}`])];
+      },
+    }),
+    decide(seen: Seen<typeof read>, at: number, unsealed) {
+      const caller = callerFrom(seen, shown, vault.workloads, at);
+      if (caller === null) return { refused: 'unauthenticated' };
+      if (caller.workload?.stop != null) return { refused: caller.workload.stop };
+      if (caller.workload?.narrowed === true) return { refused: 'narrowed' };
+      const { place, environment } = placed(seen);
+      // As for a write: a personal config holds keys only its owner files, which no route serves yet.
+      if (place === undefined || environment === undefined || environment.owner !== null || !caller.may('secret.write', environment)) return { refused: 'no_access' };
+      if (unsealed.keys > 0) return { refused: 'unreadable' };
+      const there = seen.keys.filter((row) => row.environmentId === environment.id && row.folder === from);
+      if (there.length === 0) return { refused: 'no_folder' };
+      const moved = there.map((row) => row.key).sort();
+      return {
+        // Renamed onto itself, nothing moves: the entry says it was asked, as for projects (`folder.refile`).
+        writes: to === from ? [] : there.map((row) => amended(secrets, row, { folder: to })),
+        entry: {
+          kept: true,
+          action: 'secret.refile',
+          actor: caller.principal,
+          credential: caller.credential.id,
+          request: shown.request,
+          ip: shown.ip,
+          objects: [`project:${place.id}`, `environment:${environment.id}`, `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...there.map((row) => `secret:${row.id}`)],
+          detail: { folder: from, to, keys: moved },
+        },
+        answer: { moved },
+      };
+    },
+  };
+}
+
+/**
  * End the reference a key is (0.14's `breakReference`): its readers read
  * nothing there until it is given a value, or made a reference again, and
  * its value before the reference stays history. Whoever writes the key
@@ -370,4 +441,4 @@ function referenceBreak(input: Presented & ReferenceBreak, vault: Deciding): Ope
 }
 
 /** The changes of keys and their values. */
-export const secretOperations: Operations<SecretsChanges> = { 'secret.write': secretWrite, 'reference.break': referenceBreak };
+export const secretOperations: Operations<SecretsChanges> = { 'secret.write': secretWrite, 'secret.refile': secretRefile, 'reference.break': referenceBreak };

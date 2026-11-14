@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
-import type { KeyWrite, Presented, SecretWrite, UseInput } from '@coffre/core/vault';
+import type { KeyWrite, Presented, SecretRefile, SecretWrite, UseInput } from '@coffre/core/vault';
 import { rowsOf } from '@coffre/db/dialect';
 import { environments, projects, secrets } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
@@ -200,6 +200,54 @@ test('a key is filed in a folder, and taken out, by whoever writes it, archived 
   assert.equal((await key('DATABASE_URL'))!.folder, 'db');
   // Filing changes nothing a use gives.
   assert.deepEqual(await given(['DATABASE_URL', 'NEW']), ['x', 'v']);
+});
+
+test('a folder of keys is renamed, merged or emptied whole, archived keys too, by whoever writes there', async () => {
+  const refile = (label: string, folder: string, to: string | null, more: Partial<SecretRefile> = {}) =>
+    vault.change({ ...shown(label), op: 'secret.refile', project: 'market', environment: 'prod', folder, to, ...more });
+  assert.ok('answer' in (await vault.change(writing('bo-cli', [{ key: 'DATABASE_URL', folder: 'db' }, { key: 'OLD', folder: 'db' }, { key: 'PRIMARY', folder: 'replicas' }]))));
+  // Bo's personal config of prod, with a key filed: no route files there yet.
+  const mine = environment(market, 'prod-bo', { parentId: prod.id, owner: bo });
+  await write(world, ...rows('environments', mine), ...rows('secrets', value(world, secret(mine, 'OWN', { folder: 'db' }), 'his')));
+  const before = [await count('log_pending'), await count('secret_versions')];
+  // A viewer files nothing, and is told no more than for a project or an environment that is not there, or a personal config.
+  for (const [label, more] of [['dee-cli', {}], ['bo-cli', { project: 'nope' }], ['bo-cli', { environment: 'staging' }], ['bo-cli', { environment: 'prod-bo' }]] as const) {
+    assert.deepEqual(await refile(label, 'db', 'data', more), { refused: 'no_access' });
+  }
+  // A folder nothing is filed in is no folder, to whoever may file there.
+  assert.deepEqual(await refile('bo-cli', 'nope', 'data'), { refused: 'no_folder' });
+  await nothing(before);
+
+  assert.deepEqual(await refile('bo-cli', 'db', 'data'), { answer: { moved: ['DATABASE_URL', 'OLD'] } });
+  const entry = await written();
+  assert.deepEqual([entry.action, entry.detail], ['secret.refile', { folder: 'db', to: 'data', keys: ['DATABASE_URL', 'OLD'] }]);
+  assert.deepEqual([await key('DATABASE_URL'), await key('OLD'), await key('PRIMARY')], [{ archived: false, folder: 'data', versions: 1 }, { archived: true, folder: 'data', versions: 0 }, { archived: false, folder: 'replicas', versions: 1 }]);
+  // Renamed onto a folder that is there, the two are one.
+  assert.deepEqual(await refile('bo-cli', 'replicas', 'data'), { answer: { moved: ['PRIMARY'] } });
+  assert.equal((await key('PRIMARY'))!.folder, 'data');
+  // Renamed onto itself, nothing moves, and the entry says it was asked.
+  const entries = await count('log_pending');
+  assert.deepEqual(await refile('bo-cli', 'data', 'data'), { answer: { moved: ['DATABASE_URL', 'OLD', 'PRIMARY'] } });
+  assert.equal(await count('log_pending'), entries + 1);
+  // A key's row edited behind the vault may be one filed there: none is left behind, so none moves.
+  await world.owner.execute(sql`UPDATE secrets SET folder = 'data' WHERE environment_id = ${prod.id} AND key = 'STRIPE_KEY'`);
+  assert.deepEqual(await refile('bo-cli', 'data', null), { refused: 'unreadable' });
+  assert.equal((await key('DATABASE_URL'))!.folder, 'data');
+  await world.owner.execute(sql`UPDATE secrets SET folder = NULL WHERE environment_id = ${prod.id} AND key = 'STRIPE_KEY'`);
+  // Nor is one filed there and moved out behind the vault: its row no longer says it is in the folder.
+  await world.owner.execute(sql`UPDATE secrets SET folder = 'hidden' WHERE environment_id = ${prod.id} AND key = 'OLD'`);
+  const kept = await count('log_pending');
+  assert.deepEqual(await refile('bo-cli', 'data', 'elsewhere'), { refused: 'unreadable' });
+  assert.deepEqual([(await key('DATABASE_URL'))!.folder, (await key('PRIMARY'))!.folder, await count('log_pending')], ['data', 'data', kept]);
+  await world.owner.execute(sql`UPDATE secrets SET folder = 'data' WHERE environment_id = ${prod.id} AND key = 'OLD'`);
+  // Emptied, each key stays where it is, in no folder; and that folder is gone.
+  assert.deepEqual(await refile('bo-cli', 'data', null), { answer: { moved: ['DATABASE_URL', 'OLD', 'PRIMARY'] } });
+  assert.deepEqual([(await key('DATABASE_URL'))!.folder, (await key('OLD'))!.folder, (await key('PRIMARY'))!.folder], [null, null, null]);
+  assert.deepEqual(await refile('bo-cli', 'data', null), { refused: 'no_folder' });
+  // What the contract does not say is a fault: no folder to rename, or one no folder could be named.
+  for (const [folder, to] of [[null, 'x'], ['db', ' x'], ['db', 'a/b'], ['db', '\ud800'], ['db', undefined], ['', 'x']] as const) {
+    await assert.rejects(refile('bo-cli', folder as never, to as never), TypeError, `${folder} ${to}`);
+  }
 });
 
 test('an item that is not what the contract says is a fault, before any read', async () => {

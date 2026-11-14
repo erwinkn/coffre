@@ -202,6 +202,16 @@ def holds (d : Option RoleDef) (p : Permission) (x : Place) (h : Holdings) : Boo
     if p.projectOnly then d.normal.contains p
     else (if guarded h x then d.prot else d.normal).contains p
 
+/-- `assignableToEnvironment`: a role the policy defines, holding no permission only a project takes. -/
+def assignableToEnvironment (pol : Policy) (role : String) : Bool :=
+  match pol.roles.get? role with
+  | none => false
+  | some d => !d.normal.any (·.projectOnly)
+
+/-- `grantDefinition`: a grant's role at its place; nothing on an environment while the role is not `assignableToEnvironment`. -/
+def grantDef (pol : Policy) (g : GrantPlace) (role : String) : Option RoleDef :=
+  if g.env.isSome && !assignableToEnvironment pol role then none else pol.roles.get? role
+
 /-- `scopeHolds`: the credential's scope covers the place with a grant that held the permission there. -/
 def scopeHolds (h : Holdings) (p : Permission) (x : Place) : Bool :=
   (h.cred.getD []).any fun g => covers g.place x && holds (some (scopeDef g)) p x h
@@ -209,7 +219,7 @@ def scopeHolds (h : Holdings) (p : Permission) (x : Place) : Bool :=
 /-- What the instance role and the grants give, before any credential caps it. -/
 def held (h : Holdings) (p : Permission) (x : Place) : Bool :=
   (inScope h.scope x && holds (h.policy.instanceRoles.get? h.role) p x h) ||
-    h.grants.any fun g => covers g.place x && holds (h.policy.roles.get? g.role) p x h
+    h.grants.any fun g => covers g.place x && holds (grantDef h.policy g.place g.role) p x h
 
 /-- `allows`. -/
 def allows (h : Holdings) (p : Permission) (x : Place) : Bool :=
@@ -226,7 +236,7 @@ def within (col : List Permission) (cap : Option (List Permission)) : List Permi
 /-- `issuedGrant`: the role's columns now, each no more than its issuer holds there (`heldColumns`). -/
 def issuedGrant (project : Option String) (env : Option String) (role : String) (pol : Policy)
     (cap : Option RoleDef) : ScopeGrant :=
-  let d := pol.roles.get? role
+  let d := grantDef pol ⟨project, env⟩ role
   { project, env, role, sensitive := none,
     cols := some ⟨within ((d.map (·.normal)).getD []) (cap.map (·.normal)),
                   within ((d.map (·.prot)).getD []) (cap.map (·.prot))⟩ }
@@ -262,11 +272,13 @@ def mayManageAccess (h : Holdings) (x : Place) : Bool := allows h .grantManage x
 
 def runsInstance (h : Holdings) : Bool := h.cred.isNone && administers h.role && unscoped h.scope
 
+def Place.asGrant (x : Place) : GrantPlace := ⟨some x.project, x.envId⟩
+
 /-- `givesService`. `setting` is none for a service account, which sets none up. -/
 def givesService (h : Holdings) (setting : Option Scope) (role : String) (x : Place)
     (kept : Option RoleDef) : Bool :=
   mayManageAccess h x ||
-    match kept <|> h.policy.roles.get? role, setting with
+    match kept <|> grantDef h.policy x.asGrant role, setting with
     | none, _ => false
     | some _, none => false
     | some d, some s =>
@@ -287,8 +299,6 @@ def managesService (h : Holdings) (setting : Option Scope) (actor : String) (a :
     if a.grants.isEmpty then setting.isSome && a.admittedBy == some actor
     else a.grants.all fun (role, x) => givesService h setting role x none
 
-def Place.asGrant (x : Place) : GrantPlace := ⟨some x.project, x.envId⟩
-
 /-- `issuesCredential`. -/
 def issuesCredential (h : Holdings) (setting : Option Scope) (actor : String) (a : ServiceAccount)
     (scope : List (String × Place × Option RoleDef)) : Bool :=
@@ -297,7 +307,7 @@ def issuesCredential (h : Holdings) (setting : Option Scope) (actor : String) (a
       { NOTHING h.policy with service := true, grants := a.grants.map fun (role, x) => ⟨x.asGrant, role⟩ }
     scope.all fun (role, x, kept) =>
       givesService h setting role x kept &&
-        (((kept <|> h.policy.roles.get? role).map fun d => d.normal.all (allows heldBy · x)).getD false)
+        (((kept <|> grantDef h.policy x.asGrant role).map fun d => d.normal.all (allows heldBy · x)).getD false)
 
 def readsWholeLog (h : Holdings) : Bool :=
   h.cred.isNone && unscoped h.scope &&
