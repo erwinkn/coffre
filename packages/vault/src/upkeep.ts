@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 
+import { KekRegistry } from '@coffre/core/kek';
 import { HASH_SIZE, inclusionProof, nodesFrom, leafHash, tileKey, tilesFor, verifyInclusion, WIDTH, type Edge } from '@coffre/core/log';
 import { credentials, deviceLogins, enrollmentCodes } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
@@ -149,6 +150,10 @@ export async function recheck(ask: Ask, now: number, trees: Record<Tree, Edge>, 
   return { found: held.flatMap(({ lost }) => lost.map((of) => ({ found: 'lost' as const, of }))), walk: { tree, block, since, ends } };
 }
 
+/** The keys the upkeep's change seals values under: none, as it writes no value. One that did would fail here, not seal under a key nobody holds. */
+const refuse = () => Promise.reject(new Error('the upkeep seals no value'));
+const SEALS_NOTHING = new KekRegistry({ provider: 'none', keyId: 'upkeep', keyVersion: '0', wrap: refuse, unwrap: refuse });
+
 /**
  * The rows that lapsed, the oldest first, a batch of each: credentials,
  * device logins and enrollment codes a day past their expiry, in one change
@@ -159,7 +164,7 @@ export async function recheck(ask: Ask, now: number, trees: Record<Tree, Edge>, 
  * it made one, is `told` the signer as it commits, before the statement
  * that follows can fail: its answer, whether one waits to be signed.
  */
-export async function expire(vault: Omit<Running, 'wake'>, ask: Ask, told: (hash: Buffer) => Promise<void>): Promise<boolean> {
+export async function expire(vault: Pick<Running, 'db' | 'keys' | 'now'>, ask: Ask, told: (hash: Buffer) => Promise<void>): Promise<boolean> {
   const at = vault.now();
   const before = sql`${new Date(at - DAY_MS).toISOString()}::timestamptz`;
   // By the expiry a row's MAC covers: one a writer moved back is not the vault's, and stays.
@@ -167,7 +172,7 @@ export async function expire(vault: Omit<Running, 'wake'>, ask: Ask, told: (hash
     part(table, sql`${table.id} IN (SELECT e.id FROM ${table} e WHERE e.expires_at < ${before}${more} ORDER BY e.expires_at, e.id LIMIT ${DELETE_MOST})`);
   const read = { credentials: oldest(credentials), logins: oldest(deviceLogins), codes: oldest(enrollmentCodes, sql` AND NOT EXISTS (SELECT 1 FROM credentials c WHERE c.enrollment_id = e.id)`) };
   let telling: Promise<void> | undefined;
-  const committed = change({ ...vault, wake: (hash) => void (telling = told(hash)) }, {
+  const committed = change({ ...vault, keks: SEALS_NOTHING, refused: new Map(), wake: (hash) => void (telling = told(hash)) }, {
     read,
     decide: ({ credentials: sessions, logins, codes }) => {
       const writes = [...sessions.map((row) => drop(credentials, row)), ...logins.map((row) => drop(deviceLogins, row)), ...codes.map((row) => drop(enrollmentCodes, row))];
