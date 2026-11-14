@@ -82,6 +82,16 @@ export type BindingPlan = {
   replaces: { id: string; why: 'asked' | 'keys_moved' }[];
 };
 
+/**
+ * What giving a service's bindings on an issuer new keys would do
+ * (`?dryRun=1`), in 0.14.7's shape: the keys, the bindings on the issuer
+ * the new ones take the place of, and the places of their scopes that hold
+ * a sensitive value the new ones will not read: one an Owner bound,
+ * re-keyed by anyone else. Named for the CLI's preview (`coffre trust
+ * --replace-keys`); the route answers it once its dry run is served.
+ */
+export type KeysPlan = { issuer: string; jwksUri: string; keys: KeySummary[]; replaces: string[]; withheld: string[] };
+
 /** A binding made or re-keyed: its id, and what it reaches, by path and role, as the vault sealed it. */
 export type BindingMade = { id: string; scope: Record<string, string> };
 

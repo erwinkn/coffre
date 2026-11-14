@@ -10,7 +10,7 @@
  * its own handling of Cloudflare Access redirects. A request that never
  * reaches the instance throws `Unreachable`, which says why.
  */
-import type { Api, AuthInfo, BindingPlan, DeletionResult, DryRunOutcome, DryRunResult, RoleImpact, SetResult, TokenPlan } from './api.ts';
+import type { Api, AuthInfo, BindingPlan, DeletionResult, DryRunOutcome, DryRunResult, KeysPlan, RoleImpact, SetResult, TokenPlan } from './api.ts';
 import { Unreachable } from './reach.ts';
 
 export type {
@@ -33,6 +33,7 @@ export type {
   IdentityRow,
   ImpactLine,
   InheritResult,
+  KeysPlan,
   ListedReference,
   Me,
   Member,
@@ -335,7 +336,7 @@ export function createClient(options: ClientOptions) {
       /** The service's bindings on an issuer that new keys would replace, and the keys as checked; writes nothing. Not served in 0.16 yet: a 501. */
       previewKeys: (member: string, input: RouteInput<'POST /members/:member/bindings/keys'>) => {
         const [method, route] = address('POST /members/:member/bindings/keys', { member });
-        return send(method, `${route}?dryRun=1`, input) as Promise<Exclude<RouteOutput<'POST /members/:member/bindings/keys'>, { bindings: unknown }>>;
+        return send(method, `${route}?dryRun=1`, input) as Promise<KeysPlan>;
       },
       /** New keys, uploaded, for every binding of the service on the issuer: each replaced by one the same but for them. */
       replaceKeys: (member: string, input: RouteInput<'POST /members/:member/bindings/keys'>) =>

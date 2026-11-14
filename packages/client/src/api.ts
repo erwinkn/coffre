@@ -1952,6 +1952,18 @@ export type InheritResult = {
   key: string;
 };
 
+export type KeysPlan = {
+  issuer: string;
+  jwksUri: string;
+  keys: {
+    kid: string | null;
+    alg: "ES256" | "RS256";
+    thumbprint: string;
+  }[];
+  replaces: string[];
+  withheld: string[];
+};
+
 export type ListedReference = {
   readers: null | string[];
   canBreak: boolean;
