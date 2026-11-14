@@ -15,14 +15,6 @@ const unserved = <const Key extends string>(key: Key, what: string) =>
   });
 
 export const unservedRoutes = {
-  // The instance's roles and settings: the vault's `policy.change` and `settings.change`.
-  ...unserved('GET /roles', "the instance's roles"),
-  ...unserved('PUT /roles/:role', 'changing a role'),
-  ...unserved('DELETE /roles/:role', 'deleting a role'),
-  ...unserved('PUT /instance-roles/:role', 'changing an instance role'),
-  ...unserved('DELETE /instance-roles/:role', 'deleting an instance role'),
-  ...unserved('GET /settings', "the instance's settings"),
-  ...unserved('PUT /settings', "changing the instance's settings"),
   // A member's tokens and trust bindings.
   ...unserved('GET /members/:member/tokens', "a member's tokens"),
   ...unserved('POST /members/:member/tokens', 'issuing a token'),

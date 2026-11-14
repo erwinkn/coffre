@@ -41,7 +41,7 @@ import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
 import { HASH, presented, text, traced } from './input.ts';
-import { definitionsOf, held, manages, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
+import { definitionsOf, manages, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
 
 /** A provider's id, as the table's own check has it (`identities_provider_check`). */
 const PROVIDER = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -549,7 +549,7 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
       if (caller.workload !== null) return { refused: 'workload_cannot_issue' };
       // A row written behind the vault is not a row that is absent, wherever it is: one grant less, one role less, an environment unprotected.
       if (Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
-      const holder = held(caller);
+      const holder = caller.holds;
       let principal = caller.principal;
       let generation = caller.credential.generation;
       let ends = at + token.minutes * 60_000;

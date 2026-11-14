@@ -329,7 +329,7 @@ test('a member put is one change and no statement: admitted, brought back or giv
 });
 
 test('what is not served yet answers 501', async () => {
-  for (const [method, path] of [['GET', `/members/${ada}`], ['GET', '/roles'], ['PUT', '/settings'], ['GET', `/members/${ci}/tokens`], ['POST', `/members/${ci}/bindings`]] as const) {
+  for (const [method, path] of [['GET', `/members/${ada}`], ['GET', `/members/${ci}/tokens`], ['POST', `/members/${ci}/bindings`]] as const) {
     assert.deepEqual(refused(await call('cy-cli', method, path, method === 'GET' ? undefined : {})), [501, 'not_implemented', undefined], `${method} ${path}`);
   }
 });

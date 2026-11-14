@@ -5,7 +5,7 @@ import {
   ROLE_ID, ROLES, setsUpServices, unscoped,
   type Filter, type Holdings, type InstanceRole, type Permission, type Place, type RoleDefinition, type Scope, type ServiceAccount,
 } from '@coffre/core/access';
-import type { AccessAnswers, AccessChange, AccessChanges, AccessGrant, MemberPut, MemberRemove, Presented, RoleEdit, ScopeInput, SettingsEdit, Standing } from '@coffre/core/vault';
+import { ROLE_REVISION, roleRevision, type AccessAnswers, type AccessChange, type AccessChanges, type AccessGrant, type MemberPut, type MemberRemove, type Presented, type RoleEdit, type ScopeInput, type SettingsEdit, type Standing } from '@coffre/core/vault';
 import { environments, grants, identities, policy, principals, projects, roles } from '@coffre/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
 
@@ -17,7 +17,7 @@ import type { Deciding } from '../vault.ts';
 import { managing, NOWHERE, ownsAllAsking, said } from './asking.ts';
 import type { Operations } from './index.ts';
 import { presented, text } from './input.ts';
-import { definitionsOf, held as holding, managesSealed, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
+import { definitionsOf, managesSealed, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
 
 /**
  * The changes of members, grants, roles and the instance's policy
@@ -542,16 +542,6 @@ function says(row: Row<typeof roles> | undefined, definition: RoleDefinition | n
   return row.name === definition.name && row.description === definition.description && same(row.permissions, definition.permissions) && same(row.protected, definition.protected);
 }
 
-/** The role as the caller saw it: a definition's shape, held to the row as it is, whatever a release's rules say of it now. */
-function seenAs(value: unknown): RoleDefinition | null | undefined {
-  if (value === null) return null;
-  if (typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const { name, description, permissions, protected: guarded } = value as Record<string, unknown>;
-  const column = (list: unknown) => Array.isArray(list) && list.length <= 64 && [...list].every(text);
-  if (!text(name) || !text(description) || !column(permissions) || !column(guarded)) return undefined;
-  return { name, description, permissions: [...(permissions as Permission[])], protected: [...(guarded as Permission[])] };
-}
-
 /**
  * A role defined, edited, put back as it ships or deleted
  * (`policy.change`), by an Owner of the whole instance on a session, as
@@ -560,39 +550,39 @@ function seenAs(value: unknown): RoleDefinition | null | undefined {
  * whose row was deleted is written again.
  *
  * A grant is read only to refuse: deleting a role one names, defining one
- * that does not ship while one names it, or giving a role one names on an
- * environment what only a project has. The read takes the first such
- * grant, and one the vault did not write refuses as `tampered`: it may
- * stand in front of a genuine one. After a genuine deletion no grant names
- * the role, so defining it again refuses no honest caller; a grant put back
- * around the vault refuses it, and one kept hidden from the deletion through
- * the definition is the accepted "row taken away for one decision"
- * (docs/design/0.16.md). One on an environment put back after a widening
- * gives nothing (`grantDefinition`).
+ * that does not ship and has no row while one names it, or giving a role
+ * one names on an environment what only a project has. The read takes the
+ * first such grant, and one the vault did not write refuses as `tampered`:
+ * it may stand in front of a genuine one. After a genuine deletion no grant
+ * names the role, so defining it again refuses no honest caller; a grant
+ * put back around the vault refuses it, and one kept hidden from the
+ * deletion through the definition is the accepted "row taken away for one
+ * decision" (docs/design/0.16.md). One on an environment put back after a
+ * widening gives nothing (`grantDefinition`).
  */
 function roleEdit(input: Presented & RoleEdit, vault: Deciding): Operation<Parts, AccessAnswers['policy.change']> {
   const shown = presented(input);
-  const { instance, role } = input;
+  const { instance, role, revision } = input;
   const definition = input.definition === null ? null : definitionAsked(input.definition);
-  const was = seenAs(input.was);
   const fixed = (instance ? (FIXED_ROLES.instanceRoles as readonly string[]) : FIXED_ROLES.roles).includes(role);
-  if (typeof instance !== 'boolean' || typeof role !== 'string' || !ROLE_ID.test(role) || (instance && !isInstanceRole(role)) || fixed || definition === undefined || was === undefined) {
-    throw new TypeError("a role's change names a project role or an Admin's or Auditor's, by id, never Owner's or the instance's Member's, with a definition as definitionProblem holds one or null, and the role as it was or null");
+  if (
+    typeof instance !== 'boolean' || typeof role !== 'string' || !ROLE_ID.test(role) || (instance && !isInstanceRole(role)) || fixed || definition === undefined
+    || (revision !== undefined && (typeof revision !== 'string' || !ROLE_REVISION.test(revision)))
+  ) {
+    throw new TypeError("a role's change names a project role or an Admin's or Auditor's, by id, never Owner's or the instance's Member's, with a definition as definitionProblem holds one or null, and the role's revision as its preview weighed it, or none");
   }
   // What it holds once changed: one that ships, put back, as it ships; one an Owner made, deleted, nothing.
   const shipped = instance ? INSTANCE_ROLES[role as InstanceRole] : isBuiltinRole(role) ? ROLES[role] : null;
   const next = definition ?? (shipped === null ? null : normalDefinition(shipped));
-  // The one grant that would refuse it, if any: naming the role, to delete it or to define one that does not ship (seen as
-  // absent: one there refuses as changed); on an environment, to give it what only a project has.
+  // The first grant naming the role, which refuses deleting it, or defining one that does not ship where no row is (which
+  // the row read beside it says); the first on an environment, which refuses giving it what only a project has.
   const wide = next !== null && next.permissions.some((permission) => PROJECT_ONLY_PERMISSIONS.includes(permission));
-  const anyGrant = !instance && (next === null || (shipped === null && was === null));
-  const refusing = instance || (!anyGrant && !wide)
-    ? sql`false`
-    : sql`${grants.id} = (SELECT g.id FROM grants g WHERE g.role = ${role}${anyGrant ? sql`` : sql` AND g.environment_id IS NOT NULL`} ORDER BY g.id LIMIT 1)`;
+  const first = (onEnvironment: boolean) => sql`${grants.id} = (SELECT g.id FROM grants g WHERE g.role = ${role}${onEnvironment ? sql` AND g.environment_id IS NOT NULL` : sql``} ORDER BY g.id LIMIT 1)`;
   const read = {
     ...callerParts(shown.token, NOWHERE),
     edited: part(roles, and(eq(roles.instance, instance), eq(roles.id, role))),
-    naming: part(grants, refusing),
+    naming: part(grants, !instance && (next === null || shipped === null) ? first(false) : sql`false`),
+    onEnvironment: part(grants, !instance && wide ? first(true) : sql`false`),
   };
   const object = `${instance ? 'instance-role' : 'role'}:${role}`;
   return {
@@ -602,14 +592,21 @@ function roleEdit(input: Presented & RoleEdit, vault: Deciding): Operation<Parts
       const caller = managing(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       if (!runs(caller) || !ownsAllAsking(caller)) return { refused: 'no_access' };
-      // A row the vault did not write is neither the role the caller saw nor one to write over.
+      // A row the vault did not write is neither the role the caller weighed nor one to write over.
       if (unsealed.edited > 0) return { refused: 'tampered' };
       const [row] = seen.edited;
-      if (!says(row, was)) return { refused: 'policy_changed' };
+      if (revision !== undefined && roleRevision(row === undefined ? null : definitionIn(row)) !== revision) return { refused: 'policy_changed' };
       if (row === undefined && next === null) return { refused: 'invalid' };
-      // The first grant naming it, unreadable, may hide a genuine one behind it.
-      if (unsealed.naming > 0) return { refused: 'tampered' };
-      if (seen.naming.length > 0) return { refused: anyGrant ? 'role_granted' : 'invalid' };
+      // A grant naming it refuses its deletion, and defining one that does not ship and is not there; the first, unreadable,
+      // may hide a genuine one behind it.
+      if (next === null || (shipped === null && row === undefined)) {
+        if (unsealed.naming > 0) return { refused: 'tampered' };
+        if (seen.naming.length > 0) return { refused: 'role_granted' };
+      }
+      if (wide) {
+        if (unsealed.onEnvironment > 0) return { refused: 'tampered' };
+        if (seen.onEnvironment.length > 0) return { refused: 'invalid' };
+      }
       const detail = { role, instance, definition: next, was: row === undefined ? null : definitionIn(row) };
       if (says(row, next)) return { writes: [], entry: said('policy.change', caller, shown, [object], { ...detail, unchanged: true }), answer: { role: next } };
       return {
@@ -673,7 +670,7 @@ function settingsEdit(input: Presented & SettingsEdit, vault: Deciding): Operati
 
 /** What the caller holds, every project role as its row says beside their own: whether they give a service account one weighs them all. */
 function withRoles(caller: Asking, defined: readonly Row<typeof roles>[]): Holdings {
-  const own = holding(caller);
+  const own = caller.holds;
   return { ...own, policy: { ...own.policy, roles: { ...definitionsOf(defined), ...own.policy.roles } } };
 }
 

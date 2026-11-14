@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
 import { INSTANCE_ROLES, normalDefinition, ROLES, type RoleDefinition } from '@coffre/core/access';
-import type { Change, Presented } from '@coffre/core/vault';
+import { roleRevision, type Change, type Presented } from '@coffre/core/vault';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
@@ -56,8 +56,10 @@ beforeEach(async () => {
 });
 
 const shown = (label: string): Presented => ({ token: tokenOf(label).toString('hex'), proof: null, request: 'req-1', ip: '192.0.2.7' });
-type RoleAsk = { instance?: boolean; role: string; definition: RoleDefinition | null; was: RoleDefinition | null };
-const asked = (label: string, ask: RoleAsk): Presented & Extract<Change, { op: 'policy.change' }> => ({ ...shown(label), op: 'policy.change', instance: false, ...ask });
+/** A role's change, `was` the role as its preview weighed it (none, null), sent as its revision; left out, none is sent. */
+type RoleAsk = { instance?: boolean; role: string; definition: RoleDefinition | null; was?: RoleDefinition | null };
+const asked = (label: string, { was, ...ask }: RoleAsk): Presented & Extract<Change, { op: 'policy.change' }> =>
+  ({ ...shown(label), op: 'policy.change', instance: false, ...ask, ...(was === undefined ? {} : { revision: roleRevision(was) }) });
 const edit = (label: string, ask: RoleAsk) => vault.change<'policy.change'>(asked(label, ask));
 type Filters = { projects: unknown; environments: unknown };
 const settingAsked = (label: string, serviceAccounts: Filters): Presented & Extract<Change, { op: 'settings.change' }> => ({ ...shown(label), op: 'settings.change', serviceAccounts: serviceAccounts as never });
@@ -247,6 +249,21 @@ test('roles are edited only by an Owner of the whole instance, on a session: ref
   assert.deepEqual((await refusals()).map((entry) => [entry.actor, entry.detail.refused]), [[fay, 'no_access'], [sam, 'no_access'], [bo, 'no_access'], [ada, 'no_access'], [api, 'no_access']], 'once a minute for who asked and what');
 });
 
+test('a change with no revision is made from the role as it is: a grant naming one that does not ship refuses it only where no row is', async () => {
+  assert.deepEqual(await edit('ada-cli', { role: 'developer', definition: narrowed }), { answer: { role: narrowed } });
+  assert.deepEqual((await written()).detail, { role: 'developer', instance: false, definition: narrowed, was: developer });
+  await nothingWritten(async () => assert.deepEqual(await edit('ada-cli', { role: 'release', definition: null }), { refused: 'invalid' }));
+  assert.deepEqual(await edit('ada-cli', { role: 'release', definition: release }), { answer: { role: release } });
+  await write(world, ...rows('grants', grant(eve, 'release', { project: billing })));
+  // There, it is an edit, whatever a grant says; deleted around the vault, defining it again is refused while the grant names it.
+  const steady: RoleDefinition = { ...release, description: 'Ships, steadily.' };
+  assert.deepEqual(await edit('ada-cli', { role: 'release', definition: steady }), { answer: { role: steady } });
+  await world.owner.execute(sql`DELETE FROM roles WHERE NOT instance AND id = 'release'`);
+  await nothingWritten(async () => assert.deepEqual(await edit('ada-cli', { role: 'release', definition: steady }), { refused: 'role_granted' }));
+  // A revision of the role as it was weighed, which it no longer is.
+  await nothingWritten(async () => assert.deepEqual(await edit('ada-cli', { role: 'developer', definition: developer, was: developer }), { refused: 'policy_changed' }));
+});
+
 test('a role\'s change that is not what the contract says is a fault, before any read', () => {
   const fault = (ask: Record<string, unknown>) => assert.throws(() => OPERATIONS['policy.change']({ ...asked('ada-cli', { role: 'developer', definition: narrowed, was: developer }), ...ask } as never, deciding), TypeError, JSON.stringify(ask));
   fault({ role: 'owner' });
@@ -265,10 +282,11 @@ test('a role\'s change that is not what the contract says is a fault, before any
   holed[2] = 'secret.write';
   fault({ definition: { ...narrowed, permissions: holed } });
   fault({ definition: 'developer' });
-  fault({ was: undefined });
-  fault({ was: { ...developer, permissions: 'all' } });
+  fault({ revision: null });
+  fault({ revision: 'policy-57' });
+  fault({ revision: roleRevision(developer).toUpperCase() });
   assert.doesNotThrow(() => OPERATIONS['policy.change'](asked('ada-cli', { role: 'release-2', definition: release, was: null }), deciding));
-  assert.doesNotThrow(() => OPERATIONS['policy.change'](asked('ada-cli', { role: 'developer', definition: null, was: { ...developer, permissions: ['secret.gone'] } as never }), deciding), 'a role as seen is any the row could say');
+  assert.doesNotThrow(() => OPERATIONS['policy.change'](asked('ada-cli', { role: 'release-2', definition: release }), deciding), 'no revision: made from the role as it is');
 });
 
 test('whoever runs the instance sets where people set up service accounts, projects by id, and the policy row keeps the rest', async () => {

@@ -76,11 +76,21 @@ const iso = (value: Date | string): string => new Date(value).toISOString();
  *   removed    removed members too, with no grant
  *   scopes     the slugs of the projects each scope names, for whoever
  *              is shown scopes
+ *   reaching   only those a role reaches: holding a live grant naming the
+ *              project role, or holding the instance role
+ *   most       at most one member past this many, and one grant past this
+ *              many of each, to see there are more: the caller refuses past it
  */
 export async function members(
   db: Queryable,
-  query: { member?: string; within: readonly string[] | null; project?: string; listed: 'all' | 'held'; roles?: boolean; removed: boolean; scopes: boolean; now: Date },
+  query: { member?: string; within: readonly string[] | null; project?: string; listed: 'all' | 'held'; roles?: boolean; removed: boolean; scopes: boolean; reaching?: { instance: boolean; role: string }; most?: number; now: Date },
 ): Promise<MemberRow[]> {
+  const now = sql`${query.now.toISOString()}::timestamptz`;
+  const reaching = query.reaching === undefined ? sql`true` : query.reaching.instance ? sql`m.role = ${query.reaching.role}`
+    : sql`EXISTS (SELECT 1 FROM grants rg WHERE rg.principal = m.id AND rg.generation = m.generation AND rg.role = ${query.reaching.role} AND (rg.expires_at IS NULL OR rg.expires_at > ${now}))`;
+  // Unordered, so the database stops at the limit rather than sorting every grant first; `json_agg` orders what it took.
+  const most = query.most === undefined ? sql`` : sql` LIMIT ${query.most + 1}`;
+  const members = query.most === undefined ? sql`` : sql` LIMIT ${query.most + 1}`;
   const within = query.within === null ? sql`true` : sql`gp.id = ANY(${sql.param([...query.within])}::uuid[])`;
   const onProject = query.project === undefined ? sql`true` : sql`gp.id = ${query.project}::uuid`;
   const member = query.member === undefined ? sql`true` : sql`m.id = ${query.member}`;
@@ -94,28 +104,30 @@ export async function members(
       FROM principals m
       LEFT JOIN roles ir ON ir.instance AND ir.id = m.role
       LEFT JOIN LATERAL (
-        SELECT json_agg(json_build_object(
-          'project_id', gp.id, 'project', gp.slug, 'role', g.role, 'expires_at', g.expires_at, 'role_name', r.name, 'permissions', r.permissions, 'guarded', r.protected,
-          'environment_id', e.id, 'environment', e.slug, 'archived_at', e.archived_at, 'protected', e.protected, 'owner', e.owner,
-          'parent_id', parent.id, 'parent', parent.slug, 'parent_archived', parent.archived_at IS NOT NULL, 'parent_protected', parent.protected
-        ) ORDER BY gp.slug, e.slug NULLS LAST) AS grants
-        FROM grants g
-        LEFT JOIN environments e ON e.id = g.environment_id
-        LEFT JOIN environments parent ON parent.id = e.parent_id AND strpos(parent.slug, '~') = 0
-        JOIN projects gp ON gp.id = COALESCE(g.project_id, e.project_id)
-        LEFT JOIN roles r ON NOT r.instance AND r.id = g.role
-        WHERE m.status = 'active' AND g.principal = m.id AND g.generation = m.generation
-          AND (g.expires_at IS NULL OR g.expires_at > ${query.now.toISOString()}::timestamptz)
-          AND (g.environment_id IS NULL OR (e.id IS NOT NULL AND strpos(e.slug, '~') = 0)) AND strpos(gp.slug, '~') = 0
-          AND ${within} AND ${onProject}
+        SELECT json_agg(one.grant ORDER BY one.project, one.environment NULLS LAST) AS grants FROM (
+          SELECT gp.slug AS project, e.slug AS environment, json_build_object(
+            'project_id', gp.id, 'project', gp.slug, 'role', g.role, 'expires_at', g.expires_at, 'role_name', r.name, 'permissions', r.permissions, 'guarded', r.protected,
+            'environment_id', e.id, 'environment', e.slug, 'archived_at', e.archived_at, 'protected', e.protected, 'owner', e.owner,
+            'parent_id', parent.id, 'parent', parent.slug, 'parent_archived', parent.archived_at IS NOT NULL, 'parent_protected', parent.protected
+          ) AS grant
+          FROM grants g
+          LEFT JOIN environments e ON e.id = g.environment_id
+          LEFT JOIN environments parent ON parent.id = e.parent_id AND strpos(parent.slug, '~') = 0
+          JOIN projects gp ON gp.id = COALESCE(g.project_id, e.project_id)
+          LEFT JOIN roles r ON NOT r.instance AND r.id = g.role
+          WHERE m.status = 'active' AND g.principal = m.id AND g.generation = m.generation
+            AND (g.expires_at IS NULL OR g.expires_at > ${now})
+            AND (g.environment_id IS NULL OR (e.id IS NOT NULL AND strpos(e.slug, '~') = 0)) AND strpos(gp.slug, '~') = 0
+            AND ${within} AND ${onProject}${most}
+        ) one
       ) held ON true
       LEFT JOIN LATERAL (
         -- A scope names its projects by id inside its JSON: the projects whose id it holds, a superset of those it lists, which the route picks from.
         SELECT json_object_agg(sp.id, sp.slug) AS slugs FROM projects sp
         WHERE ${query.scopes ? sql`true` : sql`false`} AND m.scope IS NOT NULL AND strpos(sp.slug, '~') = 0 AND strpos(m.scope, sp.id::text) > 0
       ) scoped ON true
-      WHERE ${member} AND ${status} AND ${listed}
-      ORDER BY m.id`,
+      WHERE ${member} AND ${status} AND ${listed} AND ${reaching}
+      ORDER BY m.id${members}`,
   );
   return rows.map((row) => ({
     id: row.id,

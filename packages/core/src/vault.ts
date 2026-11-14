@@ -605,6 +605,24 @@ export function policyRevision(seq: number | bigint | null, policy: Pick<Policy,
 /** A revision as `policyRevision` writes it. */
 export const POLICY_REVISION = /^(none|[1-9][0-9]{0,15})\.[0-9a-f]{16}$/;
 
+/**
+ * A role's revision, as a change of it is confirmed with
+ * (`policy.change`'s `revision`): a digest of what it holds, its columns in
+ * any order, or of none. The app answers it with a change's preview; the
+ * vault takes the change only while the role's row still says what was
+ * weighed.
+ *
+ *   9c41e07b5d2a8f13   developer, as it ships
+ *   74d0b1e6a9c3f852   no such role
+ */
+export function roleRevision(definition: Pick<RoleDefinition, 'name' | 'description' | 'permissions' | 'protected'> | null): string {
+  const said = definition === null ? null : [definition.name, definition.description, [...definition.permissions].sort(), [...definition.protected].sort()];
+  return createHash('sha256').update(JSON.stringify(said)).digest('hex').slice(0, 16);
+}
+
+/** A revision as `roleRevision` writes it. */
+export const ROLE_REVISION = /^[0-9a-f]{16}$/;
+
 export type ChangePolicyInput = Correlation & Through & {
   actor: string;
   change: PolicyChange;

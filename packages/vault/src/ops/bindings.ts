@@ -49,7 +49,7 @@ import type { Deciding } from '../vault.ts';
 import { asking } from './asking.ts';
 import type { Operations } from './index.ts';
 import { long, presented, text } from './input.ts';
-import { definitionsOf, held, manages, projectsOf, serviceOf, serviceParts, settingOf } from './services.ts';
+import { definitionsOf, manages, projectsOf, serviceOf, serviceParts, settingOf } from './services.ts';
 import { by, labelled, scopeAsked, sealedScope, SLUG, type Wanted } from './signin.ts';
 
 /** A binding's id, as the vault draws one. */
@@ -247,7 +247,7 @@ function tokenBind(input: Presented & TokenBind, vault: Deciding): Operation<Par
       // Oldest first, as an exchange tries them: a read's rows come in no order.
       const live = seen.live.filter((binding) => binding.principal === member && binding.generation === row.generation && binding.revokedAt === null)
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : 1));
-      const holder = held(caller);
+      const holder = caller.holds;
       const policy: Policy = { ...holder.policy, roles: { ...definitionsOf(seen.heldAs), ...definitionsOf(seen.asked), ...holder.policy.roles } };
       const issuer: Holdings & { policy: Policy } = { ...holder, policy };
       const setting = settingOf(seen);

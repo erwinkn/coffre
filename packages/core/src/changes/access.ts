@@ -107,15 +107,19 @@ export type AccessGrant = {
  * instance's that ships (Admin, Auditor). Owner, and the instance's Member,
  * are never edited. `definition` null puts a role that ships back as it
  * ships, and deletes one an Owner made, refused `role_granted` while a
- * grant names it. A project role that holds what only a project has
+ * grant names it, as is defining one that does not ship and is not there.
+ * A project role that holds what only a project has
  * (`PROJECT_ONLY_PERMISSIONS`) is refused `invalid` while a grant on an
- * environment names it. `was` is the role as the caller saw it, null for
- * none: one that changed since is refused `policy_changed`, so that a
- * change is made from the role its preview was. An id is a role's as
- * `ROLE_ID` has it; a definition one `definitionProblem` passes: past those
- * the call is a fault, not a refusal: the app checks them first.
+ * environment names it, as is deleting a role that is not there.
+ * `revision` is the role as its preview weighed it (`roleRevision`), none
+ * included: one that changed since is refused `policy_changed`, so that a
+ * change is made from the role its preview was. Left out, the change is
+ * made from the role as it is. An id is a role's as `ROLE_ID` has it; a
+ * definition one `definitionProblem` passes; a revision one
+ * `ROLE_REVISION` matches: past those the call is a fault, not a refusal:
+ * the app checks them first.
  */
-export type RoleEdit = { op: 'policy.change'; instance: boolean; role: Role; definition: RoleDefinition | null; was: RoleDefinition | null };
+export type RoleEdit = { op: 'policy.change'; instance: boolean; role: Role; definition: RoleDefinition | null; revision?: string };
 
 /**
  * Where people set up service accounts themselves (`settings.change`,

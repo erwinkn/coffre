@@ -22,9 +22,16 @@ const iso = (value: Date | string | null): string | null => (value === null ? nu
  * its environments: one statement. A deletion's tombstone is no place. The
  * rows are read as they are, their MACs unchecked: they say what a page
  * lists, and decide no use and no change.
+ *
+ *   granting  only the projects a grant naming this project role is on,
+ *             lapsed or of a membership before a removal too
+ *   most      at most one environment past this many, to see there are more
+ *             (a project with none is one): the caller refuses past it
  */
-export async function places(db: Queryable, within: readonly string[] | null): Promise<PlaceRow[]> {
+export async function places(db: Queryable, within: readonly string[] | null, only: { granting?: string; most?: number } = {}): Promise<PlaceRow[]> {
   const scoped = within === null ? sql`true` : sql`p.id = ANY(${sql.param([...within])}::uuid[])`;
+  const granting = only.granting === undefined ? sql`true` : sql`p.id IN (SELECT COALESCE(g.project_id, ge.project_id) FROM grants g LEFT JOIN environments ge ON ge.id = g.environment_id WHERE g.role = ${only.granting})`;
+  const most = only.most === undefined ? sql`` : sql` LIMIT ${only.most + 1}`;
   const rows = await rowsOf<{ project_id: string; project: string; project_archived_at: Date | string | null; folder: string | null; id: string | null; slug: string; archived_at: Date | string | null; protected: boolean; owner: string | null; parent_id: string | null; parent_slug: string | null; parent_archived: boolean | null; parent_protected: boolean | null }>(
     db,
     sql`
@@ -34,8 +41,8 @@ export async function places(db: Queryable, within: readonly string[] | null): P
       FROM projects p
       LEFT JOIN environments e ON e.project_id = p.id AND strpos(e.slug, '~') = 0
       LEFT JOIN environments parent ON parent.id = e.parent_id AND strpos(parent.slug, '~') = 0
-      WHERE ${scoped} AND strpos(p.slug, '~') = 0
-      ORDER BY p.slug, e.slug`,
+      WHERE ${scoped} AND ${granting} AND strpos(p.slug, '~') = 0
+      ORDER BY p.slug, e.slug${most}`,
   );
   const found = new Map<string, PlaceRow>();
   for (const row of rows) {
