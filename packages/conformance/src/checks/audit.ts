@@ -141,7 +141,8 @@ export async function writesAgree(deployment: Deployment): Promise<string> {
     for (const body of await logBodies(sql)) {
       if (!WRITES.has(body.action) || body.detail.refused !== undefined) continue;
       // Each is someone's, through one request the server passed the vault (docs/design/0.16.md, "The server").
-      expect(body.actor !== null && body.request !== null, `a committed ${body.action} names no actor or no request`, body);
+      const named = (field: unknown) => typeof field === 'string' && field !== '';
+      expect(named(body.actor) && named(body.request), `a committed ${body.action} names no actor or no request`, body);
       for (const line of (body.detail.keys ?? []) as { secret?: string; version?: number }[]) {
         if (line.version === undefined) continue;
         const name = `${line.secret} ${line.version}`;

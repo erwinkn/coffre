@@ -5,7 +5,10 @@ import { writesAgree } from '../src/checks/audit.ts';
 import type { Deployment } from '../src/harness.ts';
 import { scratch } from './scratch.ts';
 
-async function versions(t: test.TestContext, written: number[]): Promise<Deployment> {
+/** A write entry's attribution, as the vault writes it: who, and through which request. */
+const BY = '"actor":"user:writer@acme.example","request":"request-1"';
+
+async function versions(t: test.TestContext, written: number[], by = BY): Promise<Deployment> {
   const database = await scratch(t);
   const sql = await database();
   const keys = written.map((version) => `{"key":"API_KEY","secret":"secret","version":${version}}`).join(',');
@@ -18,8 +21,8 @@ async function versions(t: test.TestContext, written: number[]): Promise<Deploym
     INSERT INTO projects VALUES ('project', 'conformance');
     INSERT INTO secrets VALUES ('secret', 'project', 'API_KEY');
     INSERT INTO secret_versions VALUES ('v1', 'secret', 1), ('v2', 'secret', 2);
-    INSERT INTO log VALUES (0, '{"action":"secret.write","detail":{"keys":[${keys}]}}');
-    INSERT INTO log_pending VALUES (1, '{"action":"secret.write","detail":{"keys":[{"key":"API_KEY","secret":"secret","version":2}]}}');
+    INSERT INTO log VALUES (0, '{"action":"secret.write",${by}${by === '' ? '' : ','}"detail":{"keys":[${keys}]}}');
+    INSERT INTO log_pending VALUES (1, '{"action":"secret.write",${BY},"detail":{"keys":[{"key":"API_KEY","secret":"secret","version":2}]}}');
   `);
   await sql.close();
   return { database } as Deployment;
@@ -35,4 +38,10 @@ test('a stored version without a write entry fails conformance', async (t) => {
 
 test('a stored version written twice fails conformance', async (t) => {
   await assert.rejects(writesAgree(await versions(t, [1, 2])), /a stored version has no unique write entry/);
+});
+
+test('a committed write that names no actor or no request fails conformance', async (t) => {
+  for (const by of ['', '"actor":null,"request":null', '"actor":"user:writer@acme.example"', '"request":"request-1"', '"actor":"","request":"request-1"']) {
+    await assert.rejects(writesAgree(await versions(t, [1], by)), /names no actor or no request/, by);
+  }
 });

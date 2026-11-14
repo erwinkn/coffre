@@ -232,6 +232,14 @@ export async function mcpConnect(deployment: Deployment, people: People): Promis
   expect(done(), 'the log does not hold each connection, token and disconnection', counts);
   const reasons = mine.filter((entry) => entry.action === 'mcp.disconnect').map((entry) => entry.metadata.reason).sort();
   expect(JSON.stringify(reasons) === JSON.stringify(['code_reused', 'refresh_reused']), 'the disconnections do not say why', reasons);
+  // The reader connected, redeemed and disconnected; a reuse's disconnect is the vault's own, with no one's name on it.
+  const by = (entry: AuditEntryView) => `${entry.action} ${entry.actorType}:${entry.actorId}`;
+  const reader = (entry: AuditEntryView) => entry.actorType === 'user' && entry.actorId === people.reader.email;
+  const vault = (entry: AuditEntryView) => entry.actorType === 'system' && entry.actorId === 'vault';
+  const counted = mine.filter((entry) => ['mcp.connect', 'mcp.token', 'mcp.disconnect'].includes(entry.action));
+  const misnamed = [...counted, ...entries.filter((entry) => entry.action === 'token.revoke' && entry.metadata.credential === listed[0]!.id)]
+    .filter((entry) => entry.decision === 'allow' && !(entry.action === 'mcp.disconnect' ? vault(entry) : reader(entry)));
+  expect(misnamed.length === 0, "the log names someone else for the reader's connections, or someone for a reuse's disconnect", misnamed.map(by));
   return '401 and both metadata documents; registered, approved, redeemed and discovered; only at /mcp, and only its token there; a reused refresh token, a reused code and a disconnection each end the connection, and the log says so';
 }
 
