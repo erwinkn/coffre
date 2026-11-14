@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { personalOf, secretKey } from '@coffre/core/schemas';
+import { environmentPath, personalOf, secretKey, slug } from '@coffre/core/schemas';
 import type { Nature } from '@coffre/core/vault';
 import { z } from 'zod';
 
@@ -37,6 +37,20 @@ export function versionOf(read: readonly { key: string; secret: string; version:
 /** What a whole environment's read leaves out and names, and what it leaves out as not there: any other refusal of a key refuses the read. */
 const LEFT_OUT = new Set(['sensitive', 'use_only', 'unknown_key', 'no_value']);
 
+/**
+ * `market/prod` or `market/prod/KEY`, each part as a path's segment is
+ * (`PARAMS`): the vault takes a name as given, and one it cannot store is
+ * its fault, not a refusal.
+ */
+const readPath = z.string().max(400).transform((text, issue) => {
+  const path = parsePath(text, [2, 3]);
+  if (!slug.safeParse(path.project).success || !environmentPath.safeParse(path.environment).success || (path.key !== undefined && !secretKey.safeParse(path.key).success)) {
+    issue.addIssue({ code: 'custom', message: `"${text.slice(0, 80)}" names no environment or secret` });
+    return z.NEVER;
+  }
+  return { project: path.project, environment: path.environment!, key: path.key };
+});
+
 export const secretRoutes = {
   /**
    * The only way to open a value, and a POST so nothing can trigger it by
@@ -52,32 +66,34 @@ export const secretRoutes = {
    * without it.
    */
   ...route('POST /reveals', {
-    input: z.object({ path: z.string().max(400), keys: z.array(secretKey).min(1).max(MOST_READ).optional() }).strict(),
+    input: z.object({ path: readPath, keys: z.array(secretKey).min(1).max(MOST_READ).optional() }).strict(),
     run: async (ctx, { input }) => {
-      const path = parsePath(input.path, [2, 3]);
+      const { path } = input;
+      const named = `${path.project}/${path.environment}`;
       if (input.keys !== undefined && path.key !== undefined) throw badRequest('keys names keys of an environment: give its path, <project>/<environment>');
       const one = path.key;
       const answer = await ctx.vault.use({
         ...ctx.shown,
         project: path.project,
-        ...environmentOf(path.environment!),
+        ...environmentOf(path.environment),
         keys: one === undefined ? (input.keys ?? null) : [one],
         purpose: one === undefined ? 'run' : 'reveal',
         upstream: null,
       });
-      if ('refused' in answer) throw refusal(answer.refused, input.path);
+      if ('refused' in answer) throw refusal(answer.refused, one === undefined ? named : `${named}/${one}`);
       // A null-prototype record: a key named __proto__ is a key like any other.
       const values: Record<string, string> = Object.create(null);
       const read: { key: string; secret: string; version: number }[] = [];
       const left: Record<string, string[]> = { sensitive: [], use_only: [] };
+      const stops = answer.values.filter((item) => 'refused' in item && (one !== undefined || !LEFT_OUT.has(item.refused))) as { key: string; refused: string }[];
+      // Before any other refusal, as 0.14: past a key's name, a fork says nothing of what its reader cannot read.
+      const stop = stops.find((item) => item.refused === 'parent_unreadable') ?? stops[0];
+      if (stop !== undefined) throw refusal(stop.refused, `${named}/${stop.key}`);
       for (const item of answer.values) {
-        if (!('refused' in item)) {
+        if ('refused' in item) left[item.refused]?.push(item.key);
+        else {
           values[item.key] = item.value;
           read.push(item);
-        } else if (one !== undefined || !LEFT_OUT.has(item.refused)) {
-          throw refusal(item.refused, `${path.project}/${path.environment}/${item.key}`);
-        } else {
-          left[item.refused]?.push(item.key);
         }
       }
       return { operationId: ctx.shown.request, values: { ...values }, sensitive: left.sensitive!, useOnly: left.use_only!, version: one === undefined ? versionOf(read) : null };
@@ -102,7 +118,7 @@ export const secretRoutes = {
       const { environment, mine } = environmentOf(params.environment);
       if (mine) throw new ApiError('not_implemented', `a write to ${params.project}/${params.environment}, your personal config, is not served yet`);
       const values = Object.entries(input).map(([key, written]) => (typeof written === 'string' ? { key, value: written, nature: 'secret' as Nature } : { key, value: written.value, nature: written.sensitivity as Nature }));
-      const answer = await ctx.vault.change({ ...ctx.shown, op: 'secret.write', project: params.project, environment, values });
+      const answer = await ctx.vault.change({ ...ctx.shown, op: 'secret.write', project: params.project, environment, keys: values });
       if ('refused' in answer) throw refusal(answer.refused, `${params.project}/${params.environment}`);
       const keys: Record<string, { version: number; sensitivity: Nature }> = Object.create(null);
       for (const { key, nature } of values) keys[key] = { version: answer.answer.versions[key]!, sensitivity: nature };

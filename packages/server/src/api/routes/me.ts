@@ -34,10 +34,11 @@ export const meRoutes = {
         for (const environment of project.environments) {
           if (environment.archived) continue;
           // Someone else's personal config is no place of yours; your own goes by `dev@me`, while the environment it is a config of is there.
-          if (environment.owner !== null && (environment.owner !== who.principal || project.environments.find((other) => other.id === environment.parentId)?.archived !== false)) continue;
+          const { parent } = environment;
+          if (environment.owner !== null && (environment.owner !== who.principal || parent === null || parent.archived)) continue;
           const permissions = permissionsAt(who, placeOf(project, environment));
           if (permissions.length === 0) continue;
-          environments.push({ project: project.slug, environment: environment.owner === null ? environment.slug : `${environment.parentSlug ?? '?'}@me`, permissions });
+          environments.push({ project: project.slug, environment: environment.owner === null ? environment.slug : `${parent!.slug}@me`, permissions });
         }
       }
       const service = who.principal.startsWith('token:');

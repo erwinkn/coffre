@@ -61,6 +61,7 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
+    "typecheck:skeleton": "tsc --noEmit -p tsconfig.skeleton.json",
     "test": "node --conditions=coffre:source --test"
   },
   "dependencies": {

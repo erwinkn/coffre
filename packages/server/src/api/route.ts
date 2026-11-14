@@ -1,5 +1,5 @@
-import { environmentPath, folderName, roleId, secretKey, slug } from '@coffre/core/schemas';
-import { z } from 'zod';
+import { environmentPath, secretKey, slug } from '@coffre/core/schemas';
+import type { z } from 'zod';
 
 import type { ApiContext } from './context.ts';
 
@@ -36,14 +36,10 @@ export function route<
   return { [key]: def } as { [K in Key]: Route<Key, S, Output, Q> };
 }
 
-/** What each named segment of a path may hold. */
+/** What each named segment of a path may hold: an area adds the segments its routes name. */
 export const PARAMS: Record<string, z.ZodType<string>> = {
   project: slug,
   // A slug, or `<slug>@me` for the caller's personal config of it.
   environment: environmentPath,
   key: secretKey,
-  member: z.string().min(3).max(330),
-  id: z.string().uuid(),
-  folder: folderName,
-  role: roleId,
 };

@@ -2,7 +2,7 @@
 // real vault over the suite's database, through JSON as over any transport,
 // and the app's own login for what its pages list. `calls` and `statements`
 // say what one request cost.
-import { github, signin } from '@coffre/core/identity';
+import { github, signin, type Auth } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
@@ -26,6 +26,8 @@ export type TestApp = {
   calls: string[];
   /** How many statements the app ran on its own connection. */
   readonly statements: number;
+  /** What it executed, oldest first, as Drizzle's `SQL`: for a test to read a statement's parameters. */
+  executed: unknown[];
   /** A request, as a deployment's Start app answers one: coffre's middleware around coffre's route. */
   request(path: string, init?: RequestInit): Promise<Response>;
   /** A page's render for a request, with what coffre hands it. */
@@ -33,20 +35,22 @@ export type TestApp = {
   close(): Promise<void>;
 };
 
-/** `database`: another than the suite's, by name, for the app's own connection. */
-export async function openApp({ database }: { database?: string } = {}): Promise<TestApp> {
+/** `database`: another than the suite's, by name, for the app's own connection. `auth`: another than coffre's own sign-in. */
+export async function openApp({ database, auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }) }: { database?: string; auth?: Auth } = {}): Promise<TestApp> {
   const { world, vault } = await openConfiguredVault({ kek: { id: 'app-test', key: Buffer.alloc(32, 9).toString('base64') }, owners: ['root@acme.example'] });
   const url = new URL(APP_URL);
   if (database !== undefined) url.pathname = `/${database}`;
   const app = await openDatabase(url.href);
   const calls: string[] = [];
   let statements = 0;
+  const executed: unknown[] = [];
   const counted = new Proxy(app.db, {
     get(target, name, receiver) {
       const member = Reflect.get(target, name, receiver) as unknown;
       if (typeof member !== 'function' || !['execute', 'select', 'insert', 'update', 'delete', 'transaction'].includes(String(name))) return member;
       return (...args: unknown[]) => {
         statements += 1;
+        if (name === 'execute') executed.push(args[0]);
         return (member as (...args: unknown[]) => unknown).apply(target, args);
       };
     },
@@ -60,7 +64,7 @@ export async function openApp({ database }: { database?: string } = {}): Promise
   const config = resolveConfig({
     publicUrl: PUBLIC_URL,
     vault: recorded,
-    auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }),
+    auth,
     auditChainKey: Buffer.alloc(32, 3).toString('base64'),
   });
   const scope = requestScope(createRuntime(config, counted, recorded), () => '192.0.2.7');
@@ -71,6 +75,7 @@ export async function openApp({ database }: { database?: string } = {}): Promise
     get statements() {
       return statements;
     },
+    executed,
     request(path, init) {
       const request = new Request(`${PUBLIC_URL}${path}`, init);
       return scope.respond(request, () => scope.route(request));

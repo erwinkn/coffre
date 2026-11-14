@@ -13,7 +13,7 @@ import { logged } from '../logged.ts';
  *   403 forbidden          the caller lacks the permission
  *   403 registration_required  signed in, but not a member of this instance
  *   403 cross_origin       a change sent with a browser cookie, from another site
- *   403 vault_refused      the vault said no; `reason` is its code (`no_grant`, `removed`, ...)
+ *   403 vault_refused      the vault said no; `reason` is its word (`no_access`, ...)
  *   403 bulk_limit         the vault said no: too many secrets read in too short a time
  *   403 insufficient_scope a request through MCP whose connection lacks the scope the route needs
  *   404 not_found          no such project, environment, secret or member
@@ -73,14 +73,6 @@ export const forbidden = (message = 'you do not have permission to do that') =>
 export const notFound = (message = 'not found') => new ApiError('not_found', message);
 export const conflict = (message: string) => new ApiError('conflict', message);
 /**
- * A route of docs/design/workload-access.md that is declared, in every map
- * that lists the API, before the change that serves it: its message names
- * that change.
- */
-export const notBuilt = (what: string, change: string) =>
-  new ApiError('not_implemented', `${what} is not served yet: docs/design/workload-access.md, ${change}, brings it`);
-
-/**
  * The vault's refusals the API words itself, each with its code. Any other
  * is 403 `vault_refused`, the vault's word as its `reason`: an area's
  * operations add theirs here as they are served.
@@ -98,6 +90,7 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   unknown_key: ['not_found', 'unknown secret'],
   no_value: ['not_found', 'that secret holds no value'],
   unreadable: ['conflict', 'that is a reference whose source cannot be read'],
+  archived: ['conflict', 'that secret is archived: bring it back before writing it'],
   broken_chain: ['conflict', 'the environment inherits from one that is gone'],
 };
 

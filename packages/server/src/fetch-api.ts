@@ -1,16 +1,13 @@
 import { createClient, type CoffreClient } from '@coffre/client';
-import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig } from '@coffre/core/identity';
+import { tokenKind, type AuthConfig } from '@coffre/core/identity';
 import type { Called, Presented } from '@coffre/core/vault';
 
 import { callerOf } from './api/context.ts';
 import { ApiError } from './api/errors.ts';
 import { serveApi } from './api/router.ts';
-import { bearerToken, presented, readCookie, sessionCookie, sessionCookieName } from './auth.ts';
+import { bearerToken, presented, sessionCookie, sessionCookieName } from './auth.ts';
 import { errorResponse } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
-
-/** The cookie Cloudflare Access keeps its session in, on the browser. */
-const ACCESS_COOKIE = 'CF_Authorization';
 
 /**
  * How a request proves who it is. A cookie is `ambient`: the browser attaches
@@ -19,20 +16,8 @@ const ACCESS_COOKIE = 'CF_Authorization';
  */
 export type ApiCredential = { token: string; ambient: boolean };
 
-const nonEmpty = (value: string | null) => (value === null || value.length === 0 ? null : value);
-
-/**
- * The credential an API call carries. With coffre's sign-in, the CLI and
- * service tokens send a bearer token, and the browser the cookie its sign-in
- * set. Behind Cloudflare Access every request carries Access's assertion,
- * and the browser's carry Access's cookie as well, which is what gives them
- * away.
- */
+/** The credential an API call carries: the CLI and service tokens send a bearer token, and the browser the cookie its sign-in set. */
 export function apiCredential(request: Request, auth: AuthConfig): ApiCredential | null {
-  if (auth.mode === 'cloudflare') {
-    const token = nonEmpty(request.headers.get(ACCESS_JWT_HEADER));
-    return token === null ? null : { token, ambient: readCookie(request, ACCESS_COOKIE) !== null };
-  }
   const header = bearerToken(request);
   if (header !== null) return { token: header, ambient: false };
   const cookie = sessionCookie(request, auth);
@@ -70,10 +55,10 @@ type AskCaller = (shown: Presented) => Promise<Called>;
  */
 export async function fetchApi(request: Request, runtime: CoffreRuntime, options: { sourceIp: string | null; caller?: AskCaller }): Promise<Response> {
   try {
+    // Behind Access a request carries Access's assertion, which is no credential of the vault's (docs/design/0.16.md, "Still to design").
+    if (runtime.auth.mode === 'cloudflare') throw new ApiError('not_implemented', 'coffre behind Cloudflare Access is not served yet');
     const credential = apiCredential(request, runtime.auth);
-    if (credential === null) {
-      throw new ApiError('unauthenticated', runtime.auth.mode === 'cloudflare' ? 'sign in through Cloudflare Access first' : 'sign in first');
-    }
+    if (credential === null) throw new ApiError('unauthenticated', 'sign in first');
     if (credential.ambient && !SAFE_METHODS.has(request.method) && !isSameOrigin(request, runtime.publicUrl)) {
       throw new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself');
     }
@@ -90,26 +75,14 @@ export async function fetchApi(request: Request, runtime: CoffreRuntime, options
       vault: runtime.vault,
       shown,
       caller: () => (asked ??= ask(shown)),
-      waitUntil: runtime.waitUntil,
-      rotateAfterDays: runtime.rotateAfterDays,
     });
   } catch (error) {
     return errorResponse(error);
   }
 }
 
-/**
- * The page's credential, and nothing else of its request: the session
- * cookie, or Access's assertion and cookie behind Cloudflare. Every other
- * cookie and header stays behind.
- */
+/** The page's credential, and nothing else of its request: the session cookie. Every other cookie and header stays behind. */
 export function pageCredential(page: Request, auth: AuthConfig): Record<string, string> {
-  if (auth.mode === 'cloudflare') {
-    const token = nonEmpty(page.headers.get(ACCESS_JWT_HEADER));
-    const cookie = readCookie(page, ACCESS_COOKIE);
-    // Access's cookie too, when the browser sent it: what tells a browser's page from any other caller.
-    return token === null ? {} : { [ACCESS_JWT_HEADER]: token, ...(cookie === null ? {} : { cookie: `${ACCESS_COOKIE}=${encodeURIComponent(cookie)}` }) };
-  }
   const token = sessionCookie(page, auth);
   return token === null ? {} : { cookie: `${sessionCookieName(auth)}=${encodeURIComponent(token)}` };
 }

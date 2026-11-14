@@ -7,7 +7,7 @@ import type { Presented } from '@coffre/core/vault';
  * verifies nothing: the vault finds the credential by the hash, and decides.
  */
 
-function cookieValue(request: Request, name: string): string | null {
+function readCookie(request: Request, name: string): string | null {
   const raw = request.headers.get('cookie');
   if (raw === null) return null;
   for (const part of raw.split(';')) {
@@ -35,10 +35,6 @@ export function sessionCookieName(auth: AuthConfig): string {
     : 'coffre_session';
 }
 
-export function readCookie(request: Request, name: string): string | null {
-  return cookieValue(request, name);
-}
-
 /**
  * The browser's session, from its cookie in signin mode. Never a personal
  * token: that is a bearer token, sent in a header, and what trusts the
@@ -46,7 +42,7 @@ export function readCookie(request: Request, name: string): string | null {
  * at their browser, which a token planted in the cookie is not.
  */
 export function sessionCookie(request: Request, auth: AuthConfig): string | null {
-  const token = cookieValue(request, sessionCookieName(auth));
+  const token = readCookie(request, sessionCookieName(auth));
   return token === null || tokenKind(token) === 'personal' ? null : token;
 }
 

@@ -17,10 +17,6 @@ export type ApiContext = {
    * itself.
    */
   caller(): Promise<Called>;
-  /** Background work that must outlive the response, that is explicitly scheduled. */
-  waitUntil: (promise: Promise<unknown>) => void;
-  /** Days a value may go unchanged before it is flagged for rotation (`rotateAfterDays`), or null for no flag. */
-  rotateAfterDays: number | null;
 };
 
 /** Who a request is, as the vault answers it; its refusal, thrown as the API's. */

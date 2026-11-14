@@ -64,16 +64,13 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     request(env, ctx) {
       const entry = configured(env);
       const pool = new HyperdrivePool(entry.config.database.hyperdrive.connectionString);
+      const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault);
       const left: Promise<unknown>[] = [];
-      const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, (promise) => {
-        left.push(promise);
-        ctx.waitUntil(promise);
-      });
       let closing: Promise<void> | undefined;
       /**
-       * Close the client once `work`, and whatever the invocation left to
-       * finish, are: the work of its request, a page with the API calls its
-       * render made inside it.
+       * Close the client once `work`, and whatever else the invocation is
+       * told of meanwhile, are done: its middleware's answer, and the
+       * route or the page with the API calls its render made inside it.
        */
       const close = (work: Promise<unknown>) => {
         left.push(work);
