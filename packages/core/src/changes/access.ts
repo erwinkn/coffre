@@ -17,9 +17,10 @@ export type AccessAnswers = {
    * revoked, and, of their generation, live sessions (browser and CLI),
    * tokens (every other credential but an MCP connection's) and connected
    * apps (an MCP connection its client redeemed), which the generation's
-   * move ends.
+   * move ends; and whether the caller runs the instance (`runs`), as the
+   * change found them: the leaver's report is theirs to read.
    */
-  'member.remove': { revoked: number; sessions: number; tokens: number; identities: number; apps: number };
+  'member.remove': { revoked: number; sessions: number; tokens: number; identities: number; apps: number; runs: boolean };
   /** What became of each place, in the order asked; with `admit`, whether this change admitted the service account. */
   'access.grant': { changes: AccessChange[]; created?: boolean };
   /** The role as it is now: null once deleted. */

@@ -2,7 +2,7 @@
 // own pages, until they leave, and never too much at once.
 import { bearer } from '../browser.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, refused } from '../report.ts';
+import { expect, refused, until } from '../report.ts';
 import { BULK, canary, DEV, PROD, PROJECT, signIn, valuesIn, type Canaries, type People } from './people.ts';
 import { connectedApp, discovers } from './mcp.ts';
 import { pollDevice, startDevice } from './signin.ts';
@@ -107,12 +107,15 @@ export async function offboarding(deployment: Deployment, { admin, leaver, servi
   const expected = Object.keys(valuesIn(canaries, DEV)).map((key) => `${DEV}/${key}`).sort();
   expect(same(exposed, expected), 'the offboarding report does not name what they read', report.exposed);
 
-  expect((await leaver.browser.fetch('/api/me')).status === 401, "a removed member's browser session still works");
+  // Within the vault's memory of who they are, 2 seconds (docs/design/0.16.md, D218): no change clears it.
+  await until("the refusal of a removed member's browser session", async () => (await leaver.browser.fetch('/api/me')).status === 401, 5);
+  await until("the refusal of a removed member's CLI session", () => leaver.cli.secrets.list(DEV).then(() => false, () => true), 5);
   await refused("a removed member's CLI session read secrets", leaver.cli.secrets.list(DEV));
   const again = await signIn(deployment, leaver.browser, leaver.email);
   expect(!again.ok, 'a removed member signed in again');
 
   await admin.api.members.remove(service.member);
+  await until("the refusal of a removed service's token", () => service.api.secrets.reveal(DEV).then(() => false, () => true), 5);
   await refused("a removed service's token read secrets", service.api.secrets.reveal(DEV));
   await admin.api.members.add(leaver.member);
   await admin.api.access.set(leaver.member, { [DEV]: 'developer' });

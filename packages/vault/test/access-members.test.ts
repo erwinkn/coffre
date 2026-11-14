@@ -57,7 +57,7 @@ const put = (label: string, who: string, role: string | null = null, scope: unkn
 const as = (created: boolean, role: string, scope: unknown = null) => ({ answer: { role, scope, created } });
 const remove = (label: string, who: string) => asked(label, { op: 'member.remove', principal: who } as never);
 /** A removal's answer: the grants it revoked, and the ways in it ended, none unless said. */
-const removed = (revoked: number, ended: Partial<Record<'sessions' | 'tokens' | 'apps' | 'identities', number>> = {}) => ({ answer: { revoked, sessions: 0, tokens: 0, apps: 0, identities: 0, ...ended } });
+const removed = (revoked: number, ended: Partial<Record<'sessions' | 'tokens' | 'apps' | 'identities', number>> = {}) => ({ answer: { revoked, sessions: 0, tokens: 0, apps: 0, identities: 0, runs: true, ...ended } });
 
 const reveal = (label: string): UseInput => ({ ...shown(label), project: 'market', environment: 'prod', mine: false, keys: ['DATABASE_URL'], purpose: 'reveal', upstream: null });
 /** What a use by `label` is answered: the value, or why not. */
