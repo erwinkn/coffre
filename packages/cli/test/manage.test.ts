@@ -262,6 +262,27 @@ test('projects and environments: create, rename and archive, each one request, b
   await assert.rejects(manage.environmentsCreate(connect, ['deck'], io), /expected <project>\/<environment>, not "deck"/);
 });
 
+test("a project or environment that is there already: 0.16's 409 `exists` and 0.14's `created: false` both say nothing changed, and fail nothing", async () => {
+  const exists = () => Response.json({ error: 'conflict', message: 'that is there already: its slug is taken', reason: 'exists' }, { status: 409 });
+  const now = fixture(exists);
+  await manage.projectsCreate(now.connect, ['slides'], now.io);
+  await manage.environmentsCreate(now.connect, ['slides/prod'], now.io);
+  assert.equal(now.written.out, 'slides exists already: nothing changed\nslides/prod exists already: nothing changed\n');
+  // A fork is a new environment, or nothing: one there already is the refusal, said of the place.
+  await assert.rejects(manage.fork(now.connect, ['slides/prod', 'staging'], now.io), /^Error: slides\/staging is there already: a fork makes a new environment\. Nothing was copied$/);
+  const before = fixture(({ path }) =>
+    path.split('/').length === 4 ? { environment: { slug: 'prod', name: 'prod', archivedAt: null }, created: false } : { project: { slug: 'slides', name: 'slides', archivedAt: null }, created: false });
+  await manage.projectsCreate(before.connect, ['slides'], before.io);
+  await manage.environmentsCreate(before.connect, ['slides/prod'], before.io);
+  assert.equal(before.written.out, now.written.out);
+  // Any other conflict, or a refusal, is no `exists`: it fails.
+  const other = fixture(() => Response.json({ error: 'conflict', message: 'the environment inherits from one that is gone', reason: 'broken_chain' }, { status: 409 }));
+  await assert.rejects(manage.environmentsCreate(other.connect, ['slides/prod'], other.io), CoffreError);
+  const refused = fixture(() => Response.json({ error: 'vault_refused', message: 'no', reason: 'no_access' }, { status: 403 }));
+  await assert.rejects(manage.projectsCreate(refused.connect, ['slides'], refused.io), CoffreError);
+  assert.equal(other.written.out + refused.written.out, '');
+});
+
 test('projects delete and environments delete show what they would take, and delete only with --apply', async () => {
   const deletion = (path: string, dryRun: boolean) => ({
     dryRun,

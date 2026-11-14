@@ -8,7 +8,7 @@ import { openSync, closeSync, writeSync, rmSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
 import { INSTANCE_ROLES, isInstanceRole, MAX_PERSONAL_TOKEN_MINUTES, PROJECT_ONLY_PERMISSIONS, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
-import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion, type RoleView, type RouteInput } from '@coffre/client';
+import { apiMember, byFolder, CoffreError, serviceName, shownMember, type CoffreClient, type Deletion, type RoleView, type RouteInput } from '@coffre/client';
 
 import { describeRemoval, reaches, scopeFrom, serviceMember } from './trust.ts';
 
@@ -129,8 +129,19 @@ export async function projectsCreate(connect: () => CoffreClient, args: string[]
   nameIgnored(values, 'project', io);
   const api = connect();
   // The slug as its name too: an instance before 0.6.2 wants one.
-  const made = await api.projects.create(project, { name: project });
-  io.out.write(made.created ? `created ${made.project.slug}\n` : `${made.project.slug} exists already: nothing changed\n`);
+  const created = await api.projects.create(project, { name: project }).then(({ created }) => created, unlessThere);
+  io.out.write(created ? `created ${project}\n` : `${project} exists already: nothing changed\n`);
+}
+
+/** A place that is there already: refused, 409 `exists`, since 0.16; 0.14 answered it unchanged, `created: false`. */
+function isThere(error: unknown): boolean {
+  return error instanceof CoffreError && error.status === 409 && error.reason === 'exists';
+}
+
+/** Creating what is there already changes nothing, as 0.14 said: not created, and no failure. */
+function unlessThere(error: unknown): false {
+  if (isThere(error)) return false;
+  throw error;
 }
 
 export async function environmentsCreate(connect: () => CoffreClient, args: string[], io: Io = STDIO): Promise<void> {
@@ -138,16 +149,16 @@ export async function environmentsCreate(connect: () => CoffreClient, args: stri
   const { project, environment } = place(positionals[0]!, true);
   nameIgnored(values, 'environment', io);
   const api = connect();
-  const made = await api.environments.create(`${project}/${environment}`, { name: environment! });
-  const path = `${project}/${made.environment.slug}`;
-  io.out.write(made.created ? `created ${path}\n` : `${path} exists already: nothing changed\n`);
+  const path = `${project}/${environment}`;
+  const created = await api.environments.create(path, { name: environment! }).then(({ created }) => created, unlessThere);
+  io.out.write(created ? `created ${path}\n` : `${path} exists already: nothing changed\n`);
 }
 
 /**
  * `coffre fork market/prod staging`: a new environment beside it, with each
  * live key's value and folder, and none of its history. Copying is a read,
- * logged as one; running it again fills the environment if it stopped
- * half way. With --inherit, nothing is copied or read: the fork reads its
+ * logged as one, and all of it in the one change that makes it: one that
+ * is there already is refused (0.14 filled it). With --inherit, nothing is copied or read: the fork reads its
  * parent's keys live, but for those it sets or removes, and its readers
  * need read on the parent for those (docs/design/forking.md).
  */
@@ -172,6 +183,8 @@ export async function fork(connect: () => CoffreClient, args: string[], io: Io =
     from: from!,
     ...(values.reference ? { references: true } : {}),
     ...(values.inherit ? { inherit: true } : {}),
+  }).catch((error: unknown) => {
+    throw isThere(error) ? new Error(`${project}/${slug} is there already: a fork makes a new environment. Nothing was copied`) : error;
   });
   if (values.inherit) {
     if (made.forked?.inherits !== true) {

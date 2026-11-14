@@ -2050,6 +2050,8 @@ const sessionFlags = attempt(() => readSession(line.session));
 
 /** The API of the instance the session names, asked for once a command has read its arguments. */
 const connect = () => client();
+/** The API, for a command that makes a place: a 409 comes back to it, which says one that is there already (`exists`) changed nothing. */
+const making = () => client(target(), undefined, [409]);
 
 /** Each command, by the words that name it: those `coffre help` lists, each one (`commands.ts`). */
 const COMMANDS: Record<Command, (args: string[]) => unknown> = {
@@ -2096,15 +2098,15 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   'missing dismiss': (args) => manage.missingDismiss(connect, args, true),
   'missing restore': (args) => manage.missingDismiss(connect, args, false),
   projects: (args) => manage.projects(connect, args),
-  'projects create': (args) => manage.projectsCreate(connect, args),
+  'projects create': (args) => manage.projectsCreate(making, args),
   'projects rename': (args) => manage.projectsRename(connect, args),
   'projects archive': (args) => manage.projectsArchive(connect, args, true),
   'projects unarchive': (args) => manage.projectsArchive(connect, args, false),
   'projects delete': (args) => manage.placeDelete(connect, args, false),
-  'environments create': (args) => manage.environmentsCreate(connect, args),
+  'environments create': (args) => manage.environmentsCreate(making, args),
   references: (args) => manage.references(connect, args),
   'references break': (args) => manage.referencesBreak(connect, args),
-  fork: (args) => manage.fork(connect, args),
+  fork: (args) => manage.fork(making, args),
   personal: (args) => manage.personal(connect, args),
   'environments rename': (args) => manage.environmentsRename(connect, args),
   'environments archive': (args) => manage.environmentsArchive(connect, args, true),

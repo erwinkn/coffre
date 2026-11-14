@@ -127,6 +127,12 @@
   instance`, as the owner, holds the log's newest page, 200 entries, to the
   head the signer signed (`owner log proofs`), where 0.14.7 walked the whole
   log; as a token, it no longer checks the log.
+- **A project or environment that is there already is refused.** Its
+  `PUT` answers 409 `exists`, where 0.14.7 answered it unchanged, `created:
+  false`. `coffre projects create` and `coffre environments create` still
+  say it exists already and that nothing changed, and succeed, so a script
+  that makes what it needs runs as before; `coffre fork` into an
+  environment that is there is refused, where 0.14.7 filled it.
 - **A restored version comes back as typed.** Restoring a version a recipe
   made, or one half of a key pair, writes it as a value typed by hand:
   Regenerate no longer makes its next one by that recipe, and the pair's
