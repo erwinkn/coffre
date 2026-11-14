@@ -141,7 +141,9 @@ type LogRow = { seq: string; kept: boolean; leaf: string; body: string };
  * not within a run (docs/conformance.md).
  */
 export async function logCut(deployment: Deployment, { admin }: People): Promise<string> {
-  const said = (tree: string) => deployment.output().split(`- cut ${tree}:`).length - 1;
+  // Each alert the signer sent, in order: one per check that found something, its findings one per line.
+  const alerts = () => deployment.output().split("coffre's signer reports (").slice(1);
+  const trees = ['kept', 'aging'] as const;
   const out: LogRow[] = [];
   const seqs = new Set<number>();
   await using(deployment.database(), async (sql) => {
@@ -149,11 +151,15 @@ export async function logCut(deployment: Deployment, { admin }: People): Promise
       // Nothing waits: an entry signed after the cut would end its tree again, and leave the cut to the walk.
       await until('nothing waiting to be signed', async () => (await query(sql, 'SELECT 1 FROM log_pending LIMIT 1')).length === 0, PUBLISHED_SECONDS);
       const tree = kept ? 'kept' : 'aging';
-      const before = said(tree);
+      const before = alerts().length;
       const [row] = await query<LogRow>(sql, 'DELETE FROM log WHERE kept = $1 AND leaf = (SELECT max(leaf) FROM log WHERE kept = $1) RETURNING seq::text, kept, leaf::text, body', [kept]);
       expect(row !== undefined, `the log has no ${tree} entry to cut`);
       out.push(row);
-      await until(`the signer's alert naming - cut ${tree}:`, async () => said(tree) > before, PUBLISHED_SECONDS);
+      let alert: string | undefined;
+      await until(`the signer's alert naming - cut ${tree}:`, async () => (alert = alerts().slice(before).find((text) => text.includes(`- cut ${tree}:`))) !== undefined, PUBLISHED_SECONDS);
+      // Found afresh: the check that names it names no cut put back before, so a finding let go is not one said again.
+      const again = trees.filter((other) => other !== tree && alert!.includes(`- cut ${other}:`));
+      expect(again.length === 0, 'the signer names again a cut put back before', { tree, again, alert });
       // The page's stretch lacks it, by its tree's count, and lists it nowhere as proven.
       const page = await admin.api.audit.list({ detail: '1', limit: 200 });
       const seq = Number(row.seq);
