@@ -36,18 +36,14 @@
   "durable_objects": {
     "bindings": [
       { "name": "SOCKETS", "class_name": "CoffreSockets" },
-      { "name": "GATES", "class_name": "CoffreGates" },
-      // The audit log's anchor, one object for the instance: what the
-      // heartbeat last verified, kept where whoever writes the database cannot.
-      { "name": "ANCHOR", "class_name": "CoffreAnchor" }
+      { "name": "GATES", "class_name": "CoffreGates" }
     ]
   },
   "migrations": [
     { "tag": "sockets", "new_sqlite_classes": ["CoffreSockets"] },
-    { "tag": "gates", "new_sqlite_classes": ["CoffreGates"] },
-    { "tag": "anchor", "new_sqlite_classes": ["CoffreAnchor"] }
+    { "tag": "gates", "new_sqlite_classes": ["CoffreGates"] }
   ],
-  // The heartbeat and audit checkpoints.
+  // coffre's scheduled job.
   "triggers": { "crons": ["*/5 * * * *"] },
   // What a CI run's exchange of its ID token passes first: per address, and
   // for everyone. Cloudflare counts each per location.

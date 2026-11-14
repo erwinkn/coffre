@@ -1,8 +1,7 @@
 // The server, which `pnpm start` runs under srvx: Start's handler, with
-// coffre in each request's context; coffre's scheduled job, the heartbeat
-// and audit checkpoints, every five minutes from the start; and the
-// browser's files. `vite build app` builds it into
-// app/dist/server/server.js.
+// coffre in each request's context; coffre's scheduled job, every five
+// minutes from the start; and the browser's files. `vite build app` builds
+// it into app/dist/server/server.js.
 import { fileURLToPath } from 'node:url';
 
 import handler from '@tanstack/react-start/server-entry';

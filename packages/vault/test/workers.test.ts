@@ -31,7 +31,7 @@ const prepared = prepareVault(resolveVaultConfig({ kek: { id: 'vault-workers-tes
 const world = await openTestVault({ ...prepared, now: Date.now });
 after(() => world.close());
 
-const ada = user('ada');
+const [ada, bo] = [user('ada'), user('bo')];
 const KEYS = Array.from({ length: 8 }, (_, i) => `KEY_${i}`);
 
 /** `market/prod` with eight keys, which Ada reads. */
@@ -40,8 +40,8 @@ async function instance(): Promise<void> {
   const market = project('market');
   const prod = environment(market, 'prod');
   const secrets = await Promise.all(KEYS.map((key) => value(world, secret(prod, key), `value of ${key}`)));
-  await write(world, ...rows('projects', market), ...rows('environments', prod), ...rows('secrets', ...secrets), ...rows('roles', role(false, 'viewer', ['secret.read'])),
-    ...rows('principals', principal(ada)), ...rows('grants', grant(ada, 'viewer', { project: market })), ...rows('credentials', credential('ada-cli', ada)));
+  await write(world, ...rows('projects', market), ...rows('environments', prod), ...rows('secrets', ...secrets), ...rows('roles', role(false, 'viewer', ['secret.read']), role(false, 'developer', ['secret.read', 'secret.write'])),
+    ...rows('principals', principal(ada), principal(bo)), ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market })), ...rows('credentials', credential('ada-cli', ada), credential('bo-cli', bo)));
 }
 
 /**
@@ -85,6 +85,7 @@ type Answer = { status: number; body: Used & { refused?: string; error?: string 
 /** A fresh isolate of the vault Worker and its signer, over the suite's database through the vault's login. */
 async function freshVault(database: string, { signer = true } = {}): Promise<{
   reveal(bearer: string, path: string, keys: string[] | null): Promise<Answer>;
+  write(bearer: string, path: string, values: Record<string, string>): Promise<{ status: number; body: { answer?: { versions: Record<string, number> }; refused?: string; error?: string } }>;
   post(path: string): Promise<{ error?: string }>;
   stop(): Promise<void>;
 }> {
@@ -121,6 +122,10 @@ async function freshVault(database: string, { signer = true } = {}): Promise<{
     async reveal(bearer, path, keys) {
       const response = await worker.fetch('/reveals', { method: 'POST', headers: { authorization: `Bearer ${bearer}` }, body: JSON.stringify({ path, keys }), signal: AbortSignal.timeout(20_000) });
       return { status: response.status, body: (await response.json()) as Answer['body'] };
+    },
+    async write(bearer, path, values) {
+      const response = await worker.fetch('/secrets', { method: 'PATCH', headers: { authorization: `Bearer ${bearer}` }, body: JSON.stringify({ path, values }), signal: AbortSignal.timeout(20_000) });
+      return { status: response.status, body: (await response.json()) as { answer?: { versions: Record<string, number> }; refused?: string; error?: string } };
     },
     async post(path) {
       return (await (await worker.fetch(path, { method: 'POST', signal: AbortSignal.timeout(20_000) })).json()) as { error?: string };
@@ -170,6 +175,28 @@ test('a reveal through the app is answered its value, and its entry is in the lo
     const again = await vault.reveal('ada-cli', 'market/prod', ['KEY_0']);
     assert.deepEqual(given(again), [{ key: 'KEY_0', value: 'value of KEY_0' }]);
     assert.deepEqual([await count('log'), await count('log_pending')], [written + 1, 0]);
+  } finally {
+    await vault.stop();
+  }
+});
+
+test('a value written through the app is sealed by the vault, signed into the log, and read back by whoever reads there', { timeout: 120_000 }, async () => {
+  await instance();
+  const written = await count('log_pending');
+  const vault = await freshVault(VAULT_URL);
+  try {
+    const refused = await vault.write('ada-cli', 'market/prod', { KEY_0: 'not hers to write' });
+    assert.deepEqual([refused.status, refused.body], [403, { refused: 'no_access' }]);
+    const done = await vault.write('bo-cli', 'market/prod', { KEY_0: 'the next value', KEY_NEW: 'a new këy' });
+    assert.deepEqual([done.status, done.body], [200, { answer: { versions: { KEY_0: 2, KEY_NEW: 1 } } }]);
+    assert.deepEqual(given(await vault.reveal('ada-cli', 'market/prod', ['KEY_0', 'KEY_NEW'])), [{ key: 'KEY_0', value: 'the next value' }, { key: 'KEY_NEW', value: 'a new këy' }]);
+
+    // The change's entry among those kept for good, the read's among those that age out: both signed, nothing waiting.
+    await until(async () => (await count('log_pending')) === 0, 15_000, 'the signer has taken every entry');
+    const kept = (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log WHERE kept ORDER BY seq DESC LIMIT 1`)).map(({ body }) => JSON.parse(body) as { action: string; actor: string });
+    assert.deepEqual(kept.map((entry) => [entry.action, entry.actor]), [['secret.write', bo]]);
+    // And Ada's refused write, said once: three entries in all, two of them among those that age out.
+    assert.deepEqual([await count('log'), (await reads()).map((entry) => [entry.action, entry.actor])], [written + 3, [['secret.write', ada], ['secret.read', ada]]]);
   } finally {
     await vault.stop();
   }

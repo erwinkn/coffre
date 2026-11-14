@@ -2,6 +2,9 @@ import { createHash } from 'node:crypto';
 
 import type { AccessFault } from './access-fault.ts';
 import type { CallerKind, CredentialScope, GrantPlace, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
+import type { AccessAnswers, AccessChanges } from './changes/access.ts';
+import type { PlacesAnswers, PlacesChanges } from './changes/places.ts';
+import type { SecretsAnswers, SecretsChanges } from './changes/secrets.ts';
 import type { BindingPolicy, Constraints } from './identity/index.ts';
 
 export type { CallerKind } from './access.ts';
@@ -24,11 +27,19 @@ export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames
  * decides on.
  *
  * A decision comes back as a value: `{ refused }` for a refusal, which
- * wrote nothing. Only a fault throws: a bug, or the database down.
+ * wrote nothing of what was asked. A refused use writes nothing at all; a
+ * change refused to a caller who stands, one log entry that says so, once
+ * a minute in each instance for that caller and what they asked. Only a
+ * fault throws: a bug, or the database down.
  */
 export interface Vault {
   /** Open values for whoever presented a token: a reveal, `coffre run`, an export, a proxied request, a signature. */
   use(input: UseInput): Promise<Used | Refused>;
+  /**
+   * Make a change: one operation, named as its log entry's action is, with
+   * its input. All of it, or none.
+   */
+  change<O extends Change['op']>(input: Presented & Extract<Change, { op: O }>): Promise<{ answer: Answers[O] } | Refused>;
 }
 
 /**
@@ -86,8 +97,20 @@ export type Used = {
   workload: { binding: string; profile: string; policy: BindingPolicy; constraints: Constraints | null } | null;
 };
 
-/** Why a call is not answered. It wrote nothing, the log included. */
+/** Why a call is not answered. Nothing it asked was written. */
 export type Refused = { refused: string };
+
+/**
+ * Every change the vault makes: its operation, and what that one takes.
+ * Each area's are in a file of its own (`changes/`), with what each
+ * answers once it is made.
+ */
+export type Change = SecretsChanges | PlacesChanges | AccessChanges;
+export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers;
+
+export type * from './changes/access.ts';
+export type * from './changes/places.ts';
+export type * from './changes/secrets.ts';
 
 // 0.14's contract, from here on: each type goes with the last of the server's code that names it.
 

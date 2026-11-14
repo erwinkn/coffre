@@ -23,6 +23,7 @@ after(() => vault.close());
 beforeEach(async () => {
   await emptyDatabase(vault.owner);
   vault.woken.length = 0;
+  vault.refused.clear();
 });
 
 const said = (action: string, actor: string | null = null): Said => ({ kept: true, action, actor, credential: null, request: null, ip: null, objects: [], detail: {} });
@@ -379,4 +380,93 @@ test('a change that keeps losing answers busy', async () => {
   await assert.rejects(change({ ...vault, db }, bump(100)), busy('55P03'));
   assert.equal(writes, 5);
   assert.equal((await seenOf(principals, eq(principals.id, bo)))[0]!.generation, 5, 'none of its own writes landed');
+});
+
+test('a value is the current version of a secret the same change writes, in an environment it read, or the change is a fault', async () => {
+  const [place, id] = [randomUUID(), randomUUID()];
+  const environment: Fresh<typeof environments> = { id: place, projectId: randomUUID(), slug: 'prod', name: 'prod', createdAt: at, archivedAt: null, parentId: null, owner: null, protected: false, frozenCredentials: [] };
+  const secret = (versions: number, currentVersion: number | null): Fresh<typeof secrets> => ({ id, projectId: environment.projectId, environmentId: place, key: 'A', createdAt: at, updatedAt: at, versions, currentVersion, archivedAt: null, folder: null, sourceId: null });
+  const version = (of: string, number: number, plaintext: string | null = null) => ({ version: { id: randomUUID(), secretId: of, version: number, createdAt: at, createdBy: ada, recipe: null, pairId: null, pairHalf: null, plaintext, sensitive: false }, text: Buffer.from('x') });
+  const here = put(environments, environment);
+  const tries: [string, Write[], ReturnType<typeof version>, RegExp][] = [
+    ['no secret written', [here], version(id, 1), /current version of a secret it writes/],
+    ['another secret written', [here, put(secrets, secret(1, 1))], version(randomUUID(), 1), /current version/],
+    ['an older number than its secret is at', [here, put(secrets, secret(2, 2))], version(id, 1), /current version/],
+    ['a number its secret counts past', [here, put(secrets, secret(2, 1))], version(id, 1), /current version/],
+    ['a secret left with no value', [here, put(secrets, secret(1, null))], version(id, 1), /current version/],
+    ['an environment neither read nor written', [put(secrets, secret(1, 1))], version(id, 1), /that it read/],
+    ['an environment of another project', [put(environments, { ...environment, projectId: randomUUID() }), put(secrets, secret(1, 1))], version(id, 1), /of its project/],
+    ['a plain copy that is not the value', [here, put(secrets, secret(1, 1))], version(id, 1, 'y'), /copy is the value/],
+  ];
+  for (const [what, writes, value, why] of tries) {
+    await assert.rejects(change(vault, { read: nothing, decide: () => ({ writes, values: [value], entry: said('test.write'), answer: null }) }), why, what);
+  }
+  assert.equal(vault.woken.length, 0);
+  assert.deepEqual(await rowsOf(vault.owner, sql`SELECT 1 FROM secrets UNION ALL SELECT 1 FROM secret_versions`), []);
+  // And as it should be: written with its secret and its environment, plain or not.
+  const project = put(projects, { id: environment.projectId, slug: 'market', name: 'Market', createdAt: at, archivedAt: null, folder: null });
+  const done = await change(vault, { read: nothing, decide: () => ({ writes: [project, here, put(secrets, secret(1, 1))], values: [version(id, 1, 'x')], entry: said('test.write'), answer: null }) });
+  assert.ok('answer' in done);
+  // An environment the change drops is no place for a value, though it read it.
+  const next = version(id, 2);
+  const dropping = { place: part(environments, eq(environments.id, place)), held: part(secrets, eq(secrets.id, id)) };
+  await assert.rejects(change(vault, { read: dropping, decide: ({ place: [was], held: [row] }) => ({ writes: [drop(environments, was!), put(secrets, secret(2, 2), row!)], values: [next], entry: said('test.write'), answer: null }) }), /that it read/);
+});
+
+test('a refused change is logged once a minute for who asked and what, and the log never costs its refusal', async (t) => {
+  const refusing = (reason: string, actor: string | null = ada, action = 'member.role'): Operation<typeof nothing, null> => ({
+    read: nothing,
+    decide: () => ({ refused: reason }),
+    denied: (_seen, _at, refusal) => (actor === null ? null : { action, actor, credential: null, request: null, ip: null, objects: [], detail: { refused: refusal.refused } }),
+  });
+  const logged = async () => (await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(vault.owner, sql`SELECT kept, body, mac FROM log_pending ORDER BY id`)).map((row) => ({ kept: row.kept, ...entryOf(vault.keys, row)! }));
+
+  // Twenty at once, before any has written: one entry between them.
+  assert.deepEqual(await Promise.all(Array.from({ length: 20 }, () => change(vault, refusing('not_owner')))), Array.from({ length: 20 }, () => ({ refused: 'not_owner' })));
+  assert.equal((await logged()).length, 1);
+  const [first] = await logged();
+  assert.deepEqual([first!.kept, first!.action, first!.actor, first!.detail, first!.rows], [false, 'member.role', ada, { refused: 'not_owner' }, []]);
+  assert.equal(vault.woken.length, 1, 'the signer is told of it');
+  // Again within the minute, for another reason even: nothing more. Another caller: theirs. One who does not stand: none.
+  assert.deepEqual(await change(vault, refusing('last_owner')), { refused: 'last_owner' });
+  assert.equal((await logged()).length, 1);
+  await change(vault, refusing('not_owner', bo));
+  await change(vault, refusing('unauthenticated', null));
+  assert.deepEqual((await logged()).map((entry) => entry.actor), [ada, bo]);
+  // The same caller refused something else: that is another entry, then once a minute too.
+  await change(vault, refusing('no_access', bo, 'member.remove'));
+  await change(vault, refusing('no_access', bo, 'member.remove'));
+  assert.deepEqual((await logged()).map((entry) => `${entry.actor} ${entry.action}`), [`${ada} member.role`, `${bo} member.role`, `${bo} member.remove`]);
+  vault.tick(59_999);
+  await change(vault, refusing('not_owner'));
+  assert.equal((await logged()).length, 3);
+  vault.tick(1);
+  await change(vault, refusing('not_owner'));
+  assert.deepEqual((await logged()).map((entry) => entry.actor), [ada, bo, bo, ada]);
+  // An operation that says nothing of its refusals logs none.
+  await change(vault, { read: nothing, decide: () => ({ refused: 'no' }) });
+  assert.equal((await logged()).length, 4);
+
+  // The log held by someone else: the refusal is answered all the same, two seconds later, and said in the Worker's log.
+  const errors = t.mock.method(console, 'error', () => {});
+  vault.tick(60_000);
+  let release!: () => void;
+  const holding = vault.owner.transaction(async (tx) => {
+    await tx.execute(sql`LOCK TABLE log_pending IN ACCESS EXCLUSIVE MODE`);
+    await new Promise<void>((resolve) => (release = resolve));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  try {
+    assert.deepEqual(await change(vault, refusing('not_owner')), { refused: 'not_owner' });
+    assert.equal(errors.mock.callCount(), 1);
+  } finally {
+    release();
+    await holding;
+  }
+  // Not remembered as logged: the next one is.
+  await change(vault, refusing('not_owner'));
+  assert.equal((await logged()).length, 5);
+  // An operation that cannot say its refusal: refused all the same, said in the vault's own log, and not in the audit log.
+  assert.deepEqual(await change(vault, { read: nothing, decide: () => ({ refused: 'no' }), denied: () => { throw new Error('nothing to say'); } }), { refused: 'no' });
+  assert.deepEqual([errors.mock.callCount(), (await logged()).length], [2, 5]);
 });

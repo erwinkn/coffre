@@ -12,7 +12,6 @@
  *     vault: connectVault('/run/coffre/vault.sock'),
  *     auth: signin({ providers: [github({ clientId: …, clientSecret: … })] }),
  *     auditChainKey: process.env.APP_KEY,
- *     plugins: [auditWatch({ anchor: fileAnchor('/var/lib/coffre/anchor.json') })],
  *   });
  *
  * and Start's server entry, which hands each request coffre and runs the
@@ -43,8 +42,6 @@ import { requestScope, type CoffreContext } from './scope.ts';
 import { nodeTransport } from './workloads/node-transport.ts';
 
 export * from './index.ts';
-/** The audit watch's anchor in a file, for one process with a persistent volume: `auditWatch({ anchor: fileAnchor('/var/lib/coffre/anchor.json') })`. */
-export { fileAnchor } from './anchor-file.ts';
 export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './scope.ts';
 /** Limits for workload exchanges that count in this process: `signin({ workloads: { limits: processLimits() } })`. */
 export { processLimits } from './workloads/limits.ts';
