@@ -36,14 +36,14 @@ export type VaultOptions = { wake(hash: Buffer): void | Promise<void>; now?(): n
  * the vault's MAC, so it is one the contract names.
  */
 function asked(input: UseInput): Ask {
-  const { project, environment, mine, purpose, upstream } = input;
+  const { project, environment, mine, purpose, upstream, fresh = false } = input;
   // A copy: an array that crossed from another isolate may have holes, which no check of its items sees.
   const keys = input.keys === null ? null : Array.isArray(input.keys) ? [...input.keys] : undefined;
   const named = keys === null || (keys !== undefined && keys.length <= 1000 && keys.every(text));
-  if (!text(project) || !text(environment) || typeof mine !== 'boolean' || !named || !PURPOSES.includes(purpose) || !(upstream === null || text(upstream))) {
+  if (!text(project) || !text(environment) || typeof mine !== 'boolean' || !named || !PURPOSES.includes(purpose) || !(upstream === null || text(upstream)) || typeof fresh !== 'boolean') {
     throw new TypeError('a use names a place by its slugs, 1,000 keys at most, and a purpose the contract has');
   }
-  return { ...presented(input), project, environment, mine, keys: keys as string[] | null, purpose, upstream };
+  return { ...presented(input), project, environment, mine, keys: keys as string[] | null, purpose, upstream, fresh };
 }
 
 /** The changes nobody asks, by name: each rests on a proof, which a weighing would try and not spend. */

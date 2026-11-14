@@ -146,7 +146,8 @@ test('a reveal through the app is answered its value, and its entry is in the lo
     // A peek through the binding: what the reveal was given, key by key, and nothing logged.
     const peeked = await vault.peek('ada-cli', 'market/prod', ['KEY_0', 'NOPE']);
     const [held] = first.body.values as { secret: string; version: number; nature: string }[];
-    assert.deepEqual([peeked.status, peeked.body.items], [200, [{ key: 'KEY_0', secret: held!.secret, version: held!.version, nature: held!.nature }, { key: 'NOPE', refused: 'unknown_key' }]]);
+    const versionId = (await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM secret_versions WHERE secret_id = ${held!.secret} AND version = ${held!.version}`))[0]!.id;
+    assert.deepEqual([peeked.status, peeked.body.personal, peeked.body.items], [200, false, [{ key: 'KEY_0', secret: held!.secret, version: held!.version, nature: held!.nature, versionId, recipe: null, own: false }, { key: 'NOPE', refused: 'unknown_key' }]]);
     assert.deepEqual([await count('log'), await count('log_pending')], [written + 1, 0]);
   } finally {
     await vault.stop();
