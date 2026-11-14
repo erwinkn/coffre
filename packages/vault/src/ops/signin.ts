@@ -367,6 +367,12 @@ function credentialEnd(input: Presented & CredentialEnd, vault: Deciding): Opera
  * verified (`AccountLink`). The account bound to anyone already, them
  * included, is refused. So is one whose row the read found written behind
  * the vault, `tampered`: it is bound to someone, the row cannot say whom.
+ *
+ * A row the index does not find: one deleted, or edited to say it is
+ * revoked, which takes it out of `identities_active_subject`, and no other
+ * index reads an account by its subject. The account is then bound to the
+ * caller, who holds it at its provider, and so could sign in as the member
+ * it was bound to anyway; that member's row, edited, serves nobody.
  */
 function accountLink(input: Presented & AccountLink, vault: Deciding): Operation<Parts, Answers['account.link']> {
   const shown = presented(input);
