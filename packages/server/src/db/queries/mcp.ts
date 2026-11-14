@@ -1,4 +1,4 @@
-import { parseScopes, type McpScope } from '@coffre/core/mcp';
+import { clientIdKept, parseScopes, type McpScope } from '@coffre/core/mcp';
 import type { Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
@@ -73,8 +73,10 @@ export async function registeredClient(db: Queryable, id: string): Promise<Regis
  * What the consent page reads, in one statement: the client's registration,
  * when its id is one's (`registered`), and the scopes of each of the
  * person's connections of that client, which the approval may supersede.
+ * None for an id no client may have, which Postgres may not even take.
  */
 export async function consentRead(db: Queryable, principal: string, clientId: string, at: Date): Promise<{ registered: RegisteredClient | null; connections: McpScope[][] }> {
+  if (!clientIdKept(clientId)) return { registered: null, connections: [] };
   const id = REGISTERED.test(clientId) ? clientId : null;
   const [row] = await rowsOf<{ registered: { name: string; redirectUris: string } | null; connections: string[] }>(db, sql`
     SELECT

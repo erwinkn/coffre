@@ -25,6 +25,10 @@ const CLAUDE = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
 const LONG_ID = `https://long.example/${'x'.repeat(250)}`;
 const LONG_REDIRECT = `https://long.example/${'x'.repeat(400)}`;
 const LONG_REDIRECTS = 'https://long.example/client.json';
+/** A host of 119 characters, longer than a name the vault keeps; its documents give no name, or an empty one. */
+const LONG_HOST = `${'a'.repeat(60)}.${'b'.repeat(50)}.example`;
+const UNNAMED = `https://${LONG_HOST}/unnamed.json`;
+const EMPTY_NAME = `https://${LONG_HOST}/empty.json`;
 
 /** The documents the fake internet serves, by URL. */
 const documents = new Map<string, unknown>([
@@ -32,6 +36,8 @@ const documents = new Map<string, unknown>([
   [CLAUDE, { client_id: CLAUDE, client_name: 'Claude', redirect_uris: ['https://claude.ai/api/mcp/auth_callback'], token_endpoint_auth_method: 'none' }],
   [LONG_ID, { client_id: LONG_ID, client_name: 'Long', redirect_uris: ['https://long.example/cb'] }],
   [LONG_REDIRECTS, { client_id: LONG_REDIRECTS, client_name: 'Long', redirect_uris: [LONG_REDIRECT] }],
+  [UNNAMED, { client_id: UNNAMED, redirect_uris: [`https://${LONG_HOST}/cb`] }],
+  [EMPTY_NAME, { client_id: EMPTY_NAME, client_name: ' ', redirect_uris: [`https://${LONG_HOST}/cb`] }],
 ]);
 let fetched: string[] = [];
 const transport: WorkloadTransport = {
@@ -230,7 +236,29 @@ test("Claude's hosted app connects with its callback on claude.ai; a redirect el
   assert.equal((await describe(request(LONG_ID, 'https://long.example/cb', challenge))).status, 'invalid');
   assert.equal((await describe(request(LONG_REDIRECTS, LONG_REDIRECT, challenge))).status, 'invalid');
   assert.deepEqual(fetched.filter((url) => url.startsWith('https://long.example/')), [LONG_REDIRECTS]);
+  // An id Postgres would not take is no client's: said on the page, and refused on Approve, with nothing read.
+  // Half of a surrogate pair reaches only Approve: a URL's query carries it as U+FFFD.
+  for (const client of ['\0', 'https://claude.ai/oauth/x\0']) {
+    const [view, , statements] = await cost(() => describe(request(client, 'https://claude.ai/api/mcp/auth_callback', challenge)));
+    assert.deepEqual([view.status, statements], ['invalid', 0], JSON.stringify(client));
+  }
+  for (const client of ['\0', 'https://claude.ai/oauth/x\0', '\ud800', 'https://claude.ai/oauth/x\udc00']) {
+    const [decided, , statements] = await cost(() => decideAs('ada-web', request(client, 'https://claude.ai/api/mcp/auth_callback', challenge), { approve: true }));
+    assert.deepEqual([decided.status, statements], [400, 0], JSON.stringify(client));
+  }
   assert.deepEqual(await standing(ada), []);
+});
+
+test("a client that names itself nothing is shown by its host, cut to the name the vault keeps, and connects", async () => {
+  const { challenge } = pkce();
+  const name = LONG_HOST.slice(0, 100);
+  for (const client of [UNNAMED, EMPTY_NAME]) {
+    const ask = request(client, `https://${LONG_HOST}/cb`, challenge);
+    const view = await describe(ask);
+    assert.deepEqual([view.status, (view.client as { name: string }).name], ['ready', name], client);
+    assert.equal((await decide(ask, { approve: true })).searchParams.has('code'), true, client);
+  }
+  assert.equal((await standing(ada)).length, 2);
 });
 
 test('what is wrong past the client and its redirect goes back to the client, as OAuth says', async () => {

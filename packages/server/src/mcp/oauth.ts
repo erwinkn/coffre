@@ -5,7 +5,7 @@
 // Approve sends again. Every write is the vault's: `mcp.connect`,
 // `mcp.token`, `mcp.revoke`, `oauth.register`.
 import type { AuthConfig, McpConfig, McpLimits, SigninConfig } from '@coffre/core/identity';
-import { ClientInvalid, parseScopes, redirectHost, redirectKind, redirectMatches, type ClientMetadata, type McpScope } from '@coffre/core/mcp';
+import { ClientInvalid, clientIdKept, MAX_CLIENT_ID, parseScopes, redirectHost, redirectKind, redirectMatches, type ClientMetadata, type McpScope } from '@coffre/core/mcp';
 
 import type { RegisteredClient } from '../db/queries/mcp.ts';
 import { resolveClient, wouldFetch, type Fetching } from './clients.ts';
@@ -90,8 +90,7 @@ export type Checked = { status: 'ready'; client: ClientMetadata; redirectUri: st
 
 /** An S256 challenge (RFC 7636, section 4.2): a SHA-256, base64url with no padding. */
 const S256_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
-/** The longest client id and redirect the vault keeps (`text` and `MOST_URI` in its ops). */
-const MOST_CLIENT_ID = 256;
+/** The longest redirect the vault keeps (`MOST_URI` in its ops). */
 const MOST_REDIRECT = 400;
 
 /**
@@ -111,7 +110,7 @@ export async function checkAuthorization(
   const redirectUri = request.redirect_uri ?? '';
   if (clientId === '') return { status: 'invalid', message: 'The app sent no client_id.' };
   if (redirectUri === '') return { status: 'invalid', message: 'The app sent no redirect_uri.' };
-  if (clientId.length > MOST_CLIENT_ID) return { status: 'invalid', message: `The client_id is longer than ${MOST_CLIENT_ID} characters.` };
+  if (!clientIdKept(clientId)) return { status: 'invalid', message: `The client_id is longer than ${MAX_CLIENT_ID} characters, or holds a NUL or half of a surrogate pair.` };
   let client: ClientMetadata;
   try {
     const { allowLoopback, limits } = mcp.mcp;

@@ -3,7 +3,7 @@
 // each one call to the vault and no statement of the app's. `app.ts` routes
 // to them and checks the method.
 import { generateToken, hashToken, tokenKind } from '@coffre/core/identity';
-import { ClientInvalid, clientName, MCP_SCOPES, parseScopes, redirectKind, registrationRedirects, scopeString, type McpScope } from '@coffre/core/mcp';
+import { ClientInvalid, clientIdKept, clientName, MCP_SCOPES, parseScopes, redirectKind, registrationRedirects, scopeString, type McpScope } from '@coffre/core/mcp';
 import type { Asked } from '@coffre/core/vault';
 
 import { ApiError, noteTampered, refusal, toErrorBody, UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
@@ -21,8 +21,6 @@ const NO_STORE = { 'cache-control': 'no-store', pragma: 'no-cache' };
 
 /** A PKCE verifier (RFC 7636, section 4.1). */
 const VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
-/** The longest client id the vault keeps (`text` in its ops). */
-const MOST_CLIENT_ID = 256;
 
 const hashed = (token: string) => hashToken(token).toString('hex');
 
@@ -125,8 +123,6 @@ const GRANT_REFUSED: Record<string, [string, string]> = {
   invalid_scope: ['invalid_scope', 'a refresh may narrow the scopes, not widen them'],
 };
 
-/** Whether a client_id is text the vault takes: 256 characters at most, no NUL, no half of a surrogate pair. */
-const keptClient = (value: string): boolean => value.length <= MOST_CLIENT_ID && !/[\0\p{Cs}]/u.test(value);
 
 /** Whether a redirect is one the vault keeps: HTTPS, or HTTP on loopback, of 400 characters at most. */
 function keptRedirect(value: string): boolean {
@@ -154,7 +150,7 @@ export const oauthToken: Path = async (request, runtime, sourceIp) => {
     const resource = params.get('resource');
     if (resource !== null && !isResource(runtime.publicUrl, resource)) throw new OAuthError('invalid_target', `coffre issues tokens for ${resourceOf(runtime.publicUrl)} only`);
     const client = required(params, 'client_id');
-    if (!keptClient(client)) throw new OAuthError('invalid_grant', GRANT_REFUSED.wrong_client![1]);
+    if (!clientIdKept(client)) throw new OAuthError('invalid_grant', GRANT_REFUSED.wrong_client![1]);
     const tokens = { access: generateToken('mcp'), refresh: generateToken('mcp-refresh') };
     const asked = { request: crypto.randomUUID(), ip: sourceIp, op: 'mcp.token' as const, client, tokens: { access: hashed(tokens.access), refresh: hashed(tokens.refresh) } };
     let change: Asked<'mcp.token'>;
@@ -265,7 +261,7 @@ export const oauthRevoke: Path = async (request, runtime, sourceIp) => {
     const token = required(params, 'token');
     const client = params.get('client_id') || null;
     const kind = tokenKind(token);
-    if ((kind === 'mcp' || kind === 'mcp-refresh') && (client === null || keptClient(client))) {
+    if ((kind === 'mcp' || kind === 'mcp-refresh') && (client === null || clientIdKept(client))) {
       const trace = { request: crypto.randomUUID(), ip: sourceIp };
       const answered = await runtime.vault.change<'mcp.revoke'>({ ...trace, op: 'mcp.revoke', token: hashed(token), client });
       if ('refused' in answered && answered.refused !== 'unknown_grant') throw fault('POST /api/oauth/revoke', trace.request, answered.refused);

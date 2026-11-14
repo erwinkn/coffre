@@ -74,6 +74,7 @@ test("a client's document names itself, a public client, and redirects on its ow
   for (const document of refused) assert.throws(() => clientFromDocument(id, document), ClientInvalid, JSON.stringify(document));
   assert.equal(clientName('  Cla‮ude\u0007 ', 'host'), 'Claude', 'no control or bidirectional characters');
   assert.equal(clientName(undefined, 'vscode.dev'), 'vscode.dev');
+  assert.equal(clientName('', 'h'.repeat(150)), 'h'.repeat(100), 'a host is cut as a name is');
   assert.equal(clientName('\udc00Zed\ud800', 'host'), 'Zed', 'no half of a surrogate pair');
   // Cut to 100, then trimmed, and never through a character: the name the vault keeps is the name as shown.
   assert.equal(clientName(`${'a'.repeat(99)} b`, 'host'), 'a'.repeat(99));
