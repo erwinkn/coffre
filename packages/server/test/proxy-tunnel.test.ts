@@ -709,13 +709,20 @@ test('a database that ends SCRAM without its signature is no database the URL na
   }
 });
 
-test('a database that asks for more SCRAM iterations than any needs is refused before the work begins', async () => {
+test('a database that asks for more SCRAM iterations than any needs is refused before the work begins', async (t) => {
   // One past the tunnel's most (100,000): computed, it costs milliseconds, so a broken limit fails here, and never hangs.
   let proved = false;
+  const derived: number[] = [];
+  const deriveBits = crypto.subtle.deriveBits;
+  t.mock.method(crypto.subtle, 'deriveBits', (algorithm: Pbkdf2Params, key: CryptoKey, length: number) => {
+    derived.push(algorithm.iterations);
+    return deriveBits.call(crypto.subtle, algorithm, key, length);
+  });
   const fake = await fakeDatabase(scramFake(100_001, () => void (proved = true)));
   const client = appClientOf();
   try {
     await assert.rejects(Promise.race([client.unsafe('SELECT 1'), sleep(3_000).then(() => assert.fail('neither refused nor logged in within 3 s'))]), /SCRAM iterations/);
+    assert.deepEqual(derived, [], 'the tunnel ran PBKDF2 before refusing');
     assert.equal(proved, false, 'the tunnel sent the database its proof: it did the work');
   } finally {
     // The fake first: a query it holds would keep the client's end waiting.
