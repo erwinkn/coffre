@@ -8,8 +8,10 @@ import { createHash, randomBytes } from 'node:crypto';
 
 import { CoffreError, type AuditEntryView } from '@coffre/client';
 
+import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, until, PUBLISHED_SECONDS } from '../report.ts';
+import { logBodies } from './storage.ts';
 
 import { bearer } from '../browser.ts';
 import { canary, deviceLogin, DEV, personaOn, PROD, PROJECT, valuesIn, type Canaries, type People, type Person } from './people.ts';
@@ -322,8 +324,8 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
 
   // 0.16 writes no entry for a tools/call: the vault's use and change log what matters, and these calls read names alone
   // (docs/design/0.16.md, "The server", MCP's OAuth). 0.14.7 logged each, `mcp.read` and `mcp.call`, under the client.
-  // Its connection's own entries aside, nothing names the client (`client`) or its connection (`via`), once the
-  // connection's entry is published.
+  // Its connection's own entries aside, nothing names the client (`client`) or its connection (`via`): not on the
+  // page, once the connection's entry is published, nor among the entries signed or waiting, read from the database.
   let entries: AuditEntryView[] = [];
   const connections = new Set<unknown>();
   await until('the connection on the log', async () => {
@@ -334,6 +336,10 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
   expect(connections.size === 1, 'the connection is not in the log under its client', connections.size);
   const mine = entries.filter((entry) => (entry.metadata.client === clientId && entry.action !== 'mcp.connect' && entry.action !== 'mcp.token') || connections.has(entry.metadata.via));
   expect(mine.length === 0, 'a read-only tools/call left an entry under the client', mine.map((entry) => entry.action));
+  // The page lists only what the signer has published; an entry the calls wrote may still wait in `log_pending`.
+  const waiting = (await using(deployment.database(), logBodies)).filter((body) =>
+    (body.detail.client === clientId && body.action !== 'mcp.connect' && body.action !== 'mcp.token') || connections.has(body.detail.via));
+  expect(waiting.length === 0, 'a read-only tools/call left an entry under the client, signed or waiting to be', waiting.map((body) => body.action));
   return `on 2026-07-28 and 2025-11-25, the Read tools as the reader: ${DEV} listed, ${PROD} refused, no value in any answer; headers held to the body; no entry for the calls, which read names alone`;
 }
 

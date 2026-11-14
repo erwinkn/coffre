@@ -128,7 +128,7 @@ export async function auditPageProofs({ admin }: People): Promise<string> {
  * Every version stored is the vault's write: one entry of the log names
  * it, its secret and its number, among the keys the change wrote: a
  * `secret.write` or `secret.loosen`, or the `environment.create` of a fork
- * that copied it. 0.14's app and vault each logged their
+ * that copied it, naming who wrote it and the request. 0.14's app and vault each logged their
  * half of a write, the app's naming the vault's seal of its key; in 0.16
  * the vault writes the version and its one entry together, and the app
  * writes nothing (docs/design/0.16.md, "Four rules").
@@ -140,6 +140,8 @@ export async function writesAgree(deployment: Deployment): Promise<string> {
     const written = new Map<string, number>();
     for (const body of await logBodies(sql)) {
       if (!WRITES.has(body.action) || body.detail.refused !== undefined) continue;
+      // Each is someone's, through one request the server passed the vault (docs/design/0.16.md, "The server").
+      expect(body.actor !== null && body.request !== null, `a committed ${body.action} names no actor or no request`, body);
       for (const line of (body.detail.keys ?? []) as { secret?: string; version?: number }[]) {
         if (line.version === undefined) continue;
         const name = `${line.secret} ${line.version}`;
@@ -154,7 +156,7 @@ export async function writesAgree(deployment: Deployment): Promise<string> {
       const entries = written.get(`${version.secret_id} ${version.version}`) ?? 0;
       expect(entries === 1, 'a stored version has no unique write entry', { version, entries });
     }
-    return `${versions.length} stored versions, each written by one entry of the vault's`;
+    return `${versions.length} stored versions, each written by one entry of the vault's, naming its actor and request`;
   });
 }
 

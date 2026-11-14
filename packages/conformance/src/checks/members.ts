@@ -90,6 +90,8 @@ export async function memberTampering(deployment: Deployment, people: People, ki
         await query(sql, 'DELETE FROM grants WHERE principal = $1', [person.member]);
         for (const grant of grants) await insertRow(sql, 'grants', grant);
         named = ['grants', grants[0]!.id];
+        // Served while it stands: the viewer's grant still reads dev.
+        expect((await person.api.secrets.reveal(DEV)).values.API_KEY !== undefined, 'a genuine older grant put back was not served');
       } else if (kind === 'member') {
         // The instance role, as the database's owner could set it: an Owner reads every value.
         await query(sql, "UPDATE principals SET role = 'owner' WHERE id = $1", [person.member]);
@@ -106,7 +108,7 @@ export async function memberTampering(deployment: Deployment, people: People, ki
     }
   });
   expect((await person.api.secrets.reveal(DEV)).values.API_KEY !== undefined, 'restoring the member did not restore legitimate use');
-  if (kind === 'stale') return 'a genuine older grant, put back, named in the signer\'s alert, then restored';
+  if (kind === 'stale') return 'a genuine older grant, put back, served and named in the signer\'s alert, then restored';
   if (kind === 'member') return `an edited member row refused at use (${refused}), then restored`;
   return `a forged grant refused at use (${refused}) and named in the signer's alert, then restored`;
 }

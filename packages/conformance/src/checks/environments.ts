@@ -172,10 +172,11 @@ export async function references(deployment: Deployment, { admin, reader, leaver
   try {
     const read = await reader.api.secrets.reveal(`${DEV}/${HELD}`);
     expect(read.values[HELD] === canaries[source], "a viewer on dev did not read prod's value through dev's reference");
-    // 0.16's entry names the read by its request, and each key read through a reference by its holder, `through`;
+    // 0.16's entry names the read by its reader and its request, and each key read through a reference by its holder, `through`;
     // the page lists it once the signer has published it, within its minute. The source key's own log is looked at
     // too, to tell a read missing from prod's log from one missing from the log altogether.
     const through = (entry: AuditEntryView) => entry.requestId === read.operationId && entry.action === 'secret.read'
+      && entry.actorType === 'user' && entry.actorId === reader.email
       && Array.isArray(entry.metadata.keys) && entry.metadata.keys.some((key: unknown) => typeof key === 'object' && key !== null && 'through' in key);
     const seen: Record<string, boolean> = { [PROD]: false, [DEV]: false, [source]: false };
     const shown: Record<string, AuditEntryView[]> = {};
@@ -183,8 +184,8 @@ export async function references(deployment: Deployment, { admin, reader, leaver
       for (const path of Object.keys(seen)) seen[path] ||= (shown[path] = (await admin.api.audit.list({ path, limit: 200 })).entries).some(through);
       return Object.values(seen).every(Boolean);
     }, PUBLISHED_SECONDS).catch(() => undefined);
-    expect(seen[PROD] && seen[DEV], "the read through the reference is not in both the source's log and the holder's",
-      { seen, shown: Object.fromEntries(Object.entries(shown).map(([path, entries]) => [path, entries.slice(0, 5).map((entry) => `${entry.seq} ${entry.action} ${entry.requestId}`)])) });
+    expect(seen[PROD] && seen[DEV], "the reader's read through the reference is not in both the source's log and the holder's",
+      { seen, shown: Object.fromEntries(Object.entries(shown).map(([path, entries]) => [path, entries.slice(0, 5).map((entry) => `${entry.seq} ${entry.action} ${entry.actorId} ${entry.requestId}`)])) });
 
     // What it reads cannot be archived while it reads it (D41): not the key, nor its environment. Its
     // project could be, since the reference is held there too, and archiving it stops no one else's read.
