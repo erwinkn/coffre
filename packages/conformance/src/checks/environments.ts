@@ -237,8 +237,11 @@ export async function references(deployment: Deployment, { admin, reader, leaver
     }
 
     await admin.api.references.break(`${DEV}/${HELD}`);
-    const after = await outcome(reader.api.secrets.reveal(`${DEV}/${HELD}`));
-    expect(after.startsWith('409 '), `a broken reference still read: ${after}`);
+    // A key whose reference ended has no value until someone writes one (0.16's `no_value`; 0.14.7 answered 409).
+    const broken = await reader.api.secrets.reveal(`${DEV}/${HELD}`).then((answer) => answer, (error: unknown) => error);
+    const said = broken instanceof CoffreError ? `${broken.status} ${broken.reason ?? broken.code}` : 'let through';
+    expect(said === '404 no_value' && !JSON.stringify(broken instanceof Error ? { ...broken, message: broken.message } : broken).includes(canaries[source]!),
+      `a broken reference still read, or was refused other than as holding no value: ${said}`, broken instanceof Error ? broken.message : broken);
   } finally {
     await admin.api.secrets.update(`${DEV}/${HELD}`, { archived: true });
   }

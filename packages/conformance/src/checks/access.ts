@@ -180,9 +180,9 @@ export async function instanceRoles(deployment: Deployment, { admin, reader }: P
     ['an admin demoted the Owner', () => reader.api.members.add(admin.member, { role: 'admin' })],
     ['an admin removed the Owner', () => reader.api.members.remove(admin.member)],
   ] as const) {
-    // Not that the Owner is the last, which an Owner hears too: that only an Owner may (0.14.7's `not_allowed`).
+    // Not that the Owner is the last, which an Owner hears too: that only an Owner may, `not_allowed`, as in 0.14.7.
     const refusal = await refused(what, call());
-    expect(refusal.status === 403 && refusal.reason === 'no_access', `${what}, or was refused for another reason`, refusal);
+    expect(refusal.status === 403 && refusal.reason === 'not_allowed', `${what}, or was refused for another reason`, refusal);
   }
 
   // As it was: a member, with its viewer on dev; the service and the project gone.
