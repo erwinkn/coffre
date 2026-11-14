@@ -18,8 +18,8 @@ export function PrincipalReportCards({ report }: { report: PrincipalReport }) {
   return (
     <>
       {report.status === 'removed' && <ConsiderRotating report={report} person={person} />}
-      {report.issuedTokens !== null && report.issuedTokens.length > 0 && <IssuedTokens tokens={report.issuedTokens} />}
-      {report.references !== null && report.references.length > 0 && <MadeReferences references={report.references} />}
+      {report.issuedTokens !== null && report.issuedTokens.length > 0 && <IssuedTokens tokens={report.issuedTokens} total={report.totals.issuedTokens} />}
+      {report.references !== null && report.references.length > 0 && <MadeReferences references={report.references} total={report.totals.references} />}
     </>
   );
 }
@@ -179,11 +179,16 @@ function ConsiderRotating({ report, person }: { report: PrincipalReport; person:
  * environment that holds it, like a value, not to them (D46), so their
  * leaving ends none. Listed to review.
  */
-function MadeReferences({ references }: { references: NonNullable<PrincipalReport['references']> }) {
+/** "200 of 1,240" in a list's title, when it stops short of all of them; nothing otherwise. */
+function ofAll(listed: number, total: number | null): string {
+  return total === null || total <= listed ? '' : ` (${listed.toLocaleString('en-US')} of ${total.toLocaleString('en-US')})`;
+}
+
+function MadeReferences({ references, total }: { references: NonNullable<PrincipalReport['references']>; total: number | null }) {
   return (
     <Card
       labelledBy="made-references"
-      title="References they made"
+      title={`References they made${ofAll(references.length, total)}`}
       description="These stay after they leave, and whoever reads a reference's environment reads its source through it. Review them: the source's access managers, or whoever writes where one is held, can break it."
     >
       <div className="dt-wrap">
@@ -215,11 +220,11 @@ function MadeReferences({ references }: { references: NonNullable<PrincipalRepor
   );
 }
 
-function IssuedTokens({ tokens }: { tokens: NonNullable<PrincipalReport['issuedTokens']> }) {
+function IssuedTokens({ tokens, total }: { tokens: NonNullable<PrincipalReport['issuedTokens']>; total: number | null }) {
   return (
     <Card
       labelledBy="issued-tokens"
-      title="Bearer tokens they issued"
+      title={`Bearer tokens they issued${ofAll(tokens.length, total)}`}
       description="These still work, and they saw each one when it was issued. Revoke any they may have kept."
     >
       <div className="dt-wrap">

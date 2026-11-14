@@ -1,4 +1,4 @@
-import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, type CoffreClient, type ListedReference } from '@coffre/client';
+import { ageInDays, byFolder, CoffreError, foldersOf, olderThan, planImport, shownMember, type CoffreClient, type ListedReference } from '@coffre/client';
 import { parseDotenv } from '@coffre/core/dotenv';
 import type { Generation } from '@coffre/core/recipe';
 import { useEffect, useId, useReducer, useRef, useState, type ReactNode } from 'react';
@@ -2147,14 +2147,17 @@ function SortHeader({
  * Who wrote the value a key reads and how long ago, on one line: the local
  * part of the email is enough to recognise a colleague, and the full address
  * and the exact time are a hover away. A reference's value is its source's,
- * as old as the version it reads (0.16 keeps no record of who made a
- * reference, or when). A value unchanged past the deployment's `rotateAfterDays` gets a
+ * as old as the version it reads, and who made the reference is a hover
+ * away too. A value unchanged past the deployment's `rotateAfterDays` gets a
  * quiet tag, its age in days a hover away: it is due for rotation.
  */
 function Written({ entry, rotateAfterDays }: { entry: SecretKey; rotateAfterDays: number | null }) {
   const { reference } = entry;
+  const made = reference?.createdBy == null || reference.createdAt === null
+    ? undefined
+    : `Reference made by ${shownMember(reference.createdBy).replace(/^user:/, '')} on ${reference.createdAt.slice(0, 10)}`;
   if (entry.updatedAt === null) {
-    return <span className="cell-muted">—</span>;
+    return <span className="cell-muted" title={made}>—</span>;
   }
   const by = entry.updatedBy ?? 'unknown';
   const due = rotateAfterDays !== null && olderThan(entry, rotateAfterDays);
@@ -2166,7 +2169,7 @@ function Written({ entry, rotateAfterDays }: { entry: SecretKey; rotateAfterDays
           {by.split('@')[0]}
         </span>
       ) : (
-        <span className="written-by cell-muted" title="Its source's current version">
+        <span className="written-by cell-muted" title={made === undefined ? "Its source's current version" : `Its source's current version. ${made}`}>
           source
         </span>
       )}

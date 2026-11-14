@@ -137,8 +137,8 @@ export type Api = {
           source: string;
           state: "broken" | "live" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
           version: number | null;
-          createdBy: null;
-          createdAt: null;
+          createdBy: string | null;
+          createdAt: string | null;
           endedBy: null;
           endedAt: null;
           sourceId: string;
@@ -213,8 +213,8 @@ export type Api = {
         source: string;
         state: "broken" | "live" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
         version: number | null;
-        createdBy: null;
-        createdAt: null;
+        createdBy: string | null;
+        createdAt: string | null;
         endedBy: null;
         endedAt: null;
       }[];
@@ -438,13 +438,18 @@ export type Api = {
         version: number | null;
         source: string;
         id: string;
+        state: "broken" | "live" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
         holder: string;
-        state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+        endedBy: null;
+        endedAt: null;
         createdBy: string;
         createdAt: string;
-        endedBy: string | null;
-        endedAt: string | null;
       }[];
+      totals: {
+        issuedTokens: number | null;
+        personalTokens: number | null;
+        references: number | null;
+      };
       personal: {
         project: string;
         of: string;
@@ -615,13 +620,18 @@ export type Api = {
           version: number | null;
           source: string;
           id: string;
+          state: "broken" | "live" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
           holder: string;
-          state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+          endedBy: null;
+          endedAt: null;
           createdBy: string;
           createdAt: string;
-          endedBy: string | null;
-          endedAt: string | null;
         }[];
+        totals: {
+          issuedTokens: number | null;
+          personalTokens: number | null;
+          references: number | null;
+        };
         personal: {
           project: string;
           of: string;
@@ -1821,8 +1831,8 @@ export type ListedReference = {
   source: string;
   state: "broken" | "live" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
   version: number | null;
-  createdBy: null;
-  createdAt: null;
+  createdBy: string | null;
+  createdAt: string | null;
   endedBy: null;
   endedAt: null;
 };
@@ -2028,13 +2038,18 @@ export type OffboardingReport = {
     version: number | null;
     source: string;
     id: string;
+    state: "broken" | "live" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
     holder: string;
-    state: "broken" | "live" | "replaced" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
+    endedBy: null;
+    endedAt: null;
     createdBy: string;
     createdAt: string;
-    endedBy: string | null;
-    endedAt: string | null;
   }[];
+  totals: {
+    issuedTokens: number | null;
+    personalTokens: number | null;
+    references: number | null;
+  };
   personal: {
     project: string;
     of: string;
@@ -2079,8 +2094,8 @@ export type ReferenceView = {
   source: string;
   state: "broken" | "live" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
   version: number | null;
-  createdBy: null;
-  createdAt: null;
+  createdBy: string | null;
+  createdAt: string | null;
   endedBy: null;
   endedAt: null;
 };
@@ -2173,8 +2188,8 @@ export type SecretKey = {
     source: string;
     state: "broken" | "live" | "source_archived" | "source_deleted" | "source_empty" | "source_is_reference";
     version: number | null;
-    createdBy: null;
-    createdAt: null;
+    createdBy: string | null;
+    createdAt: string | null;
     endedBy: null;
     endedAt: null;
     sourceId: string;

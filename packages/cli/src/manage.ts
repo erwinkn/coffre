@@ -362,6 +362,7 @@ export async function references(connect: () => CoffreClient, args: string[], io
   for (const reference of list) {
     const state = reference.state === 'live' ? '' : `  (${reference.state.replace('_', ' ')})`;
     io.out.write(`${reference.holder} → ${reference.source}${state}\n`);
+    if (reference.createdBy !== null && reference.createdAt !== null) io.out.write(`  made by ${shownMember(reference.createdBy).replace(/^user:/, '')} on ${reference.createdAt.slice(0, 10)}\n`);
     if (reference.readers !== null) {
       io.out.write(`  read through by ${reference.readers.length === 0 ? 'no one by a grant' : reference.readers.map((reader) => shownMember(reader).replace(/^user:/, '')).join(', ')}\n`);
     }
@@ -381,7 +382,8 @@ export async function referencesBreak(connect: () => CoffreClient, args: string[
     const [reference] = (await api.references.list(path)).references.filter((each) => each.holder === path);
     if (reference === undefined) return void io.out.write(`${path} is no reference you can see\n`);
     const readers = reference.readers === null ? 'whoever reads its environment' : reference.readers.map((reader) => shownMember(reader).replace(/^user:/, '')).join(', ') || 'no one by a grant';
-    io.out.write(`${path} reads ${reference.source}\n`);
+    const made = reference.createdBy === null || reference.createdAt === null ? '' : `, made by ${shownMember(reference.createdBy).replace(/^user:/, '')} on ${reference.createdAt.slice(0, 10)}`;
+    io.out.write(`${path} reads ${reference.source}${made}\n`);
     io.out.write(`breaking it stops ${readers} reading it there, and a run of its environment refuses until ${path.split('/')[2]} gets a value\n`);
     io.out.write('Nothing changed. Re-run with --apply to break it.\n');
     return;
