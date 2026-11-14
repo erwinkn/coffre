@@ -297,6 +297,9 @@ const ADMIT = changeTool({
       if (access !== undefined && (!service || role !== undefined || scope !== undefined)) {
         throw badRequest('access comes with a service account, and no role or scope: a person is given grants once a member (set_access)');
       }
+      // As PUT /members/:member refuses them, before anyone is asked: a scope said with no role would be dropped.
+      if (scope !== undefined && role === undefined) throw badRequest('a scope goes with a role: name the role too');
+      if (scope !== undefined && role === 'member') throw badRequest('a member holds nothing by their role: it takes no scope');
       if (!service || (role ?? 'member') !== 'member' || scope !== undefined) {
         instanceOnly(tool);
         // A person's role kept as it is (none asked) is no change of it.
@@ -323,7 +326,7 @@ const ADMIT = changeTool({
     apply: async (ctx, { member, role, scope, access }, { replaced }) => {
       // Its first grants over what the page showed it holds, as set_access's; else the route's role, as Approve weighed it.
       if (access !== undefined) await granted(ctx, member, access, replaced, true);
-      else await runRoute('PUT /members/:member', { member: apiMember(member) }, role === undefined ? {} : { role, ...(scope === undefined ? {} : { scope }) }, ctx);
+      else await runRoute('PUT /members/:member', { member: apiMember(member) }, { ...(role === undefined ? {} : { role }), ...(scope === undefined ? {} : { scope }) }, ctx);
       return {};
     },
   },

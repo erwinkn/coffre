@@ -184,7 +184,7 @@ test("restore_secret_version writes over the version the page showed: a rotation
   assert.equal((await view(id, 'dev-web')).status, 'pending');
 });
 
-test("what only an Owner of the instance may do of an instance role is refused an admin before anyone is asked: an Owner made, changed or removed, their own changed", async () => {
+test("what only an Owner of the instance may do of an instance role is refused an admin before anyone is asked: an Owner made, changed or removed, their own changed; and a scope the route would refuse", async () => {
   const approvals = async () => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM mcp_approvals`))[0]!.n;
   const token = await connect('admin-web', ALL);
   for (const [tool, args] of [
@@ -195,6 +195,10 @@ test("what only an Owner of the instance may do of an instance role is refused a
   ] as const) {
     assert.match(await refused(token, tool, args), /only an owner of the whole instance/, JSON.stringify(args));
   }
+  // A scope with no role, or on a plain member, is refused as the route refuses it, not asked and then dropped.
+  const scoped = { projects: { only: ['market'] } };
+  assert.match(await refused(token, 'admit_member', { member: other, scope: scoped }), /a scope goes with a role/);
+  assert.match(await refused(token, 'admit_member', { member: other, role: 'member', scope: scoped }), /it takes no scope/);
   assert.equal(await approvals(), 0, 'nothing asked');
   // What an admin may do is asked: another's role that is no Owner's, a member admitted with none.
   await asked(token, 'admit_member', { member: other, role: 'admin' });
