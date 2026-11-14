@@ -50,6 +50,7 @@ import {
   signInError,
   accessRefusal,
   browsersOnly,
+  savedAccess,
   within,
   withPin,
   withoutPins,
@@ -560,18 +561,21 @@ async function login(args: string[]): Promise<void> {
     if (handed !== null) fail(`${file} names ${origin}, and a secret goes only where you name it: \`coffre login ${origin} ${handed}\``);
     process.stderr.write(`Signing in to ${origin}, which ${file} names\n`);
   }
-  const kept = readStore().instances[origin];
+  const store = readStore();
+  const kept = store.instances[origin];
   // 0.14's session behind Access there: refused before a secret is read.
-  if (kept !== undefined && (kept.mode === 'cloudflare' || kept.kind === 'access')) fail(browsersOnly(origin));
+  const refused = savedAccess(store, origin);
+  if (refused !== null) fail(refused);
   // A person's session there is not replaced unseen, and left valid on the server: they sign out first.
   if (machine.length > 0 && kept !== undefined && kept.kind === undefined) {
     fail(`signed in to ${origin} as ${kept.principal?.id ?? 'a person'}: \`coffre logout ${origin}\` first, or sign the run in from a home of its own`);
   }
   if (values.token) await tokenLogin(origin);
   else if (values.service !== undefined) await runLogin(origin, serviceMember(values.service.trim()), values['id-token']);
-  else if (!(await keepSession(origin, kept))) {
+  else {
+    // Asked first: a session saved before the instance went behind Access is not sent there.
     if ((await askMode(origin)) === 'cloudflare') fail(browsersOnly(origin));
-    await deviceLogin(origin, values['no-browser']);
+    if (!(await keepSession(origin, kept))) await deviceLogin(origin, values['no-browser']);
   }
   pinTo(directory, origin);
 }
@@ -773,6 +777,21 @@ async function saveRun(to: Target, session: Omit<Session, 'principal' | 'obtaine
   writeStore(withSession(readStore(), to.origin, { ...session, principal: me.principal, obtainedAt: new Date().toISOString() }));
   process.stdout.write(`Signed in to ${to.origin} as ${me.principal.id}\n`);
   printMe(me);
+}
+
+/**
+ * What to say instead of a command, behind Cloudflare Access: for the
+ * instance the session flags and this directory choose (`accessRefusal`),
+ * or for `origin`, when the command names its own (`savedAccess`). A
+ * credentials file or coffre.json it cannot read is the command's own to say.
+ */
+function refusalBefore(origin?: string): string | null {
+  try {
+    const store = readStore();
+    return origin === undefined ? accessRefusal(sessionFlags, store, localHere()) : savedAccess(store, origin);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -2097,7 +2116,14 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   untrust: (args) => manage.untrust(connect, args),
   freeze: (args) => freeze(connect, args),
   unfreeze: (args) => unfreeze(connect, args),
-  serve: (args) => serve(args, sessionFlags.url, fetching, noMachineBehindAccess),
+  serve: (args) =>
+    serve(args, sessionFlags.url, fetching, {
+      beforeReading: (origin) => {
+        const refusal = refusalBefore(origin);
+        if (refusal !== null) fail(refusal);
+      },
+      beforeSending: noMachineBehindAccess,
+    }),
   audit,
   verify,
   'verify instance': (args) => verify(['instance', ...args]),
@@ -2165,14 +2191,7 @@ if ('group' in found) {
 }
 // Behind Cloudflare Access, before the command reads a secret or sends a credential (`accessRefusal`).
 if (talksToInstance(command)) {
-  const refusal = (() => {
-    try {
-      return accessRefusal(sessionFlags, readStore(), localHere());
-    } catch {
-      // A credentials file or coffre.json it cannot read: the command's own to say.
-      return null;
-    }
-  })();
+  const refusal = refusalBefore();
   if (refusal !== null) fail(refusal);
 }
 try {

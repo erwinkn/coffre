@@ -332,7 +332,7 @@ test("a person's login keeps the session the instance still knows, and only pins
   assert.equal(login.status, 0, login.stderr);
   assert.match(login.stdout, new RegExp(`^Signed in to ${origin} as deploy already, until 2099-01-01: \`coffre logout\` first for a new session\n`));
   assert.match(login.stdout, /\nPinned ~\/code to it/);
-  assert.ok(!seen.some(({ url }) => url.startsWith('/api/auth')), 'a new sign-in was started');
+  assert.ok(!seen.some(({ url }) => url.startsWith('/api/auth/')), 'a new sign-in was started');
   const store = JSON.parse(readFileSync(join(home, '.coffre', 'credentials.json'), 'utf8'));
   assert.equal(store.current, origin);
   assert.deepEqual(store.instances[origin], ada);
@@ -423,7 +423,7 @@ test("a person's login replaces the saved session only when the instance says it
   assert.equal(busy.status, 1, busy.stdout);
   assert.equal(busy.stderr, `coffre: could not check the session saved for ${origin}, which is kept: something went wrong. Retry, or \`coffre logout ${origin}\` first for a new one\n`);
   assert.equal(readFileSync(credentials, 'utf8'), saved);
-  assert.ok(!seen.some(({ url }) => url.startsWith('/api/auth')), 'a new sign-in was started');
+  assert.ok(!seen.some(({ url }) => url.startsWith('/api/auth/')), 'a new sign-in was started');
   assert.ok(!existsSync(join(home, '.coffre', 'directories.json')));
 });
 
@@ -479,6 +479,16 @@ test('behind Cloudflare Access, the CLI says in a sentence that 0.16.0 signs peo
   }
   seen.length = 0;
   assert.ok(!existsSync(join(home, '.coffre', 'credentials.json')), 'nothing saved');
+  // A person's session saved before the instance went behind Access: asked about first, the session's token not sent.
+  mkdirSync(join(home, '.coffre'), { recursive: true, mode: 0o700 });
+  const before = JSON.stringify({ version: 2, current: origin, instances: { [origin]: { mode: 'signin', token: 'coffre_cli_ada', expiresAt: '2099-01-01T00:00:00Z', obtainedAt: '2026-10-01T00:00:00Z' } } });
+  writeFileSync(join(home, '.coffre', 'credentials.json'), before, { mode: 0o600 });
+  const kept = await cli(home, ['login', origin, '--no-browser'], '');
+  assert.equal(kept.status, 1);
+  assert.equal(kept.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`);
+  assert.deepEqual(seen, ['GET /api/auth'], 'only how to sign in asked');
+  assert.equal(readFileSync(join(home, '.coffre', 'credentials.json'), 'utf8'), before);
+  seen.length = 0;
   // 0.14's sessions there, a person's by cloudflared and an Access service token's: refused before any request.
   for (const session of [{ mode: 'cloudflare' }, { mode: 'cloudflare', kind: 'access', clientId: 'id.access', clientSecret: 'shh' }]) {
     mkdirSync(join(home, '.coffre'), { recursive: true, mode: 0o700 });
@@ -500,6 +510,11 @@ test('behind Cloudflare Access, the CLI says in a sentence that 0.16.0 signs peo
     const service = await cli(home, ['--service', 'deploy', 'whoami'], '', undefined, false, runner);
     assert.equal(service.status, 1);
     assert.equal(service.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`);
+    // A sidecar names its instance itself, with no default here to go by: refused before its proof is read.
+    writeFileSync(join(home, '.coffre', 'credentials.json'), JSON.stringify({ version: 2, current: null, instances: { [origin]: { ...session, obtainedAt: '2026-09-01T00:00:00Z' } } }), { mode: 0o600 });
+    const serve = await cli(home, ['serve', '--url', origin, '--service', 'deploy', '--proof', 'oidc'], '');
+    assert.equal(serve.status, 1);
+    assert.equal(serve.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`);
   }
   assert.deepEqual(seen, [], 'nothing sent');
 });

@@ -73,6 +73,11 @@ export function accessRefusal(flags: SessionFlags, store: Store, local: Local | 
   } catch {
     return null;
   }
+  return savedAccess(store, origin);
+}
+
+/** 0.14's session saved for `origin` behind Cloudflare Access: what to say instead of anything else (`browsersOnly`); null without one. */
+export function savedAccess(store: Store, origin: string): string | null {
   return behindAccess(store.instances[origin]) ? browsersOnly(origin) : null;
 }
 

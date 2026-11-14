@@ -30,7 +30,7 @@ export async function serve(
   args: string[],
   sessionUrl: string | undefined,
   fetching: (instance: string) => typeof fetch,
-  beforeProof: (origin: string) => Promise<void>,
+  access: { beforeReading: (origin: string) => void; beforeSending: (origin: string) => Promise<void> },
 ): Promise<void> {
   const { values } = parse(
     args,
@@ -49,9 +49,10 @@ export async function serve(
     if ('path' in where) throw new UsageError(`--tunnel ${spec}: a tunnel listens on a host and port`);
     return { name, where };
   });
+  // Behind Cloudflare Access (`browsersOnly`), the proof is not read when a 0.14 session saved here says so, and not sent when the instance does.
+  access.beforeReading(origin);
   const proof = await proofOf(values.proof, process.env);
-  // Behind Cloudflare Access, the proof is not sent (`browsersOnly`).
-  await beforeProof(origin);
+  await access.beforeSending(origin);
   const say = (line: string) => process.stderr.write(`${line}\n`);
 
   const coffre: Workload = await workload({ url: origin, service: values.service, proof, place: values.place, log: say, sigterm: false, fetch: fetching(origin) });
