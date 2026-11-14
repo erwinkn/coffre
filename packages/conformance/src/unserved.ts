@@ -7,5 +7,4 @@
 export const UNSERVED: Readonly<Record<string, string>> = {
   'verify keys': '`coffre verify keys` reads GET /audit/keys, which answers 501 until 0.16 serves it',
   'ready once adopted': "/readyz says only that the database is migrated: whether the vault has adopted it and the signer signed comes with the vault's `about` call (T311; docs/design/0.16.md, \"Readiness\")",
-  loosening: 'PATCH /secrets/:project/:environment with `{ sensitivity }` alone, a nature changed in place, comes with the nature change (docs/design/0.16.md, "The server": not in the skeleton yet)',
 };

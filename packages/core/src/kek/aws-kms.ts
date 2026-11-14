@@ -5,6 +5,7 @@ import {
   DEK_BYTES,
   KekBadClaimError,
   KekCancelledError,
+  KekRefusedError,
   KekUnavailableError,
   type KeyOperation,
   type KekProvider,
@@ -103,11 +104,11 @@ export class AwsKmsKekProvider implements KekProvider {
       CiphertextBlob: base64(wrapped.bytes),
       EncryptionContext: encryptionContext(ctx),
     }, operation);
-    if (KeyId !== this.keyId) throw new KekUnavailableError(`KMS decrypted under ${KeyId}, not ${this.keyId}`, true);
+    if (KeyId !== this.keyId) throw new KekRefusedError(`KMS decrypted under ${KeyId}, not ${this.keyId}`, true);
     const dek = Buffer.from(Plaintext, 'base64');
     if (dek.length !== DEK_BYTES) {
       dek.fill(0);
-      throw new KekUnavailableError('unwrapped DEK has the wrong length', true);
+      throw new KekRefusedError('unwrapped DEK has the wrong length', true);
     }
     return dek;
   }
@@ -116,7 +117,9 @@ export class AwsKmsKekProvider implements KekProvider {
    * One KMS call, tried up to three times while KMS throttles, fails on its
    * side or does not answer. Every failure but a ciphertext that does not
    * open is a `KekUnavailableError`, retried or not: a key KMS will not use
-   * or credentials it refuses say nothing about the claim either.
+   * or credentials it refuses say nothing about the claim either. What KMS
+   * answered and will answer again, such as `AccessDeniedException` or
+   * `DisabledException`, is a `KekRefusedError`, which only its operator mends.
    */
   async #call(action: 'Encrypt' | 'Decrypt', request: object, operation?: KeyOperation): Promise<Record<string, string>> {
     const body = JSON.stringify(request);
@@ -144,7 +147,8 @@ export class AwsKmsKekProvider implements KekProvider {
           throw new KekBadClaimError(`KMS ${action}: ${answer.type}`);
         }
         if (!answer.retry || attempt === ATTEMPTS) {
-          throw new KekUnavailableError(`KMS ${action} failed${attempt > 1 ? ` ${attempt} times` : ''}: ${answer.failure}`, uncertain);
+          const failed = answer.refused ? KekRefusedError : KekUnavailableError;
+          throw new failed(`KMS ${action} failed${attempt > 1 ? ` ${attempt} times` : ''}: ${answer.failure}`, uncertain);
         }
         try {
           await delay(100 * 4 ** (attempt - 1) * (1 + Math.random()), signal);
@@ -162,7 +166,7 @@ export class AwsKmsKekProvider implements KekProvider {
     credentials: AwsCredentials,
     signal?: AbortSignal,
     operation?: KeyOperation,
-  ): Promise<{ data: Record<string, string> } | { type: string; failure: string; retry: boolean; uncertain: boolean }> {
+  ): Promise<{ data: Record<string, string> } | { type: string; failure: string; retry: boolean; refused: boolean; uncertain: boolean }> {
     const headers = signV4({
       method: 'POST',
       url: this.#url,
@@ -186,25 +190,22 @@ export class AwsKmsKekProvider implements KekProvider {
       });
       text = await response.text();
     } catch (error) {
-      return { type: 'network', failure: messageOf(error), retry: sent, uncertain: sent };
+      return { type: 'network', failure: messageOf(error), retry: sent, refused: false, uncertain: sent };
     }
     const parsed = parse(text);
     if (response.ok) {
       const complete =
         parsed !== null && (action === 'Encrypt' ? typeof parsed.CiphertextBlob === 'string' : typeof parsed.Plaintext === 'string');
       if (complete) return { data: parsed as Record<string, string> };
-      return { type: 'malformed', failure: `KMS answered ${response.status} without a result`, retry: true, uncertain: true };
+      return { type: 'malformed', failure: `KMS answered ${response.status} without a result`, retry: true, refused: false, uncertain: true };
     }
     // `__type` may carry a namespace (`com.amazonaws.kms#…`), the header a URL after `:`.
     const raw = response.headers.get('x-amzn-errortype') ?? (typeof parsed?.__type === 'string' ? parsed.__type : '');
     const type = raw.split(':')[0]!.split('#').pop() || `HTTP ${response.status}`;
     const message = parsed?.message ?? parsed?.Message;
-    return {
-      type,
-      failure: `${type}${typeof message === 'string' ? `, ${message}` : ''}`,
-      uncertain: false,
-      retry: response.status >= 500 || response.status === 429 || type === 'ThrottlingException',
-    };
+    const retry = response.status >= 500 || response.status === 429 || type === 'ThrottlingException';
+    // Any other answer is KMS's word on coffre's request itself, which it gives again: refused.
+    return { type, failure: `${type}${typeof message === 'string' ? `, ${message}` : ''}`, uncertain: false, retry, refused: !retry };
   }
 }
 

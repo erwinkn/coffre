@@ -11,7 +11,7 @@ import { isUnavailable } from '@coffre/db/dialect';
 import { z } from 'zod';
 
 import type { ApiContext } from '../api/context.ts';
-import { ApiError, toErrorBody } from '../api/errors.ts';
+import { ApiError, keyServiceDown, toErrorBody } from '../api/errors.ts';
 import { bearerToken, presented } from '../auth.ts';
 import { errorResponse, jsonResponse, readLimitedJson } from '../http.ts';
 import { logged } from '../logged.ts';
@@ -445,7 +445,7 @@ function pending(url: string, approval: { id: string; expiresAt: Date }, tool: T
  * transport not answering among it, which is the tool's error, to try again, as the API's 503 `unavailable` is.
  */
 function refusalOf(error: unknown): { message: string; reason: string | undefined } | null {
-  if (!(error instanceof ApiError) && !(error instanceof z.ZodError) && !isUnavailable(error)) return null;
+  if (!(error instanceof ApiError) && !(error instanceof z.ZodError) && !isUnavailable(error) && !keyServiceDown(error)) return null;
   const { status, body } = toErrorBody(error);
   if (status >= 500 && status !== 501 && status !== 503) return null;
   return { message: body.message, reason: body.reason };

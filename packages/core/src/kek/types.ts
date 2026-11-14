@@ -32,7 +32,8 @@ export type KeyOperation = { deadline: number; signal: AbortSignal };
  * context (`aws-kms.ts`). Scaleway's Audit Trail does not log Key Manager
  * Decrypt at all, which is why AWS came first.
  *
- * `unwrap` throws `KekUnavailableError` when the service cannot answer, and
+ * `unwrap` throws `KekUnavailableError` when the service cannot answer,
+ * `KekRefusedError` when it refuses coffre itself for good, and
  * `KekBadClaimError` when the wrapped DEK does not open under `ctx`. Other
  * errors are unexpected faults; the vault records them and fails the call.
  */
@@ -50,8 +51,9 @@ export const DEK_BYTES = 32;
 
 /**
  * The key service could not answer: it is down, throttling past the
- * retries, or refusing coffre's own credentials. Nothing is known about the
- * wrapped key, so the vault fails the call instead of refusing it.
+ * retries, or out of time; or it refuses coffre itself (`KekRefusedError`).
+ * Nothing is known about the wrapped key, so the vault fails the call
+ * instead of refusing it.
  */
 export class KekUnavailableError extends Error {
   override readonly name: string = 'KekUnavailableError';
@@ -71,6 +73,16 @@ export class KekCancelledError extends KekUnavailableError {
   constructor(uncertain = false) {
     super('key operation was cancelled', uncertain);
   }
+}
+
+/**
+ * The key service answered, and said no for good: it refuses coffre's
+ * credentials, the key is disabled or gone, or it opened under another key.
+ * Asked again, it says the same: the vault fails the call as for any other
+ * `KekUnavailableError`, but whoever runs coffre must act, and nobody's retry helps.
+ */
+export class KekRefusedError extends KekUnavailableError {
+  override readonly name = 'KekRefusedError';
 }
 
 /** The ciphertext does not open under the claimed key and context. */

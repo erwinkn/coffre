@@ -6,7 +6,7 @@ import type { SecretContext } from '../src/context.ts';
 import { awsKms, AwsKmsKekProvider, type AwsKmsOptions } from '../src/kek/aws-kms.ts';
 import { operationSignal } from '../src/kek/cancellation.ts';
 import { signV4 } from '../src/kek/sigv4.ts';
-import { KekUnavailableError } from '../src/kek/types.ts';
+import { KekRefusedError, KekUnavailableError } from '../src/kek/types.ts';
 
 const ARN = 'arn:aws:kms:eu-west-3:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab';
 const CREDENTIALS = { accessKeyId: 'AKIAEXAMPLE123', secretAccessKey: 'abc/def+ghi' };
@@ -181,19 +181,25 @@ test('KMS throttling, failing or out of reach is retried, then an outage', async
 
   const down = fakeKms([500, 503, 500].map((status) => kmsError('KMSInternalException', status)));
   await assert.rejects(kms(down).unwrap(wrapped, ctx), (error: unknown) => {
-    assert.ok(error instanceof KekUnavailableError);
+    assert.ok(error instanceof KekUnavailableError && !(error instanceof KekRefusedError), 'an outage, which a retry may get past');
     assert.equal(error.message, 'KMS Decrypt failed 3 times: KMSInternalException, KMSInternalException (fake)');
     return true;
   });
 
-  // KMS refusing coffre itself is no verdict on the key, and no use retrying.
-  const denied = fakeKms([kmsError('AccessDeniedException')]);
-  await assert.rejects(kms(denied).wrap(dek, ctx), (error: unknown) => {
-    assert.ok(error instanceof KekUnavailableError);
-    assert.match(error.message, /^KMS Encrypt failed: AccessDeniedException/);
-    return true;
-  });
-  assert.equal(denied.calls.length, 1);
+  // KMS refusing coffre itself is no verdict on the key, and no use retrying: refused, which the vault fails as an outage.
+  for (const type of ['AccessDeniedException', 'DisabledException', 'UnrecognizedClientException']) {
+    const denied = fakeKms([kmsError(type)]);
+    await assert.rejects(kms(denied).wrap(dek, ctx), (error: unknown) => {
+      assert.ok(error instanceof KekRefusedError && error instanceof KekUnavailableError);
+      assert.equal(error.name, 'KekRefusedError');
+      assert.match(error.message, new RegExp(`^KMS Encrypt failed: ${type}`));
+      return true;
+    });
+    assert.equal(denied.calls.length, 1);
+  }
+  // Throttled past its retries, KMS is out of reach, not refusing.
+  const throttled = fakeKms([1, 2, 3].map(() => kmsError('ThrottlingException')));
+  await assert.rejects(kms(throttled).wrap(dek, ctx), (error: unknown) => error instanceof KekUnavailableError && error.name === 'KekUnavailableError');
 });
 
 test('credentials may be a function, asked before each call, and may carry a session token', async () => {
