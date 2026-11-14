@@ -758,8 +758,9 @@ Each limit is stated here once; the other documents link to it.
   a genuine old row put back, or an entry not yet signed edited, is found
   within about a minute, and coffre keeps serving; a signed entry edited is
   found by the signer's re-check of a slice of the log each minute, or by a
-  page that shows it. What to do once the signer's storage is lost is
-  [still to design](design/0.16.md#still-to-design).
+  page that shows it. A signer whose storage is lost takes the database
+  as it stands, a limit 0.16.0 accepts (D244);
+  [restore.md](restore.md#if-the-signers-storage-is-lost) says how you know.
 - **What only KMS gives.** With a local vault key, whoever holds the vault's
   configuration and a copy of the database holds every value, and nothing
   outside coffre records either being used. AWS KMS adds a second record
