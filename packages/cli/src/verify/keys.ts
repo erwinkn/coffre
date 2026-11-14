@@ -59,9 +59,12 @@ export function keyVerdict(text: string, about: KeyMaterial, vaultId?: string): 
   if (key === null) throw malformed('a key', text);
   const derived = derivedSigningKey(key);
   try {
-    const asVaultKey = about.checks.indexOf(keyCheckOf(derived));
-    const at = asVaultKey >= 0 ? asVaultKey : about.checks.indexOf(keyCheckOf(key));
-    const what = asVaultKey >= 0 ? 'vault key' : 'signing key';
+    // Both readings, the earlier check winning: a key-service deployment's signingKey may also be a vault key it kept, whose check is a later one.
+    const readings = [
+      { what: 'vault key', at: about.checks.indexOf(keyCheckOf(derived)) },
+      { what: 'signing key', at: about.checks.indexOf(keyCheckOf(key)) },
+    ].filter(({ at }) => at >= 0);
+    const { what, at } = readings.sort((a, b) => a.at - b.at)[0] ?? { what: 'key', at: -1 };
     const now = about.kek.provider === 'local' ? `vault ID ${about.kek.id}` : `${about.kek.id}, in ${about.kek.provider}`;
     if (at < 0) throw new Failure(`not this instance's: no key the vault signs or verifies with, taken as a vault key or as a signing key. The vault wraps under ${now}`);
     if (at > 0) {

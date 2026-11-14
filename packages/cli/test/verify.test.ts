@@ -77,6 +77,16 @@ test("a key service and its signingKey: the signingKey passes as the signing key
   assert.match(await refusal(() => keyVerdict(b64(derivedSigningKey(keys.current)), moved)), /^✗ a signing key the vault only verifies with/);
 });
 
+test('a signingKey that is also a previous vault key passes as the signing key the vault signs with now', () => {
+  // A local vault key K, kept as the vault key it replaced, given to a key service as its signingKey: its check is first as the signing key, later as the vault key.
+  const reused: KeyMaterial = {
+    kek: { provider: 'aws-kms', id: 'arn:aws:kms:eu-west-1:111122223333:key/coffre' },
+    previous: [{ provider: 'local', id: CURRENT }],
+    checks: [keyCheckOf(keys.current), keyCheckOf(derivedSigningKey(keys.current))],
+  };
+  assert.equal(keyVerdict(b64(keys.current), reused), 'the signing key the vault signs with now; it wraps under arn:aws:kms:eu-west-1:111122223333:key/coffre, in aws-kms');
+});
+
 test('a malformed key is said to be one, without being shown; an empty answer skips the key', async () => {
   const text = b64(keys.current);
   for (const malformed of [text.slice(1), keys.current.toString('hex'), 'hunter2', `${text}${text}`]) {
