@@ -3,7 +3,8 @@
 // (POST), a peek (PUT), a write (PATCH), a sign-in (`/signin`) and `about`
 // (GET /about), as the app's routes do them: the token hashed, never looked
 // up, and the vault called over a service binding. `/signer` asks the signer
-// how it stands: the one the vault calls, or the object its body names.
+// how it stands: the one the vault calls, or the object its body names, or,
+// past the object's own calls, what it keeps, or its alarm fired.
 import type { Account, Vault as Contract } from '@coffre/core/vault';
 
 import { createDatabase } from '@coffre/db';
@@ -22,6 +23,14 @@ export class CoffreSigner extends Signer {
   }
   asked(): number {
     return this.#asked;
+  }
+  /** Its storage, every key and value, and when its alarm is set. */
+  async kept(): Promise<unknown> {
+    return { storage: JSON.stringify([...this.ctx.storage.kv.list()]), alarm: await this.ctx.storage.getAlarm() };
+  }
+  /** Its alarm, as the runtime fires it. */
+  ring(): Promise<void> {
+    return this.alarm();
   }
 }
 
@@ -53,9 +62,18 @@ export default {
     // The vault's configuration, as GET /audit/keys asks it: no token, and nothing read.
     if (new URL(request.url).pathname === '/about') return Response.json(await env.VAULT.about());
     if (new URL(request.url).pathname === '/signer') {
-      const { name } = (await request.json()) as { name?: string };
-      const signer = signerOf(env.SIGNER, name ?? env.SIGNER_NAME ?? SIGNER);
-      return Response.json({ ...(await signer.status()), asked: await (signer as unknown as CoffreSigner).asked() });
+      const { name, ask } = (await request.json()) as { name?: string; ask?: 'kept' | 'ring' };
+      const signer = signerOf(env.SIGNER, name ?? env.SIGNER_NAME ?? SIGNER) as unknown as CoffreSigner;
+      if (ask === 'kept') return Response.json(await signer.kept());
+      if (ask === 'ring') {
+        await signer.ring();
+        return Response.json({});
+      }
+      try {
+        return Response.json({ ...(await signer.status()), asked: await signer.asked() });
+      } catch (error) {
+        return Response.json({ error: error instanceof Error ? error.message : String(error) });
+      }
     }
     const bearer = /^Bearer (\S+)$/.exec(request.headers.get('authorization') ?? '')?.[1];
     if (bearer === undefined) return Response.json({ refused: 'unauthenticated' }, { status: 401 });

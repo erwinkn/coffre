@@ -104,7 +104,9 @@ const leafOf = (body: string) => sql.raw(`sha256('\\x00'::bytea || convert_to(${
 
 // By id, which for changes is the order they committed in: each takes its id under the change lock, held until its
 // commit shows (`commit` in change.ts), and the sequence hands ids out one at a time. Uses commit in any order, and write no row.
-const WAITING = sql`SELECT 'pending' AS part, id::text AS name, NULL::jsonb AS key, kept, body, mac FROM (SELECT * FROM log_pending ORDER BY id LIMIT ${MOST + 1}) waiting`;
+// `most` of them, and one more to tell whether that is all; null for all.
+const WAITING = (most: number | null) =>
+  sql`SELECT 'pending' AS part, id::text AS name, NULL::jsonb AS key, kept, body, mac FROM (SELECT * FROM log_pending ORDER BY id LIMIT ${most === null ? sql`ALL` : most + 1}) waiting`;
 const ROWS = sql.join(
   MIRRORED.map((table) => {
     const { name, key } = shapeOf(table);
@@ -363,21 +365,21 @@ export class Signer {
    * runs can be replayed one step at a time (test/replay-log.ts). Anything
    * else calls `run`.
    */
-  async read(full: boolean): Promise<Snapshot> {
+  async read(full: boolean, most: number | null = MOST): Promise<Snapshot> {
     this.#alive();
     if (this.#moving !== null) throw new Error('the last run is not moved yet');
     const expected = new Set(this.#expected);
     const at = this.#on.now();
     const found = await this.#ask<{ part: 'pending' | 'row' | 'end' | 'head'; name: string | null; key: unknown; kept: boolean; body: string; mac: Uint8Array }>(
-      sql`SELECT parts.*, clock_timestamp() AS read_at FROM (${full ? sql`${WAITING} UNION ALL ${ROWS} UNION ALL ${ENDS} UNION ALL ${HEAD}` : WAITING}) parts`,
+      sql`SELECT parts.*, clock_timestamp() AS read_at FROM (${full ? sql`${WAITING(most)} UNION ALL ${ROWS} UNION ALL ${ENDS} UNION ALL ${HEAD}` : WAITING(most)}) parts`,
     );
     const waiting = found.filter((row) => row.part === 'pending').map(({ name, kept, body, mac }) => ({ id: name!, kept, body, mac }));
     waiting.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
     return {
       at,
       expected,
-      pending: waiting.slice(0, MOST),
-      drained: waiting.length <= MOST,
+      pending: most === null ? waiting : waiting.slice(0, most),
+      drained: most === null || waiting.length <= most,
       rows: full ? new Map(found.filter((row) => row.part === 'row').map((row) => [JSON.stringify([row.name, ...(row.key as unknown[])]), Buffer.from(row.mac).toString('hex')])) : null,
       ends: full ? (Object.fromEntries(found.filter((row) => row.part === 'end').map((row) => [treeOf(row.kept), { size: row.key, last: row.name }])) as Record<Tree, End>) : null,
       head: found.filter((row) => row.part === 'head').map((row) => JSON.stringify([...(row.key as unknown[]), Buffer.from(row.mac).toString('hex')]))[0] ?? null,
@@ -490,7 +492,8 @@ export class Signer {
    */
   async resume(): Promise<boolean> {
     if (!this.blank) throw new Error('only a signer whose storage is empty goes on from the database');
-    const snapshot = await this.read(true);
+    // Every entry that waits, however many: the rows read with them are past them all.
+    const snapshot = await this.read(true, null);
     if (snapshot.head === null) return false;
     const [size, keptSize, keptRoot, agingSize, agingRoot, agingFrom, signedAt, mac] = JSON.parse(snapshot.head) as [number, number, string, number, string, number, number | null, string];
     // A head of no entry is a refusal of what waited before anything was adopted: nothing to go on from.

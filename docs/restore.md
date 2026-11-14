@@ -51,6 +51,12 @@ and restoring it brings them back, readable with the vault key. Deleting
 frees the live database, not its copies: expire backups as your retention
 policy says.
 
+Check the keys you will deploy while the instance still answers: `coffre
+verify keys`, with the vault key from the escrow (or, with a key service,
+the `signingKey`), must say it is the one the instance signs with now. A
+restore deployed with other keys serves nothing until the right ones are
+deployed ([below](#if-the-vault-key-is-wrong)).
+
 Stop traffic first. An instance left running against the old database keeps
 writing to it. And deploy the restored database with a new signer name
 (below): the signer that ran before it remembers every entry and row since
@@ -87,11 +93,16 @@ If the head is not the vault's (the keys are not the ones the database was
 written under) or the log does not reach it, every call is answered 503
 `adopting`, and the vault's log says why: `the database's log is begun, and
 its signer has signed none of it: its head is not the vault's`, or `its log
-does not reach its head`. Nothing is written, and the signer stays blank, so
-the same name serves once the right keys are deployed.
+does not reach its head`. Nothing is written, and the signer stays blank:
+its alarm signs nothing, and removes nothing that waits, until it has gone
+on from the head. It tries again every 10 seconds, and the same name serves
+once the right keys are deployed.
 
-The old object is left as it was: nothing calls it, and its storage stays
-in the namespace. Do not reuse a name.
+The object named before stops. Its alarm, the next time it fires, is not
+set again, and it refuses every call, so it signs nothing of the new
+signer's log. It writes nothing, to the database or its own storage, which
+stays in the namespace as it was. Do not reuse a name: named again, that
+object finds a database that moved on without it, and reports it.
 
 *Example.* A bulk change goes wrong at 11:40. Ada restores the 06:00 backup,
 deploys the vault with `signerName: 'signer-2026-11-14'`, and signs in. The
@@ -309,8 +320,10 @@ With a key service and a `signingKey`, the signing key is what the head is
 held to. The right `signingKey` beside another KMS key serves, and each
 value whose data key that KMS key did not wrap is refused, `unreadable`.
 
-Either way, deploy the escrowed keys: under the same `signerName`, since a
-signer that refused the head kept nothing.
+Either way, deploy the escrowed keys, `coffre verify keys` first if the old
+instance still answers, under the same `signerName`: the signer that
+refused the head kept nothing, and its alarm left the log as the backup
+had it, the entries that waited included.
 
 ## If the signer's storage is lost
 

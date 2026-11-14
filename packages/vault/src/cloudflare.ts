@@ -47,6 +47,12 @@ export type WorkersVaultConfig = VaultConfig & {
   signerName?: string;
 };
 
+/** The signer's object, as the configuration names it. */
+function signerNameOf({ signerName = SIGNER }: WorkersVaultConfig): string {
+  if (typeof signerName !== 'string' || signerName === '') throw new Error(`signerName names the signer's object, a text that is not empty; got ${JSON.stringify(signerName)}`);
+  return signerName;
+}
+
 /** Set when the Worker's module runs `vault(…)`, before any call comes in. */
 let configure: ((env: never) => WorkersVaultConfig) | null = null;
 
@@ -136,9 +142,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     if (entry === undefined) {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
-      const signer = config.signerName ?? SIGNER;
-      if (typeof signer !== 'string' || signer === '') throw new Error(`signerName names the signer's object, a text that is not empty; got ${JSON.stringify(signer)}`);
-      entry = { database: config.database, prepared: prepareVault(resolveVaultConfig(config)), signer, adopted: false };
+      entry = { database: config.database, prepared: prepareVault(resolveVaultConfig(config)), signer: signerNameOf(config), adopted: false };
       ready.set(env, entry);
     }
     return entry;
@@ -172,7 +176,7 @@ export const CoffreSigner = signerObject((env: object) => {
   if (configure === null) throw new Error('the vault Worker must export default vault(…)');
   const config = configure(env as never);
   const { signingKeys, keks, owners, keepUsesDays } = resolveVaultConfig(config);
-  return { database: config.database, signingKeys, keks, owners, keepUsesDays, alert: config.alert };
+  return { database: config.database, signingKeys, keks, owners, keepUsesDays, alert: config.alert, name: signerNameOf(config) };
 });
 
 /** The vault Worker's default export, `VaultEntrypoint`, configured from its `env`. */

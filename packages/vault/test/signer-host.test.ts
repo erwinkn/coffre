@@ -38,12 +38,12 @@ const down = { database: false, alert: false };
 /** What the deployment's alert does before it returns, if anything. */
 let sending: (() => void | Promise<void>) | null;
 
-/** A host over the storage, as the one a Durable Object makes each time it starts. */
-const start = (alone: Hosting['alone'] = (run) => run()) =>
+/** A host over the storage, as the one a Durable Object makes each time it starts: with the vault's keys, or the `seeds` given. */
+const start = (alone: Hosting['alone'] = (run) => run(), seeds = [seed]) =>
   new SignerHost({
     storage,
     alone,
-    keys: vault.keys,
+    keys: seeds.map(keyOf),
     db: new Proxy(vault.db, {
       get(db, key) {
         if (down.database) throw new Error('the database is out of reach');
@@ -52,7 +52,7 @@ const start = (alone: Hosting['alone'] = (run) => run()) =>
     }),
     now: vault.now,
     keepUsesDays: 90,
-    adopting,
+    adopting: { ...adopting, signingKeys: seeds },
     alert: async (alert) => {
       if (down.alert) throw new Error('the alert could not be sent');
       await sending?.();
@@ -884,6 +884,52 @@ test('a log whose oldest uses were pruned is gone on from, from the tiles above 
   await minute();
   await minute();
   assert.deepEqual([await head(), alerts], [{ size: 602, keptSize: 1, agingFrom: 512 }, []]);
+});
+
+test('a signer deployed with a wrong vault key over a restored log touches nothing, its alarm neither: the right key, under the same storage, goes on', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  assert.equal(await host.adopt(), true);
+  await member(ada, 'member');
+  await minute();
+  // Committed, and not signed: the entry the wrong key would take for forged.
+  await member(bo, 'member');
+  // Told to the signer the backup was taken under, not this one.
+  vault.woken.length = 0;
+  const before = [await seqs(), await head(), await actions('log_pending')];
+  storage = objectStorage();
+  host = start(undefined, [randomBytes(32)]);
+  assert.equal(await host.adopt(), false);
+  assert.match((await host.status()).adoption!.error, /its head is not the vault's$/);
+  // The alarm the adoption set, and the minute's after it: neither signs, refuses, nor moves the head.
+  vault.tick(TICK_MS);
+  await fire();
+  vault.tick(CHECK_MS);
+  await fire();
+  assert.deepEqual([await seqs(), await head(), await actions('log_pending'), alerts], [...before, []]);
+  // Tried again no sooner than an adoption is: a wrong key fails each try, which reads every row.
+  assert.equal(storage.alarm, vault.now() + ADOPT_AGAIN_MS);
+  host = start();
+  vault.tick(ADOPT_AGAIN_MS);
+  assert.equal(await host.adopt(), true);
+  await minute();
+  assert.deepEqual([await seqs(), await actions('log_pending'), alerts, (await host.status()).standing], [upTo(3), [], [], []]);
+});
+
+test('a restored log with more entries waiting than a run signs: the mirror is put back past every one of them, and the signer finds nothing', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  assert.equal(await host.adopt(), true);
+  await minute();
+  // More than one run's worth of uses, then a change: its row is in the database, and its entry waits behind them.
+  await wait(...Array.from({ length: 300 }, (_, i) => reading(`KEY_${i}`)));
+  await member(bo, 'member');
+  // Told to the signer the backup was taken under, not this one.
+  vault.woken.length = 0;
+  storage = objectStorage();
+  host = start();
+  assert.equal(await host.adopt(), true);
+  await minute();
+  await minute();
+  assert.deepEqual([await count('log'), await count('log_pending'), alerts, (await host.status()).standing], [302, 0, [], []]);
 });
 
 test('a restored log that does not reach its head, or a head that is not the vault\'s, is not gone on from: the signer says no, and why', async (t) => {

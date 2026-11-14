@@ -20,6 +20,8 @@ import { SignerHost, type SignerAlert, type SignerStatus } from './signer-host.t
 
 export type SignerConfig = Adopting & {
   database: PostgresDatabase;
+  /** The object the deployment names (`signerName` in cloudflare.ts), `SIGNER` unless set: any other touches nothing. */
+  name?: string | undefined;
   /** How long a use is kept, in days (`log.keepUsesDays` in config.ts). Null keeps every one. */
   keepUsesDays: number | null;
   alert?: ((alert: SignerAlert) => void | Promise<void>) | undefined;
@@ -44,10 +46,12 @@ export const signerOf = (namespace: SignerNamespace, name: string) => namespace.
 export function signerObject<Env>(configure: (env: Env) => SignerConfig) {
   return class CoffreSigner extends DurableObject<Env> {
     readonly #host: SignerHost;
+    readonly #name: string;
 
     constructor(ctx: DurableObjectState, env: Env) {
       super(ctx, env);
-      const { database, signingKeys, keks, owners, keepUsesDays, alert } = configure(env);
+      const { database, signingKeys, keks, owners, keepUsesDays, alert, name = SIGNER } = configure(env);
+      this.#name = name;
       this.#host = new SignerHost({
         storage: ctx.storage,
         alone: (run) => ctx.blockConcurrencyWhile(run),
@@ -61,23 +65,36 @@ export function signerObject<Env>(configure: (env: Env) => SignerConfig) {
       });
     }
 
+    /**
+     * Before anything else: one the deployment named before a restore would sign the new signer's entries under its own
+     * numbering. It stops its alarm and refuses every call, touching neither its storage nor the database: named again, it is as it was.
+     */
+    async #named(): Promise<void> {
+      if (this.ctx.id.name === this.#name) return;
+      await this.ctx.storage.deleteAlarm();
+      throw new Error(`this signer's object is ${JSON.stringify(this.ctx.id.name)}, and the deployment names ${JSON.stringify(this.#name)} (signerName): it touches nothing`);
+    }
+
     /** Whether the database is adopted, after adopting it if it is not: the vault's question before it serves. */
-    adopt(): Promise<boolean> {
+    async adopt(): Promise<boolean> {
+      await this.#named();
       return this.#host.adopt();
     }
 
     /** The vault's word that an entry was committed, by its hash. */
-    wake(hash: Uint8Array): Promise<void> {
+    async wake(hash: Uint8Array): Promise<void> {
+      await this.#named();
       return this.#host.wake(hash);
     }
 
     /** When the last check completed, what stands of what the checks found, and whether the database is adopted. */
-    status(): Promise<SignerStatus> {
+    async status(): Promise<SignerStatus> {
+      await this.#named();
       return this.#host.status();
     }
 
     alarm(): Promise<void> {
-      return this.#host.alarm();
+      return this.#named().then(() => this.#host.alarm(), (error: unknown) => console.error('coffre: an alarm of a signer the deployment no longer names; it is not set again', error));
     }
   };
 }
