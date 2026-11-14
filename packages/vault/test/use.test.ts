@@ -731,6 +731,40 @@ test('with no outage length set, and for a failure that is no outage, a use fail
   down.back();
 });
 
+test('a pool with no connection to give is the database busy, no outage: the use fails, and the next asks again; a connection that could not be made is one', async () => {
+  // Whoever holds a credential can fill the pool, and a credential revoked meanwhile must not be answered from older
+  // rows for it (D238). Hyperdrive's two ways of saying so, the second with no code, and Postgres's out of connections.
+  Object.assign(vault, { memory: memoryOf(2, 300) });
+  const proxied = ask('ada', 'market/prod', ['FLAG'], { purpose: 'use' });
+  assert.deepEqual(await got(proxied), { FLAG: 'on' });
+  const full = [
+    { message: 'Timed out while waiting for an open slot in the pool.', code: '58000' },
+    { message: 'Failed to acquire a connection from the pool.' },
+    { message: 'sorry, too many clients already', code: '53300' },
+  ];
+  for (const failure of full) {
+    vault.tick(2000);
+    const down = unreachable({ failure });
+    await assert.rejects(use(vault, proxied), { message: failure.message });
+    assert.equal(vault.memory.downAt, -Infinity);
+    await assert.rejects(use(vault, proxied), { message: failure.message });
+    assert.equal(down.tried, 2);
+    down.back();
+  }
+  // The same use, the database out of reach: answered from the rows it was last answered from. Local workerd's
+  // words for a connection it could not make, as Hyperdrive's.
+  for (const message of ['connection attempt failed', 'Server connection attempt failed: destination_unavailable']) {
+    vault.tick(2000);
+    const down = unreachable({ failure: { message } });
+    assert.deepEqual(await got(proxied), { FLAG: 'on' });
+    assert.equal(down.tried, 1);
+    assert.notEqual(vault.memory.downAt, -Infinity);
+    down.back();
+    vault.tick(2000);
+    assert.deepEqual(await got(proxied), { FLAG: 'on' });
+  }
+});
+
 test('the bulk cap refuses the read that would pass it, writes nothing for it, and lets the window slide', async () => {
   Object.assign(vault, { cap: { count: 3, windowMs: 60_000 } });
   assert.deepEqual(Object.keys(await got(ask('ci', 'market/prod', ['DATABASE_URL', 'FLAG'])) as object), ['DATABASE_URL', 'FLAG']);

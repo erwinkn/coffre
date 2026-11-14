@@ -1,8 +1,11 @@
 // What a plugin's WebSocket passes before it opens: the migration door, as
 // `respond` keeps it for every other request, then the plugin under the
 // path, which refuses or hands back its session.
+import { isUnavailable } from '@coffre/db/dialect';
+
 import { UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import { schemaReady } from './app.ts';
+import { errorResponse } from './http.ts';
 import { pluginSocket, type SocketSession } from './plugins.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
@@ -31,15 +34,18 @@ export async function admitSocket(request: Request, runtime: CoffreRuntime, sour
  * A decision on a WebSocket, if it comes within `ADMISSION_MS`, and a
  * refusal for taking too long otherwise. `hold` is told of the decision
  * itself, which goes on past that refusal: what holds a slot for it (a
- * Durable Object's) holds it until then.
+ * Durable Object's) holds it until then. A database that did not answer
+ * or had no connection to give, the door's question or the plugin's, is a
+ * 503 that says when to ask again, as everywhere else (`errorResponse`);
+ * any other failure, a 500.
  */
 export async function inTime(decided: Promise<Response | SocketSession>, hold?: (deciding: Promise<unknown>) => void): Promise<Response | SocketSession> {
   let late: ReturnType<typeof setTimeout> | undefined;
   try {
     hold?.(decided);
     return await Promise.race([decided, new Promise<Response>((resolve) => (late = setTimeout(() => resolve(new Response('coffre took too long to decide', { status: 503, headers: { 'retry-after': UNAVAILABLE_RETRY_AFTER } })), ADMISSION_MS)))]);
-  } catch {
-    return new Response('the plugin failed', { status: 500 });
+  } catch (error) {
+    return isUnavailable(error) ? errorResponse(error) : new Response('the plugin failed', { status: 500 });
   } finally {
     clearTimeout(late);
   }

@@ -297,4 +297,11 @@ test('through an outage of the database, a credential is routed by the row read 
     throw new Error('syntax error');
   };
   await assert.rejects(routed(runtime, hash), /syntax error/);
+  // Nor is a pool with no connection to give: the database busy, which whoever holds a credential can make it.
+  const full = new Error('Failed query: select 1', { cause: Object.assign(new Error('Timed out while waiting for an open slot in the pool.'), { code: '58000' }) });
+  db.execute = async () => {
+    throw full;
+  };
+  await assert.rejects(routed(runtime, hash), (error) => error === full);
+  await assert.rejects(routed(runtime, hash), (error) => error === full);
 });

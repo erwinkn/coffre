@@ -26,6 +26,12 @@
   Workers alike, where it used node-postgres (`pg`). No package of coffre's
   depends on `pg` or `pg-connection-string` any more, and a deployment
   installs no driver. Database URLs are read as before, TLS included.
+  A deployment that put a pooler in front of Postgres needs one that keeps
+  prepared statements (PgBouncer 1.21 or later with
+  `max_prepared_statements`), or the database's direct endpoint: a use's
+  read is prepared by name once per connection, and in PgBouncer's
+  transaction mode without them every use after the first fails (`42P05`
+  or `26000`).
 - **`previousAuditChainKeys` is gone.** The app key signs no log entry in
   0.16, so nothing verifies with a key it replaced: `createCoffre` no
   longer takes the option, and a deployment that passes it fails its
