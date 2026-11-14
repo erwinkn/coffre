@@ -88,6 +88,23 @@ function placesOf(rows: readonly PlacesRow[]): PlaceRow[] {
   return [...found.values()];
 }
 
+/**
+ * The environments `ids` names, by path as they are named now
+ * (`market/prod`), in the order given; one deleted, or not found, is left
+ * out. One statement on the primary keys. What a workload's sign-in answers
+ * the places its session reaches with, which the vault names by id.
+ */
+export async function environmentPaths(db: Queryable, ids: readonly string[]): Promise<string[]> {
+  if (ids.length === 0) return [];
+  const rows = await rowsOf<{ id: string; path: string }>(db, sql`
+    SELECT e.id, p.slug || '/' || e.slug AS path
+    FROM environments e JOIN projects p ON p.id = e.project_id
+    WHERE e.id = ANY(${sql.param([...ids])}::uuid[]) AND strpos(e.slug, '~') = 0 AND strpos(p.slug, '~') = 0
+  `);
+  const named = new Map(rows.map((row) => [row.id, row.path]));
+  return ids.flatMap((id) => named.get(id) ?? []);
+}
+
 /** Environments may inherit through three above them, and a personal config sits one below: as a use reads a chain (`@coffre/vault`'s use.ts). */
 const CHAIN = 4;
 

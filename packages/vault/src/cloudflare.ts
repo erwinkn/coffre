@@ -25,6 +25,7 @@
 import type { Asked, Change, McpUnasked, Presented, Refused, Unasked, UseInput, Vault, WorkloadsUnasked } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
+import { logged } from '@coffre/db/dialect';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
 import { SIGNER, signerObject, signerOf, type SignerNamespace } from './cloudflare-signer.ts';
@@ -108,7 +109,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
             // A copy of its own: what crosses is the bytes' whole buffer.
             await signerOf(namespace, entry.signer).wake(Uint8Array.from(hash));
           } catch (error) {
-            console.error('coffre: the signer was not told of an entry', error);
+            console.error('coffre: the signer was not told of an entry', logged(error));
           }
         })(),
       );
@@ -125,7 +126,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     const asked = signer
       .adopt()
       .catch((error: unknown) => {
-        console.error('coffre: the signer did not say whether the database is adopted', error);
+        console.error('coffre: the signer did not say whether the database is adopted', logged(error));
         return false;
       });
     this.ctx.waitUntil(asked);

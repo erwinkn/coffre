@@ -84,6 +84,19 @@
   egress?: true }`, no longer the credential's name alone. A presigned
   URL's method, path and expiry are no longer logged: an entry stands for a
   minute of the credential's uses, and says only what holds for all of them.
+- **A workload signs in with its key again.** `POST /api/auth/workload`
+  (a platform's ID token, or a signed `GetCallerIdentity`), `POST
+  /api/auth/workload/renew` and `POST /api/auth/logout` with the session's
+  DPoP proof are served on 0.16, each decided by the vault. A binding's
+  `sources` outside the request's address now refuse `no_match` (0.14.7:
+  `source`), an AWS proof signed in the future `too_old` (0.14.7:
+  `not_yet_valid`), and a session's token sent to `logout` as a bearer is
+  refused 401 `workload`.
+- **Re-keying's preview is served again.** `POST
+  /members/:member/bindings/keys?dryRun=1` (`coffre trust … --replace-keys`
+  without `--apply`) answers 0.14.7's `KeysPlan`: the keys as checked, the
+  bindings on the issuer they would replace, and the places whose sensitive
+  values the new bindings would withhold. It was 501.
 - **The vault is told of workloads too.** It decides each CI run's
   sign-in now, on its own configuration: a deployment that trusts
   workloads adds `workloads: {}` to `vault(env => …)` in

@@ -23,7 +23,7 @@ import { limitAlert, sendAlert } from './alerts.ts';
 import { ApiError } from './api/errors.ts';
 import { routedSession, type RoutedSession } from './db/queries/sessions.ts';
 import { errorResponse, jsonResponse } from './http.ts';
-import { logged } from './logged.ts';
+import { logged } from '@coffre/db/dialect';
 import type { CoffreRuntime } from './runtime.ts';
 
 /** `Authorization: DPoP <token>`: a workload's session; null for any other scheme. */
@@ -165,4 +165,11 @@ export async function gated(
     console.error('the workload gate failed', logged(error));
     throw refused(new ApiError('unavailable', 'coffre cannot check this proof right now'));
   }
+}
+
+/** An answer to a workload, with the nonce its next proof signs: a response of its own, since another's headers may be immutable. */
+export function withNonce(response: Response, nonce: string): Response {
+  const headers = new Headers(response.headers);
+  headers.set('dpop-nonce', nonce);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }

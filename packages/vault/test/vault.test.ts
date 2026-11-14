@@ -3,6 +3,7 @@
 // use.test.ts holds what a use decides; this holds what crosses.
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
+import { inspect } from 'node:util';
 
 import { allows } from '@coffre/core/access';
 import type { UseInput } from '@coffre/core/vault';
@@ -141,4 +142,31 @@ test('a wake-up that fails costs the caller nothing: the entry is written, and t
   // The rejection is caught, not left for the process: said in the log, once each.
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(logged.mock.callCount(), 2);
+});
+
+test("what the vault logs of a failure quotes no value: not a query's parameter, a cast it could not make, or a row a constraint refused", async (t) => {
+  const canary = 'coffre-canary-not-for-the-log';
+  const failed = (work: () => Promise<unknown>) => work().then(() => assert.fail('the query ran'), (thrown: unknown) => thrown);
+  const errors = [
+    await failed(() => world.owner.select({ v: sql`${canary}` }).from(sql`no_such_table`)),
+    await failed(() => world.owner.execute(sql`SELECT ${canary}::uuid`)),
+    await failed(() => world.owner.transaction(async (tx) => {
+      await tx.execute(sql`CREATE TEMPORARY TABLE kept (key text CONSTRAINT kept_key_unique UNIQUE) ON COMMIT DROP`);
+      await tx.execute(sql`INSERT INTO kept VALUES (${canary}), (${canary})`);
+    })),
+  ];
+  // Each quotes it, as it is: the log is what leaves it out.
+  for (const error of errors) assert.ok(inspect(error, { depth: null }).includes(canary));
+  const logged = t.mock.method(console, 'error', () => {});
+  for (const error of errors) {
+    const failing = openLocalVault(world.db, prepared, { now: world.now, wake: () => { throw error; } });
+    prepared.memory.logged.clear();
+    assert.ok(!('refused' in (await failing.use(reveal('ada-cli', ['DATABASE_URL'])))));
+  }
+  assert.equal(logged.mock.callCount(), 3);
+  const said = logged.mock.calls.map((call) => call.arguments);
+  assert.ok(!inspect(said, { depth: null }).includes(canary), 'a value in the log');
+  // What went wrong, by Postgres's code and names.
+  assert.deepEqual(said.map(([, line]) => (line as { cause: { code: string } }).cause.code), ['42P01', '22P02', '23505']);
+  assert.equal((said[2]![1] as { cause: { constraint: string } }).cause.constraint, 'kept_key_unique');
 });
