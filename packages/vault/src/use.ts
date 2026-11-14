@@ -437,8 +437,8 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
 }
 
 /**
- * What a use would be given, as of now, without it: each key's secret and
- * version, or why it is refused, as `answer` would say (docs/design/0.16.md,
+ * What a use would be given, as of now, without it: each key's secret,
+ * version and nature, or why it is refused, as `answer` would say (docs/design/0.16.md,
  * "Pages"). It opens nothing and writes nothing: no log entry, no exposure,
  * no credential's last use. Its rows are remembered as a use's are, so a
  * reveal just after reads nothing again. A value whose row says it is
@@ -454,7 +454,7 @@ export async function peek(vault: Serving, ask: Ask): Promise<Peeked | Refusal> 
     return decided;
   }
   remember(vault.memory, ask, found, at);
-  const items = decided.items.map((item) => ('refused' in item ? item : { key: item.key, secret: item.held.id, version: item.version.version }));
+  const items = decided.items.map((item) => ('refused' in item ? item : { key: item.key, secret: item.held.id, version: item.version.version, nature: natureOf(item.version) }));
   return { principal: decided.caller.principal, credential: decided.caller.credential.id, items };
 }
 

@@ -879,7 +879,7 @@ test('a peek is what a use would give, key by key, and writes nothing: no entry,
   // What a use of the same gives, the same key by key: the secret that holds the value, its version, or the same refusal.
   for (const [i, asked] of asks.entries()) {
     const used = await use(vault, asked);
-    const seen = 'refused' in used ? used : { principal: used.principal, credential: used.credential, items: used.values.map((item) => ('refused' in item ? item : { key: item.key, secret: item.secret, version: item.version })) };
+    const seen = 'refused' in used ? used : { principal: used.principal, credential: used.credential, items: used.values.map((item) => ('refused' in item ? item : { key: item.key, secret: item.secret, version: item.version, nature: item.nature })) };
     assert.deepEqual(peeked[i], seen, JSON.stringify(asked.keys));
   }
   assert.equal((peeked[3] as { items: { key: string }[] }).items.some((item) => item.key === 'STRIPE_KEY' && !('refused' in item)), true);

@@ -142,12 +142,17 @@ export type Used = {
   workload: { binding: string; profile: string; policy: BindingPolicy; constraints: Constraints | null } | null;
 };
 
-/** What a use would give: each key's secret and version, or why it is refused; nothing opened. */
+/**
+ * What a use would give: each key's secret, version and nature, or why it
+ * is refused; nothing opened. The nature is the one its rows say, which the
+ * use holds the value to: what `coffre run`'s plan picks the keys it asks
+ * for by, and never what it places a value by, which is the use's.
+ */
 export type Peeked = {
   principal: string;
   /** The credential's id. */
   credential: string;
-  items: ({ key: string; secret: string; version: number } | { key: string; refused: string })[];
+  items: ({ key: string; secret: string; version: number; nature: Nature } | { key: string; refused: string })[];
 };
 
 /**
