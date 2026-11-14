@@ -66,6 +66,7 @@ export type Kek = { id: string; key: string } | KekProvider;
  *     previousKeks: [{ id: 'vault-2025-01-10-k7q2xm', key: env.OLD_VAULT_KEY }],
  *     owners: ['admin@acme.example'],
  *     signingKey: env.SIGNING_KEY, // required with a key service; derived from a local KEK otherwise
+ *     workloads: null, // or what the app's signin({ workloads }) says: { useOnly: true }
  *   }
  */
 export type VaultConfig = {
