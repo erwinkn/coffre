@@ -16,8 +16,9 @@ import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
 import { Signer } from '../src/signer.ts';
+import { use } from '../src/use.ts';
 import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
-import { binding, credential, environment, grant, instance, principal, project, role, rows, secret, TABLES, tokenOf, user, value, write } from './world.ts';
+import { ask, binding, credential, environment, grant, instance, principal, project, role, rows, secret, TABLES, tokenOf, user, value, write } from './world.ts';
 
 const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
@@ -440,4 +441,25 @@ test('malformed asks throw before anything is read', () => {
   assert.throws(() => OPERATIONS['token.bind']({ ...shown('root-cli'), op: 'token.bind', member: ci, keys: { issuer: 7, jwks: {} } } as never, deciding), TypeError);
   assert.throws(() => OPERATIONS['token.unbind'](unbind('root-cli', ci, 'nope'), deciding), TypeError);
   assert.throws(() => OPERATIONS['token.unbind'](unbind('root-cli', 'user:x', '00000000-0000-4000-8000-000000000000'), deciding), TypeError);
+});
+
+test("an Owner's binding reads a sensitive value through a reference into another project only on a scope reaching that project: decided where the value is held", async () => {
+  // billing/dev refers to market/dev's sensitive TOKEN, and ci views billing/dev too.
+  const leak = secret({ id: ids.billingDev!, projectId: ids.billing! }, 'LEAK', { sourceId: ids.token! });
+  await write(world, ...rows('secrets', leak), ...rows('grants', grant(ci, 'viewer', { environment: { id: ids.billingDev! } })));
+  // Root owns every project: bound to billing/dev alone, its say is billing's, and billing/dev lends market's value.
+  const narrow = await vault.change(bind('root-cli', ci, { scope: { 'billing/dev': 'viewer' } }));
+  const wide = await vault.change(bind('root-cli', ci, { claims: { sub: 'system:serviceaccount:ci:wide' } }));
+  if ('refused' in narrow || 'refused' in wide) assert.fail(JSON.stringify([narrow, wide]));
+  assert.deepEqual(narrow.answer.bindings[0]!.withheld, ['billing/dev']);
+  assert.deepEqual([wide.answer.bindings[0]!.scope, wide.answer.bindings[0]!.withheld], [{ 'billing/dev': 'viewer', 'market/dev': 'developer', 'market/prod': 'viewer' }, []]);
+  // A run of each, as /api/auth/oidc issues it.
+  const run = (label: string, made: typeof narrow) => credential(label, ci, { createdBy: `binding:${made.answer.bindings[0]!.id}` });
+  await write(world, ...rows('credentials', run('narrow-run', narrow), run('wide-run', wide)));
+  const read = async (label: string) => {
+    const answer = await use(world, ask(label, 'billing/dev', ['LEAK']));
+    return 'refused' in answer ? answer.refused : answer.values.map((each) => ('refused' in each ? each.refused : each.value.toString()));
+  };
+  assert.deepEqual(await read('narrow-run'), ['not_owner_issued']);
+  assert.deepEqual(await read('wide-run'), ['tok']);
 });

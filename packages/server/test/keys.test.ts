@@ -50,13 +50,14 @@ beforeEach(async () => {
   const b = value(world, secret(prod, 'B'), 'b', { plain: true });
   const c = value(world, secret(prod, 'C', { archivedAt: new Date(0) }), 'c');
   const [own, o] = [value(world, secret(adas, 'OWN'), 'own'), value(world, secret(old, 'O'), 'o')];
-  ids = { market: market.id, billing: billing.id, b: b.id, prod: prod.id, staging: staging.id, dev: dev.id, old: old.id, adas: adas.id, billed: billed.id, a: a.id, c: c.id, own: own.id, o: o.id };
+  const sensitive = value(world, secret(prod, 'S'), 's', { sensitive: true });
+  ids = { s: sensitive.id, market: market.id, billing: billing.id, b: b.id, prod: prod.id, staging: staging.id, dev: dev.id, old: old.id, adas: adas.id, billed: billed.id, a: a.id, c: c.id, own: own.id, o: o.id };
   await write(
     world,
     ...rows('projects', market, billing),
     ...rows('environments', prod, staging, dev, old, adas, billed, stale),
     ...rows('secrets',
-      a, b, value(world, secret(prod, 'S'), 's', { sensitive: true }), c, secret(prod, 'E'), secret(prod, 'R', { sourceId: a.id, folder: 'links', sourceSetBy: cy, sourceSetAt: new Date('2026-11-01T08:00:00Z') }),
+      a, b, sensitive, c, secret(prod, 'E'), secret(prod, 'R', { sourceId: a.id, folder: 'links', sourceSetBy: cy, sourceSetAt: new Date('2026-11-01T08:00:00Z') }),
       value(world, secret(staging, 'A'), 'sa'), value(world, secret(staging, 'Y'), 'y'), value(world, secret(staging, 'Z'), 'z', { plain: true }),
       value(world, secret(dev, 'A'), 'da'), value(world, secret(dev, 'D'), 'd'), value(world, secret(dev, 'S', { archivedAt: new Date(0) }), 'ds'),
       own, o,
@@ -707,4 +708,53 @@ test("a token that reads only dev lists the keys its project's other environment
   assert.equal(JSON.stringify(body).includes('staging-only'), false);
   assert.deepEqual(refused(await call('gate-token', 'GET', '/projects/market/prod/missing')), NO_ACCESS);
   assert.equal((await reveal('gate-token', 'market/prod'))[0], 403);
+});
+
+test("not_owner_issued is decided where the value is held: through a reference in its project, a reference from another, and a fork's inherited value", async () => {
+  // staging's RS and billing/prod's LEAK refer to prod's sensitive S; dev inherits S, its own reset. ci maintains billing too.
+  const [staging, billed] = [{ id: ids.staging!, projectId: ids.market! }, { id: ids.billed!, projectId: ids.billing! }];
+  const scope = (...owned: string[]) => JSON.stringify(owned.map((projectId) => ({ projectId, environmentId: null, role: 'maintainer', sensitive: true })));
+  await write(
+    world,
+    ...rows('secrets', secret(staging, 'RS', { sourceId: ids.s! }), secret(billed, 'LEAK', { sourceId: ids.s! }), value(world, secret(billed, 'OWNED'), 'owned', { sensitive: true })),
+    ...rows('grants', grant(ci, 'maintainer', { project: { id: ids.billing! } })),
+    // One an Owner of billing issued, and one an Owner of both did.
+    ...rows('credentials', credential('billing-token', ci, { scope: scope(ids.billing!) }), credential('both-token', ci, { scope: scope(ids.billing!, ids.market!) })),
+  );
+  const got = async (label: string, path: string) => {
+    const [status, body] = await reveal(label, path);
+    return status === 200 ? body.values : [status, body.error, body.reason];
+  };
+  const NOT_OWNER_ISSUED = [403, 'forbidden', 'not_owner_issued'];
+  // In market: cj's token reads neither through staging's reference nor dev's inheritance; ci's, an Owner's, reads both.
+  assert.deepEqual(await got('cj-token', 'market/staging/RS'), NOT_OWNER_ISSUED);
+  assert.deepEqual(await got('cj-token', 'market/dev/S'), NOT_OWNER_ISSUED);
+  assert.deepEqual([await got('ci-token', 'market/staging/RS'), await got('ci-token', 'market/dev/S')], [{ RS: 's' }, { S: 's' }]);
+  // From billing: an Owner of billing's say lends billing's own sensitive value, not market's, which LEAK holds.
+  assert.deepEqual(await got('billing-token', 'billing/prod/OWNED'), { OWNED: 'owned' });
+  assert.deepEqual(await got('billing-token', 'billing/prod/LEAK'), NOT_OWNER_ISSUED);
+  const [status, body] = await reveal('billing-token', 'billing/prod');
+  assert.deepEqual([status, body.reason], [403, 'not_owner_issued']);
+  assert.match(body.message!, /^billing\/prod\/LEAK: /);
+  assert.deepEqual(await got('both-token', 'billing/prod/LEAK'), { LEAK: 's' });
+});
+
+test("a reader of a fork alone, whose parent holds only a sensitive key, is refused the fork whole, parent_unreadable, where 0.14.7 left that key out by name", async () => {
+  const market = { id: ids.market! };
+  const base = environment(market, 'base');
+  const eu = environment(market, 'base-eu', { parentId: base.id });
+  await write(
+    world,
+    ...rows('environments', base, eu),
+    ...rows('secrets', value(world, secret(base, 'HIDDEN'), 'hidden', { sensitive: true }), value(world, secret(eu, 'OWN'), 'own-eu')),
+    ...rows('grants', grant(ed, 'viewer', { environment: eu })),
+  );
+  // Ed views base-eu alone. The key they could not have read anyway still stops the read: it is inherited from a parent Ed does not read.
+  const [status, body] = await reveal('ed-cli', 'market/base-eu');
+  assert.deepEqual([status, body.error, body.reason], [403, 'forbidden', 'parent_unreadable']);
+  assert.match(body.message!, /^market\/base-eu\/HIDDEN: /);
+  assert.deepEqual((await reveal('ed-cli', 'market/base-eu/OWN'))[1].values, { OWN: 'own-eu' });
+  // A reader of the parent too is answered as 0.14.7 answered Ed: the fork's own value, and the sensitive key named.
+  const [, read] = await reveal('ada-cli', 'market/base-eu');
+  assert.deepEqual([read.values, read.sensitive], [{ OWN: 'own-eu' }, ['HIDDEN']]);
 });
