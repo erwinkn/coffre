@@ -122,12 +122,11 @@ Each file names its model and its sources in its header.
 database; `pnpm test` runs each on its private clone too.
 
 - **Operation sequences** (`operations-properties.test.ts`): below.
-- **Forks** (`forks-properties.test.ts`): random worlds written as rows,
-  around the app too (a parent archived or deleted under a live fork, a chain
-  that loops or runs past three, a key with neither value nor reference),
-  resolve to the same keys by name (`resolveKeys`), row by row
-  (`inheritedRows`) and as read (`readableValues`), each from the nearest
-  environment that holds or removed it.
+- **Forks** (`forks-properties.test.ts`): random worlds of forks, a
+  personal config, overrides, resets, references and dismissals, some
+  restored, written as the vault's rows, resolve to the same keys listed
+  and missed (the app's `resolveKeys`) and used (the vault's), each from
+  the nearest environment that holds it live or dismissed it.
 - **Natures** (`natures-properties.test.ts`): a random world built through
   the API, then a random list of changes; after each, every session and
   credential reads every environment every way the API offers, and no value

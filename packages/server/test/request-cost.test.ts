@@ -369,6 +369,9 @@ const requests: Record<string, Entry> = {
   'PATCH /secrets/:project/:environment/:key': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy/KEY', { folder: 'kept' }), calls: ['change'], statements: 0 },
   'PATCH /folders/:project/:environment/:folder': { request: () => api('bo-cli', 'PATCH', '/folders/market/busy/kept', { name: 'filed' }), calls: ['change'], statements: 0 },
   'DELETE /folders/:project/:environment/:folder': { request: () => api('bo-cli', 'DELETE', '/folders/market/busy/filed'), calls: ['change'], statements: 0 },
+  // A missing key dismissed, in a fork, where it is a removal too, then restored.
+  'PATCH /projects/:project/:environment/dismissals': { request: () => api('bo-cli', 'PATCH', '/projects/market/dev-fork/dismissals', { SENTRY_DSN: true, OTHER: true }), calls: ['change'], statements: 0 },
+  'PATCH /projects/:project/:environment/dismissals, restored': { request: () => api('bo-cli', 'PATCH', '/projects/market/dev-fork/dismissals', { SENTRY_DSN: null, OTHER: null }), calls: ['change'], statements: 0 },
   'PATCH /secrets/:project/:environment/:key, renamed': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy/KEY', { key: 'RENAMED' }), calls: ['change'], statements: 0 },
   'PATCH /secrets/:project/:environment/:key, renamed back': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy/RENAMED', { key: 'KEY' }), calls: ['change'], statements: 0 },
   'PATCH /secrets/:project/:environment, a reference': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy', { LINK: { ref: 'market/dev/DATABASE_URL' } }), calls: ['change'], statements: 0 },

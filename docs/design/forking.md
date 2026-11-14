@@ -616,8 +616,9 @@ Forks that inherit, everywhere but personal configs:
   again, each with an Undo. The CLI has `fork --inherit`, `reset`, `remove`
   and a fork's `list`; MCP's `create_environment` takes `inherits`; the
   audit page reads "revealed market/prod/STRIPE_KEY in market/prod-eu".
-- **Tests.** `packages/server/test/inheritance.test.ts` on both engines,
-  the CLI's, the UI's sentences, MCP's approval, and the conformance
+- **Tests.** `packages/vault/test/secret-inherit.test.ts` and
+  `secret-dismiss.test.ts`, `packages/server/test/keys.test.ts` and
+  `forks-properties.test.ts`, the CLI's, the UI's sentences, MCP's approval, and the conformance
   check `inheritance`.
 
 Left out, on purpose or for later:
@@ -667,7 +668,7 @@ Left out, on purpose or for later:
   Make, and Delete), "yours alone" on its card, Personal configs on
   the project's Environments tab; the CLI: `@me` in every path, `coffre personal`, and a
   note on `list` when `@me` fell back; MCP's read tools take `@me` paths.
-- **Tests.** `packages/server/test/personal.test.ts`, on both engines, and
+- **Tests.** `packages/vault/test/secret-personal.test.ts`, and
   the conformance check `personal configs`.
 
 Where the build differs from the design above: a rename's collision is

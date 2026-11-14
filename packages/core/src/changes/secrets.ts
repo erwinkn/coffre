@@ -1,7 +1,7 @@
 import type { Generation } from '../recipe.ts';
 
 /** The changes of keys and their values (`packages/vault/src/ops/secrets.ts`). */
-export type SecretsChanges = SecretWrite | SecretRename | SecretRefile | ReferenceBreak;
+export type SecretsChanges = SecretWrite | SecretRename | SecretRefile | ReferenceBreak | MissingDismiss;
 
 export type SecretsAnswers = {
   /**
@@ -15,6 +15,8 @@ export type SecretsAnswers = {
   'secret.rename': { id: string };
   /** The keys filed there, by name, in order. */
   'secret.refile': { moved: string[] };
+  /** What the change did to each key it named: dismissed, restored, or nothing, as it was already. */
+  'missing.dismiss': { keys: Record<string, 'dismissed' | 'restored' | 'unchanged'> };
 };
 
 /**
@@ -176,4 +178,29 @@ export type ReferenceBreak = {
   project: string;
   environment: string;
   key: string;
+};
+
+/**
+ * Keys an environment does without (`dismissed: true`), or does again
+ * (`false`), 0.14's `setDismissals`, by whoever writes keys there: the
+ * team's decision, which its missing keys list leaves out until someone
+ * restores it. A key named twice, or a key past 2,000 in one change, is a
+ * fault and a refusal (`too_many_keys`) respectively.
+ *
+ * In a fork, or a personal config (`mine`), a dismissal is also a removal:
+ * the environment no longer inherits the key, and a use there reads
+ * nothing of it. One it holds a live row of, a value or a reference, would
+ * serve whatever is dismissed, so dismissing it is refused, `held_here`:
+ * reset it to what it inherits first, or archive it. Outside a fork, such a
+ * dismissal is moot, and allowed, as in 0.14.7. A personal config is
+ * dismissed in only by its owner, and only once they have one: a
+ * dismissal makes none, `no_config`.
+ */
+export type MissingDismiss = {
+  op: 'missing.dismiss';
+  project: string;
+  environment: string;
+  /** In the caller's personal config of `environment` (`dev@me`). */
+  mine?: boolean;
+  keys: { key: string; dismissed: boolean }[];
 };

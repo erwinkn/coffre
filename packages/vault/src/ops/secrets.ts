@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { allows, useOnly, withinCredential, type Permission } from '@coffre/core/access';
 import { formatRecipe, parseRecipe, recipeProblem } from '@coffre/core/recipe';
-import type { Answers, KeyOutcome, KeyWrite, Nature, Presented, ReferenceBreak, SecretPath, SecretRefile, SecretRename, SecretsChanges, SecretWrite } from '@coffre/core/vault';
+import type { Answers, KeyOutcome, KeyWrite, MissingDismiss, Nature, Presented, ReferenceBreak, SecretPath, SecretRefile, SecretRename, SecretsChanges, SecretWrite } from '@coffre/core/vault';
 import { dismissedKeys, environments, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
@@ -890,5 +890,111 @@ function referenceBreak(input: Presented & ReferenceBreak, vault: Deciding): Ope
   };
 }
 
+/**
+ * Keys an environment does without, or does again (0.14's
+ * `setDismissals`): one change for every key named, by whoever writes
+ * keys there, each key's dismissal a sealed row, since in a fork it is
+ * also a removal, which decides what a use there is given. In a fork, or a
+ * personal config, a key the environment holds a live row of is not
+ * dismissed, `held_here`: it would serve whatever is dismissed. A row of
+ * the keys named edited behind the vault, a key's or a dismissal's, is
+ * not guessed at, `unreadable`. More keys than one write takes
+ * (`MOST_KEYS`) are read not at all, and refused, `too_many_dismissals`,
+ * once the caller is known to write there.
+ */
+function missingDismiss(input: Presented & MissingDismiss, vault: Deciding): Operation<Parts, Answers['missing.dismiss']> {
+  const shown = presented(input);
+  const { project: projectSlug, environment: environmentSlug, keys } = input;
+  const mine = input.mine ?? false;
+  if (!text(projectSlug) || !text(environmentSlug) || typeof mine !== 'boolean' || !Array.isArray(keys) || keys.length === 0
+    || !keys.every((item) => typeof item === 'object' && item !== null && typeof item.key === 'string' && KEY.test(item.key) && typeof item.dismissed === 'boolean')
+    || new Set(keys.map((item) => item.key)).size !== keys.length) {
+    throw new TypeError('keys are dismissed or restored by their place\'s slugs, or the caller\'s personal config of it, and at least one key, each once, as a key is named, with whether it is dismissed');
+  }
+  const over = keys.length > MOST_KEYS;
+  const names = sql.param(over ? [] : keys.map((item) => item.key));
+  const { project, here, environment } = keysPlace(shown.token, projectSlug, environmentSlug, mine);
+  const read = {
+    ...callerParts(shown.token, project),
+    project: part(projects, sql`${projects.slug} = ${projectSlug}`),
+    environment,
+    // The rows the environment holds of the keys named: in a fork, a live one serves whatever is dismissed.
+    secret: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} = ${here} AND ${secrets.key} = ANY(${names}::text[])`),
+    dismissed: part(dismissedKeys, sql`${dismissedKeys.environmentId} = ${here} AND ${dismissedKeys.key} = ANY(${names}::text[])`),
+  };
+  const placed = (seen: Seen<typeof read>) => {
+    const place = seen.project.find((row) => row.slug === projectSlug && live(row));
+    const named = place && seen.environment.find((row) => row.projectId === place.id && row.slug === environmentSlug && live(row));
+    return { place, named, config: named && seen.environment.find((row) => row.parentId === named.id && row.owner !== null && !row.slug.includes('~')) };
+  };
+  return {
+    read,
+    denied: refusedTo('missing.dismiss', shown, vault.workloads, {
+      where: { project: projectSlug, environment: environmentSlug },
+      objects: (seen: Seen<typeof read>) => {
+        const { place, named, config } = placed(seen);
+        return [...(place === undefined ? [] : [`project:${place.id}`]), ...[named, mine ? config : undefined].flatMap((row) => (row === undefined ? [] : [`environment:${row.id}`]))];
+      },
+    }),
+    decide(seen: Seen<typeof read>, at: number, unsealed) {
+      const caller = callerFrom(seen, shown, vault.workloads, at);
+      if (caller === null) return { refused: 'unauthenticated' };
+      if (caller.workload?.stop != null) return { refused: caller.workload.stop };
+      if (caller.workload?.narrowed === true) return { refused: 'narrowed' };
+      const { place, named, config } = placed(seen);
+      // As for a write: not there, someone's personal config, or not theirs to write in are one answer.
+      if (place === undefined || named === undefined || named.owner !== null) return { refused: 'no_access' };
+      const denied = deniedIn(caller, named, mine, ['secret.write']);
+      if (denied !== undefined) return denied;
+      if (over) return { refused: 'too_many_dismissals' };
+      let environment = named;
+      if (mine) {
+        // Found by who holds the token, which its MAC says nothing of; edited behind the vault, it is not guessed at.
+        if (config !== undefined && config.owner !== caller.principal) return { refused: 'unreadable' };
+        // A dismissal makes no config, as 0.14.7's never fell back to the environment.
+        if (config === undefined) return { refused: unsealed.environment > 0 ? 'unreadable' : 'no_config' };
+        if (!live(config)) return { refused: 'no_access' };
+        environment = config;
+      }
+      if (unsealed.secret + unsealed.dismissed > 0) return { refused: 'unreadable' };
+      // In a fork, a dismissal is a removal: one of a key it holds live, a value or a reference, would say one thing and do another.
+      const holds = new Set(seen.secret.filter((row) => row.environmentId === environment.id && row.archivedAt === null).map((row) => row.key));
+      if (environment.parentId !== null && keys.some((item) => item.dismissed && holds.has(item.key))) return { refused: 'held_here' };
+      const now = new Date(at);
+      const rows = new Map(seen.dismissed.filter((row) => row.environmentId === environment.id).map((row) => [row.key, row]));
+      const writes: Write[] = [];
+      const outcomes: [string, 'dismissed' | 'restored' | 'unchanged'][] = [];
+      for (const { key, dismissed } of keys) {
+        const row = rows.get(key);
+        if ((row !== undefined && row.restoredAt === null) === dismissed) {
+          outcomes.push([key, 'unchanged']);
+          continue;
+        }
+        const by = { dismissedAt: now, dismissedBy: caller.principal, restoredAt: null, restoredBy: null };
+        writes.push(!dismissed ? amended(dismissedKeys, row!, { restoredAt: now, restoredBy: caller.principal })
+          : row === undefined ? put(dismissedKeys, { environmentId: environment.id, key, ...by }) : amended(dismissedKeys, row, by));
+        outcomes.push([key, dismissed ? 'dismissed' : 'restored']);
+      }
+      const said = (outcome: string) => outcomes.flatMap(([key, was]) => (was === outcome ? [key] : []));
+      return {
+        writes,
+        entry: {
+          kept: true,
+          action: 'missing.dismiss',
+          actor: caller.principal,
+          credential: caller.credential.id,
+          request: shown.request,
+          ip: shown.ip,
+          objects: [`project:${place.id}`, `environment:${environment.id}`, ...(mine ? [`environment:${named.id}`] : []), `principal:${caller.principal}`, `credential:${caller.credential.id}`],
+          // What changed, by key; a key named that was so already is in neither.
+          detail: { ...(mine ? { personal: named.slug } : {}), dismissed: said('dismissed'), restored: said('restored') },
+        },
+        // As entries: a key named __proto__ is a key like any other.
+        answer: { keys: Object.fromEntries(outcomes) },
+      };
+    },
+  };
+}
+
 /** The changes of keys and their values. */
-export const secretOperations: Operations<SecretsChanges> = { 'secret.write': secretWrite, 'secret.rename': secretRename, 'secret.refile': secretRefile, 'reference.break': referenceBreak };
+export const secretOperations: Operations<SecretsChanges> = { 'secret.write': secretWrite, 'secret.rename': secretRename, 'secret.refile': secretRefile, 'reference.break': referenceBreak, 'missing.dismiss': missingDismiss };

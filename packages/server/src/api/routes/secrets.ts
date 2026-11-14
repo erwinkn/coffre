@@ -344,6 +344,24 @@ export const secretRoutes = {
   }),
 
   /**
+   * Dismiss keys an environment is missing (`true`), or restore them
+   * (`null`), as a merge patch: "Dismiss all" is one call, and one entry
+   * in the log. The team's decision, which its missing keys list shows
+   * apart until someone restores it. In a fork, or `dev@me`, a dismissal is
+   * also a removal: the key is no longer inherited there. Whoever writes
+   * keys there may; one call to the vault, which decides and writes them
+   * all or none (`missing.dismiss`), 2,000 keys at most.
+   */
+  ...route('PATCH /projects/:project/:environment/dismissals', {
+    input: z.record(secretKey, z.literal(true).nullable()).refine((patch) => Object.keys(patch).length > 0, 'name at least one key'),
+    run: async (ctx, { params, input }) => {
+      const keys = Object.entries(input).map(([key, dismissed]) => ({ key, dismissed: dismissed === true }));
+      const answer = await changed(ctx, { op: 'missing.dismiss', project: params.project, ...environmentOf(params.environment), keys }, `${params.project}/${params.environment}`);
+      return { operationId: ctx.shown.request, keys: answer.keys };
+    },
+  }),
+
+  /**
    * Break the reference a key is: whoever read through it reads nothing
    * there until the key is given a value. Whoever writes the key may, and
    * whoever manages access in its source's project; one call to the vault,
