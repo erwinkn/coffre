@@ -11,7 +11,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { binding, credential, emptyDatabase, environment, grant, identity, instance, principal, project, role, rows, secret, signerOf, user, value, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 
-import { approvalWait, STALE } from '../src/mcp/approvals.ts';
+import { approvalWait, callDigest, STALE } from '../src/mcp/approvals.ts';
 import { randomOf } from '../src/mcp/changes.ts';
 import { app, callRaw, connect, fromPage, KUBE } from './mcp-fixture.ts';
 
@@ -284,6 +284,12 @@ test("admit_member admits a service account with its first grants, and a person;
   assert.equal((await approve(await asked(others, 'admit_member', { member: 'service:plain', role: 'member' }), 'other-web')).body.status, 'approved');
   // Any other role is none a service account holds: refused before anyone is asked, whoever asks, the instance's runner too.
   for (const who of [others, await connect('root-web', ALL)]) assert.match(await refused(who, 'admit_member', { member: 'service:boss', role: 'admin' }), /a service account holds no instance role/);
+  // One asked before that refusal, still pending, is refused on Approve by the vault: nothing set up, nothing said done.
+  const stale = await asked(others, 'admit_member', { member: 'service:boss', role: 'member' });
+  const was = { member: 'service:boss', role: 'admin' };
+  await world.owner.execute(sql`UPDATE mcp_approvals SET arguments = ${JSON.stringify(was)}, digest = decode(${callDigest('admit_member', was)}, 'hex') WHERE id = ${stale}`);
+  const old = await approve(stale, 'other-web');
+  assert.notEqual(old.body.status, 'approved', JSON.stringify(old.body));
   // Once the setting leaves market out, they set up none: refused before anyone is asked. dev, who manages access in
   // market, still would, as the vault lets him.
   await api('root-web', 'PUT', '/settings', { serviceAccounts: { projects: { only: [] } } });
@@ -295,6 +301,7 @@ test("admit_member admits a service account with its first grants, and a person;
   const { members } = await api<{ members: { member: string; grants: { role: string }[] }[] }>('root-web', 'GET', '/members');
   assert.deepEqual(['token:built', 'token:deploy', 'token:plain'].map((account) => members.find((entry) => entry.member === account)?.grants.map((entry) => entry.role)), [['viewer'], ['viewer'], []]);
   assert.ok(members.some((entry) => entry.member === 'user:new@acme.example'));
+  assert.ok(!members.some((entry) => entry.member === 'token:boss'), 'the stale approval set up nobody');
 });
 
 test("admit_member's first grants write over what the page showed: the account admitted with lead between Approve's read and the write is refused, and stands", async () => {

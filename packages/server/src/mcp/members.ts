@@ -330,7 +330,8 @@ const ADMIT = changeTool({
     apply: async (ctx, { member, role, scope, access }, { replaced }) => {
       // Its first grants over what the page showed it holds, as set_access's; else the route's role, as Approve weighed it. A
       // service account's one role, `member`, is sent as none: whoever sets one up and does not run the instance names no role.
-      const asked = canonical(member).startsWith('token:') ? undefined : role;
+      // Any other goes as asked, for the vault to refuse (`invalid`): an approval asked before `check` refused it fails, not drops it.
+      const asked = canonical(member).startsWith('token:') && role === 'member' ? undefined : role;
       if (access !== undefined) await granted(ctx, member, access, replaced, true);
       else await runRoute('PUT /members/:member', { member: canonical(member) }, { ...(asked === undefined ? {} : { role: asked }), ...(scope === undefined ? {} : { scope }) }, ctx);
       return {};
