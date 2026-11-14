@@ -10,10 +10,12 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+import type { AuditEntryView } from '@coffre/client';
+
 import { bearer } from '../browser.ts';
 import type { Deployment } from '../harness.ts';
 import { GITHUB_RUN } from '../idp/index.ts';
-import { expect, Skip } from '../report.ts';
+import { expect, Skip, until } from '../report.ts';
 import { Cli } from './cli.ts';
 import { DEV, type Canaries, type Person } from './people.ts';
 
@@ -89,13 +91,17 @@ export async function runSignsIn(deployment: Deployment, admin: Person, canaries
   const { values } = await bearer(deployment.origin, token).secrets.reveal(`${DEV}/API_KEY`);
   expect(values.API_KEY === canaries[`${DEV}/API_KEY`], 'the credential did not read the value as the service');
 
-  const { entries } = await admin.api.audit.list({ actor: RUNNER, detail: '1' });
-  const exchanged = entries.find((entry) => entry.action === 'token.exchange');
-  const read = entries.find((entry) => entry.author === 'vault' && entry.action === 'secret.read' && entry.key === 'API_KEY');
+  // The signer moves what the vault wrote into the log within its minute.
+  let entries: AuditEntryView[] = [];
+  const exchangedIn = () => entries.find((entry) => entry.action === 'token.exchange');
+  const readIn = () => entries.find((entry) => entry.author === 'vault' && entry.action === 'secret.read' && entry.key === 'API_KEY');
+  await until('the exchange and the read in the log', async () => {
+    ({ entries } = await admin.api.audit.list({ actor: RUNNER, detail: '1' }));
+    return exchangedIn() !== undefined && readIn() !== undefined;
+  }, 90).catch(() => undefined);
+  const [exchanged, read] = [exchangedIn(), readIn()];
   expect(exchanged !== undefined && read !== undefined, 'the exchange or the read is not in the log', entries.map((entry) => entry.action));
-  const credentialId = exchanged.metadata.credentialId;
-  expect(typeof credentialId === 'string', 'the exchange did not log its credential', exchanged.metadata);
-  expect(read.metadata.credentialId === credentialId, "the vault's entry for the read does not name the credential", read.metadata);
+  expect(typeof exchanged.metadata.credential === 'string', 'the exchange did not log its credential', exchanged.metadata);
   expect(
     read.run?.exchangeSeq === exchanged.seq && read.run.claims.run_id === GITHUB_RUN.run_id && read.run.claims.repository === GITHUB_RUN.repository,
     'the read does not lead to its run',
@@ -132,7 +138,7 @@ export async function runsRefused(deployment: Deployment, admin: Person): Promis
     ['from a pull request', await mint(deployment, { event_name: 'pull_request', ref: 'refs/pull/1/merge', base_ref: 'main', workflow_ref: GITHUB_RUN.workflow_ref.replace(/@.*/, '@refs/pull/1/merge'), sub: 'repo:acme/api:pull_request' }), 'no_match'],
     ['from another repository', await mint(deployment, { repository_id: '1', repository: 'acme/fork' }), 'no_match'],
   ] as const;
-  const before = (await admin.api.audit.list({ actor: RUNNER, detail: '1' })).entries.filter((entry) => entry.action === 'token.exchange').length;
+  const from = Date.now();
   for (const [what, token, reason] of cases) {
     const answer = await exchange(deployment, token);
     expect(answer.status === 401 && answer.reason === reason, `a token ${what} was not refused as ${reason}`, shown(answer));
@@ -140,8 +146,16 @@ export async function runsRefused(deployment: Deployment, admin: Person): Promis
   }
   const stranger = await exchange(deployment, await mint(deployment), 'token:conformance-nobody');
   expect(stranger.status === 401 && stranger.reason === 'no_match', 'a token was taken for a service no binding names', shown(stranger));
-  const after = (await admin.api.audit.list({ actor: RUNNER, detail: '1' })).entries.filter((entry) => entry.action === 'token.exchange').length;
-  expect(after === before, `${after - before} refused exchanges were logged as exchanges`);
+  // The signer moves entries into the log in order: once an exchange taken after the refusals is in, any refusal logged would be too.
+  const to = Date.now();
+  expect((await exchange(deployment, await mint(deployment))).status === 200, 'a fresh token was refused');
+  let exchanges: AuditEntryView[] = [];
+  await until('an exchange taken after the refusals in the log', async () => {
+    exchanges = (await admin.api.audit.list({ actor: RUNNER, detail: '1' })).entries.filter((entry) => entry.action === 'token.exchange');
+    return exchanges.some((entry) => Date.parse(entry.occurredAt) >= to);
+  }, 90);
+  const logged = exchanges.filter((entry) => Date.parse(entry.occurredAt) >= from && Date.parse(entry.occurredAt) < to).length;
+  expect(logged === 0, `${logged} refused exchanges were logged as exchanges`);
   return `${cases.length + 1} refused, each for its reason, none saying what the binding expects, none logged: ${cases.map(([what]) => what).join(', ')}, for another service`;
 }
 
@@ -206,8 +220,9 @@ export async function keysUploaded(deployment: Deployment, admin: Person, canari
   expect(values.API_KEY === canaries[`${DEV}/API_KEY`], 'the credential did not read the value as the service');
   const other = await exchange(deployment, await pod('RS256', 'another-uid'), POD);
   expect(other.status === 401 && other.reason === 'no_match', 'a token of another service account under the same name was taken', shown(other));
+  // 0.16 says `too_old` where 0.14.7 said `too_long`: a token past its time, either way (docs/design/0.16.md, "Operations").
   const long = await exchange(deployment, await pod('RS256', POD_ACCOUNT.uid, { iat: now, nbf: now, exp: now + 3601 }), POD);
-  expect(long.status === 401 && long.reason === 'too_long', 'a token that lives past the hour was taken', shown(long));
+  expect(long.status === 401 && long.reason === 'too_old', 'a token that lives past the hour was taken', shown(long));
 
   await admin.api.bindings.replaceKeys(POD, { issuer: CLUSTER, jwks: { keys: keys.filter((key) => key.alg === 'ES256') } });
   const dropped = await exchange(deployment, await pod('RS256'), POD);
@@ -217,17 +232,21 @@ export async function keysUploaded(deployment: Deployment, admin: Person, canari
   return `${POD} trusts ${CLUSTER} by its uploaded keys: a pod's token taken by its account's UID; another UID, and a token living past the hour, refused; the RS256 key replaced away, its tokens refused and ES256's taken`;
 }
 
-/** Removing the binding ends the credentials it issued at once, and the next run gets none. */
+/**
+ * Removing the binding ends the credentials it issued within the vault's
+ * memory of who they are, 2 seconds (docs/design/0.16.md, D218), and the
+ * next run gets none at once.
+ */
 export async function runUnbound(deployment: Deployment, admin: Person, bindingId: string, credential: string): Promise<string> {
   const me = (token: string) => fetch(`${deployment.origin}/api/me`, { headers: { authorization: `Bearer ${token}` } }).then((response) => response.status);
   expect((await me(credential)) === 200, 'the credential did not work before its binding was removed');
   await admin.api.bindings.remove(RUNNER, bindingId);
-  expect((await me(credential)) === 401, 'the credential still worked once its binding was removed');
+  await until('the credential refused once its binding was removed', async () => (await me(credential)) === 401, 5);
   const next = await exchange(deployment, await mint(deployment));
   expect(next.status === 401 && next.reason === 'no_match', 'a run was let in once its binding was removed', shown(next));
   const { bindings } = await admin.api.bindings.list(RUNNER);
   expect(bindings.length === 0, 'the removed binding is still listed', bindings);
-  return 'its credential refused at once, and the next run refused as no binding matching';
+  return 'its credential refused within the vault\'s memory, and the next run refused as no binding matching';
 }
 
 /**

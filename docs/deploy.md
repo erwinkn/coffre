@@ -807,6 +807,17 @@ auth: signin({
 }),
 ```
 
+and the vault, which decides on each run's sign-in, is told too, in
+`vault/src/worker.ts`; left out, it refuses every run as `no_match`.
+`useOnly` and `noReads` go to both, alike:
+
+```ts
+export default vault((env: Env) => ({
+  // …
+  workloads: {},
+}));
+```
+
 Cloudflare counts each limit per location, so a flood from many places can
 reach the limit times the locations it comes through. On Node,
 `processLimits()` from `@coffre/server/node` counts per process:

@@ -27,6 +27,25 @@
   depends on `pg` or `pg-connection-string` any more, and a deployment
   installs no driver. Database URLs are read as before, TLS included.
 
+- **The vault is told of workloads too.** It decides each CI run's
+  sign-in now, on its own configuration: a deployment that trusts
+  workloads adds `workloads: {}` to `vault(env => …)` in
+  `vault/src/worker.ts`, with `useOnly` or `noReads` as the app's
+  `signin({ workloads })` says them. Left out, the vault refuses every run
+  as `no_match` (401), whatever bindings the owners made
+  ([deploy.md](docs/deploy.md#ci-runs-without-a-stored-token)).
+  `/api/me`'s `features.workloads` says whether sign-in trusts workloads,
+  where it always said `false`.
+- **A run's trail on the audit page.** Each entry a CI run's credential
+  wrote, its reads included, names the run again (`run`, with the
+  exchange's `seq` and the issuer's claims), as 0.14.7's page did, read
+  from the log alone, so it outlives the credential, and only once the
+  head proves the exchange as it proves the entry. A token out of its
+  time is refused as `too_old`, where 0.14.7 also said `too_long` and
+  `not_yet_valid`, and its message now names all three cases. A
+  binding removed ends the credentials its runs hold within the vault's
+  memory, 2 seconds, where 0.14.7 ended them at once.
+
 - **A key marked in place, as one change.** `coffre mark` (`{ "KEY": {
   "sensitivity" } }` alone in a write) is served again: the value is kept
   as the key's next version, with its first date, recipe and pair. A

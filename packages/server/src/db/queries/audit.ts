@@ -73,20 +73,43 @@ export const MOST_OBJECTS = 1000;
  */
 const COPIES = 2;
 
-/** A stretch of the log, newest first, and whether it stopped before the end of what it reads. */
-export type Stretch = { rows: LogRow[]; more: boolean };
+/**
+ * A stretch of the log, newest first, and whether it stopped before the end
+ * of what it reads; and, by credential, the first entry naming each
+ * credential a service's entry in it was written on.
+ */
+export type Stretch = { rows: LogRow[]; more: boolean; firsts: Map<string, LogRow> };
 
 /**
  * A stretch of the log, newest first: up to `rows` entries at or below
  * `below`. From `log` itself, by its key; or, for `objects`, from
  * `log_index` (`stretchOf`). An entry that mentions two of them comes once.
+ * In the same statement, for each credential a service's entry in it names,
+ * other than by an exchange, the first entry that names it: a CI run's is
+ * its exchange, whose claims say the run, once the head proves it. Read
+ * here, its tiles come with the page's own, in the next statement. A body
+ * that is not a JSON object names nothing.
  */
 export async function logStretch(db: Queryable, at: { objects: readonly string[] | null; below: number | null; rows: number }): Promise<Stretch> {
   const { objects, rows } = at;
-  if (objects !== null && objects.length === 0) return { rows: [], more: false };
-  const read = await rowsOf<LogRow & { merged: number }>(db, stretchOf(at));
-  const more = read.length === rows || (objects !== null && read[0]?.merged === rows * COPIES);
-  return { rows: read.map(({ merged: _, ...row }) => row), more };
+  if (objects !== null && objects.length === 0) return { rows: [], more: false, firsts: new Map() };
+  const read = await rowsOf<LogRow & { merged: number; first: string | null }>(
+    db,
+    sql`
+      WITH stretch AS MATERIALIZED (${stretchOf(at)}),
+      credentials AS (
+        SELECT DISTINCT b ->> 'credential' AS id
+        FROM (SELECT CASE WHEN s.body IS JSON OBJECT THEN s.body::jsonb END AS b FROM stretch s) parsed
+        WHERE b ->> 'actor' LIKE 'token:%' AND b ->> 'action' IS DISTINCT FROM 'token.exchange' AND jsonb_typeof(b -> 'credential') = 'string')
+      SELECT s.seq, s.kept, s.leaf, s.body, s.merged, NULL::text AS first FROM stretch s
+      UNION ALL SELECT l.seq::float8, l.kept, l.leaf::float8, l.body, 0, c.id
+        FROM credentials c JOIN log l ON l.seq = (SELECT min(x.seq) FROM log_index x WHERE x.object = 'credential:' || c.id)
+      ORDER BY first NULLS FIRST, seq DESC`,
+  );
+  const stretch = read.filter((row) => row.first === null);
+  const more = stretch.length === rows || (objects !== null && stretch[0]?.merged === rows * COPIES);
+  const firsts = new Map(read.flatMap(({ merged: _, first, ...row }) => (first === null ? [] : [[first, row] as const])));
+  return { rows: stretch.map(({ merged: _, first: __, ...row }) => row), more, firsts };
 }
 
 /**

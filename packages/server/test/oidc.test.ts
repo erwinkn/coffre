@@ -10,7 +10,9 @@ import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:cryp
 import { after, beforeEach, mock, test } from 'node:test';
 
 import { canonicalClaims, github, signin, type RateLimiter, type WorkloadAlert } from '@coffre/core/identity';
-import { binding, emptyDatabase, environment, grant, instance, principal, project, role, rows, write } from '@coffre/vault/testing';
+import { credentials, log, logIndex } from '@coffre/db/schema';
+import { binding, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, signerOf, write } from '@coffre/vault/testing';
+import { eq } from 'drizzle-orm';
 
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -124,10 +126,95 @@ test("a run's token buys a five-minute token of its service, the issuer's keys f
   assert.deepEqual(fetched, [KEYS]);
   const me = await app.request('/api/me', { headers: { authorization: `Bearer ${answer.body.token}` } });
   assert.equal(me.status, 200);
-  assert.equal(((await me.json()) as { principal: { type: string; id: string } }).principal.id, 'deploy');
+  const seen = (await me.json()) as { principal: { type: string; id: string }; features: { workloads: boolean } };
+  assert.equal(seen.principal.id, 'deploy');
+  // This deployment's sign-in trusts workloads, and says so.
+  assert.equal(seen.features.workloads, true);
   // The keys are kept: the next run fetches nothing.
   assert.equal((await exchange(idToken())).status, 200);
   assert.deepEqual(fetched, [KEYS]);
+});
+
+test("the audit page leads each entry a run's credential wrote to its run, through the exchange, after the credential's row is gone", async () => {
+  // An auditor who writes, too: their write is no run's.
+  const AUD = 'user:aud@acme.example';
+  await write(world, ...rows('roles', role(true, 'auditor', ['secret.write', 'audit.read'])), ...rows('principals', principal(AUD, { role: 'auditor' })), ...rows('credentials', credential('aud-cli', AUD)));
+  const call = (bearer: string, path: string, init: RequestInit = {}) => app.request(path, { ...init, headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' } });
+  const wrote = await call('aud-cli', '/api/secrets/market/prod', { method: 'PATCH', body: JSON.stringify({ API_KEY: 'v1' }) });
+  assert.equal(wrote.status, 200, await wrote.text());
+  const run = await exchange(idToken());
+  assert.equal(run.status, 200, JSON.stringify(run.body));
+  assert.equal((await call(run.body.token!, '/api/reveals', { method: 'POST', body: JSON.stringify({ path: 'market/prod/API_KEY' }) })).status, 200);
+  await (await signerOf(world)).sign();
+  // Whoever owns the database deletes the credential's row: the log alone leads from the read to the run.
+  await world.owner.delete(credentials).where(eq(credentials.principal, DEPLOY));
+
+  type Entry = { seq: number; action: string; actorId: string; run: { exchangeSeq: number; claims: Record<string, unknown> } | null };
+  const got = await call('aud-cli', '/api/audit?detail=1');
+  assert.equal(got.status, 200);
+  const entries = ((await got.json()) as { entries: Entry[] }).entries.filter((entry) => entry.action !== 'test.write');
+  assert.deepEqual(entries.map((entry) => `${entry.actorId} ${entry.action}`), ['deploy secret.read', 'deploy token.exchange', 'aud@acme.example secret.write']);
+  const [read, exchanged, written] = entries as [Entry, Entry, Entry];
+  assert.equal(exchanged.run?.exchangeSeq, exchanged.seq);
+  assert.equal(exchanged.run?.claims.ref, MAIN.ref);
+  assert.deepEqual(read.run, exchanged.run);
+  assert.equal(written.run, null);
+});
+
+test("an exchange the tree does not prove says no entry's run: a writer who forges one, and points a credential's index at it, is not believed", async () => {
+  const AUD = 'user:aud@acme.example';
+  // A service token of the same service, which no run ever bought.
+  const plain = credential('deploy-cli', DEPLOY, { scope: VIEWER });
+  await write(world, ...rows('roles', role(true, 'auditor', ['secret.write', 'audit.read'])), ...rows('principals', principal(AUD, { role: 'auditor' })), ...rows('credentials', credential('aud-cli', AUD), plain));
+  const call = (bearer: string, path: string, init: RequestInit = {}) => app.request(path, { ...init, headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' } });
+  assert.equal((await call('aud-cli', '/api/secrets/market/prod', { method: 'PATCH', body: JSON.stringify({ API_KEY: 'v1' }) })).status, 200);
+  const run = await exchange(idToken());
+  assert.equal(run.status, 200, JSON.stringify(run.body));
+  assert.equal((await call(run.body.token!, '/api/reveals', { method: 'POST', body: JSON.stringify({ path: 'market/prod/API_KEY' }) })).status, 200);
+  const plainly = await call('deploy-cli', '/api/reveals', { method: 'POST', body: JSON.stringify({ path: 'market/prod/API_KEY' }) });
+  assert.equal(plainly.status, 200, await plainly.text());
+  await (await signerOf(world)).sign();
+
+  type Entry = { seq: number; action: string; actorId: string; proof: string; run: { exchangeSeq: number; claims: Record<string, unknown> } | null };
+  const page = async () => ((await (await call('aud-cli', '/api/audit?detail=1')).json()) as { entries: Entry[] }).entries.filter((entry) => entry.action !== 'test.write');
+  const [, , exchanged, written] = (await page()) as [Entry, Entry, Entry, Entry];
+  assert.deepEqual([exchanged.action, written.action], ['token.exchange', 'secret.write']);
+  // The writer turns the auditor's entry, signed and below both reads, into an exchange that bought `deploy-cli`, by a run of its choosing.
+  const [real] = await world.owner.select({ body: log.body }).from(log).where(eq(log.seq, BigInt(exchanged.seq)));
+  const forged = JSON.parse(real!.body) as { credential: string; detail: { run: Record<string, unknown> } };
+  forged.credential = plain.id;
+  forged.detail.run = { ...forged.detail.run, ref: 'refs/heads/FORGED' };
+  await world.owner.update(log).set({ body: JSON.stringify(forged) }).where(eq(log.seq, BigInt(written.seq)));
+  await world.owner.insert(logIndex).values({ object: `credential:${plain.id}`, seq: BigInt(written.seq) });
+
+  const [plainRead, runRead, exchangedAgain, rewritten] = (await page()) as [Entry, Entry, Entry, Entry];
+  assert.deepEqual([plainRead, runRead].map((entry) => `${entry.actorId} ${entry.action} ${entry.proof}`), ['deploy secret.read proven', 'deploy secret.read proven']);
+  assert.equal(rewritten.proof, 'failed');
+  assert.equal(plainRead.run, null);
+  // The run's own read still leads to its exchange, which the tree proves.
+  assert.deepEqual(runRead.run, exchangedAgain.run);
+  assert.equal(runRead.run?.claims.ref, MAIN.ref);
+});
+
+test("a run's exchange far below its read, in tiles of its own, is proven in the page's two statements", async () => {
+  const AUD = 'user:aud@acme.example';
+  await write(world, ...rows('roles', role(true, 'auditor', ['secret.read', 'secret.write', 'audit.read'])), ...rows('principals', principal(AUD, { role: 'auditor' })), ...rows('credentials', credential('aud-cli', AUD)));
+  const call = (bearer: string, path: string, init: RequestInit = {}) => app.request(path, { ...init, headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' } });
+  assert.equal((await call('aud-cli', '/api/secrets/market/prod', { method: 'PATCH', body: JSON.stringify({ API_KEY: 'v1' }) })).status, 200);
+  const run = await exchange(idToken());
+  assert.equal(run.status, 200, JSON.stringify(run.body));
+  // 300 reads of the auditor's, each a leaf of the aging tree as the exchange is: the run's read lands in another tile than its exchange.
+  for (let i = 0; i < 300; i += 1) {
+    for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged]) kept.clear();
+    assert.equal((await call('aud-cli', '/api/reveals', { method: 'POST', body: JSON.stringify({ path: 'market/prod/API_KEY' }) })).status, 200);
+  }
+  assert.equal((await call(run.body.token!, '/api/reveals', { method: 'POST', body: JSON.stringify({ path: 'market/prod/API_KEY' }) })).status, 200);
+  await (await signerOf(world)).sign();
+
+  type Entry = { action: string; proof: string; run: { exchangeSeq: number; claims: Record<string, unknown> } | null };
+  const [got, , statements] = await cost(async () => (await (await call('aud-cli', '/api/audit?limit=1&detail=1')).json()) as { entries: Entry[] });
+  const [read] = got.entries as [Entry];
+  assert.deepEqual([read.action, read.proof, read.run?.claims.ref, statements], ['secret.read', 'proven', MAIN.ref, 2]);
 });
 
 test('a token is spent once: the same token again is replayed, by the vault', async () => {
@@ -205,7 +292,7 @@ test("an unknown key's alert names the service in full, quoted as the shell read
   const logged = mock.method(console, 'error', () => {});
   const answer = await exchange(idToken({ iss: KUBE, sub: 'system:serviceaccount:ci:runner' }, { key: pair().privateKey, kid: 'rotated' }), odd);
   logged.mock.restore();
-  assert.deepEqual(refused(answer), [401, 'unauthenticated', 'unknown_signer']);
+  assert.deepEqual(refused(answer), [401, 'unauthenticated', 'unknown_key']);
   assert.match(alerts.at(-1)!.text, named);
   }
 });
@@ -223,6 +310,21 @@ test("an issuer whose keys cannot be fetched is the app's 503, with when to come
   assert.deepEqual([refused(answer), answer.retryAfter, calls], [[503, 'unavailable', 'issuer_unavailable'], '60', []]);
 });
 
+test("a binding removed ends the credentials it issued once the vault's memory of their caller lapses, and the next run is refused at once", async () => {
+  const ROOT = 'user:root@acme.example';
+  await write(world, ...rows('principals', principal(ROOT, { role: 'owner' })), ...rows('credentials', credential('root-cli', ROOT)));
+  const run = await exchange(idToken());
+  assert.equal(run.status, 200, JSON.stringify(run.body));
+  const me = async () => (await app.request('/api/me', { headers: { authorization: `Bearer ${run.body.token}` } })).status;
+  assert.equal(await me(), 200);
+  const removed = await app.request(`/api/members/${DEPLOY}/bindings/${main.id}`, { method: 'DELETE', headers: { authorization: 'Bearer root-cli' } });
+  assert.equal(removed.status, 200, await removed.text());
+  // The vault remembers who a credential is for its memory's length, 2 seconds (docs/design/0.16.md, D218): then it reads the binding gone.
+  world.memory.callers.clear();
+  assert.equal(await me(), 401);
+  assert.deepEqual(refused(await exchange(idToken())), [401, 'unauthenticated', 'no_match']);
+});
+
 test("a binding that carries its keys: the app fetches nothing, the vault verifies; an unknown key alerts once an hour, waited on 2 s at most, and logs once a minute", async () => {
   const logged = mock.method(console, 'error', () => {});
   const refusals = () => logged.mock.calls.filter((call) => (call.arguments[0] as { event?: string } | undefined)?.event === 'workload_exchange_refused').length;
@@ -236,7 +338,7 @@ test("a binding that carries its keys: the app fetches nothing, the vault verifi
   const started = performance.now();
   const [unknown] = await cost(() => exchange(kube(stranger.privateKey, 'rotated')));
   const waited = performance.now() - started;
-  assert.deepEqual(refused(unknown), [401, 'unauthenticated', 'unknown_signer']);
+  assert.deepEqual(refused(unknown), [401, 'unauthenticated', 'unknown_key']);
   assert.ok(waited >= 1_900 && waited < 4_000, `answered after ${Math.round(waited)} ms`);
   // The hook, still unanswered, is work the platform keeps the request alive for: on Workers, the response's end would cancel it.
   assert.equal((await settledOf(app.tracked.slice(before))).filter((settled) => !settled).length, 1);
@@ -246,7 +348,7 @@ test("a binding that carries its keys: the app fetches nothing, the vault verifi
   assert.deepEqual({ kind: alerts[0]!.kind, service: alerts[0]!.service, binding: alerts[0]!.binding }, { kind: 'unknown_key', service: DEPLOY, binding: carried.id });
   assert.match(alerts[0]!.text, /names key "rotated", not one uploaded for https:\/\/kubernetes\.acme\.example/);
   // Within the hour, once: the next is refused the same, and says nothing more.
-  assert.deepEqual(refused(await exchange(kube(stranger.privateKey, 'rotated'))), [401, 'unauthenticated', 'unknown_signer']);
+  assert.deepEqual(refused(await exchange(kube(stranger.privateKey, 'rotated'))), [401, 'unauthenticated', 'unknown_key']);
   assert.equal(alerts.length, 1);
   assert.equal(refusals(), 1);
   logged.mock.restore();

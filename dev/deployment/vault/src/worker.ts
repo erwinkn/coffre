@@ -15,4 +15,6 @@ export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: env.COFFRE_VAULT_KEY_ID, key: env.COFFRE_VAULT_KEY },
   owners: env.COFFRE_OWNERS.split(','),
+  // The app's signin({ workloads }), said to the vault too: left out, it refuses every CI run.
+  workloads: {},
 }));
