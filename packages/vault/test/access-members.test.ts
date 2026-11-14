@@ -16,7 +16,7 @@ import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
 import { Signer } from '../src/signer.ts';
 import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
-import { amend, binding, credential, environment, grant, instance, principal, project, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
+import { amend, binding, credential, environment, grant, identity, instance, principal, project, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
 
 const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
@@ -263,6 +263,26 @@ test('a removal deletes the member\'s grants and moves their generation on, whic
   // An Owner of the whole instance removes another, and anyone who runs it removes themselves.
   assert.deepEqual(await remove('ada-cli', cy), { answer: { revoked: 0 } });
   assert.deepEqual(await remove('fay-cli', fay), { answer: { revoked: 0 } });
+});
+
+test('a removal revokes the member\'s sign-in accounts, so that back in, they bind them anew: one revoked before is left as it is', async () => {
+  const account = identity(bo, { email: 'bo@acme.example' });
+  const before = identity(bo, { revokedAt: new Date(world.now() - 60_000), revokedBy: bo });
+  const others = identity(eve);
+  await write(world, ...rows('identities', account, before, others));
+  const accounts = async () => rowsOf<{ id: string; generation: number; revoked_by: string | null; revoked: boolean }>(world.owner, sql`SELECT id, generation, revoked_by, revoked_at IS NOT NULL AS revoked FROM identities ORDER BY id`);
+  const untouched = (await accounts()).find((found) => found.id === before.id);
+
+  assert.ok('answer' in (await remove('fay-cli', bo)));
+  const entry = await written();
+  assert.ok(entry.objects.includes(`identity:${account.id}`) && !entry.objects.includes(`identity:${before.id}`), entry.objects.join());
+  assert.equal(named(entry).filter((name) => name === 'identities replaced').length, 1);
+  assert.ok('answer' in (await restore('fay-cli', bo)));
+  const now = await accounts();
+  assert.deepEqual(now.find((found) => found.id === account.id), { id: account.id, generation: 0, revoked_by: fay, revoked: true }, 'revoked, of the generation before');
+  assert.deepEqual(now.find((found) => found.id === before.id), untouched);
+  assert.deepEqual(now.find((found) => found.id === others.id), { id: others.id, generation: 0, revoked_by: null, revoked: false }, 'another member\'s, untouched');
+  assert.equal((await row(bo))!.generation, 1);
 });
 
 test('a grant hidden from a removal and put back once the member is brought back reaches nothing: it is of the generation the removal ended', async () => {

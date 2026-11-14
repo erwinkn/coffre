@@ -1,7 +1,7 @@
 import { EVERYWHERE, isInstanceRole, isScope, normalScope, ownsInstance, runsInstance, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
 import type { AccessAnswers, AccessChanges, MemberAdd, MemberRemove, MemberRestore, MemberRole, Presented, ScopeInput, Standing } from '@coffre/core/vault';
-import { grants, principals, projects } from '@coffre/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { grants, identities, principals, projects } from '@coffre/db/schema';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, refusedTo, type Asking, type Shown } from '../caller.ts';
 import { drop, part, put, type Operation, type Parts, type Refusal, type Seen } from '../change.ts';
@@ -251,9 +251,13 @@ function memberRole(input: Presented & MemberRole, vault: Deciding): Operation<P
 /**
  * Remove a member (`member.remove`): their grants are deleted, and their
  * generation moves on, which ends every session, token and binding issued
- * in the one before (`callerOf`), with nothing revoked row by row. Whoever
- * runs the instance removes a member, and only an Owner of the whole
- * instance an Owner; never the last one, nor one the deployment names.
+ * in the one before (`callerOf`), with nothing revoked row by row. Their
+ * sign-in accounts are revoked: an account signs in as one member at a
+ * time (`identities_active_subject`), and one bound in a generation before
+ * signs in as nobody, so revoked, it is free to bind anew when they are
+ * let back in. Whoever runs the instance removes a member, and only an
+ * Owner of the whole instance an Owner; never the last one, nor one the
+ * deployment names.
  */
 function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operation<Parts, AccessAnswers['member.remove']> {
   const shown = presented(input);
@@ -264,6 +268,7 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
     member: part(principals, eq(principals.id, principal)),
     owners: owners(),
     held: part(grants, eq(grants.principal, principal)),
+    accounts: part(identities, and(eq(identities.principal, principal), isNull(identities.revokedAt))),
   };
   return {
     read,
@@ -285,8 +290,13 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
         writes: [
           put(principals, { ...withoutMac(was), status: 'removed', role: 'member', scope: null, generation, statusChangedAt: now, statusChangedBy: caller.principal }, was),
           ...seen.held.map((grant) => drop(grants, grant)),
+          ...seen.accounts.map((account) => put(identities, { ...withoutMac(account), revokedAt: now, revokedBy: caller.principal }, account)),
         ],
-        entry: said('member.remove', caller, shown, [`principal:${principal}`, ...seen.held.map((grant) => (grant.projectId === null ? `environment:${grant.environmentId}` : `project:${grant.projectId}`))], { member: principal, generation, revoked }),
+        entry: said('member.remove', caller, shown, [
+          `principal:${principal}`,
+          ...seen.held.map((grant) => (grant.projectId === null ? `environment:${grant.environmentId}` : `project:${grant.projectId}`)),
+          ...seen.accounts.map((account) => `identity:${account.id}`),
+        ], { member: principal, generation, revoked }),
         answer: { revoked: revoked.length },
       };
     },
