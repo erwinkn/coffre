@@ -238,12 +238,14 @@ deployment it booted.
 | token reveal | The canary is revealed once, its value is the one given, and the audit log holds exactly one allowed `secret.read` of it under the reveal's operation and request |
 | token scan | The canary's value, as text, base64 or hex, is in no answer to any GET route, as the token or as no one, nor in any page: only in its reveal |
 | token scope | The token sees the canary's project and reads its environment, and nothing more: every other environment it is told of, a made-up place and the members refuse it, and the audit entries it reads are about its project only |
-| token verification | The whole audit chain verifies. Verifying is for auditors, admins and owners of the whole instance, which a token cannot be, so this is skipped with a token, and says it was not checked |
 
 Each prints ✓, ✗ or – and a line, and the run exits 1 on any ✗. Behind
-Cloudflare Access, which turns everyone away before coffre answers, neither
-tier can run: `coffre verify instance` says so, and `coffre verify log`
-verifies the audit log as you.
+Cloudflare Access, which turns everyone away before coffre answers, and
+where 0.16.0 takes no CLI's credential, neither tier can run: `coffre verify
+instance` says so. Neither checks the whole audit log, which 0.16.0's vault
+watches itself: the signer checks its end every minute and re-checks older
+entries a few blocks a minute, and the audit page proves each entry it shows
+([design](design/0.16.md), D222).
 
 ### Signed in as an owner
 
@@ -274,8 +276,7 @@ Signed in as anyone else, it says so and stops before it makes anything.
 |---|---|
 | owner | The session is an admin's or owner's of the whole instance |
 | setup | What step 1 and 2 found and made, a fresh canary and a fresh credential |
-| token, token reveal, token scan, token scope | The token tier, as the fresh credential. Its last check, token verification, which a token can only skip, is left out: yours comes next |
-| owner verification | The whole audit chain verifies, read by you |
+| token, token reveal, token scan, token scope | The token tier, as the fresh credential |
 | clean-up | The credential revoked, your session left as it was; what stays |
 
 What stays, for the next run: the project, the environment with its canary,
@@ -331,7 +332,6 @@ Checking https://secrets.example.com, as no one and with the bearer token `coffr
   ✓ token reveal        one secret.read of CANARY, entry 57, under request 1d3a7bc8-3fcf-419f-9771-c83026072506
   ✓ token scan          72 answers from 15 GET routes and 13 pages, as the token and as no one: no value
   ✓ token scope         only conformance/live; 6 reads elsewhere refused: no other environment of conformance, a made-up place, the members
-  – token verification  verification is for auditors, admins and owners of the whole instance, which this token is not: not checked
 
 ✓ Conformant
 ```

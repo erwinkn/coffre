@@ -97,8 +97,7 @@ async function ciInstance(t: test.TestContext, { unavailable = [] as (string | n
     const known =
       req.headers.authorization === 'Bearer coffre_svc_ci' ||
       req.headers.authorization === 'Bearer coffre_cli_ada' ||
-      req.headers.authorization === 'Bearer coffre_svc_run' ||
-      (req.headers['cf-access-client-id'] === 'id.access' && req.headers['cf-access-client-secret'] === 'shh');
+      req.headers.authorization === 'Bearer coffre_svc_run';
     if (req.url === '/api/me' && meUnavailable > 0) {
       meUnavailable -= 1;
       return send(503, { error: 'unavailable', message: 'coffre cannot check who you are right now' });
@@ -176,12 +175,11 @@ test('a CI run signs in with what login asks it for, piped in, and later command
   const { origin, seen } = await ciInstance(t);
   for (const [args, input, saved] of [
     [['--token'], 'coffre_svc_ci\n', { mode: 'signin', kind: 'token', token: 'coffre_svc_ci' }],
-    [['--access-client-id', 'id.access', '--auth-mode', 'cloudflare'], 'shh\n', { mode: 'cloudflare', kind: 'access', clientId: 'id.access', clientSecret: 'shh' }],
     [['--service', 'deploy', '--id-token'], 'id.token.ok\n', { mode: 'signin', kind: 'run', token: 'coffre_svc_run', expiresAt: '2099-01-01T00:05:00.000Z' }],
   ] as const) {
     const home = mkdtempSync(join(tmpdir(), 'coffre-login-ci-'));
     t.after(() => rmSync(home, { recursive: true, force: true }));
-    const login = await cli(home, ['login', origin, ...args.filter((arg) => arg !== '--auth-mode' && arg !== 'cloudflare')], input);
+    const login = await cli(home, ['login', origin, ...args], input);
     assert.equal(login.status, 0, login.stderr);
     assert.match(login.stdout, new RegExp(`^Signed in to ${origin} as deploy\\n`));
     assert.ok(!login.stdout.includes(input.trim()) && !login.stderr.includes(input.trim()), 'the secret was shown');
@@ -195,7 +193,7 @@ test('a CI run signs in with what login asks it for, piped in, and later command
     // The next command, signed in as the run.
     const whoami = await cli(home, ['whoami'], '');
     assert.equal(whoami.status, 0, whoami.stderr);
-    assert.match(whoami.stdout, /^service:deploy \(service account\) on .*, via (a bearer token|an Access service token|the run's ID token)/);
+    assert.match(whoami.stdout, /^service:deploy \(service account\) on .*, via (a bearer token|the run's ID token)/);
     assert.match(whoami.stdout, /\n {2}MCP clients: off\n {2}CI sign-in by ID token: on\n/, 'whoami says what the deployment turns on');
     // Signing out forgets it here, and revokes nothing: the token is the service's.
     const before = seen.length;
@@ -426,6 +424,47 @@ test("a person's login replaces the saved session only when the instance says it
   assert.ok(!existsSync(join(home, '.coffre', 'directories.json')));
 });
 
+test('behind Cloudflare Access, the CLI says in a sentence that 0.16.0 signs people in through the browser only, and sends no credential', async (t) => {
+  const seen: string[] = [];
+  const server = createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    // An instance behind Access answers who vouches for people, and turns every credential the CLI could send away.
+    if (req.url === '/api/auth') return res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ signin: null, access: { assertion: false } }));
+    res.writeHead(401, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'unauthenticated', message: 'no' }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); }));
+  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const home = mkdtempSync(join(tmpdir(), 'coffre-login-access-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const sentence = 'coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x';
+
+  // A person's login: the instance says it is behind Access, and the CLI stops there, no cloudflared started.
+  const person = await cli(home, ['login', origin, '--no-browser'], '');
+  assert.equal(person.status, 1);
+  assert.equal(person.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`);
+  assert.deepEqual(seen, ['GET /api/auth']);
+  // Told so by --auth-mode, or handed 0.14's Access service token: nothing asked, of the instance or on stdin.
+  for (const args of [['--auth-mode', 'cloudflare', 'login', origin], ['login', origin, '--access-client-id', 'id.access']]) {
+    const run = await cli(home, args, 'shh\n');
+    assert.equal(run.status, 1, args.join(' '));
+    assert.equal(run.stderr, `coffre: Behind Cloudflare Access ${sentence}\n`, args.join(' '));
+    assert.ok(!run.stdout.includes('secret') && !run.stderr.includes('secret'), 'no secret asked for');
+  }
+  assert.deepEqual(seen, ['GET /api/auth'], 'nothing sent');
+  assert.ok(!existsSync(join(home, '.coffre', 'credentials.json')), 'nothing saved');
+  // 0.14's sessions there, a person's by cloudflared and an Access service token's: refused before any request.
+  for (const session of [{ mode: 'cloudflare' }, { mode: 'cloudflare', kind: 'access', clientId: 'id.access', clientSecret: 'shh' }]) {
+    mkdirSync(join(home, '.coffre'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(home, '.coffre', 'credentials.json'), JSON.stringify({ version: 2, current: origin, instances: { [origin]: { ...session, obtainedAt: '2026-09-01T00:00:00Z' } } }), { mode: 0o600 });
+    const whoami = await cli(home, ['whoami'], '');
+    assert.equal(whoami.status, 1);
+    assert.equal(whoami.stderr, `coffre: ${origin} is behind Cloudflare Access, where ${sentence}\n`);
+  }
+  assert.deepEqual(seen, ['GET /api/auth'], 'nothing sent');
+});
+
 test('login refuses an --auth-mode it does not know before asking the instance anything', async (t) => {
   const { origin, seen, home } = await savedHome(t, 'coffre_cli_ada');
   const typo = await cli(home, ['--auth-mode', 'signon', 'login', origin, '--no-browser'], '', join(home, 'code'));
@@ -458,7 +497,7 @@ test("a repository's coffre.json names its instance for a fresh clone, which sig
   assert.equal((await at('code/acme', ['use'])).stdout, `* ${a.origin.padEnd(36)} ${'not signed in'.padEnd(24)} named by ~/code/acme/coffre.json\n`);
 
   // A secret goes only where you name it, not where a clone says.
-  for (const [args, input] of [[['--token'], 'coffre_svc_ci\n'], [['--access-client-id', 'id.access'], 'shh\n'], [['--service', 'deploy', '--id-token'], 'id.token.ok\n']] as const) {
+  for (const [args, input] of [[['--token'], 'coffre_svc_ci\n'], [['--service', 'deploy', '--id-token'], 'id.token.ok\n']] as const) {
     const handed = await at('code/acme/src', ['login', ...args], input);
     assert.equal(handed.status, 1);
     assert.match(handed.stderr, new RegExp(`^coffre: ~/code/acme/coffre\\.json names ${a.origin}, and a secret goes only where you name it: \`coffre login ${a.origin} ${args[0]}`));

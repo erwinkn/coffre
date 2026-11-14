@@ -98,9 +98,10 @@ curl https://coffre.example.com/api/auth
 Behind Access it answers `{"signin":null,"access":{"assertion":true}}`:
 `assertion` says whether this request carried one, so the page can tell
 "open coffre through Access" from "Access vouched, and coffre could not
-verify it". `coffre login` runs a device login when `signin` is set, and
-hands over to `cloudflared` when `access` is, or when Access turns the
-request away before it reaches coffre.
+verify it". `coffre login` runs a device login when `signin` is set. When
+`access` is, or when Access turns the request away before it reaches
+coffre, it signs in nowhere and says why ([The CLI and
+machines](#the-cli-and-machines)).
 
 ## Behind Cloudflare Access
 
@@ -161,7 +162,24 @@ will sign in with coffre's own credentials, Access checking them at the
 edge: `coffre login` through a device login approved in the browser, and
 machines with a service token or a binding of coffre's beside an Access
 service token. Until then, a deployment whose CLI or machines reach coffre
-through Access stays on 0.14.
+through Access stays on 0.14, and its machines keep 0.14's Access service
+tokens; in 0.16.x they will need coffre's tokens instead, beside them.
+
+The CLI says so before it sends a credential, in each of the ways 0.14's
+signed in behind Access:
+
+```
+$ coffre login https://secrets.acme.example
+coffre: https://secrets.acme.example is behind Cloudflare Access, where coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x
+$ coffre login https://secrets.acme.example --access-client-id 1b2c….access
+coffre: Behind Cloudflare Access coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x
+```
+
+The first asks only `GET /api/auth`, and starts no `cloudflared`; the
+second asks nothing, its secret included. `--auth-mode cloudflare` says the
+same as the second, and a session 0.14's CLI saved behind Access, by
+`cloudflared` or an Access service token, the same as the first, for any
+command.
 
 ### Closed-door behavior
 

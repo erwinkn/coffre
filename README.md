@@ -223,8 +223,7 @@ coffre settings service-accounts --except-environments prod   # this lets them: 
 
 coffre audit --denied
 coffre audit market/prod/DATABASE_URL       # who read or changed it, a run of all of market/prod included
-coffre verify                               # asks which: instance, keys or log; admins and owners
-coffre verify log                           # walks the whole log from its first entry, as an auditor, admin or owner of all of it
+coffre verify                               # asks which: instance or keys; admins and owners
 coffre verify keys                          # checks the keys you keep, on your machine (docs/keys.md)
 coffre verify instance                      # checks the instance from outside (docs/conformance.md)
 ```
@@ -321,7 +320,7 @@ so, ``not signed in: run `coffre login https://secrets.acme.example`
 there after saying which file named it. That login pins nothing, as the
 file already routes the repository; `whoami` and `use` say `named by
 ~/Code/acme/coffre.json`. A secret handed to `coffre login` (`--token`,
-`--access-client-id`, `--id-token`) goes only to a URL you name. A
+`--id-token`) goes only to a URL you name. A
 `coffre.json` that is not a file, holds another key, or names anything
 but an origin, as `https://…` (or `http://` on this machine), stops the
 commands below it with its path, rather than send them elsewhere.

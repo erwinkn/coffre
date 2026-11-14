@@ -27,15 +27,13 @@ export function parseCanary(text: string, value?: string): Canary {
 
 /**
  * The checks with a bearer token that reads the canary, and audits its
- * project. `prefix` names them apart, run twice; `verification` false leaves
- * out the last, which a token can only skip, for a caller that verifies the
- * chain otherwise.
+ * project. `prefix` names them apart, run twice.
  */
 export async function tokenChecks(
   report: Checks,
   origin: string,
   setup: { token?: string; canary?: Canary },
-  { prefix = '', verification = true }: { prefix?: string; verification?: boolean } = {},
+  { prefix = '' }: { prefix?: string } = {},
 ): Promise<void> {
   const api = setup.token === undefined ? undefined : bearer(origin, setup.token);
   const token = await report.check(`${prefix}token`, { api, canary: setup.canary }, ({ api, canary }) => whoIsToken(origin, api, canary));
@@ -43,7 +41,6 @@ export async function tokenChecks(
   await report.check(`${prefix}token reveal`, needs, ({ api, canary, token }) => tokenReveal(api, canary, token));
   await report.check(`${prefix}token scan`, needs, ({ canary, secret }) => tokenScan(origin, secret, canary));
   await report.check(`${prefix}token scope`, needs, ({ api, canary }) => tokenScope(api, canary));
-  if (verification) await report.check(`${prefix}token verification`, { api }, ({ api }) => tokenVerification(api));
 }
 
 // --- with a token ---------------------------------------------------------------
@@ -170,18 +167,4 @@ async function tokenScope(api: CoffreClient, canary: Canary): Promise<string> {
   }
   const elsewhere = others.length === 0 ? 'no other environment' : `${others.length} other environment${others.length === 1 ? '' : 's'}`;
   return `only ${own}; ${refusals} reads elsewhere refused: ${elsewhere} of ${canary.project}, a made-up place, the members`;
-}
-
-async function tokenVerification(api: CoffreClient): Promise<string> {
-  let verified;
-  try {
-    verified = await api.audit.verify();
-  } catch (error) {
-    if (error instanceof CoffreError && error.status === 403) {
-      throw new Skip('verification is for auditors, admins and owners of the whole instance, which this token is not: not checked');
-    }
-    throw error;
-  }
-  expect(verified.ok, 'the audit log does not verify', verified);
-  return `${verified.entries} entries verify, through entry ${verified.through}`;
 }

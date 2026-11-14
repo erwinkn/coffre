@@ -10,16 +10,18 @@ export { KEYS_USAGE, verifyKeys } from './keys.ts';
 export const CHECKS = [
   ['instance', 'the instance from outside: as no one, then as you, an owner'],
   ['keys', 'the vault key or signing key you keep, against the instance'],
-  ['log', 'the whole audit log, as you, an owner'],
 ] as const;
 
 export type Check = (typeof CHECKS)[number][0];
 
-export const VERIFY_USAGE = `usage: coffre verify instance | keys | log | backup <dump>
+export const VERIFY_USAGE = `usage: coffre verify instance | keys | backup <dump>
 
 ${CHECKS.map(([name, what]) => `  ${name.padEnd(10)}${what}`).join('\n')}
   backup    a dump coffre backup made, restored into an empty database;
             not in 0.16 yet
+
+The whole audit log is no check of coffre verify in 0.16.0: the vault signs
+it and checks it every minute, and the audit page proves each entry it shows.
 
 On a terminal, \`coffre verify\` alone asks which. \`coffre verify <check> --help\`
 says more about each.`;

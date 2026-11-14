@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   choose,
+  browsersOnly,
   credentialHeaders,
   emptyPins,
   emptyStore,
@@ -22,7 +23,6 @@ import {
   withoutPins,
   withSession,
   withoutSession,
-  type AuthMode,
   type Local,
   type Pins,
   type Store,
@@ -108,31 +108,25 @@ test('signing out of the current instance falls back to another one', () => {
 test('with no session flags, the current instance and its session are used', () => {
   assert.deepEqual(resolveTarget({}, storeWith(), null, NOW), {
     origin: OURS,
-    mode: 'signin',
     by: 'person',
     credential: { kind: 'token', token: 'coffre_cli_ours' },
   });
 });
 
-test('--url picks another saved instance, with that instance’s mode', () => {
-  assert.deepEqual(resolveTarget({ url: 'coffre.acme.example' }, storeWith(), null, NOW), {
-    origin: THEIRS,
-    mode: 'cloudflare',
-    by: 'person',
-    credential: { kind: 'cloudflared' },
+test("--url picks another saved instance; 0.14's session behind Cloudflare Access there is refused, in a sentence, before any request", () => {
+  assert.throws(() => resolveTarget({ url: 'coffre.acme.example' }, storeWith(), null, NOW), {
+    message: `${THEIRS} is behind Cloudflare Access, where coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x`,
   });
+  assert.equal(browsersOnly(THEIRS), `${THEIRS} is behind Cloudflare Access, where coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x`);
+  assert.equal(browsersOnly(), 'Behind Cloudflare Access coffre 0.16.0 signs people in through the browser only; the CLI and machines come back in 0.16.x');
 });
 
 test('a CI run signs in with `coffre login`, and its session is used as a person’s is', () => {
   const token = withSession(emptyStore(), OURS, { mode: 'signin', kind: 'token', token: 'coffre_svc_ci', expiresAt: null, obtainedAt: '2026-09-26T00:00:00Z' });
-  assert.deepEqual(resolveTarget({}, token, null, NOW), { origin: OURS, mode: 'signin', by: 'token', credential: { kind: 'token', token: 'coffre_svc_ci' } });
-  const access = withSession(emptyStore(), THEIRS, { mode: 'cloudflare', kind: 'access', clientId: 'id.access', clientSecret: 'shh', obtainedAt: '2026-09-26T00:00:00Z' });
-  assert.deepEqual(resolveTarget({}, access, null, NOW), {
-    origin: THEIRS,
-    mode: 'cloudflare',
-    by: 'access',
-    credential: { kind: 'access-service-token', clientId: 'id.access', clientSecret: 'shh' },
-  });
+  assert.deepEqual(resolveTarget({}, token, null, NOW), { origin: OURS, by: 'token', credential: { kind: 'token', token: 'coffre_svc_ci' } });
+  // 0.14's Access service token, saved: read, so that it is refused as Access's, never sent.
+  const access = parseStore(JSON.stringify({ version: 2, current: THEIRS, instances: { [THEIRS]: { mode: 'cloudflare', kind: 'access', clientId: 'id.access', clientSecret: 'shh', obtainedAt: '2026-09-26T00:00:00Z' } } }));
+  assert.throws(() => resolveTarget({}, access, null, NOW), { message: browsersOnly(THEIRS) });
   // A run's credential lasts five minutes, and says how to get another.
   const run = withSession(emptyStore(), OURS, {
     mode: 'signin',
@@ -161,46 +155,39 @@ test('an instance with no saved session asks for a login there', () => {
 
 test('every message that sends someone to `coffre login` has the one-line agent hint under it', () => {
   assert.equal(SIGN_IN_HINT, 'agents: run the command in the background and provide the link it prints to the user');
-  assert.equal(signInError('not signed in: run `coffre login https://coffre.example.com`', 'signin'), `not signed in: run \`coffre login https://coffre.example.com\`\n${SIGN_IN_HINT}`);
-  // An instance not yet signed in to gets the same hint; Cloudflare Access signs in with cloudflared and gets none.
-  assert.equal(signInError('x'), `x\n${SIGN_IN_HINT}`);
-  assert.equal(signInError('x', 'cloudflare'), 'x');
+  assert.equal(signInError('not signed in: run `coffre login https://coffre.example.com`'), `not signed in: run \`coffre login https://coffre.example.com\`\n${SIGN_IN_HINT}`);
 
-  const sentTo = (call: () => unknown, line: string, mode?: AuthMode) =>
+  const sentTo = (call: () => unknown, line: string) =>
     assert.throws(call, (error: Error) => {
       assert.equal(error.message.split('\n')[0], line, 'the first line is the one grep finds');
-      assert.equal(error.message, signInError(line, mode));
+      assert.equal(error.message, signInError(line));
       return true;
     });
   sentTo(() => resolveTarget({}, emptyStore(), null, NOW), 'not signed in anywhere yet: run `coffre login <url>`');
   sentTo(() => choose({}, emptyStore(), null), 'not signed in anywhere yet: run `coffre login <url>`');
   sentTo(() => resolveTarget({ url: 'https://other.example.com' }, storeWith(), null, NOW), 'not signed in: run `coffre login https://other.example.com`');
   // Named a sign-in instance by --auth-mode: known.
-  sentTo(() => resolveTarget({ url: 'https://other.example.com', authMode: 'signin' }, storeWith(), null, NOW), 'not signed in: run `coffre login https://other.example.com`', 'signin');
+  sentTo(() => resolveTarget({ url: 'https://other.example.com', authMode: 'signin' }, storeWith(), null, NOW), 'not signed in: run `coffre login https://other.example.com`');
   sentTo(
     () => resolveTarget({}, storeWith(), null, new Date('2026-11-01T00:00:00Z')),
     `your session on ${OURS} ended on 2026-10-26: run \`coffre login ${OURS}\``,
-    'signin',
   );
   // A person's session with no token left in it; a bearer token's or a CI run's is signed in again another way.
   const tokenless = (kind?: 'token' | 'run') => withSession(emptyStore(), OURS, { mode: 'signin', ...(kind === undefined ? {} : { kind }), obtainedAt: '2026-09-26T00:00:00Z' });
-  sentTo(() => resolveTarget({}, tokenless(), null, NOW), `not signed in: run \`coffre login ${OURS}\``, 'signin');
+  sentTo(() => resolveTarget({}, tokenless(), null, NOW), `not signed in: run \`coffre login ${OURS}\``);
   for (const kind of ['token', 'run'] as const) {
     assert.throws(() => resolveTarget({}, tokenless(kind), null, NOW), (error: Error) => !error.message.includes('\n'));
   }
-  // Cloudflare Access signs in with cloudflared, not a code: no hint.
-  assert.throws(() => resolveTarget({ authMode: 'cloudflare' }, storeWith(), null, NOW), (error: Error) => !error.message.includes('\n'));
-  assert.throws(() => choose({ authMode: 'cloudflare' }, emptyStore(), null), (error: Error) => !error.message.includes('\n'));
-  sentTo(() => choose({ authMode: 'signin' }, emptyStore(), null), 'not signed in anywhere yet: run `coffre login <url>`', 'signin');
+  // Behind Cloudflare Access, the CLI signs in nowhere in 0.16.0: the sentence, no hint.
+  assert.throws(() => resolveTarget({ authMode: 'cloudflare' }, storeWith(), null, NOW), { message: browsersOnly() });
+  assert.throws(() => resolveTarget({ authMode: 'cloudflare' }, emptyStore(), null, NOW), { message: browsersOnly() });
+  sentTo(() => choose({ authMode: 'signin' }, emptyStore(), null), 'not signed in anywhere yet: run `coffre login <url>`');
   // A mode that is none is the command's to refuse, not the hint's.
   sentTo(() => choose({ authMode: 'dev' }, emptyStore(), null), 'not signed in anywhere yet: run `coffre login <url>`');
 });
 
-test('a saved token is not sent to the same origin under a different mode', () => {
-  assert.throws(
-    () => resolveTarget({ authMode: 'cloudflare' }, storeWith(), null, NOW),
-    /not signed in: run `coffre login https:\/\/coffre\.example\.com`/,
-  );
+test('a saved token is never sent when --auth-mode says Cloudflare Access, nor under a mode that is none', () => {
+  assert.throws(() => resolveTarget({ authMode: 'cloudflare' }, storeWith(), null, NOW), { message: browsersOnly() });
   assert.throws(() => resolveTarget({ authMode: 'dev' }, storeWith(), null, NOW), /--auth-mode must be one of signin, cloudflare/);
 });
 
@@ -306,14 +293,14 @@ test('a coffre.json names the instance, and the session sent there is its own: w
   const file: Local = { origin: THEIRS, by: 'file', directory: '/home/ada/Code/acme' };
   assert.deepEqual(choose({}, storeWith(), file), file);
   assert.deepEqual(choose({ url: OURS }, storeWith(), file), { origin: OURS, by: 'url' }, '--url first');
-  assert.deepEqual(resolveTarget({}, storeWith(), file, NOW).credential, { kind: 'cloudflared' });
+  assert.throws(() => resolveTarget({}, storeWith(), file, NOW), { message: browsersOnly(THEIRS) });
   assert.throws(
     () => resolveTarget({}, emptyStore(), file, NOW),
     /^Error: not signed in: run `coffre login https:\/\/coffre\.acme\.example` \(named by \/home\/ada\/Code\/acme\/coffre\.json\)\n/,
   );
   // A CI run's ID token is asked for that origin alone, which no other instance takes: it needs no --url.
   assert.deepEqual(resolveTarget({ service: 'deploy' }, emptyStore(), file, NOW), {
-    origin: THEIRS, mode: 'signin', by: 'service', credential: { kind: 'workload', service: 'token:deploy' },
+    origin: THEIRS, by: 'service', credential: { kind: 'workload', service: 'token:deploy' },
   });
 });
 
@@ -322,7 +309,8 @@ test('--url, then the pin that applies, then the default', () => {
   assert.deepEqual(choose({ url: 'coffre.example.com' }, storeWith(), pin), { origin: OURS, by: 'url' });
   assert.deepEqual(choose({}, storeWith(), pin), { origin: THEIRS, by: 'pin', directory: '/home/ada/Code/acme' });
   assert.deepEqual(choose({}, storeWith(), null), { origin: OURS, by: 'default' });
-  assert.equal(resolveTarget({}, storeWith(), pin, NOW).origin, THEIRS);
+  // The pin's instance, whose saved session is 0.14's behind Access: refused there, never the default's sent.
+  assert.throws(() => resolveTarget({}, storeWith(), pin, NOW), { message: browsersOnly(THEIRS) });
   // A CI run's ID token goes where the directory is pinned too, as it went to the default.
   assert.equal(resolveTarget({ service: 'deploy' }, emptyStore(), pin, NOW).origin, THEIRS);
 });
@@ -347,20 +335,9 @@ test('a directory pinned to an instance with no session asks for a login there, 
 
 // --- headers ------------------------------------------------------------------
 
-test('each mode carries its credential the way its gatekeeper expects', () => {
-  assert.deepEqual(credentialHeaders('signin', { kind: 'token', token: 't' }), {
-    authorization: 'Bearer t',
-  });
-  assert.deepEqual(credentialHeaders('cloudflare', { kind: 'token', token: 't' }), {
-    'cf-access-token': 't',
-  });
-  assert.deepEqual(credentialHeaders('cloudflare', { kind: 'cloudflared' }, 'from-cloudflared'), {
-    'cf-access-token': 'from-cloudflared',
-  });
-  assert.deepEqual(
-    credentialHeaders('cloudflare', { kind: 'access-service-token', clientId: 'i', clientSecret: 's' }),
-    { 'cf-access-client-id': 'i', 'cf-access-client-secret': 's' },
-  );
+test('a credential goes as a bearer token, and nothing else: no Access header', () => {
+  assert.deepEqual(credentialHeaders({ kind: 'token', token: 't' }), { authorization: 'Bearer t' });
+  assert.deepEqual(credentialHeaders({ kind: 'workload', service: 'token:deploy' }, 'coffre_svc_issued'), { authorization: 'Bearer coffre_svc_issued' });
 });
 
 // --- login ----------------------------------------------------------------------
@@ -370,7 +347,7 @@ test('login signs in the way GET /api/auth says, or the way Access turns it away
   assert.equal(loginMode(OURS, 200, signin), 'signin');
   assert.equal(loginMode(THEIRS, 200, { signin: null, access: { assertion: false } }), 'cloudflare');
   assert.equal(loginMode(THEIRS, 302, undefined), 'cloudflare');
-  assert.throws(() => loginMode(THEIRS, 403, undefined), /coffre --auth-mode cloudflare login https:\/\/coffre\.acme\.example/);
+  assert.throws(() => loginMode(THEIRS, 403, undefined), { message: `${THEIRS} turned the CLI away (status 403). ${browsersOnly()}` });
   assert.throws(() => loginMode(OURS, 404, undefined), /does not look like coffre: GET \/api\/auth answered 404/);
   assert.throws(() => loginMode(OURS, 200, { hello: 'world' }), /does not look like coffre/);
 });

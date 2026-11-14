@@ -11,7 +11,7 @@ npx @coffre/cli setup                      # its database, keys and, on Workers,
 pnpm exec coffre migrate --yes             # in a deployment, before its deploy
 coffre login https://secrets.acme.example
 coffre run market/prod -- node server.js
-coffre verify                              # the instance from outside, the keys you keep, or the log
+coffre verify                              # the instance from outside, or the keys you keep
 ```
 
 It bundles everything it runs, so it installs with no dependencies:

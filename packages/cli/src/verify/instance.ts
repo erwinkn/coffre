@@ -2,8 +2,8 @@
 // anyone on the network sees it; then with a bearer token that reads one
 // canary. The token is the operator's, from CI, with its canary; or, with
 // this CLI signed in as an admin or owner of the whole instance, one the run issues itself:
-// it finds or makes its own place, writes a fresh canary, runs the token's
-// checks, then verifies the whole audit log as the owner. However it ends,
+// it finds or makes its own place, writes a fresh canary, and runs the
+// token's checks. However it ends,
 // the credential it issued is revoked. The session is the one `coffre login`
 // made, and it stays signed in. Neither credential, nor the canary, is ever
 // printed or written down.
@@ -16,7 +16,7 @@ import { parseArgs } from 'node:util';
 import { CoffreError, createClient, shownMember, type CoffreClient } from '@coffre/client';
 
 import { readSecret } from '../secret.ts';
-import { askedMode, credentialHeaders, instanceOrigin, resolveTarget, SIGN_IN_HINT, signInError, type Local, type SessionFlags, type Store } from '../instance.ts';
+import { browsersOnly, credentialHeaders, instanceOrigin, resolveTarget, SIGN_IN_HINT, signInError, type Local, type SessionFlags, type Store } from '../instance.ts';
 import { style, type Output } from '../tty.ts';
 import { anonymousChecks } from './anonymous.ts';
 import { Checks, expect, Failure, stop } from './checks.ts';
@@ -42,8 +42,8 @@ Checks an instance from outside, the current one unless <url> names another:
   as an owner      with your \`coffre login\` session, as an owner or a root
                    admin: finds or makes conformance/live and
                    service:conformance-probe, issues it a credential, writes a
-                   fresh canary, runs the token's checks below, then verifies
-                   the whole audit log as you. The credential is revoked
+                   fresh canary, and runs the token's checks below. The
+                   credential is revoked
                    however the run ends, and your session stays signed in
   with a token     signed in with a bearer token, \`coffre login <url> --token\`,
                    as CI is: one that reads the canary's environment and
@@ -80,7 +80,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
     );
   }
   const requested = positionals[0] ?? session.url ?? local?.origin ?? store.current;
-  if (!requested) stop(1, `coffre: ${signInError('not signed in anywhere yet: run `coffre login <url>` first', askedMode(session.authMode))}`);
+  if (!requested) stop(1, `coffre: ${signInError('not signed in anywhere yet: run `coffre login <url>` first')}`);
   let origin: string;
   try {
     origin = instanceOrigin(requested);
@@ -90,8 +90,10 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   const s = style(out);
   const report = new Checks(out);
   const saved = store.instances[origin];
-  if (saved?.kind === 'access' || saved?.kind === 'run') {
-    stop(2, `coffre: verify instance checks as no one, then with a bearer token, or as you: the session saved for ${origin} is ${saved.kind === 'access' ? 'an Access service token' : "a run's ID token"}`);
+  // Access turns everyone away before coffre answers, and 0.16.0 takes no CLI's credential behind it.
+  if (saved?.mode === 'cloudflare' || session.authMode === 'cloudflare') stop(1, `coffre: ${browsersOnly(origin)}`);
+  if (saved?.kind === 'run') {
+    stop(2, `coffre: verify instance checks as no one, then with a bearer token, or as you: the session saved for ${origin} is a run's ID token`);
   }
 
   if (saved?.kind === 'token' && saved.token !== undefined) {
@@ -117,18 +119,11 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   }
 
   // The session `coffre login` made, and none other: no second sign-in.
-  if (store.instances[origin] === undefined) stop(1, `coffre: ${signInError(`not signed in: run \`coffre login ${origin}\` first`, askedMode(session.authMode))}`);
+  if (store.instances[origin] === undefined) stop(1, `coffre: ${signInError(`not signed in: run \`coffre login ${origin}\` first`)}`);
   let api: CoffreClient;
   try {
     const to = resolveTarget({ ...session, url: origin }, store);
-    if (to.mode === 'cloudflare') {
-      stop(
-        1,
-        `coffre: ${origin} is behind Cloudflare Access, which turns everyone away before coffre answers, so it cannot be checked from outside. ` +
-          '`coffre verify log` verifies its audit log, as you.',
-      );
-    }
-    api = createClient({ url: origin, headers: () => credentialHeaders(to.mode, to.credential) });
+    api = createClient({ url: origin, headers: () => credentialHeaders(to.credential) });
   } catch (error) {
     stop(1, `coffre: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -144,8 +139,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
 }
 
 /**
- * As the signed-in owner: who they are, set up, the token's checks,
- * verification; and, however it ends, a Ctrl-C included, the credential
+ * As the signed-in owner: who they are, set up, the token's checks; and, however it ends, a Ctrl-C included, the credential
  * revoked. The session stays as it was.
  */
 export async function ownerChecks(report: Checks, origin: string, api: CoffreClient): Promise<void> {
@@ -162,9 +156,7 @@ export async function ownerChecks(report: Checks, origin: string, api: CoffreCli
   process.once('SIGTERM', onTerm);
   try {
     const live = await report.check('setup', {}, () => setUp(api, issued));
-    // Without the token's own verification, which it can only skip: the owner verifies the whole chain next.
-    await tokenChecks(report, origin, live ?? {}, { verification: false });
-    await report.check('owner verification', {}, () => verification(api));
+    await tokenChecks(report, origin, live ?? {});
   } finally {
     process.off('SIGINT', onInt);
     process.off('SIGTERM', onTerm);
@@ -219,15 +211,6 @@ async function setUp(api: CoffreClient, issued: Issued[]): Promise<{ detail: str
     detail: `${made.length === 0 ? 'all found' : `made ${made.join(', ')}`}; a fresh ${place}/${PROBE.key} and a fresh credential for ${shownMember(PROBE.service)}`,
     value: { token: credential.token, canary: { project: PROBE.project, environment: PROBE.environment, key: PROBE.key, value } },
   };
-}
-
-/** What the whole audit chain says, walked from its first entry by the owner, which a token cannot be. */
-async function verification(api: CoffreClient): Promise<string> {
-  const verified = await api.audit.verifyWhole();
-  expect(verified.ok, 'the audit log does not verify', verified);
-  // A server older than 0.10.1 says nothing of what it left, and walked it all.
-  expect((verified.remaining ?? 0) === 0, 'the audit log is not verified to its end: the checkpoints are catching up', verified);
-  return `the whole chain verifies, as you: ${verified.entries} entries, through entry ${verified.through}`;
 }
 
 /** Revoke what the run issued, and say what stays: the session among it. */
