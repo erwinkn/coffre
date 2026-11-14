@@ -149,7 +149,7 @@ export type Called = {
    * For a call that asked (`head`): the log's head as the vault last signed
    * it, read with the caller's rows and held to the vault's MAC; null when
    * no head stands under it. The audit page proves each entry it shows
-   * against these roots, and shows one past these sizes as not signed yet.
+   * against these roots; one past these sizes is proven by nothing here.
    */
   head?: SignedHead | null;
 };

@@ -262,8 +262,9 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
  * Parts read in one statement: each part's rows whose MAC is the vault's,
  * `named` by table and key, `tokens`, every row the statement found by
  * its part and MAC, the vault's or not, and `readAt`, the database's clock
- * as it read them, in milliseconds (none when it found no row): a number,
- * which no session's settings read another way. `beside` rides in the same
+ * as it read them, in milliseconds (none when it found no row, of a part
+ * or beside one): a number, which no session's settings read another way.
+ * `beside` rides in the same
  * statement and is no part: each a query of one jsonb column, `row`, given
  * back as read. No MAC is checked on it here, so whoever asks for one holds
  * it to its own (the log's head, sealed as the signer seals it: caller.ts).

@@ -339,13 +339,14 @@ export async function touch(vault: Pick<Running, 'db'> & { memory: Memory }, cre
 /** The log's head as its row holds it, in the words its MAC covers (`headText`): what rides beside a caller's rows when a page asks. */
 const HEAD = sql`
   SELECT jsonb_build_object('size', size, 'keptSize', kept_size, 'keptRoot', encode(kept_root, 'hex'), 'agingSize', aging_size, 'agingRoot', encode(aging_root, 'hex'),
-    'agingFrom', aging_from, 'signedAt', (extract(epoch FROM signed_at) * 1000)::float8, 'mac', encode(mac, 'hex')) AS row
+    'agingFrom', aging_from, 'signedAt', round(extract(epoch FROM signed_at) * 1000)::bigint, 'mac', encode(mac, 'hex')) AS row
   FROM log_head`;
 
 /**
  * The head the vault signed, or null: no head yet, or a row whose MAC is
  * not the vault's, which vouches for nothing. A number too large to read
- * back whole fails the MAC like any other edit.
+ * back whole fails the MAC like any other edit. The table's own columns
+ * give the row its shape: none is null, and each is of its type.
  */
 function headOf(keys: readonly Key[], wire: Wire | undefined): SignedHead | null {
   if (wire === undefined) return null;
@@ -368,8 +369,10 @@ export type CallerRead = { at: number; seen: Seen<ReturnType<typeof callerParts>
  * With `head`, the log's head rides in the same statement and comes back
  * with the answer once its MAC is held to the vault's keys: what the audit
  * page proves the entries it shows against, since the app holds no key and
- * the row is a writer's to edit. Never from memory: the head moves at each
- * signing, and a remembered one would show the newest entries as unsigned.
+ * the row is a writer's to edit. It is a head the vault signed, not
+ * necessarily its last: a writer can put an older one back, and only the
+ * signer, from its own copy, tells. Never from memory: the head moves at
+ * each signing, and a remembered one would leave the newest entries past it.
  */
 export async function caller(vault: Pick<Running, 'db' | 'keys' | 'now'> & { memory: Memory; workloads: Workloads }, shown: Shown & { token: Buffer; head?: boolean }): Promise<Called | Refusal> {
   const { memory } = vault;

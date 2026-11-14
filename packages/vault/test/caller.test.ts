@@ -235,7 +235,8 @@ test('asked for the head, the same statement brings the one the vault signed, ne
     assert.ok(!('refused' in answer), JSON.stringify(answer));
     return answer;
   };
-  const head = { size: 7, keptSize: 3, keptRoot: 'aa'.repeat(32), agingSize: 4, agingRoot: 'bb'.repeat(32), agingFrom: 1, signedAt: vault.now() - 1500 };
+  // A time of odd milliseconds: one no binary fraction of a second holds exactly.
+  const head = { size: 7, keptSize: 3, keptRoot: 'aa'.repeat(32), agingSize: 4, agingRoot: 'bb'.repeat(32), agingFrom: 1, signedAt: vault.now() - 1377 };
   const signed = { ...head, signedAt: new Date(head.signedAt).toISOString() };
   /** The head's row as the signer writes it, under `key`. */
   const put = (key: Key = vault.keys[0]!) =>
@@ -260,6 +261,11 @@ test('asked for the head, the same statement brings the one the vault signed, ne
   statements = 0;
   assert.equal('head' in (await who('ada')), false);
   assert.equal(statements, 0);
+  // And its own answer is from the rows it read, not from those remembered: a grant gone since is gone from it.
+  await vault.owner.execute(sql`DELETE FROM grants WHERE principal = ${ada}`);
+  assert.equal((await who('ada')).holds.grants.length, 1, 'remembered');
+  assert.deepEqual((await heading('ada')).holds.grants, []);
+  assert.deepEqual((await who('ada')).holds.grants, []);
 
   // Every field is under the MAC, and the MAC under the vault's keys: a row edited, or signed with another key, vouches for nothing.
   const edits = [
@@ -272,8 +278,13 @@ test('asked for the head, the same statement brings the one the vault signed, ne
     await put();
     assert.deepEqual((await heading('ada')).head, signed);
   }
-  await put(keyOf(Buffer.alloc(32, 9)));
+  const other = keyOf(Buffer.alloc(32, 9));
+  await put(other);
   assert.equal((await heading('ada')).head, null, "another key's");
+  // Under a key the vault signed with before, the head stands: the rows are under one key, the head under the other.
+  const rotated = await caller({ db: vault.db, keys: [...vault.keys, other], now: vault.now, memory: memoryOf(0), workloads: vault.workloads }, { ...shown('ada'), head: true });
+  assert.ok(!('refused' in rotated));
+  assert.deepEqual(rotated.head, signed);
 
   // Whoever does not stand is told nothing, the head no more than the rest.
   await put();
