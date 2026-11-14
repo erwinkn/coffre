@@ -1,8 +1,10 @@
 // What is written down: every value opened, by the vault that opened it;
 // every version stored, naming the vault's wrap of its key; and no value
-// without its entry. 0.14's checks that a log changed behind coffre's back is
-// caught asked `GET /audit/verification`, which 0.16 drops: `coffre verify
-// --full` reads the log now (docs/design/0.16.md, "The server").
+// without its entry; and each entry the audit page lists proven against the
+// head the vault signed. 0.14's checks that a log changed behind coffre's
+// back is caught asked `GET /audit/verification`, which 0.16 drops: the
+// page's proofs and `coffre verify --full` read the log now
+// (docs/design/0.16.md, "The server").
 import type { AuditEntryView, CoffreClient } from '@coffre/client';
 
 import { using } from '../database.ts';
@@ -52,6 +54,46 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
     }
   });
   return `${read.length} values read by the vault for ${purpose}, in one entry under ${operationId}`;
+}
+
+/**
+ * Each entry the audit page lists is held to the head the vault vouched for
+ * in the page's own call (docs/design/0.16.md, "The log's head, when
+ * asked"): every entry the head numbers proves against it, and only those
+ * past it are not proven. What 0.14 asked of `GET /audit/verification`,
+ * which 0.16 drops. The signer signs on its own, so a head stands within
+ * its minute.
+ */
+export async function auditProven({ admin }: People): Promise<string> {
+  type Page = Awaited<ReturnType<CoffreClient['audit']['list']>>;
+  let page: Page | undefined;
+  await until('a head the vault signed', async () => {
+    page = await admin.api.audit.list({ detail: '1', limit: 200 });
+    return page.head !== null;
+  }, 90);
+  const { entries, head } = page!;
+  expect(head !== null && entries.length > 0, 'the audit page has no head or no entries', page);
+  const failed = entries.filter((entry) => entry.proof === 'failed');
+  expect(failed.length === 0, 'entries the head numbers do not prove against it', failed.slice(0, 5));
+  // The signer signs the log in order, so the head numbers its first `size` entries.
+  const misplaced = entries.filter((entry) => (entry.seq < head.size) !== (entry.proof === 'proven'));
+  expect(misplaced.length === 0, 'an entry the head numbers is not proven, or one past it is', { head, misplaced: misplaced.slice(0, 5) });
+  const proven = entries.filter((entry) => entry.proof === 'proven').length;
+  expect(proven > 0, 'no entry on the page is proven', { head });
+  return `${proven} of ${entries.length} entries proven against the head of ${head.size}, signed at ${head.signedAt}`;
+}
+
+/**
+ * The audit page is sent with what its proofs found, rendered by the
+ * server, never a verdict to come; and a log that proves is not shown as
+ * one coffre could not check.
+ */
+export async function auditPageProofs({ admin }: People): Promise<string> {
+  const page = await admin.browser.fetch('/audit');
+  const html = await page.text();
+  expect(page.status === 200 && !html.includes('Verifying'), 'the audit page was not sent with its proofs', { status: page.status });
+  expect(!html.includes('could not check the log'), 'the audit page says coffre could not check the log', { status: page.status });
+  return 'the audit page sent with its proofs, rendered by the server';
 }
 
 /**

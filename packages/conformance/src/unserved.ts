@@ -6,5 +6,6 @@
 // check of one 0.16 drops goes with the route.
 export const UNSERVED: Readonly<Record<string, string>> = {
   'verify keys': '`coffre verify keys` reads GET /audit/keys, which answers 501 until 0.16 serves it',
+  'audit page proofs': "the audit page is still 0.14's: it renders `GET /audit/verification`'s verdict, which 0.16 drops, not its entries' proofs (docs/design/0.16.md, \"Pages\"); the page's port takes this line off",
   loosening: 'PATCH /secrets/:project/:environment with `{ sensitivity }` alone, a nature changed in place, comes with the nature change (docs/design/0.16.md, "The server": not in the skeleton yet)',
 };

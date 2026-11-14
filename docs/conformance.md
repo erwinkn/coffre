@@ -175,8 +175,12 @@ saying what it waits for (`packages/conformance/src/unserved.ts`), and runs
 again once the area that serves the route deletes its line. 0.14's checks
 of `GET /audit/verification` (full verification, the rewritten, forged and
 missing entries, the earlier checkpoint and the deleted tail) went with the
-route: 0.16 reads the log with `coffre verify --full`, and conformance does
-not hold that to a tampered log yet.
+route. In 0.16 the audit page proves each entry it lists against the head
+the vault signed: `audit proven` requires every entry the head numbers
+proven and only those past it not, and `audit page proofs` that the page is
+sent with them rendered, which waits for the page's port. `coffre verify
+--full` reads the log, and conformance does not hold either to a tampered
+log yet.
 
 ## What it does not show
 

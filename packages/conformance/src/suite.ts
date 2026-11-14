@@ -4,7 +4,7 @@ import type { Deployment } from './harness.ts';
 import { Report } from './report.ts';
 import { UNSERVED } from './unserved.ts';
 import { bulkLimit, crossSite, grantScoping, instanceRoles, membersOnly, offboarding } from './checks/access.ts';
-import { noAuditNoValue, revealAudited, writesAgree } from './checks/audit.ts';
+import { auditPageProofs, auditProven, noAuditNoValue, revealAudited, writesAgree } from './checks/audit.ts';
 import { deletion } from './checks/deletion.ts';
 import { folders, forks, inheritance, loosening, missingKeys, personalConfigs, references } from './checks/environments.ts';
 import { appLogin, vaultLogin } from './checks/logins.ts';
@@ -93,6 +93,8 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
 
   await report.check('access authorship', { people }, ({ people }) => accessAuthorship(deployment, people));
   await report.check('no audit, no access', { people }, ({ people }) => noAuditNoAccess(deployment, people));
+  await report.check('audit proven', { people }, ({ people }) => auditProven(people));
+  await report.check('audit page proofs', { people }, ({ people }) => auditPageProofs(people));
   await report.check('checkpoint refused', {}, () => refusedCheckpoint(deployment));
   await report.check('checkpoint missing', {}, () => missingCheckpoint(deployment));
   await report.check('app login', {}, () => appLogin(deployment));
