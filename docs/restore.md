@@ -1,24 +1,26 @@
 # Restoring from a backup
 
 Everything coffre knows is in one Postgres database: values (encrypted),
-wrapped data keys, members and grants, sessions and tokens, and the audit
-log with its head. A backup of that database and two keys bring all of it
-back, including a log that verifies. This page says what to keep, how to
-back up and restore on PlanetScale Postgres or plain Postgres (`coffre
-backup`, `coffre restore`), how to check a backup and the result, and what
-the local drill (`scripts/restore-drill.sh`) shows.
+wrapped data keys, members and grants, sessions and tokens, and the log
+with its signed head. A backup of that database and the keys bring all of
+it back. The one thing outside it is the signer's own storage, a Durable
+Object of the vault Worker's, which no backup holds and no restore needs:
+a restore deploys the vault with a new signer, which goes on from the
+restored log's head.
 
-0.16.0 does not ship `coffre backup`, `coffre restore` or `coffre verify
-backup` yet, nor `coffre verify log`: the steps that run them, and the
-heartbeat and checkpoints they check, are 0.14's, and change when backup
-and restore come back. What to keep, below, holds now.
+This page says what to keep, how to back up and restore on PlanetScale
+Postgres or plain Postgres, how to check the result, how to go back after
+the upgrade from 0.14, and what the local drill (`scripts/restore-drill.sh`)
+shows. In 0.16.0, `coffre backup`, `coffre restore` and `coffre verify
+backup` refuse: they read 0.14's log and envelopes, and come back in 0.16.x.
+PostgreSQL's own `pg_dump` and `pg_restore` do the work meanwhile.
 
 ## What to keep, and where
 
 | What | Where | Without it |
 |---|---|---|
 | The database | PlanetScale's backups, or `pg_dump` files you keep off the server | nothing to restore |
-| The vault key, `VAULT_KEY`, with its vault ID, `VAULT_KEY_ID`, and every earlier vault key in `previousKeks` | your password manager, never beside the backups | no value can be read, ever: the backup holds only wrapped data keys. The vault's signing key comes from the vault key too, so every member's row fails its MAC, and neither the log's signed head nor the entries waiting for the signer verify |
+| The vault key, `VAULT_KEY`, with its vault ID, `VAULT_KEY_ID`, and every earlier vault key in `previousKeks` | your password manager, never beside the backups | no value can be read, ever: the backup holds only wrapped data keys. The vault's own keys come from the vault key too, so its new signer cannot take the restored log's head as the vault's, and the vault serves nothing |
 | The app key, `APP_KEY` | your password manager | little: it seals only the cookies of sign-ins under way and, behind Cloudflare Access, the one that ties a browser to its session. Those sign in again; sessions, tokens and the log are untouched. |
 | The OAuth client secret and the deployment's settings | your password manager and the deployment's repository | nobody can sign in |
 
@@ -50,9 +52,55 @@ frees the live database, not its copies: expire backups as your retention
 policy says.
 
 Stop traffic first. An instance left running against the old database keeps
-writing to it, and one pointed at the restored database while still running
-refuses to append behind the log head it remembers (`LogRewound`), which is
-the intended response to a rollback, not a fault.
+writing to it. And deploy the restored database with a new signer name
+(below): the signer that ran before it remembers every entry and row since
+the backup, and would report each one as tampered with, for good.
+
+## The signer after a restore
+
+The signer keeps, in its own storage, the head it signed last and what each
+sealed row should be ([design](design/0.16.md#operations), "The signer"). A restored
+database is behind it. So a restore names a new signer object, in the vault
+Worker's configuration:
+
+```ts
+export default vault((env: Env) => ({
+  database: postgres(env.VAULT_HYPERDRIVE),
+  kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },
+  owners: env.OWNERS.split(',').map((email) => email.trim()),
+  // The object the signer runs in, `signer` until a restore: a new name after each.
+  signerName: 'signer-2026-11-14',
+}));
+```
+
+The object of the new name is blank. At the vault's first call it goes on
+from the restored database's head: it checks the head's MAC under the
+vault's keys, rebuilds both trees of the log from its entries and requires
+them to reach the head's roots, takes the rows as they stand, and numbers
+the next entry after the head's last. The vault's log says so once:
+
+```
+coffre: the signer's storage was empty: it took the database as it stands, a log begun that it did not sign, from its head (docs/design/0.16.md, "Losing the signer's storage")
+```
+
+If the head is not the vault's (the keys are not the ones the database was
+written under) or the log does not reach it, every call is answered 503
+`adopting`, and the vault's log says why: `the database's log is begun, and
+its signer has signed none of it: its head is not the vault's`, or `its log
+does not reach its head`. Nothing is written, and the signer stays blank, so
+the same name serves once the right keys are deployed.
+
+The old object is left as it was: nothing calls it, and its storage stays
+in the namespace. Do not reuse a name.
+
+*Example.* A bulk change goes wrong at 11:40. Ada restores the 06:00 backup,
+deploys the vault with `signerName: 'signer-2026-11-14'`, and signs in. The
+backup's log holds 1,202 entries; her first change is the 1,203rd, and the
+signer's checks find nothing. Had she kept the old name, the signer would
+report every member, grant and value changed between 06:00 and 11:40 as
+`row`, and the head rewritten, for good, and number her change after the
+1,250 entries it had signed, leaving a hole of 48 that its daily walk
+reports `lost`.
 
 ## On PlanetScale Postgres
 
@@ -100,8 +148,9 @@ role logs in to the new branch as `<role>.<new branch id>`.
    owner, the two updates with `coffre_runtime.<branch id>` and
    `coffre_vault_runtime.<branch id>`, and `pnpm exec coffre migrate`, in
    the deployment's directory, with the owner's URL for the new branch.
-5. Redeploy both Workers with `pnpm run deploy`, the same keys and settings:
-   a fresh deployment remembers no log head.
+5. Give the vault a new `signerName` ([above](#the-signer-after-a-restore)),
+   and redeploy both Workers with `pnpm run deploy`, the same keys and
+   settings.
 6. Check the result, below, then reopen traffic. Promote the branch, or
    point production at it, as PlanetScale's branching docs describe.
 
@@ -113,19 +162,15 @@ not the privileges on the database itself. Provision the roles before
 restoring; `coffre migrate` reasserts the database privileges afterwards.
 This is what the drill runs.
 
-`coffre backup`, `coffre restore` and `coffre verify backup` run
-PostgreSQL's own `pg_dump` and `pg_restore`, which must be on `PATH`:
-`pg_dump` of the server's major version or newer, `pg_restore` of the
-server's own (a newer one sends settings an older server lacks, and the
-restore stops at once, restoring nothing). Each asks for its connection
-string at a hidden prompt, or reads it from stdin, never an argument, and
-hands it to the tool with the password in `PGPASSWORD`.
+Use PostgreSQL's `pg_dump` of the server's major version or newer, and
+`pg_restore` of the server's own: a newer one sends settings an older
+server lacks, and the restore stops at once, restoring nothing.
 
 ### Backing up
 
 Back up as a login of its own, here `coffre_backup_login`, as often as you
 can afford to lose. Its group, `coffre_backup`, which the migrations make,
-reads every row, the audit log's included, and writes none, so the backup
+reads every row, the log's included, and writes none, so the backup
 job never holds the owner's password. `coffre setup` makes it, grants it
 its group and shows its URL once, as `Backup database URL`; `coffre setup
 --reset-passwords` gives it a new password, as it does the others. A login
@@ -154,54 +199,30 @@ SELECT grantor::regrole FROM pg_auth_members
 REVOKE coffre_backup FROM coffre_backup_login GRANTED BY <grantor>;
 ```
 
-`$BACKUP_URL` is the owner's URL with that login's name and password:
+The backup itself, with the login's password in `PGPASSWORD`, never on the
+command line:
 
 ```sh
-printf '%s' "$BACKUP_URL" | coffre backup coffre-$(date -u +%Y%m%dT%H%MZ).dump
+pg_dump --format=custom --enable-row-security -h <host> -U coffre_backup_login -d coffre \
+  -f coffre-$(date -u +%Y%m%dT%H%MZ).dump
 ```
 
-It opens one snapshot, reads in it what the dump must hold, and has
-`pg_dump --snapshot --enable-row-security` dump exactly that snapshot. Beside
-the dump, `coffre-….manifest.json` says what it holds: each table's rows,
-counted and hashed in any order, the newest migration, the audit log's
-head, and the dump's size and SHA-256. Neither file holds a key, but plain
-values are in the clear: both are written for their owner alone. Keep the
-manifest with the dump: `coffre restore` and `coffre verify backup` need it.
+`pg_dump` reads every table in one snapshot, so the dump is of one moment.
+`--enable-row-security` dumps a table with row-level security as the
+login's policies show it, which for `coffre_backup` is every row; without
+the flag, a login that cannot bypass row-level security stops at such a
+table. The dump holds no key, but plain values are in the clear: keep it
+for its owner alone. A table in the database that coffre's migrations did
+not make, `coffre_backup` cannot read, and the dump stops at it: grant it
+`SELECT`, or move it to another database.
 
-The audit log has row-level security: a login it applies to sees only
-the entries a policy shows it, and `pg_dump --enable-row-security` dumps
-only those, without a word (without the flag it stops at the log, "query
-would be affected by row-level security policy"). `coffre backup` refuses,
-before dumping anything, a login row-level security hides rows of any
-table from: one no permissive policy shows a whole table, such as a login
-in `pg_read_all_data` before the log, or one a restrictive policy hides
-rows from. The log is the one table with row-level security today. A table in the database that coffre's migrations
-did not make, `coffre_backup` cannot read, and the backup stops at it:
-grant it `SELECT`, or move it to another database. While the snapshot is
-open, a migration that wants an exclusive lock waits behind it, and the
-app's writes behind the migration: the snapshot waits 30 seconds at most
-for a lock, and so does `pg_dump`, and the server ends the session if it
-sits idle for 10 minutes, which it never does while `pg_dump` runs: once
-the backup's process is gone.
-
-### Checking a backup
-
-`coffre verify backup <dump>` restores it into an empty scratch database,
-without owners, grants or row policies, so it needs none of coffre's roles,
-and checks it as a restore does (below). Run it after every backup, on any
-Postgres of the server's major version: a CI service container will do.
-The copy stays in that database, for you to drop.
-
-With `--keys`, it also asks for the vault keys and the app keys, and opens
-every version of every value, a plain one compared with its text, and
-authenticates every log entry the app and the vault signed under those
-keys (below). That puts both keys and every value on the machine that
-runs it: the job that backs up every night is no place for them. Run it in
-a drill, on your own machine.
+Check a backup by restoring it, as the drill does: into a scratch database
+and a stack of its own, with the keys, on your own machine, never in the
+job that backs up every night.
 
 ### Restoring
 
-1. Stop both components (or both Workers).
+1. Stop both Workers.
 2. Create the runtime logins if this server lacks them, and set their
    passwords, as in [deploy.md](deploy.md#appendix-the-database-by-hand):
 
@@ -217,50 +238,19 @@ a drill, on your own machine.
    `pnpm exec coffre migrate` once against an empty database on this server
    if they do not. Make `coffre_backup_login` too, to back the restored
    database up: step 4 grants it its group.
-3. Create an empty database, and restore into it as the owner:
+3. Create an empty database, and restore into it as the owner, in one
+   transaction, so a restore that fails leaves it empty:
 
    ```sh
    createdb --owner=coffre_owner coffre_restored
-   printf '%s' "$OWNER_URL_OF_COFFRE_RESTORED" | coffre restore coffre-….dump
+   pg_restore --no-owner --exit-on-error --single-transaction -U coffre_owner -d coffre_restored coffre-….dump
    ```
 
-   It refuses a database that holds anything of coffre's already, and
-   restores in one transaction, so a restore that fails leaves the database
-   empty. Every object belongs to the login that restores, the one the
-   deployment migrates as, whoever owned it before; the grants and row
-   policies come back as they were. The database's default privileges name
-   the role that owned it (`ALTER DEFAULT PRIVILEGES FOR ROLE coffre_owner`),
-   so restore as that role, or as a member of it, on a server that has it. Then it checks the database against the
-   manifest:
-   - the dump is the one the manifest describes, byte for byte;
-   - every table holds the rows it held, by count and by a hash of them;
-   - the same migrations ran, the newest the same;
-   - the audit log's head is the one backed up, and the chain runs from the
-     first entry to it with no gap: every link and every hash. Without the
-     keys, this says nothing about who wrote an entry: anyone who can write
-     rows can link one.
-
-   The walk also holds each author to its keys' order, as `coffre verify
-   log` does, which needs no key: the app's key writes nothing from the
-   first entry that moves on from it (`key.reseal`, `key.rotate`), and the
-   vault never goes back to a key it left.
-
-   With `--keys`, it asks at hidden prompts for the vault keys, then the
-   app keys, separated by spaces (on stdin, the second and third lines
-   after the connection string): first the one each signs with now, then
-   any it replaced. Either line may be blank, not both. A vault whose
-   config gives a `signingKey` of its own signs with it: give it first,
-   then the vault keys. It then also opens every version of every value,
-   each under the vault key its vault ID names, and counts those deleted
-   for good, which hold no value any more; and it authenticates each log
-   entry under its author's keys. Entries under a key not given pass by
-   their place in the chain alone, and are counted; but each author's
-   newest entries must be under the first key given, and once that key has
-   written, no other may write after it, as the online verifiers require.
-   Only local vault keys: one in a key service, AWS KMS, never leaves it,
-   so values wrapped there are counted, not opened.
-
-   It ends by listing what is left, the steps below.
+   Every object belongs to the login that restores, the one the deployment
+   migrates as, whoever owned it before; the grants and row policies come
+   back as they were. The database's default privileges name the role that
+   owned it (`ALTER DEFAULT PRIVILEGES FOR ROLE coffre_owner`), so restore
+   as that role, or as a member of it, on a server that has it.
 4. In the deployment's directory, run `coffre migrate` with the owner's
    URL for the restored database, or `coffre setup --reset-passwords` if
    the runtime logins' passwords changed:
@@ -280,114 +270,51 @@ a drill, on your own machine.
      pnpm --dir packages/db run db:verify:runtime
    ```
 
-6. Point both components at the restored database, each with its own login:
-   both Hyperdrive configs on Workers, or `DATABASE_URL` in `.env` and
-   `vault.env` on Node. Keep the same keys and settings.
-7. Restart both processes, or redeploy both Workers.
-
-A dump `pg_dump` made by hand, without a manifest, restores with
-`pg_restore --no-owner --exit-on-error --single-transaction` into an empty
-database, as the owner; nothing checks it then but the steps below.
+6. Point both Hyperdrive configs at the restored database, each with its
+   own login. Keep the same keys and settings.
+7. Give the vault a new `signerName` ([above](#the-signer-after-a-restore)),
+   and redeploy both Workers.
 
 ## Checking the result
 
 Before reopening traffic:
 
-1. `coffre verify log`, as an Owner. It must say `audit log OK`,
-   verified through the newest entry, with the last checkpoint the backup
-   held. It walks the log from its first entry, a stretch a request: every
-   link, both authors' MACs, every checkpoint against the prefix it signed
-   and the tally it keeps, and replays the members and grants.
+1. The vault's log says the signer went on from the head
+   ([above](#the-signer-after-a-restore)), and a minute on, its first check
+   sends no alert.
 2. Reveal a canary: a secret kept for this, whose value you know.
 3. Look at the Users page: members, owners, grants and the removed, as they
    were at the backup's moment. Someone removed before it stays removed, and
    their old sessions and tokens stay refused.
 4. Write a value and read it back.
-5. Wait for the next heartbeat, or trigger the Cron, then check `/readyz`:
-   `ok`, with `checkpointed: true`.
-6. `coffre verify keys` with the keys you deployed it with, from the
+5. `coffre verify keys` with the keys you deployed it with, from the
    escrow: both must be the instance's, the vault key the current one.
-7. Optionally, `coffre verify instance` from outside: as no one, then as
+6. Optionally, `coffre verify instance` from outside: as no one, then as
    you, with a token of its own ([conformance.md](conformance.md#against-a-running-instance)).
 
-Verification proves the restored history is the one coffre wrote, up to the
-backup's moment. It cannot show what was written after it: a complete older
-backup verifies as well as a recent one ([Limits](architecture.md#limits)).
+The signer holds the restored log to its head, and the head to the vault's
+keys. It cannot show what was written after the backup: a complete older
+database, put back, is taken as well as a recent one.
 
 ## If the vault key is wrong
 
-The vault's configuration names the vault key `kek`, and the keys it
-replaced `previousKeks`; the messages below name them in passing.
-
 With a local vault key, the vault's own keys come from it
-([keys.md](keys.md#a-local-key)). A vault key other than the one that
-wrapped the data, whether a mistyped key under the right `VAULT_KEY_ID` or
-the wrong escrowed key, holds none of the keys the vault's entries were written under, which
-the vault sees at its first call. It then writes nothing at all, and
-refuses every key operation and every change of access. It cannot check
-anyone's member row either, since it sealed them under the same keys, the
-Owner's included: it says of no member who they are, so nobody signs in,
-and every request from a member's session or token answers
+([keys.md](keys.md#a-local-key)). Under another vault key, whether a
+mistyped key under the right `VAULT_KEY_ID` or the wrong escrowed key, the
+signer cannot take the restored head as the vault's, and every call is
+answered 503 `adopting`, with the reason in the vault's log (above). Nobody
+signs in, and nothing is read or written.
 
-```
-HTTP 503  {"error":"unavailable","message":"coffre cannot check who you are right now"}
-```
+With a key service and a `signingKey`, the signing key is what the head is
+held to. The right `signingKey` beside another KMS key serves, and each
+value whose data key that KMS key did not wrap is refused, `unreadable`.
 
-while the app's log says why:
-
-```
-checking who called failed … the vault's entries are under vault:3f1c…, a key this vault does not hold: it was given the wrong vault key or signing key, or a vault key it replaced is missing from previousKeks in its config
-```
-
-The scheduled checkpoint is refused too, so `/readyz` turns red after the
-next beat (`checkpointed: false`).
-
-A vault key replaced and then dropped from `previousKeks` shows the other
-way: the values under the new vault key read, and `coffre verify log` fails
-at the first entry the vault wrote under the one dropped, saying why:
-
-```
-written under vault:3f1c…, a key this verifier does not hold: either it is forged,
-or the vault wrote it under another vault key or signing key, which must stay configured:
-a vault key that was replaced stays in the vault's config, in previousKeks
-```
-
-A vault key the vault's own keys do not come from, an earlier one in
-`previousKeks` or a KMS key beside a `signingKey`, is checked before the
-vault's first key operation instead. Each has a check value: a known value
-wrapped under it the first time the vault used it, kept in a `key.check`
-entry of the log. Opening it again opens no data. A key with no check value
-yet is first tried on a few of the newest keys it wrapped, if any; a backup
-from before check values existed is covered the same way. A vault key that
-opens neither gets every key operation refused, each refused key logged with the code
-`wrong_kek`, and the checkpoint with them:
-
-```
-HTTP 503  {"error":"unavailable","reason":"wrong_kek",
-           "message":"the vault key arn:aws:kms:… (aws-kms), kek or previousKeks in the vault's config, is not the one that wrapped these values"}
-```
-
-Either message names keys by id, never key material. Restart the vault with
-the escrowed vault key and its `VAULT_KEY_ID`: the vault decides once per
-process, so a restart is what clears it.
-
-A vault key the vault cannot reach (KMS down, or refusing the vault's
-credentials) is not a verdict: the call fails as any key operation does
-during an outage, the next one asks again, and checkpoints go on. A vault
-key under a new id is a rotation: its check value is recorded on first use,
-and values wrapped under an id the vault is no longer given fail with "no
-vault key configured for …". Keep earlier vault keys in `previousKeks`.
+Either way, deploy the escrowed keys: under the same `signerName`, since a
+signer that refused the head kept nothing.
 
 ## If the signer's storage is lost
 
-From 0.16, the vault's signer, a Durable Object (`CoffreSigner`), keeps in
-its own storage what the log said: which entries it signed, and what each
-sealed row should be. That storage is what tells it the database was
-adopted, and is not new. Lose it and a new signer takes the database as
-it stands, with anything a writer of the database planted in it, and
-nothing in the database can tell it otherwise
-([design](design/0.16.md#still-to-design), "Losing the signer's storage").
-
+The signer's storage is the vault Worker's Durable Object (`CoffreSigner`).
 What loses it:
 
 - the object's class or its namespace deleted, or renamed without
@@ -395,70 +322,125 @@ What loses it:
 - the vault Worker deployed under another name, or to another Cloudflare
   account: the namespace is the Worker's own.
 
+A new signer over a database whose log was begun goes on from its head, as
+after a restore, holding the head to the vault's keys and the log to the
+head. What it cannot tell is a database a writer emptied or rolled back
+behind it: an emptied log is adopted again, with whatever rows were planted
+([design](design/0.16.md#still-to-design), "Losing the signer's storage").
+
 How you know: the vault's log and the signer's `status` (`took`) say
 `the signer's storage was empty: it took the database as it stands`, with
-the time. A fresh install never says it, and an upgrade from 0.14 says it
-once, at its adoption. At any other time, the storage was lost. The
-line covers the adoptions the signer makes itself: a copy of the
-adoption's entry that a writer put back in the log is signed without it,
-so its absence proves nothing.
+the time. A fresh install never says it, an upgrade from 0.14 says it
+once, at its adoption, and a restore once, under its new name. At any
+other time, the storage was lost.
 
 What to do:
 
 1. Stop traffic, as before any restore ([Before you restore](#before-you-restore)),
    and keep it stopped: the vault serves the database it took. When you
    know the loss is coming (a move to another account), stop it before.
-2. Restore the last backup taken before the loss, as above, or compare the database with it, members, grants, roles and policy
-   first, and put back by hand what differs. 0.16.0 has no command that
-   verifies the database against the log for you.
+2. Restore the last backup taken before the loss, as above, or compare the
+   database with it, members, grants, roles and policy first, and put back
+   by hand what differs.
 
 Changes made after the backup are lost with a restore. Compare instead
 when you must keep them.
 
-A restart or a redeploy keeps the object's storage: bringing the vault up
-does not make the signer take the restored database again. A signer that
-kept its storage over a restored database reports the log rewritten, and
-its state can run ahead of the restored log, with entries and rows the
-backup never saw. 0.16.0 has no command that starts the signer over at the
-restored database's head.
+## Going back after the upgrade from 0.14
+
+The upgrade ([design](design/0.16.md#upgrade-from-014)) takes coffre offline
+and backs up the 0.14 database before it migrates. That backup is the way
+back, and 0.14.7's own CLI takes it, checks it and restores it: 0.16's
+CLI cannot.
+
+**At the upgrade, step 2**, once the two runtime logins are `NOLOGIN`:
+
+```sh
+printf '%s' "$BACKUP_URL" | npx coffre@0.14.7 backup coffre-0.14.7-$(date -u +%Y%m%dT%H%MZ).dump
+printf '%s\n%s\n%s\n' "$SCRATCH_OWNER_URL" "$VAULT_KEY" "$APP_KEY" | npx coffre@0.14.7 verify backup coffre-0.14.7-….dump --keys
+```
+
+`verify backup --keys` restores the dump into an empty scratch database and
+checks it against its manifest, walks the audit chain with every MAC, and
+opens every value (0.14.7's `docs/restore.md`, "Checking a backup").
+Run it on your own machine, never in a pipeline: it holds both keys. Upgrade
+only once it passes.
+
+**Going back**, once 0.16.0 has been deployed:
+
+1. Take coffre offline: set the two runtime logins `NOLOGIN` and end their
+   sessions. What 0.16 wrote since the upgrade is lost.
+2. Restore into an empty database, as the owner, with 0.14.7's CLI:
+
+   ```sh
+   printf '%s\n%s\n%s\n' "$OWNER_URL_OF_COFFRE_RESTORED" "$VAULT_KEY" "$APP_KEY" | npx coffre@0.14.7 restore coffre-0.14.7-….dump --keys
+   ```
+
+   It checks what `verify backup` checks, and lists what is left to do.
+3. Keep the signer's Durable Object class. 0.14.7's vault Worker exports no
+   `CoffreSigner`, and its namespace stays bound
+   (`vault/wrangler.jsonc`), so the deployment's own vault Worker exports
+   one that does nothing, beside 0.14.7's code:
+
+   ```ts
+   // The signer's class, kept while 0.14.7 runs: 0.16 brings it back.
+   import { DurableObject } from 'cloudflare:workers';
+   export class CoffreSigner extends DurableObject {}
+   ```
+
+   Leave the binding and the migration in `vault/wrangler.jsonc` as 0.16
+   wrote them. Cloudflare's documentation does not say what a deploy of a
+   Worker that drops a class with a migration does under the `migrations`
+   form coffre uses ([Durable Object migrations](https://developers.cloudflare.com/durable-objects/reference/durable-object-class-migrations-legacy/)),
+   and its newer `exports` form refuses one
+   (`orphaned_provisioned_namespace`, [Durable Object class exports](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/)).
+   A `deleted_classes` migration would delete the class's every object and
+   its storage, and the documentation does not say that a class deleted can
+   be made again under its name: keeping the class needs neither.
+4. Point both Hyperdrive configs at the restored database, and deploy
+   0.14.7: the vault, then the app.
+5. Set the two runtime logins `LOGIN`.
+6. Check the result as 0.14.7's `docs/restore.md` says: `coffre@0.14.7 verify log`,
+   a canary, `/readyz` checkpointed.
+
+**Upgrading again** later is the upgrade from the start, with one change:
+0.16's vault config names a new `signerName`. The old object signed 0.16's
+first log, and refuses a database that shows none, so every call would be
+answered 503 `adopting`; the new one is blank, and adopts it.
+
+Rehearse the way back once, on a copy of the deployment on its own
+Cloudflare account, before the upgrade.
 
 ## The local drill
 
 `scripts/restore-drill.sh` runs the plain-Postgres restore end to end on
-this machine, against the compose Postgres, after `pnpm build`, with
-PostgreSQL 16's `pg_dump` and `pg_restore` on `PATH`, the compose server's
-version:
+this machine, against the compose Postgres and its own `pg_dump` and
+`pg_restore`, after `pnpm build`:
 
 1. It builds the Workers example (as `coffre init` writes it) and starts it
    under `wrangler dev`, over a new database, `coffre_drill`, with the dev IdP for
    sign-in and `.env.dev`'s keys. It seeds it, writes a canary, grants a
-   member access, removes another whose browser session it keeps, issues a
-   service token, and lets two heartbeats checkpoint the log.
-2. It backs the database up with `coffre backup`, as `coffre_backup_login`,
+   member access, removes another whose browser session it keeps, and issues
+   a service token.
+2. It backs the database up with `pg_dump`, as `coffre_backup_login`,
    which migrate granted `coffre_backup` (`--backup-login`).
-3. It restores into `coffre_drill_restored` with `coffre restore --keys`,
-   whose checks must all pass, every value opened and every entry
-   authenticated; provisions the logins, runs migrate to reassert database
-   privileges, and checks the app login's privileges. Then it checks the
-   backup again with `coffre verify backup --keys` and a random vault key,
-   into `coffre_drill_scratch`, which must fail: no value opens, and no
-   vault entry is under that key.
-4. It starts the example over the restored database with the same keys, and
-   checks:
-   - verification passes through the newest entry, and the backup's last
-     checkpoint still holds;
+3. It restores into `coffre_drill_restored` with `pg_restore`, runs migrate
+   to reassert database privileges, and checks the app login's privileges.
+4. It starts the example over the restored database with the same keys and
+   a signer whose storage is new, as a new `signerName` gives, and checks:
    - members, owners, grants and the removed are exactly as backed up;
    - the canary reveals;
    - the removed member's kept session is refused, and they cannot sign in;
-   - a new value writes and reads back, and the next beat checkpoints;
-   - `coffre verify instance` passes, as no one and with the restored
-     token, which reads the canary.
-5. It restarts the example with a random vault key under the same id, and checks
-   that its Owner cannot sign in, that reading the canary and a new write,
-   with the restored token, both answer 503, and that `/readyz` turns red.
+   - a new value writes and reads back;
+   - the signer said it went on from the backup's head, its first check a
+     minute on reports nothing, and the log has no hole: one entry per
+     number, all of them counted by the head.
+5. It restarts the example with a random vault key under the same id, and
+   checks that its Owner cannot sign in, and that reading the canary and a
+   new write, with the restored token, both answer 503.
 
 It drops its databases and stops what it started, however it ends. It
 does not drill a PlanetScale branch: there, the steps that differ are the
 restore itself and the login names, and a physical restore brings back the
-roles and database privileges. The local drill provisions the roles and
-reasserts database privileges through migrate.
+roles and database privileges. Nor does it drill the way back from the
+upgrade, which is 0.14.7's own drill.
