@@ -7,7 +7,7 @@ import { PgTable } from 'drizzle-orm/pg-core';
 import { bounded } from './change.ts';
 import { entryOf, type Entry } from './entry.ts';
 import { macOf, shapeOf, type Key, type Sealed } from './rows.ts';
-import { pruned, recheck, type Walk } from './upkeep.ts';
+import { expire, pruned, recheck, type Walk } from './upkeep.ts';
 
 /**
  * The signer (docs/design/0.16.md, "The log" and "The signer's mirror";
@@ -509,10 +509,12 @@ export class Signer {
 
   /**
    * After a check (upkeep.ts): the oldest uses pruned, as a move, so that
-   * what is kept from is in its storage before anything goes; then a slice
-   * of the log held to what it signed.
+   * what is kept from is in its storage before anything goes; the rows that
+   * lapsed deleted; a slice of the log held to what it signed, last, so that
+   * what it finds is kept with nothing between to fail. Its answer: whether
+   * an entry of its own waits.
    */
-  async #upkeep(at: number): Promise<void> {
+  async #upkeep(at: number): Promise<boolean> {
     const ask = <Row>(statement: SQL) => this.#ask<Row>(statement);
     const from = this.#agingFrom;
     const { to, tiles } = await pruned(ask, this.#on, this.#trees, from);
@@ -524,6 +526,7 @@ export class Signer {
       });
       await this.move();
     }
+    const waits = await expire(this.#on, ask, (hash) => this.wake(hash));
     const { found, walk } = await recheck(ask, this.#on.now(), this.#trees, to, this.#walk);
     await this.#step((changes) => {
       for (const { of } of found) this.#find(changes, 'lost', of);
@@ -533,6 +536,7 @@ export class Signer {
       this.#checked = at;
       changes.set('checked', at);
     });
+    return waits;
   }
 
   /**
@@ -571,8 +575,8 @@ export class Signer {
       // Done, or failed: a check that fails is tried again by the next minute's run, not by every run until then.
       if (failed !== null || (snapshot.drained && snapshot.rows !== null)) this.#owed = false;
       if (failed !== null) throw failed;
-      if (snapshot.drained && snapshot.rows !== null) await this.#upkeep(snapshot.at);
-      return this.#behind || this.#owed;
+      const waits = snapshot.drained && snapshot.rows !== null && (await this.#upkeep(snapshot.at));
+      return this.#behind || this.#owed || waits;
     } finally {
       this.#running = false;
     }

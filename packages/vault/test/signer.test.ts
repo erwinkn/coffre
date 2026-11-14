@@ -411,7 +411,7 @@ test('a row planted where an entry is about to go does not stop the signer: the 
   assert.deepEqual(await run(), [{ found: 'lost', of: first }, { found: 'lost', of: second }]);
 });
 
-test('a run is two round trips, its read and its move, and a minute\'s three, with the re-check\'s read, each bounded; only one runs at a time, and what it found outlasts its failure', async () => {
+test('a run is two round trips, its read and its move, and a minute\'s five, with the re-check\'s read and the deletions\' read and statement, each bounded; only one runs at a time, and what it found outlasts its failure', async () => {
   const sent: string[][] = [];
   const proxy = await postgresProxy(VAULT_URL, { onSync: (statements) => sent.push(statements.map((text) => text.trimStart())) });
   const through = await openDatabase(proxy.url);
@@ -423,7 +423,7 @@ test('a run is two round trips, its read and its move, and a minute\'s three, wi
     // The rows and the entries that wait are of one moment: one statement reads both. Each goes with the bound on its waits.
     assert.deepEqual(await run(), []);
     const bounded = (statement: string) => ['begin isolat', 'SELECT set_c', statement, 'commit'];
-    assert.deepEqual(sent.map((group) => group.map((text) => text.slice(0, 12))), [bounded('SELECT parts'), bounded('WITH taken A'), bounded('SELECT l.kep')]);
+    assert.deepEqual(sent.map((group) => group.map((text) => text.slice(0, 12))), [bounded('SELECT parts'), bounded('WITH taken A'), bounded('SELECT part,'), bounded('WITH spent A'), bounded('SELECT l.kep')]);
     // With the database's clock, so that no pooler answers the read from a cache.
     assert.match(sent[0]![2]!, /^SELECT parts\.\*, clock_timestamp\(\)/);
     const first = signer.run(true);

@@ -148,8 +148,8 @@ test('a change is two round trips: its read, and its write, with the lock ahead 
     sent.length = 0;
     assert.deepEqual(await change(counted, setRole(ada, bo, 'member')), { answer: 'member' });
     assert.deepEqual({ trips: proxy.trips - before.trips, syncs: proxy.syncs - before.syncs }, { trips: 2, syncs: 2 });
-    // What went together, in order: the read alone; then the transaction, its lock, its write and its end.
-    assert.deepEqual(sent, [['SELECT part,'], ['begin isolat', 'SELECT set_c', 'WITH same AS', 'commit']]);
+    // What went together, in order: the read, with its bounds; then the transaction, its lock, its write and its end.
+    assert.deepEqual(sent, [['begin isolat', 'SELECT set_c', 'SELECT part,', 'commit'], ['begin isolat', 'SELECT set_c', 'WITH same AS', 'commit']]);
     // And a write that lost to another is one more of each, read and write.
     const stale = await prepare(counted, setRole(ada, bo, 'owner'));
     assert.ok(!('refused' in stale));
@@ -369,12 +369,14 @@ test('a change that keeps losing answers busy', async () => {
       return { writes: [put(principals, { ...kept, generation: kept.generation + by }, row!)], entry: said('test.bump'), answer: null };
     },
   });
-  // Each time it has read, someone else's change lands ahead of its write.
-  let writes = 0;
+  // Each time it has read, someone else's change lands ahead of its write: of its transactions, each second.
+  let [calls, writes] = [0, 0];
   const db = Object.create(vault.db) as typeof vault.db;
   db.transaction = (async (...args: Parameters<typeof vault.db.transaction>) => {
-    writes += 1;
-    await done(bump(1));
+    if ((calls += 1) % 2 === 0) {
+      writes += 1;
+      await done(bump(1));
+    }
     return vault.db.transaction(...args);
   }) as typeof vault.db.transaction;
   await assert.rejects(change({ ...vault, db }, bump(100)), busy('55P03'));
