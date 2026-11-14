@@ -341,15 +341,29 @@ test("a long result streamed through the object leaves its heap as it was: each 
   let tail = Buffer.alloc(0);
   let reached: { at: number; then: () => void } | null = null;
   let readied: () => void = () => {};
+  // While the heap is read, nothing is counted: once a window is held uncounted, the object can send no more, so its
+  // isolate runs nothing between the collection and the reading, whose garbage the reading would otherwise count.
+  let held: { bytes: number; full: () => void } | null = null;
   ws.on('message', (data: Buffer, binary: boolean) => {
     if (!binary) return;
     received += data.length;
-    ws.send(String(data.length));
+    if (held === null) ws.send(String(data.length));
+    else if ((held.bytes += data.length) >= WINDOW) held.full();
     tail = Buffer.concat([tail, data]).subarray(-6);
     if (tail.length === 6 && tail.equals(Buffer.from([0x5a, 0, 0, 0, 5, 0x49]))) readied();
     if (reached !== null && received >= reached.at) reached.then();
   });
   const idle = () => new Promise<void>((resolve) => (readied = resolve));
+  /** The object's heap once it is stopped at its window, then the window counted back. */
+  const stoppedHeap = async () => {
+    await new Promise<void>((full) => (held = { bytes: 0, full }));
+    try {
+      return await heapUsed();
+    } finally {
+      ws.send(String(held!.bytes));
+      held = null;
+    }
+  };
   const params = Buffer.from('user\0app\0database\0app\0\0');
   const startup = Buffer.alloc(8);
   startup.writeInt32BE(8 + params.length, 0);
@@ -372,11 +386,11 @@ test("a long result streamed through the object leaves its heap as it was: each 
   ws.send(message('Q', Buffer.from(`SELECT repeat('x', 1000) FROM generate_series(1, 1200000)\0`)));
   await at200;
   reached = null;
-  const before = await heapUsed();
+  const before = await stoppedHeap();
   const at1000 = new Promise<void>((resolve) => (reached = { at: 1000e6, then: resolve }));
   await at1000;
   reached = null;
-  const during = await heapUsed();
+  const during = await stoppedHeap();
   await done;
   ws.close();
   assert.ok(during - before < 8 * 1024 * 1024, `the object's heap grew ${Math.round((during - before) / 1024)} KiB over 800 MB`);
