@@ -213,10 +213,10 @@ test("past the deadline, all of a call's requests to the App end, and it is 503 
   assert.equal(GITHUB_DEADLINE_MS, 20_000);
 });
 
-test('only those who set up service accounts may: whoever runs the instance, for one call to the vault; a person who gives one a grant somewhere, for two statements more', async () => {
+test('only those who set up service accounts may: whoever runs the instance, for one call to the vault; a person who gives one a grant somewhere, for one statement more', async () => {
   documents.set('https://api.github.com/users/acme', { id: 9919, login: 'acme' });
   // Al and Ivy by their instance roles alone, holding no grant.
-  for (const [label, statements] of [['root-cli', 0], ['ada-cli', 2], ['bo-cli', 2], ['al-cli', 2], ['ivy-cli', 2]] as const) {
+  for (const [label, statements] of [['root-cli', 0], ['ada-cli', 1], ['bo-cli', 1], ['al-cli', 1], ['ivy-cli', 1]] as const) {
     for (const path of ['/workloads/lookup?github=acme', '/workloads/repositories']) {
       const got = await get(label, path);
       assert.deepEqual([got.status, got.calls, got.statements], [200, ['caller'], statements], `${label} ${path}`);
@@ -224,7 +224,7 @@ test('only those who set up service accounts may: whoever runs the instance, for
   }
   const before = fetched.length;
   // Anyone else asks nothing outside: someone who holds nothing, a service account, a credential with a scope.
-  for (const [label, statements] of [['dee-cli', 2], ['ci-cli', 0], ['ada-token', 0]] as const) {
+  for (const [label, statements] of [['dee-cli', 1], ['ci-cli', 0], ['ada-token', 0]] as const) {
     for (const path of ['/workloads/lookup?github=acme', '/workloads/repositories']) {
       const got = await get(label, path);
       assert.deepEqual([got.status, got.body.error, got.body.message, got.calls, got.statements], [403, 'forbidden', 'only those who set up service accounts may trust workloads', ['caller'], statements], `${label} ${path}`);

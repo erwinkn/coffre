@@ -276,15 +276,20 @@ test('a person named in another case is the one the vault holds: the page shows 
   assert.deepEqual(members.find((entry) => entry.member === other)?.grants ?? [], []);
 });
 
-test('admit_member admits a service account with its first grants, and a person; one who does not run the instance sets up none until the policy row is served', async () => {
-  // dev leads market, and under 0.14.7's policy could add one there: 0.16 keeps it to whoever runs the instance for now.
-  assert.match(await refused(await connect('dev-web', ALL), 'admit_member', { member: 'service:deploy', access: { 'market/prod': 'viewer' } }), /you set up no service account/);
+test("admit_member admits a service account with its first grants, and a person; one who does not run the instance sets one up where the instance's setting lets them (0.14.7)", async () => {
+  // other views market/prod: where the setting takes market in, they set one up there, and Approve has the vault decide it.
+  const others = await connect('other-web', ALL);
+  assert.equal((await approve(await asked(others, 'admit_member', { member: 'service:built', access: { 'market/prod': 'viewer' } }), 'other-web')).body.status, 'approved');
+  // Once the setting leaves market out, they set up none: refused before anyone is asked. dev, who manages access in
+  // market, still would, as the vault lets him.
+  await api('root-web', 'PUT', '/settings', { serviceAccounts: { projects: { only: [] } } });
+  assert.match(await refused(others, 'admit_member', { member: 'service:deploy', access: { 'market/prod': 'viewer' } }), /you set up no service account/);
   assert.match(await refused(await connect('dev-web', ALL), 'admit_member', { member: 'user:new@acme.example' }), /only an admin or owner of the whole instance/);
   const token = await connect('root-web', ALL);
   assert.equal((await approve(await asked(token, 'admit_member', { member: 'service:deploy', access: { 'market/prod': 'viewer' } }), 'root-web')).body.status, 'approved');
   assert.equal((await approve(await asked(token, 'admit_member', { member: 'user:new@acme.example' }), 'root-web')).body.status, 'approved');
   const { members } = await api<{ members: { member: string; grants: { role: string }[] }[] }>('root-web', 'GET', '/members');
-  assert.deepEqual(members.find((entry) => entry.member === 'token:deploy')?.grants.map((entry) => entry.role), ['viewer']);
+  assert.deepEqual(['token:built', 'token:deploy'].map((account) => members.find((entry) => entry.member === account)?.grants.map((entry) => entry.role)), [['viewer'], ['viewer']]);
   assert.ok(members.some((entry) => entry.member === 'user:new@acme.example'));
 });
 

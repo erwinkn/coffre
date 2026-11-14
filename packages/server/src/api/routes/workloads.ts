@@ -1,11 +1,10 @@
-import { isScope, runsInstance, setsUpServices, type Permission, type Place, type RoleDefinition, type ServiceSetting } from '@coffre/core/access';
+import { runsInstance } from '@coffre/core/access';
 import { BindingInvalid, checkFetchUrl, GITLAB_ISSUER, GitHubAppUnavailable, type GitHubAppRepositories } from '@coffre/core/identity';
 import { z } from 'zod';
 
-import { places } from '../../db/queries/places.ts';
-import { serviceSetup } from '../../db/queries/policy.ts';
+import { placesWithSetup } from '../../db/queries/places.ts';
 import { FetchRefused } from '../../workloads/transport.ts';
-import { placeOf, projectsReached } from '../caller.ts';
+import { projectsReached, settingOf, setsUpAnywhere } from '../caller.ts';
 import type { ApiContext } from '../context.ts';
 import { ApiError, badRequest, forbidden, notFound } from '../errors.ts';
 import { route } from '../route.ts';
@@ -57,12 +56,11 @@ const GITLAB_PROJECT = /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+){1,20}$/;
 
 /**
  * Before anything is asked outside: whether the caller sets up any service
- * account, as 0.14.7 weighed it (`setsUpServices`): whoever runs the
+ * account, as 0.14.7 weighed it (`setsUpAnywhere`): whoever runs the
  * instance, one `caller`; or a person on a session who could give one a
- * grant somewhere they reach, one `caller` and two statements, the
- * instance's setting with every project role, and those places. Anyone
- * else would only spend the
- * hour's lookups GitHub allows the deployment's address.
+ * grant somewhere they reach, one `caller` and one statement, those places
+ * with the instance's setting and every project role. Anyone else would
+ * only spend the hour's lookups GitHub allows the deployment's address.
  */
 async function setsUp(ctx: ApiContext): Promise<void> {
   // Another site's page, riding the visitor's cookie, would spend the deployment's hour of GitHub's lookups for nothing.
@@ -71,33 +69,10 @@ async function setsUp(ctx: ApiContext): Promise<void> {
   if (runsInstance(who.holds)) return;
   // A service account, or a credential with a scope, sets none up (`givesService`): refused before any statement.
   if (who.principal.startsWith('user:') && who.holds.credentialScope == null) {
-    const { setting, roles } = await serviceSetup(ctx.db);
-    const reached: Place[] = [];
-    // Archived places too, as the vault weighs them when it admits one (`member.put`).
-    for (const project of await places(ctx.db, projectsReached(who))) {
-      reached.push(placeOf(project, null));
-      // A personal config is its owner's alone: no service account is given anything there.
-      for (const environment of project.environments) if (environment.owner === null) reached.push(placeOf(project, environment));
-    }
-    // The vault names only the roles the caller holds; any role may be one they could give, as the vault weighs it
-    // (`member.put`): every one the rows define, under the vault's definitions of their own. The rows are read as they
-    // are: they decide only whether to ask outside, and the vault decides every service account set up.
-    const defined = Object.fromEntries(roles.map((row): [string, RoleDefinition] => [row.id, { name: row.name, description: row.description, permissions: row.permissions as Permission[], protected: row.protected as Permission[] }]));
-    const holder = { ...who.holds, policy: { ...who.holds.policy, roles: { ...defined, ...who.holds.policy.roles } } };
-    if (setsUpServices(holder, settingOf(setting), reached)) return;
+    const { places: known, setting, roles } = await placesWithSetup(ctx.db, projectsReached(who), true);
+    if (setsUpAnywhere(who, settingOf(setting), roles, known)) return;
   }
   throw forbidden('only those who set up service accounts may trust workloads');
-}
-
-/** The setting as the row keeps it; none for one that does not read as a scope, as the vault takes it. */
-function settingOf(text: string | null): ServiceSetting | null {
-  if (text === null) return null;
-  try {
-    const setting: unknown = JSON.parse(text);
-    return isScope(setting) ? setting : null;
-  } catch {
-    return null;
-  }
 }
 
 /** One of the GitHub App's answers, or its refusal in the API's words: past the deadline, `ms`, 503 `deadline`. */

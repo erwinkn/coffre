@@ -2,8 +2,8 @@ import type { Me } from '@coffre/client';
 import { runsInstance, type Filter, type Scope } from '@coffre/core/access';
 import type { Called } from '@coffre/core/vault';
 
-import { places, type PlaceRow } from '../../db/queries/places.ts';
-import { canAnywhere, permissionsAt, placeOf, projectsReached } from '../caller.ts';
+import { placesWithSetup, type PlaceRow } from '../../db/queries/places.ts';
+import { canAnywhere, permissionsAt, placeOf, projectsReached, seesProject, settingOf, setsUpAnywhere } from '../caller.ts';
 import { mcpOf, resourceOf } from '../../mcp/oauth.ts';
 import { route } from '../route.ts';
 import { scopePaths } from './tokens.ts';
@@ -27,19 +27,24 @@ export const meRoutes = {
   /**
    * Who is asking, and every live environment they hold something in:
    * what every page's shell reads first. One call to the vault, shared by
-   * all the calls of one render, and one statement.
+   * all the calls of one render, and one statement, which also reads the
+   * instance's setting and, for a person who does not run the instance,
+   * every project role: whether they set up service accounts
+   * (`setsUpAnywhere`), and the setting (`serviceSetup`), projects by
+   * slug, those the caller sees; none for a service account.
    *
    * A personal token is named (`personalToken`): its label, which the
    * vault's `caller` answers, and its scope by path, from the places read.
-   *
-   * One of its fields is another area's to answer, and says "none" until
-   * it is served: `setsUpServices` past whoever runs the instance and
-   * `serviceSetup` (the policy's row).
    */
   ...route('GET /me', {
     run: async (ctx): Promise<Me> => {
       const who = await ctx.caller();
-      const known = await places(ctx.db, projectsReached(who));
+      const runs = runsInstance(who.holds);
+      const person = who.principal.startsWith('user:');
+      // The roles weigh only for a person on a credential with no scope, who does not run the instance (`setsUpAnywhere`).
+      const read = await placesWithSetup(ctx.db, projectsReached(who), person && !runs && who.holds.credentialScope == null);
+      const known = read.places;
+      const setting = person ? settingOf(read.setting) : null;
       const environments: Me['environments'] = [];
       for (const project of known) {
         if (project.archived) continue;
@@ -53,12 +58,10 @@ export const meRoutes = {
           environments.push({ project: project.slug, environment: environment.owner === null ? environment.slug : `${parent!.slug}@me`, permissions });
         }
       }
-      const service = who.principal.startsWith('token:');
-      const runs = runsInstance(who.holds);
       // Where MCP clients connect, when the deployment serves MCP.
       const mcp = mcpOf(ctx.auth);
       return {
-        principal: { type: service ? 'service' : 'user', id: who.principal.slice(who.principal.indexOf(':') + 1) },
+        principal: { type: person ? 'user' : 'service', id: who.principal.slice(who.principal.indexOf(':') + 1) },
         // Anyone else is refused before here: the vault has one answer for a credential that does not stand.
         registered: true,
         tampered: false,
@@ -66,8 +69,9 @@ export const meRoutes = {
         scope: scopeView(who.holds.scope, known),
         runsInstance: runs,
         canReadAudit: canAnywhere(who, 'audit.read'),
-        setsUpServices: runs,
-        serviceSetup: null,
+        setsUpServices: setsUpAnywhere(who, setting, read.roles, known),
+        // Named among the projects the caller sees: those read may hold more (D95); whoever runs the instance sees them all.
+        serviceSetup: setting === null ? null : scopeView(setting, runs ? known : known.filter((project) => seesProject(who, project))),
         features: { mcp: mcp === null ? null : resourceOf(mcp.publicUrl), workloads: ctx.auth.mode === 'signin' && ctx.auth.signin.workloads !== null },
         personalToken: personalToken(who, known),
         credentialExpiresAt: who.credential.expiresAt,

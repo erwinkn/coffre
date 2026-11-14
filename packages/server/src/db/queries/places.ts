@@ -2,6 +2,8 @@ import type { Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
+import { PROJECT_ROLES, type RoleRow } from './policy.ts';
+
 /** A project with its environments, as a page lists them: no key, no value. `archivedAt` is ISO 8601. */
 export type PlaceRow = {
   id: string;
@@ -29,21 +31,48 @@ const iso = (value: Date | string | null): string | null => (value === null ? nu
  *             (a project with none is one): the caller refuses past it
  */
 export async function places(db: Queryable, within: readonly string[] | null, only: { granting?: string; most?: number } = {}): Promise<PlaceRow[]> {
-  const scoped = within === null ? sql`true` : sql`p.id = ANY(${sql.param([...within])}::uuid[])`;
-  const granting = only.granting === undefined ? sql`true` : sql`p.id IN (SELECT COALESCE(g.project_id, ge.project_id) FROM grants g LEFT JOIN environments ge ON ge.id = g.environment_id WHERE g.role = ${only.granting})`;
   const most = only.most === undefined ? sql`` : sql` LIMIT ${only.most + 1}`;
-  const rows = await rowsOf<{ project_id: string; project: string; project_archived_at: Date | string | null; folder: string | null; id: string | null; slug: string; archived_at: Date | string | null; protected: boolean; owner: string | null; parent_id: string | null; parent_slug: string | null; parent_archived: boolean | null; parent_protected: boolean | null }>(
+  return placesOf(await rowsOf<PlacesRow>(db, sql`${placesQuery(within, only.granting)} ORDER BY p.slug, e.slug${most}`));
+}
+
+/**
+ * `places`, with what weighs whether the caller sets up a service account
+ * (`setsUpServices`): where people set them up themselves, as the policy
+ * row keeps it (JSON, projects by id; null when the instance has no policy
+ * row), and, with `roles`, every project role's row, any of which may be
+ * one they could give one, as the vault reads them for `member.put`. One
+ * statement still: a page's every render asks it (`GET /me`).
+ */
+export async function placesWithSetup(db: Queryable, within: readonly string[] | null, roles: boolean): Promise<{ places: PlaceRow[]; setting: string | null; roles: RoleRow[] }> {
+  const [row] = await rowsOf<{ places: PlacesRow[] | null; setting: string | null; roles: RoleRow[] | null }>(
     db,
     sql`
+      SELECT
+        (SELECT json_agg(r ORDER BY r.project, r.slug) FROM (${placesQuery(within)}) r) AS places,
+        (SELECT service_accounts FROM policy WHERE only_row) AS setting,
+        ${roles ? PROJECT_ROLES : sql`NULL`} AS roles`,
+  );
+  return { places: placesOf(row?.places ?? []), setting: row?.setting ?? null, roles: row?.roles ?? [] };
+}
+
+type PlacesRow = { project_id: string; project: string; project_archived_at: Date | string | null; folder: string | null; id: string | null; slug: string; archived_at: Date | string | null; protected: boolean; owner: string | null; parent_id: string | null; parent_slug: string | null; parent_archived: boolean | null; parent_protected: boolean | null };
+
+/** The places' rows, one an environment (a project with none, one with its columns null), in no order. */
+function placesQuery(within: readonly string[] | null, granting?: string) {
+  const scoped = within === null ? sql`true` : sql`p.id = ANY(${sql.param([...within])}::uuid[])`;
+  const granted = granting === undefined ? sql`true` : sql`p.id IN (SELECT COALESCE(g.project_id, ge.project_id) FROM grants g LEFT JOIN environments ge ON ge.id = g.environment_id WHERE g.role = ${granting})`;
+  return sql`
       SELECT p.id AS project_id, p.slug AS project, p.archived_at AS project_archived_at, p.folder,
         e.id, e.slug, e.archived_at, e.protected, e.owner,
         parent.id AS parent_id, parent.slug AS parent_slug, parent.archived_at IS NOT NULL AS parent_archived, parent.protected AS parent_protected
       FROM projects p
       LEFT JOIN environments e ON e.project_id = p.id AND strpos(e.slug, '~') = 0
       LEFT JOIN environments parent ON parent.id = e.parent_id AND strpos(parent.slug, '~') = 0
-      WHERE ${scoped} AND ${granting} AND strpos(p.slug, '~') = 0
-      ORDER BY p.slug, e.slug${most}`,
-  );
+      WHERE ${scoped} AND ${granted} AND strpos(p.slug, '~') = 0`;
+}
+
+/** The rows `placesQuery` reads, as projects with their environments, in their order. */
+function placesOf(rows: readonly PlacesRow[]): PlaceRow[] {
   const found = new Map<string, PlaceRow>();
   for (const row of rows) {
     let project = found.get(row.project_id);

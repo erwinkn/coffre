@@ -6,12 +6,9 @@
   Node comes back in 0.16.1: `@coffre/server` exports no `./node`, so a
   Node deployment that updates fails at its import of
   `@coffre/server/node`. Stay on 0.14 until 0.16.1.
-- **Known gaps of 0.16 so far.** MCP's `admit_member` adds a service
-  account only for whoever runs the instance: a person the instance's
-  service-account setting lets add one is refused until 0.16 serves that
-  setting again (`GET /api/me` says `setsUpServices: false`). A token's or a
-  binding's preview (`?dryRun=1`) answers what it would reach, but not the
-  places whose sensitive values it will not read (`withheld`).
+- **Known gaps of 0.16 so far.** A token's or a binding's preview
+  (`?dryRun=1`) answers what it would reach, but not the places whose
+  sensitive values it will not read (`withheld`).
 - **A workload's alerts, as 0.14.7 said them.** The first request a
   credential's limit refuses in its window is the deployment's `limit`
   alert, once per workload, credential and window, on a WebSocket too. A
@@ -20,6 +17,18 @@
   0.16 had capped it per isolate. 0.14.7's 60 credentials a minute per
   binding is not kept (D177): a CI sign-in has one limit, per source
   address.
+- **Who sets up service accounts, as in 0.14.7.** `GET /api/me` says
+  `setsUpServices` for a person the instance's service-account setting
+  lets give one something, and `serviceSetup`, the setting, as 0.14.7 did,
+  still in one statement; so MCP's `admit_member` and the pages offer it
+  to them again. A workload lookup costs one statement less.
+- **A member with an edited sign-in account is not removed.** When a
+  database writer has edited one of a member's sign-in accounts' rows,
+  removing them is refused `tampered` (500), where 0.14.7 removed them:
+  let back in, they could sign in again with it. Whoever runs the instance
+  can still take away their role and grants. The deployment's configured
+  Owner is refused 409 `configured_owner` where 0.14.7 said 403
+  `not_allowed`.
 - **Postgres only.** coffre no longer runs on SQLite. `@coffre/db` drops its
   SQLite schema, migrations and driver (`@libsql/client`), and a `file:`
   URL is refused wherever a database URL is taken (`createCoffre`,

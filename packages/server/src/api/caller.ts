@@ -1,5 +1,8 @@
-import { allows, grantDefinition, instanceRoleGrants, PERMISSIONS, runsInstance, scopeDefinition, withinCredential, type Holdings, type Permission, type Place as CorePlace, type Policy } from '@coffre/core/access';
+import { allows, grantDefinition, instanceRoleGrants, isScope, PERMISSIONS, runsInstance, scopeDefinition, setsUpServices, withinCredential, type Holdings, type Permission, type Place as CorePlace, type Policy, type RoleDefinition, type ServiceSetting } from '@coffre/core/access';
 import type { Called } from '@coffre/core/vault';
+
+import type { PlaceRow } from '../db/queries/places.ts';
+import type { RoleRow } from '../db/queries/policy.ts';
 
 /**
  * What a page may list, from the vault's answer about its caller
@@ -66,6 +69,17 @@ export function permissionsAt(who: Called, place: Place): Permission[] {
 }
 
 /**
+ * Whether the caller sees `project`, as `GET /projects` lists it: they hold
+ * something in it, on it or in one of its environments, someone else's
+ * personal config aside. What `projectsReached` reads may hold projects
+ * they see nothing in (0.14.7's `seesProject`).
+ */
+export function seesProject(who: Called, project: PlaceRow): boolean {
+  if (permissionsAt(who, placeOf(project, null)).length > 0) return true;
+  return project.environments.some((environment) => (environment.owner === null || environment.owner === who.principal) && permissionsAt(who, placeOf(project, environment)).length > 0);
+}
+
+/**
  * The projects the caller may reach or name, by id, or null for any: those
  * their scope lists, which `GET /me` names by slug, with those they may do
  * something in. On a scoped credential, its scope's: it does nothing
@@ -90,4 +104,40 @@ export function projectsReached({ holds }: Called): string[] | null {
 export function canAnywhere({ holds }: Called, permission: Permission): boolean {
   if (holds.credentialScope != null && !holds.credentialScope.some((grant) => scopeDefinition(grant).permissions.includes(permission))) return false;
   return instanceRoleGrants(holds.role, permission, holds.policy) || holds.grants.some((grant) => grantDefinition(holds.policy, grant)?.permissions.includes(permission) ?? false);
+}
+
+/** The service-account setting as the policy row keeps it (JSON); none for one that does not read as a scope, as the vault takes it. */
+export function settingOf(text: string | null): ServiceSetting | null {
+  if (text === null) return null;
+  try {
+    const setting: unknown = JSON.parse(text);
+    return isScope(setting) ? setting : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the caller sets up any service account, as 0.14.7 weighed it
+ * and the vault weighs it when it admits one (`setsUpServices`,
+ * `member.put`): whoever runs the instance; or a person on a credential
+ * with no scope who could give one a grant somewhere `known` holds,
+ * archived places too, inside the instance's `setting`. The vault names
+ * only the roles the caller holds, and any role may be one they could give:
+ * every one `roles` defines counts, under the vault's definitions of its
+ * own. The rows are read as they are: they say what a page offers, and the
+ * vault decides every service account set up.
+ *
+ *   setting everywhere, Ada a viewer of market    true: she gives viewer at market
+ *   setting only [billing], the same Ada          false
+ *   ci, a service account, or Ada on a token      false
+ */
+export function setsUpAnywhere(who: Called, setting: ServiceSetting | null, roles: readonly RoleRow[], known: readonly PlaceRow[]): boolean {
+  if (runsInstance(who.holds)) return true;
+  if (!who.principal.startsWith('user:') || who.holds.credentialScope != null) return false;
+  const defined = Object.fromEntries(roles.map((row): [string, RoleDefinition] => [row.id, { name: row.name, description: row.description, permissions: row.permissions as Permission[], protected: row.protected as Permission[] }]));
+  const holder = { ...who.holds, policy: { ...who.holds.policy, roles: { ...defined, ...who.holds.policy.roles } } };
+  // A personal config is its owner's alone: no service account is given anything there.
+  const reached = known.flatMap((project) => [placeOf(project, null), ...project.environments.filter((environment) => environment.owner === null).map((environment) => placeOf(project, environment))]);
+  return setsUpServices(holder, setting, reached);
 }

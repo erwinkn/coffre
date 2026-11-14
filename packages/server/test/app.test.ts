@@ -637,7 +637,7 @@ test("who is asking, and where they hold something, scoped by the vault's answer
     { project: 'market', environment: 'prod', permissions: ['secret.read'] },
     { project: 'market', environment: 'prod@me', permissions: ['secret.read', 'secret.use', 'secret.write', 'secret.archive'] },
   ]);
-  // The fields other areas answer say none, until they are served.
+  // This instance has no policy row, so no setting: she sets up no service account. The token's label is not served yet.
   assert.deepEqual([mine.setsUpServices, mine.serviceSetup, mine.features, mine.personalToken], [false, null, { mcp: null, workloads: false }, null]);
 
   // Bo's role holds its permissions in a protected environment too. Nobody else's personal config is a place of his.
