@@ -1,5 +1,6 @@
 // The signer's Durable Object in workerd, as the vault Worker exports it,
 // with a fetch that calls it as the vault does, through its binding.
+import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { postgres } from '@coffre/db/hyperdrive';
 
 import { signerObject, signerOf, type SignerNamespace } from '../../src/cloudflare-signer.ts';
@@ -10,6 +11,8 @@ type Env = { HYPERDRIVE: { connectionString: string }; SIGNING_KEY: string; ALER
 export class CoffreSigner extends signerObject((env: Env) => ({
   database: postgres(env.HYPERDRIVE),
   signingKeys: [Buffer.from(env.SIGNING_KEY, 'base64')],
+  keks: new KekRegistry(new LocalKekProvider(Buffer.from(env.SIGNING_KEY, 'base64'), 'signer-test')),
+  owners: ['root@acme.example'],
   keepUsesDays: 90,
   // A deployment's own: a webhook.
   alert: async (alert) => {

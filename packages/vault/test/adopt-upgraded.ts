@@ -11,6 +11,7 @@ import { keyOf, shapeOf } from '../src/rows.ts';
 import { MIRRORED, Signer } from '../src/signer.ts';
 import { memoryOf, use, type Value } from '../src/use.ts';
 import { memoryStore, type TestVault } from './database.ts';
+import { vaultWorker } from './workers/boot.ts';
 import { amend, ask, credential, environment, project, rows, secret, user, value, write } from './world.ts';
 
 /**
@@ -19,7 +20,9 @@ import { amend, ask, credential, environment, project, rows, secret, user, value
  * them (packages/db/test/upgrade/from-0.14.ts, whose keys these are), and
  * `coffre_fresh`, migrated from nothing. Each is adopted, its first entry
  * signed, a use and a change made through the new engine, and the signer's
- * first minute's check finds nothing. `DATABASE_URL` is the cluster's
+ * first minute's check finds nothing. Then a copy of `coffre_upgraded`,
+ * made before either is adopted, is adopted by the vault Worker in workerd
+ * at its first call, as a deployment's is. `DATABASE_URL` is the cluster's
  * owner's.
  */
 const cluster = new URL(process.env.DATABASE_URL ?? '');
@@ -32,6 +35,15 @@ const urlOf = (database: string, login?: string) => {
 const SEED = Buffer.alloc(32, 8);
 const keks = new KekRegistry(new LocalKekProvider(Buffer.alloc(32, 7), 'k'));
 const ADA = 'user:ada@acme.example';
+
+/** `coffre_upgraded` as the upgrade left it, for the vault Worker to adopt: copied before any test here adopts it. */
+const WORKERS = 'coffre_upgraded_workers';
+{
+  const cluster = await openDatabase(urlOf('postgres'));
+  await cluster.db.execute(sql.raw(`DROP DATABASE IF EXISTS ${WORKERS}`));
+  await cluster.db.execute(sql.raw(`CREATE DATABASE ${WORKERS} TEMPLATE coffre_upgraded`));
+  await cluster.close();
+}
 
 async function vaultOn(database: string): Promise<TestVault> {
   const [owner, own] = await Promise.all([openDatabase(urlOf(database)), openDatabase(urlOf(database, 'coffre_vault_runtime:local-vault-only'))]);
@@ -102,4 +114,25 @@ test('a fresh database is adopted with its Owners, then served by the new engine
   assert.deepEqual(await reveal(vault, ask('root', 'market/prod', null).token, 'market/prod', ['API_KEY']), { API_KEY: 'k' });
   assert.deepEqual(await runOf(signer, vault), []);
   assert.deepEqual(await runOf(signer, vault, true), []);
+});
+
+test('in workerd, the vault Worker adopts a database upgraded from 0.14 at its first call, a 0.14 service token\'s use, then serves it', { timeout: 120_000 }, async () => {
+  const vault = await vaultOn(WORKERS);
+  const worker = await vaultWorker(urlOf(WORKERS, 'coffre_vault_runtime:local-vault-only'), { id: 'k', key: Buffer.alloc(32, 7).toString('base64'), signingKey: SEED.toString('base64') });
+  try {
+    assert.equal((await worker.status()).adopted, false);
+    // CI's service token, as 0.14 issued it, which has since expired: its token hashes to 52 repeated. Answered as such, once the database is adopted.
+    const first = await worker.reveal(`sha256:${Buffer.alloc(32, 52).toString('hex')}`, 'market/dev', null);
+    assert.deepEqual([first.status, first.body], [401, { refused: 'unauthenticated' }]);
+    const status = await worker.status();
+    assert.deepEqual([status.adopted, status.adoption, status.standing], [true, null, []]);
+    for (const table of MIRRORED) assert.deepEqual(await rowsOf(vault.owner, sql`SELECT count(*)::int AS n FROM ${table} WHERE octet_length(mac) = 0`), [{ n: 0 }], shapeOf(table).name);
+    assert.deepEqual(await rowsOf(vault.owner, sql`SELECT body::jsonb ->> 'action' AS action FROM log ORDER BY seq`), [{ action: 'vault.adopt' }]);
+    assert.equal(await adopted(vault.db), true);
+    // Ada's CLI session, as 0.14 issued it: the value reads.
+    const read = await worker.reveal(`sha256:${Buffer.alloc(32, 51).toString('hex')}`, 'market/prod', ['DATABASE_URL', 'STRIPE_KEY']);
+    assert.deepEqual([read.status, read.body.values.map((each) => ('value' in each ? [each.key, each.value] : [each.key, each.refused]))], [200, [['DATABASE_URL', 'sensitive'], ['STRIPE_KEY', 'pk_live']]]);
+  } finally {
+    await worker.stop();
+  }
 });

@@ -35,16 +35,17 @@ import { natureOf } from './value.ts';
  * Then the signer, taking that first entry, fills its mirror from the rows
  * (`sign` in signer.ts). Until it has, the database is not `adopted`.
  *
- * The signer's object calls it, for the signer: what says the database is
- * new is that signer, which has signed nothing, and not the database, whose
- * writer could empty its log and have rows they planted adopted.
+ * The signer's object calls it, for the signer, at the vault's first call
+ * (`adopt` in signer-host.ts): what says the database is new is that signer,
+ * which has signed nothing, and not the database, whose writer could empty
+ * its log and have rows they planted adopted.
  */
 
 /** Who wrote what the vault writes of itself, as 0.14 named it. */
 const VAULT = 'system:vault';
 
 /** What the adoption needs of the vault's configuration: its keys, and its Owners. */
-type Config = Pick<ResolvedVaultConfig, 'keks' | 'owners' | 'signingKeys'>;
+export type Adopting = Pick<ResolvedVaultConfig, 'keks' | 'owners' | 'signingKeys'>;
 
 /**
  * Adopt the database for `signer`, unless it began a log already: then
@@ -53,7 +54,7 @@ type Config = Pick<ResolvedVaultConfig, 'keks' | 'owners' | 'signingKeys'>;
  * entry. Throws, having written nothing, on anything it cannot vouch for,
  * and on a database that shows no log to a signer that has signed one.
  */
-export async function adopt(signer: Signer, vault: Pick<Running, 'db' | 'keys' | 'now'>, config: Config): Promise<boolean> {
+export async function adopt(signer: Signer, vault: Pick<Running, 'db' | 'keys' | 'now'>, config: Adopting): Promise<boolean> {
   const entry = await vault.db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
     // An entry waiting is a log begun, as much as a head that holds one: one adopted and not yet signed. A head
@@ -159,7 +160,7 @@ async function sealAll(tx: Transaction, key: Running['keys'][number], table: (ty
  * each, its nature as it opened, which its secret's row takes when it is
  * the current one.
  */
-async function wrapAgain(tx: Transaction, keks: Config['keks']) {
+async function wrapAgain(tx: Transaction, keks: Adopting['keks']) {
   const versions = await tx
     .select({ version: secretVersions, projectId: secrets.projectId, environmentId: secrets.environmentId, owner: environments.owner })
     .from(secretVersions)

@@ -48,6 +48,16 @@
   again, it says the same. A key service of a deployment's own throws
   `KekRefusedError` (`@coffre/vault`) for what asking again does not mend,
   and `KekUnavailableError` for the rest.
+
+- **The vault adopts its database by itself.** At the vault Worker's
+  first call, its signer's Durable Object adopts the database, a fresh
+  one or one upgraded from 0.14.7, and signs the log's first entry; every
+  call is answered 503 `adopting` until then, and a fresh install's first
+  sign-in waits for it. Nothing to configure: `CoffreSigner` takes the
+  vault's keys and Owners from the same `vault(env => …)`. An adoption
+  that fails writes nothing, says why in the Worker's log, and is tried
+  again by a call 10 seconds on.
+
 - **A restored version comes back as typed.** Restoring a version a recipe
   made, or one half of a key pair, writes it as a value typed by hand:
   Regenerate no longer makes its next one by that recipe, and the pair's

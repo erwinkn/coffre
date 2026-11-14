@@ -280,6 +280,15 @@ export class Signer {
     return this.#trees.kept.size + this.#trees.aging.size === 0 && this.#moving === null && !this.#told;
   }
 
+  /**
+   * Whether it has signed an entry. The first is the adoption's, with the
+   * rows it sealed (adopt.ts): the vault serves nothing before it.
+   */
+  get adopted(): boolean {
+    this.#alive();
+    return this.#trees.kept.size + this.#trees.aging.size > 0;
+  }
+
   /** The rows and the trees the last check found wrong. */
   get standing(): Finding[] {
     return [...this.#stands];
