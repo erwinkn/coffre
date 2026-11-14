@@ -168,12 +168,12 @@ const SERVED_WHILE_MIGRATING = new Set(['/livez', '/readyz']);
  * health answers 503 `migrating`; a database never migrated has no ledger,
  * and is below them too. Asked until it holds, then known. A database that
  * cannot be reached lets the request through, to meet the outage as it would
- * anyway: a page shows its error state, the API answers 503. Hyperdrive's
- * pool full is one too, and may free before the request's own queries:
- * then, below the migrations, they run on the old schema. That is a gap
- * accepted, as it was for a database that came back mid-request: it needs
- * a deploy that skipped `coffre migrate`. Any other failure of the question
- * fails the request.
+ * anyway: a page shows its error state, the API answers 503. If it comes
+ * back before the request's own queries, they run on the old schema below
+ * the migrations: a gap accepted, as for a database that came back
+ * mid-request, which needs a deploy that skipped `coffre migrate`. Any other
+ * failure of the question fails the request, a pool with no connection to
+ * give (`poolFull`) with 503 too.
  */
 export async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
   if (!runtime.schema.migrated) {

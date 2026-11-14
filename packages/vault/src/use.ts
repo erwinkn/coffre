@@ -491,11 +491,11 @@ export async function peek(vault: Serving, ask: Ask): Promise<Peeked | Refusal> 
  * A use: from memory while it is fresh, else one read.
  *
  * While the database cannot be reached (`isUnreachable`: no connection to
- * it, not a statement that gave up waiting behind another, nor a key
- * service that does not answer), a proxied use is answered all the same,
- * where the deployment set `outageSeconds`: from the rows this ask was last
- * answered from as a proxied use (`spareOf`), for that long after they were
- * read. So it is given what it was given and logged for before, and nothing
+ * it, not a pool with none to give, nor a statement that gave up waiting
+ * behind another, nor a key service that does not answer), a proxied use
+ * is answered all the same, where the deployment set `outageSeconds`: from
+ * the rows this ask was last answered from as a proxied use (`spareOf`),
+ * for that long after they were read. So it is given what it was given and logged for before, and nothing
  * else: the same credential, keys and versions, never handed back, and none
  * past the bulk cap. The decision is made again as of now, so a credential
  * that expires in the outage stops.
