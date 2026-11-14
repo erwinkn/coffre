@@ -500,22 +500,25 @@ export class Signer {
     if (keptSize === 0) return false;
     const refused = (why: string) => new Error(`the database's log is begun, and its signer has signed none of it: ${why}`);
     if (checked(this.#on.keys, (key) => key.entries, `head\n${JSON.stringify([size, keptSize, keptRoot, agingSize, agingRoot, agingFrom, signedAt])}`, Buffer.from(mac, 'hex')) === undefined) throw refused('its head is not the vault\'s');
-    // The aging tree from its first use kept, on the tiles above those pruned; each entry by its hash, as the database works it out.
-    const edge = edgeOf(agingFrom).filter(({ width }) => width > 0);
+    // Each tree from its tiles as they stood at its last block's start (the aging tree's no lower than its first use kept), then that block's entries
+    // by their hashes, as the database works them out: a log of any length in one bounded read, its tiles proven by the root they reach.
+    const from = { kept: Math.max(0, Math.floor((keptSize - 1) / WIDTH) * WIDTH), aging: Math.max(agingFrom, Math.floor((agingSize - 1) / WIDTH) * WIDTH) };
+    const edges = TREES.flatMap((tree) => edgeOf(from[tree]).filter(({ width }) => width > 0).map(({ level, index }) => sql`(${tree === 'kept'}, ${level}, ${index})`));
     const found = await this.#ask<{ kept: boolean; level: number | null; place: number; hash: Buffer }>(sql`
-      SELECT kept, NULL::int AS level, leaf::float8 AS place, ${leafOf('body')} AS hash FROM log WHERE kept OR leaf >= ${agingFrom}
-      ${edge.length === 0 ? sql`` : sql`UNION ALL SELECT kept, level, number::float8, hashes FROM log_tiles WHERE NOT kept AND (level, number) IN (${sql.join(edge.map(({ level, index }) => sql`(${level}, ${index})`), sql`, `)})`}
+      SELECT kept, NULL::int AS level, leaf::float8 AS place, ${leafOf('body')} AS hash FROM log
+        WHERE (kept AND leaf >= ${from.kept} AND leaf < ${keptSize}) OR (NOT kept AND leaf >= ${from.aging} AND leaf < ${agingSize})
+      ${edges.length === 0 ? sql`` : sql`UNION ALL SELECT kept, level, number::float8, hashes FROM log_tiles WHERE (kept, level, number) IN (${sql.join(edges, sql`, `)})`}
       ORDER BY 1, 2 NULLS FIRST, 3`);
-    const tiles = new Map(found.filter((row) => row.level !== null).map((row) => [tileKey(row.level!, row.place), Buffer.from(row.hash)]));
     const trees = { kept: Edge.empty(), aging: Edge.empty() };
-    try {
-      trees.aging = Edge.load(agingFrom, tiles);
-    } catch {
-      throw refused('the tiles above its pruned uses are not there');
-    }
     const last: Record<Tree, string | null> = { kept: null, aging: null };
     for (const tree of TREES) {
-      const leaves = found.filter((row) => row.level === null && treeOf(row.kept) === tree).map((row) => Buffer.from(row.hash));
+      const mine = found.filter((row) => treeOf(row.kept) === tree);
+      try {
+        trees[tree] = Edge.load(from[tree], new Map(mine.filter((row) => row.level !== null).map((row) => [tileKey(row.level!, row.place), Buffer.from(row.hash)])));
+      } catch {
+        throw refused(`the tiles of its ${tree} tree are not there`);
+      }
+      const leaves = mine.filter((row) => row.level === null).map((row) => Buffer.from(row.hash));
       trees[tree].append(leaves);
       last[tree] = leaves.at(-1)?.toString('hex') ?? null;
     }

@@ -886,6 +886,24 @@ test('a log whose oldest uses were pruned is gone on from, from the tiles above 
   assert.deepEqual([await head(), alerts], [{ size: 602, keptSize: 1, agingFrom: 512 }, []]);
 });
 
+test('a restored log goes on from its tiles and its last block of entries alone, however long: the walk, not the resume, finds what is lost below', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  assert.equal(await host.adopt(), true);
+  await wait(...Array.from({ length: 600 }, (_, i) => reading(`KEY_${i}`)));
+  await told();
+  vault.tick(TICK_MS);
+  await fire();
+  // The first two blocks' entries gone, their tiles not: a resume that read them would not reach the head.
+  await vault.owner.execute(sql`DELETE FROM log WHERE NOT kept AND leaf < 512`);
+  storage = objectStorage();
+  host = start();
+  alerts = [];
+  assert.equal(await host.adopt(), true);
+  await minute();
+  await minute();
+  assert.ok(alerts.some((alert) => JSON.stringify(alert).includes('lost')), JSON.stringify(alerts));
+});
+
 test('a signer deployed with a wrong vault key over a restored log touches nothing, its alarm neither: the right key, under the same storage, goes on', async (t) => {
   t.mock.method(console, 'error', () => {});
   assert.equal(await host.adopt(), true);

@@ -81,8 +81,9 @@ export default vault((env: Env) => ({
 
 The object of the new name is blank. At the vault's first call it goes on
 from the restored database's head: it checks the head's MAC under the
-vault's keys, rebuilds both trees of the log from its entries and requires
-them to reach the head's roots, takes the rows as they stand, and numbers
+vault's keys, rebuilds both trees of the log from their tiles and last
+entries and requires them to reach the head's roots (its walk then checks
+every older entry, as any signer's does), takes the rows as they stand, and numbers
 the next entry after the head's last. The vault's log says so once:
 
 ```
