@@ -196,6 +196,27 @@ test("an exchange the tree does not prove says no entry's run: a writer who forg
   assert.equal(runRead.run?.claims.ref, MAIN.ref);
 });
 
+test("a run's exchange far below its read, in tiles of its own, is proven in the page's two statements", async () => {
+  const AUD = 'user:aud@acme.example';
+  await write(world, ...rows('roles', role(true, 'auditor', ['secret.read', 'secret.write', 'audit.read'])), ...rows('principals', principal(AUD, { role: 'auditor' })), ...rows('credentials', credential('aud-cli', AUD)));
+  const call = (bearer: string, path: string, init: RequestInit = {}) => app.request(path, { ...init, headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' } });
+  assert.equal((await call('aud-cli', '/api/secrets/market/prod', { method: 'PATCH', body: JSON.stringify({ API_KEY: 'v1' }) })).status, 200);
+  const run = await exchange(idToken());
+  assert.equal(run.status, 200, JSON.stringify(run.body));
+  // 300 reads of the auditor's, each a leaf of the aging tree as the exchange is: the run's read lands in another tile than its exchange.
+  for (let i = 0; i < 300; i += 1) {
+    for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged]) kept.clear();
+    assert.equal((await call('aud-cli', '/api/reveals', { method: 'POST', body: JSON.stringify({ path: 'market/prod/API_KEY' }) })).status, 200);
+  }
+  assert.equal((await call(run.body.token!, '/api/reveals', { method: 'POST', body: JSON.stringify({ path: 'market/prod/API_KEY' }) })).status, 200);
+  await (await signerOf(world)).sign();
+
+  type Entry = { action: string; proof: string; run: { exchangeSeq: number; claims: Record<string, unknown> } | null };
+  const [got, , statements] = await cost(async () => (await (await call('aud-cli', '/api/audit?limit=1&detail=1')).json()) as { entries: Entry[] });
+  const [read] = got.entries as [Entry];
+  assert.deepEqual([read.action, read.proof, read.run?.claims.ref, statements], ['secret.read', 'proven', MAIN.ref, 2]);
+});
+
 test('a token is spent once: the same token again is replayed, by the vault', async () => {
   const token = idToken();
   assert.equal((await exchange(token)).status, 200);

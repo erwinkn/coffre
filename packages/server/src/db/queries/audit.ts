@@ -73,20 +73,43 @@ export const MOST_OBJECTS = 1000;
  */
 const COPIES = 2;
 
-/** A stretch of the log, newest first, and whether it stopped before the end of what it reads. */
-export type Stretch = { rows: LogRow[]; more: boolean };
+/**
+ * A stretch of the log, newest first, and whether it stopped before the end
+ * of what it reads; and, by credential, the first entry naming each
+ * credential a service's entry in it was written on.
+ */
+export type Stretch = { rows: LogRow[]; more: boolean; firsts: Map<string, LogRow> };
 
 /**
  * A stretch of the log, newest first: up to `rows` entries at or below
  * `below`. From `log` itself, by its key; or, for `objects`, from
  * `log_index` (`stretchOf`). An entry that mentions two of them comes once.
+ * In the same statement, for each credential a service's entry in it names,
+ * other than by an exchange, the first entry that names it: a CI run's is
+ * its exchange, whose claims say the run, once the head proves it. Read
+ * here, its tiles come with the page's own, in the next statement. A body
+ * that is not a JSON object names nothing.
  */
 export async function logStretch(db: Queryable, at: { objects: readonly string[] | null; below: number | null; rows: number }): Promise<Stretch> {
   const { objects, rows } = at;
-  if (objects !== null && objects.length === 0) return { rows: [], more: false };
-  const read = await rowsOf<LogRow & { merged: number }>(db, stretchOf(at));
-  const more = read.length === rows || (objects !== null && read[0]?.merged === rows * COPIES);
-  return { rows: read.map(({ merged: _, ...row }) => row), more };
+  if (objects !== null && objects.length === 0) return { rows: [], more: false, firsts: new Map() };
+  const read = await rowsOf<LogRow & { merged: number; first: string | null }>(
+    db,
+    sql`
+      WITH stretch AS MATERIALIZED (${stretchOf(at)}),
+      credentials AS (
+        SELECT DISTINCT b ->> 'credential' AS id
+        FROM (SELECT CASE WHEN s.body IS JSON OBJECT THEN s.body::jsonb END AS b FROM stretch s) parsed
+        WHERE b ->> 'actor' LIKE 'token:%' AND b ->> 'action' IS DISTINCT FROM 'token.exchange' AND jsonb_typeof(b -> 'credential') = 'string')
+      SELECT s.seq, s.kept, s.leaf, s.body, s.merged, NULL::text AS first FROM stretch s
+      UNION ALL SELECT l.seq::float8, l.kept, l.leaf::float8, l.body, 0, c.id
+        FROM credentials c JOIN log l ON l.seq = (SELECT min(x.seq) FROM log_index x WHERE x.object = 'credential:' || c.id)
+      ORDER BY first NULLS FIRST, seq DESC`,
+  );
+  const stretch = read.filter((row) => row.first === null);
+  const more = stretch.length === rows || (objects !== null && stretch[0]?.merged === rows * COPIES);
+  const firsts = new Map(read.flatMap(({ merged: _, first, ...row }) => (first === null ? [] : [[first, row] as const])));
+  return { rows: stretch.map(({ merged: _, first: __, ...row }) => row), more, firsts };
 }
 
 /**
@@ -133,49 +156,32 @@ export type TileAt = { kept: boolean; level: number; index: number };
 /**
  * What proves and names a page's entries, in one statement: the tiles, as
  * stored, and the names of the projects, environments, secrets and
- * credentials its entries mention, by id; and for each credential in
- * `runs`, the first entry that names it, which for a CI run's is its
- * exchange, whose claims say the run once the tree proves it. Ids are
- * checked as UUIDs before: a body names what it likes.
+ * credentials its entries mention, by id. Ids are checked as UUIDs before:
+ * a body names what it likes.
  */
 export async function logProofs(
   db: Queryable,
   tiles: readonly TileAt[],
-  ids: { projects: readonly string[]; environments: readonly string[]; secrets: readonly string[]; credentials: readonly string[]; runs: readonly string[] },
-): Promise<{ tiles: { kept: Map<string, Buffer>; aging: Map<string, Buffer> }; projects: Map<string, string>; environments: Map<string, { slug: string; projectId: string }>; secrets: Map<string, string>; credentials: Map<string, { kind: string; label: string | null }>; firsts: Map<string, LogRow> }> {
+  ids: { projects: readonly string[]; environments: readonly string[]; secrets: readonly string[]; credentials: readonly string[] },
+): Promise<{ tiles: { kept: Map<string, Buffer>; aging: Map<string, Buffer> }; projects: Map<string, string>; environments: Map<string, { slug: string; projectId: string }>; secrets: Map<string, string>; credentials: Map<string, { kind: string; label: string | null }> }> {
+  const tiled = tiles.length === 0 ? sql`false` : sql`(t.kept, t.level, t.number) IN (${sql.join(tiles.map(({ kept, level, index }) => sql`(${kept}, ${level}, ${index})`), sql`, `)})`;
   const list = (values: readonly string[]) => sql`ANY(${sql.param([...values])}::uuid[])`;
-  const rows = await rowsOf<{ kind: 'tile' | 'project' | 'environment' | 'secret' | 'credential' | 'first'; kept: boolean | null; level: number | null; number: number | null; hashes: Buffer | null; id: string | null; name: string | null; more: string | null; leaf: number | null }>(
+  const rows = await rowsOf<{ kind: 'tile' | 'project' | 'environment' | 'secret' | 'credential'; kept: boolean | null; level: number | null; number: number | null; hashes: Buffer | null; id: string | null; name: string | null; more: string | null }>(
     db,
     sql`
-      SELECT 'tile' AS kind, t.kept, t.level::int AS level, t.number::float8 AS number, t.hashes, NULL AS id, NULL AS name, NULL AS more, NULL::float8 AS leaf FROM log_tiles t WHERE ${tiled(tiles)}
-      UNION ALL SELECT 'project', NULL, NULL, NULL, NULL, p.id::text, p.slug, NULL, NULL FROM projects p WHERE p.id = ${list(ids.projects)}
-      UNION ALL SELECT 'environment', NULL, NULL, NULL, NULL, e.id::text, e.slug, e.project_id::text, NULL FROM environments e WHERE e.id = ${list(ids.environments)}
-      UNION ALL SELECT 'secret', NULL, NULL, NULL, NULL, s.id::text, s.key, NULL, NULL FROM secrets s WHERE s.id = ${list(ids.secrets)}
-      UNION ALL SELECT 'credential', NULL, NULL, NULL, NULL, c.id::text, c.label, c.kind, NULL FROM credentials c WHERE c.id = ${list(ids.credentials)}
-      UNION ALL SELECT 'first', l.kept, NULL, l.seq::float8, NULL, r.id::text, NULL, l.body, l.leaf::float8
-        FROM unnest(${sql.param([...ids.runs])}::uuid[]) AS r(id)
-        JOIN log l ON l.seq = (SELECT min(x.seq) FROM log_index x WHERE x.object = 'credential:' || r.id::text)`,
+      SELECT 'tile' AS kind, t.kept, t.level::int AS level, t.number::float8 AS number, t.hashes, NULL AS id, NULL AS name, NULL AS more FROM log_tiles t WHERE ${tiled}
+      UNION ALL SELECT 'project', NULL, NULL, NULL, NULL, p.id::text, p.slug, NULL FROM projects p WHERE p.id = ${list(ids.projects)}
+      UNION ALL SELECT 'environment', NULL, NULL, NULL, NULL, e.id::text, e.slug, e.project_id::text FROM environments e WHERE e.id = ${list(ids.environments)}
+      UNION ALL SELECT 'secret', NULL, NULL, NULL, NULL, s.id::text, s.key, NULL FROM secrets s WHERE s.id = ${list(ids.secrets)}
+      UNION ALL SELECT 'credential', NULL, NULL, NULL, NULL, c.id::text, c.label, c.kind FROM credentials c WHERE c.id = ${list(ids.credentials)}`,
   );
-  const found = { tiles: { kept: new Map<string, Buffer>(), aging: new Map<string, Buffer>() }, projects: new Map<string, string>(), environments: new Map<string, { slug: string; projectId: string }>(), secrets: new Map<string, string>(), credentials: new Map<string, { kind: string; label: string | null }>(), firsts: new Map<string, LogRow>() };
+  const found = { tiles: { kept: new Map<string, Buffer>(), aging: new Map<string, Buffer>() }, projects: new Map<string, string>(), environments: new Map<string, { slug: string; projectId: string }>(), secrets: new Map<string, string>(), credentials: new Map<string, { kind: string; label: string | null }>() };
   for (const row of rows) {
     if (row.kind === 'tile') found.tiles[row.kept! ? 'kept' : 'aging'].set(`${row.level}/${row.number}`, Buffer.from(row.hashes!));
     else if (row.kind === 'project') found.projects.set(row.id!, row.name!);
     else if (row.kind === 'environment') found.environments.set(row.id!, { slug: row.name!, projectId: row.more! });
     else if (row.kind === 'secret') found.secrets.set(row.id!, row.name!);
-    else if (row.kind === 'first') found.firsts.set(row.id!, { seq: row.number!, kept: row.kept!, leaf: row.leaf!, body: row.more! });
     else found.credentials.set(row.id!, { kind: row.more!, label: row.name });
   }
   return found;
-}
-
-/** Tiles the page's own read lacked: a run's exchange, far below the page, proves up paths of its own. */
-export async function logTiles(db: Queryable, tiles: readonly TileAt[]): Promise<{ kept: Map<string, Buffer>; aging: Map<string, Buffer> }> {
-  const rows = await rowsOf<{ kept: boolean; level: number; number: number; hashes: Buffer }>(db, sql`SELECT t.kept, t.level::int AS level, t.number::float8 AS number, t.hashes FROM log_tiles t WHERE ${tiled(tiles)}`);
-  const found = { kept: new Map<string, Buffer>(), aging: new Map<string, Buffer>() };
-  for (const row of rows) found[row.kept ? 'kept' : 'aging'].set(`${row.level}/${row.number}`, Buffer.from(row.hashes));
-  return found;
-}
-
-function tiled(tiles: readonly TileAt[]): SQL {
-  return tiles.length === 0 ? sql`false` : sql`(t.kept, t.level, t.number) IN (${sql.join(tiles.map(({ kept, level, index }) => sql`(${kept}, ${level}, ${index})`), sql`, `)})`;
 }

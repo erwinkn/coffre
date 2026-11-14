@@ -3,7 +3,7 @@ import { inclusionProof, leafHash, nodesFrom, tileKey, tilesFor, verifyInclusion
 import { personalOf } from '@coffre/core/schemas';
 import type { Called, SignedHead } from '@coffre/core/vault';
 
-import { logPlaces, logProofs, logStretch, logTiles, MOST_OBJECTS, type LogPlaces, type LogRow, type TileAt } from '../db/queries/audit.ts';
+import { logPlaces, logProofs, logStretch, MOST_OBJECTS, type LogPlaces, type LogRow, type TileAt } from '../db/queries/audit.ts';
 import { can, canAnywhere, placeOf, projectsReached } from './caller.ts';
 import type { ApiContext } from './context.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
@@ -197,7 +197,7 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
   const indexed = objects !== null && objects.length > MOST_OBJECTS ? null : objects;
   const reading = Math.min(query.limit * READ_PER_SHOWN, MOST_READ);
   const below = query.before === undefined ? null : anchored ? query.before : query.before - 1;
-  const { rows: read, more: beyond } = await logStretch(ctx.db, { objects: indexed, below, rows: reading + (anchored ? 1 : 0) });
+  const { rows: read, more: beyond, firsts } = await logStretch(ctx.db, { objects: indexed, below, rows: reading + (anchored ? 1 : 0) });
   const anchor = anchored && read[0]?.seq === query.before ? read.shift()! : null;
   if (anchor === null && anchored && read.length > reading) read.pop();
 
@@ -223,7 +223,7 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
   const more = (taken < read.length || beyond) && stretch.at(-1)?.seq !== 0;
   const next = more && stretch.length > 0 ? stretch.at(-1)!.seq : null;
 
-  const ids = { projects: new Set<string>(), environments: new Set<string>(), secrets: new Set<string>(), credentials: new Set<string>(), runs: new Set<string>() };
+  const ids = { projects: new Set<string>(), environments: new Set<string>(), secrets: new Set<string>(), credentials: new Set<string>() };
   for (const { body } of shown) {
     for (const object of mentionsOf(body)) {
       const [kind, id] = [object.slice(0, object.indexOf(':')), object.slice(object.indexOf(':') + 1)];
@@ -232,32 +232,25 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
       else if (kind === 'environment') ids.environments.add(id);
       else if (kind === 'secret') ids.secrets.add(id);
     }
-    if (typeof body.credential === 'string' && UUID.test(body.credential)) {
-      ids.credentials.add(body.credential);
-      // A service's entry may be a CI run's: its credential's exchange says which run, as 0.14.7's page did.
-      if (actionOf(body) !== 'token.exchange' && actorOf(body)?.startsWith('token:')) ids.runs.add(body.credential);
-    }
+    if (typeof body.credential === 'string' && UUID.test(body.credential)) ids.credentials.add(body.credential);
   }
-  const proving = head === null ? [] : shown.flatMap(({ row }) => (placed(head, row) === 'within' ? [row] : []));
+  // A service's entry may be a CI run's, which its credential's exchange says, as 0.14.7's page did; but only as the
+  // tree proves the exchange: a writer may edit its body, or point the index elsewhere. Its tiles come with the page's.
+  const exchanges = shown.flatMap(({ body }) => {
+    const first = typeof body.credential === 'string' ? firsts.get(body.credential) : undefined;
+    return first === undefined ? [] : [first];
+  });
+  const proving = head === null ? [] : [...shown.map(({ row }) => row), ...exchanges].filter((row) => placed(head, row) === 'within');
   const found = await logProofs(ctx.db, tilesOf(head, proving), {
     projects: [...ids.projects],
     environments: [...ids.environments],
     secrets: [...ids.secrets],
     credentials: [...ids.credentials],
-    runs: [...ids.runs],
   });
-  // A run's exchange counts only as the tree proves it: a writer may edit its body, or point the index elsewhere. Its
-  // tiles are most often the page's own; those it lacks take one more read.
-  const exchanges = head === null ? [] : [...found.firsts.values()].filter((row) => placed(head, row) === 'within');
-  const lacking = tilesOf(head, exchanges).filter(({ kept, level, index }) => !found.tiles[kept ? 'kept' : 'aging'].has(tileKey(level, index)));
-  if (lacking.length > 0) {
-    const fetched = await logTiles(ctx.db, lacking);
-    for (const tree of ['kept', 'aging'] as const) for (const [key, hashes] of fetched[tree]) found.tiles[tree].set(key, hashes);
-  }
   const proofOf = prover(head, found.tiles);
   const entries = shown.map(({ row, body }) => {
     const proof = proofOf(row);
-    return { ...viewOf(row, body, found, (exchange) => standsBy(proofOf(exchange), proof)), proof };
+    return { ...viewOf(row, body, found, firsts, (exchange) => standsBy(proofOf(exchange), proof)), proof };
   });
   const holes = head !== null && unfiltered ? holesOf(head, query.before === undefined ? 'head' : anchor, stretch, more) : null;
   const page: AuditPage = { entries, more, next, head: head === null ? null : { size: head.size, signedAt: head.signedAt }, holes };
@@ -456,7 +449,7 @@ export function holesOf(head: SignedHead, top: 'head' | LogRow | null, stretch: 
 }
 
 /** An entry as the page shows it, its places and keys by name. */
-function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logProofs>>, stands: (exchange: LogRow) => boolean): Omit<AuditEntryView, 'proof'> {
+function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logProofs>>, firsts: ReadonlyMap<string, LogRow>, stands: (exchange: LogRow) => boolean): Omit<AuditEntryView, 'proof'> {
   const detail = detailOf(body);
   const mentions = mentionsOf(body);
   const ids = (kind: string) => mentions.filter((object) => object.startsWith(`${kind}:`)).map((object) => object.slice(kind.length + 1));
@@ -493,7 +486,7 @@ function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logPro
     operationId: null,
     relatedSeq: null,
     requestId: typeof body.request === 'string' ? body.request : null,
-    run: body.action === 'token.exchange' ? { exchangeSeq: row.seq, claims: runClaims(detail.run) } : runOf(body, names.firsts, stands),
+    run: body.action === 'token.exchange' ? { exchangeSeq: row.seq, claims: runClaims(detail.run) } : runOf(body, firsts, stands),
     token: credential?.kind === 'personal' ? { id: body.credential as string, label: credential.label ?? '' } : null,
     metadata: detail,
   };
