@@ -10,7 +10,6 @@ import { folders, forks, inheritance, loosening, missingKeys, personalConfigs, r
 import { appLogin, vaultLogin } from './checks/logins.ts';
 import { mcpRead, mcpChanges, mcpConnect, mcpValues } from './checks/mcp.ts';
 import { accessAuthorship, memberTampering, noAuditNoAccess, sealingRace } from './checks/members.ts';
-import { refusedCheckpoint, missingCheckpoint, middleCut } from './checks/readiness.ts';
 import { editedGeneration, forgedCredential, forgedIdentity, forgedApproval } from './checks/signin.ts';
 import { canaryScan } from './checks/canaries.ts';
 import { Cli, cliLogin, manageByCli, verifyAsOwner, verifyAsUser, verifyInterrupted, verifyKeys, verifyLeftovers, verifyWithToken } from './checks/cli.ts';
@@ -96,8 +95,6 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('no audit, no access', { people }, ({ people }) => noAuditNoAccess(deployment, people));
   await report.check('audit proven', { people }, ({ people }) => auditProven(people));
   await report.check('audit page proofs', { people }, ({ people }) => auditPageProofs(people));
-  await report.check('checkpoint refused', {}, () => refusedCheckpoint(deployment));
-  await report.check('checkpoint missing', {}, () => missingCheckpoint(deployment));
   await report.check('app login', {}, () => appLogin(deployment));
   await report.check('vault login', {}, () => vaultLogin(deployment));
   await report.check('forged grant', { people }, ({ people }) => memberTampering(deployment, people, 'grant'));
@@ -109,6 +106,5 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('forged approval', { people }, ({ people }) => forgedApproval(deployment, people));
   await report.check('edited generation', { people }, ({ people }) => editedGeneration(deployment, people));
   await report.check('canary scan', all, ({ people, canaries }) => canaryScan(deployment, people, canaries));
-  await report.check('middle cut', {}, () => middleCut(deployment));
   return report.failed;
 }

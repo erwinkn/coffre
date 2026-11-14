@@ -146,11 +146,9 @@ In order, since each builds on the ones before:
 | app login, vault login | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant |
 | access authorship | Admission, grant, revoke, removal and re-admission leave only vault entries |
 | no audit, no access | A refused append commits no grant, removal or admission |
-| checkpoint refused, checkpoint missing | A recent heartbeat without an accepted checkpoint turns readiness red; restoring checkpointing recovers |
 | forged grant, forged member, stale member | A forged grant, an edited member or a genuine older member row put back is refused at use, marked tampered, and logged as vault.tampered. Sign-in mode refuses the credential with 401 |
 | sealing race | A grant inserted while the vault's decision waits on the held log head is refused as `tampered` and logged; removal recovers the member |
 | forged credential, forged identity, forged approval, edited generation | Owner-written authentication rows cannot mint sessions or revive old tokens, and the row failure is reported |
-| middle cut | Two entries removed before the latest signed prefix make the next scheduled checkpoint refuse with `log_broken` and readiness turn red; restoring them recovers checkpointing |
 
 All table inspection and tampering goes through the one database. There
 is no vault file or Durable Object to discover. The canary scan reads every
@@ -176,7 +174,11 @@ saying what it waits for (`packages/conformance/src/unserved.ts`), and runs
 again once the area that serves the route deletes its line. 0.14's checks
 of `GET /audit/verification` (full verification, the rewritten, forged and
 missing entries, the earlier checkpoint and the deleted tail) went with the
-route. In 0.16 the audit page proves each entry it lists against the head
+route, and `checkpoint refused`, `checkpoint missing` and `middle cut` with
+the heartbeat and checkpoint they tested: in 0.16 readiness never turns red
+on tampering, and the signer's full check reports a cut to the alert
+function or the Worker's log.
+In 0.16 the audit page proves each entry it lists against the head
 the vault signed: `audit proven` requires every entry the head numbers
 proven and only those past it not (it waits for a head that numbers an
 entry on the page: a batch signed between the head's read and the log's can
