@@ -103,6 +103,7 @@ cleanup() {
     while IFS= read -r job_pid; do
         job_pids+=("$job_pid")
     done < <(jobs -p)
+    if [ -n "${reset_pid:-}" ]; then job_pids+=("$reset_pid"); fi
     if ((${#job_pids[@]} > 0)); then
         kill "${job_pids[@]}" 2>/dev/null || true
     fi
@@ -114,9 +115,12 @@ log 'starting Postgres'
 
 # Each run starts over: a fresh database, and fresh local storage for every
 # Worker, the vault's signer included, which keeps the log's head beside the
-# database. The seed then fills it through the API.
+# database. The seed then fills it through the API. The reset holds a lock on
+# the database's name until this stack stops, so no other stack resets it.
 log "starting $database over"
-DATABASE_URL="$owner_url" node --conditions=coffre:source dev/reset.mjs
+exec 3< <(DATABASE_URL="$owner_url" exec node --conditions=coffre:source dev/reset.mjs)
+reset_pid=$!
+if ! read -r -u 3 _; then exit 1; fi
 rm -rf "$state_dir/v3"
 
 log "applying migrations to $database"
