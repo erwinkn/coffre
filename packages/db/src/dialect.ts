@@ -104,40 +104,75 @@ export function isUniqueViolation(error: unknown): boolean {
 
 /**
  * The network's codes for a server that is not there, postgres.js's for a
- * connection lost, cut short or never made, and Postgres's for one that will
- * not take the connection, or has none left (53300).
+ * connection lost, cut short or never made, and Postgres's for one shutting
+ * down or starting up. Out of connections (53300) is not one (`poolFull`).
  */
 const UNREACHABLE = new Set([
   'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE',
   'CONNECTION_CLOSED', 'CONNECTION_DESTROYED', 'CONNECTION_ENDED', 'CONNECT_TIMEOUT',
-  '53300', '57P01', '57P02', '57P03',
+  '57P01', '57P02', '57P03',
 ]);
 
-/** Hyperdrive's words for having no connection to give, beside Workers' for one lost. */
-const UNREACHABLE_WORDS = /connection terminated|network connection lost|connect(ion)? timeout|open slot in the pool|acquire a connection from the pool|server connection attempt failed/i;
+/**
+ * Workers' words for a connection lost, and Hyperdrive's for one it could
+ * not make ("Server connection attempt failed: destination_unavailable";
+ * local workerd's says only "connection attempt failed").
+ */
+const UNREACHABLE_WORDS = /connection terminated|network connection lost|connect(ion)? timeout|connection attempt failed/i;
+
+/** Hyperdrive's words for a pool with no connection to give. */
+const POOL_FULL_WORDS = /open slot in the pool|acquire a connection from the pool/i;
+
+/** Whether `error` or a cause of it says so in `words`: only what said no code, or Hyperdrive's 58000. */
+function says(error: unknown, words: RegExp): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    const { code, message } = cause as { code?: unknown; message?: unknown };
+    // Never a message quoting a query and its parameters (Drizzle's, the Node vault's carrying it): the driver's
+    // words are its cause's.
+    if (typeof message === 'string' && (typeof code !== 'string' || code === '58000') && !message.includes('Failed query: ') && words.test(message)) return true;
+  }
+  return false;
+}
 
 /**
  * Whether a query failed because the database could not be reached or
  * dropped the connection: an outage, not an answer. Postgres's connection
  * exceptions are class 08; postgres.js says so in codes of its own, Workers'
- * sockets in words, and so
- * does Hyperdrive when it has no connection to the database to give: every
- * one of its pool busy for 15 s ("Timed out while waiting for an open slot
- * in the pool", FATAL 58000; "Failed to acquire a connection from the
- * pool"), or none to be made ("Server connection attempt failed:
- * destination_unavailable").
+ * sockets and Hyperdrive in words. A pool with no connection to give is not
+ * one (`poolFull`).
  */
 export function isUnreachable(error: unknown): boolean {
-  for (let cause = error; typeof cause === 'object' && cause !== null; ) {
-    const { code, message } = cause as { code?: unknown; message?: unknown };
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    const { code } = cause as { code?: unknown };
     // Class 08 but its protocol violation (08P01), which is the client's bug: asked again, it fails again.
     if (typeof code === 'string' && (UNREACHABLE.has(code) || (/^08[0-9A-Z]{3}$/.test(code) && code !== '08P01'))) return true;
-    // The words only of what said no code, or Hyperdrive's 58000, and never a message quoting a query and its
-    // parameters (Drizzle's, the Node vault's carrying it): the driver's words are its cause's.
-    if (typeof message === 'string' && (typeof code !== 'string' || code === '58000') && !message.includes('Failed query: ') && UNREACHABLE_WORDS.test(message)) return true;
-    cause = (cause as { cause?: unknown }).cause;
   }
-  return false;
+  return says(error, UNREACHABLE_WORDS);
+}
+
+/** Postgres's code for want of resources, which the vault's answer gives a pool with no connection to give. */
+export const POOL_FULL = '53000';
+
+/** Postgres's codes for no connection to give: `POOL_FULL`, and out of connections ("too many clients already"). */
+const POOL_FULL_CODES = new Set([POOL_FULL, '53300']);
+
+/**
+ * Whether the pool had no connection to give: Hyperdrive's, every one busy
+ * for 15 s ("Timed out while waiting for an open slot in the pool", FATAL
+ * 58000; "Failed to acquire a connection from the pool"), Postgres's, out
+ * of connections (53300, which Hyperdrive gives Workers past its own limit
+ * too), or `POOL_FULL`.
+ * The database busy, which whoever holds a credential can make it, as a
+ * statement that gave up waiting: no outage (D238). Hyperdrive's docs give
+ * "Failed to acquire" for a database it cannot connect to at all too, and
+ * that is no outage either, until its connects fail in words of their own.
+ */
+export function poolFull(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    const { code } = cause as { code?: unknown };
+    if (typeof code === 'string' && POOL_FULL_CODES.has(code)) return true;
+  }
+  return says(error, POOL_FULL_WORDS);
 }
 
 /** Postgres's codes for a statement that gave up waiting: on a lock (55P03), or past its own bound (57014). */
@@ -164,11 +199,12 @@ export function gaveUp(error: unknown): boolean {
 
 /**
  * Whether a query failed for want of the database, not for anything the
- * request asked: it could not be reached (`isUnreachable`), or a statement
- * gave up waiting (`gaveUp`). The same request may well succeed in a moment.
+ * request asked: it could not be reached (`isUnreachable`), its pool had no
+ * connection to give (`poolFull`), or a statement gave up waiting
+ * (`gaveUp`). The same request may well succeed in a moment.
  */
 export function isUnavailable(error: unknown): boolean {
-  return isUnreachable(error) || gaveUp(error);
+  return isUnreachable(error) || poolFull(error) || gaveUp(error);
 }
 
 /** A consistent read of several statements that cannot write, such as verifying the chain. */

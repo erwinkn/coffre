@@ -2,7 +2,7 @@ import test, { mock, after, before } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { github, signin, type Principal } from '@coffre/core/identity';
-import { isUnreachable, migrationLedger } from '@coffre/db/dialect';
+import { isUnavailable, isUnreachable, migrationLedger, poolFull } from '@coffre/db/dialect';
 import { asc, sql, type SQL } from 'drizzle-orm';
 
 import { coffreRoute, respond, runScheduled } from '../src/app.ts';
@@ -166,12 +166,17 @@ test('only a database that cannot be reached is an outage the door lets through;
   assert.equal(isUnreachable(Object.assign(new Error('relation "drizzle.__drizzle_migrations" does not exist'), { code: '42P01' })), false);
   assert.equal(isUnreachable(Object.assign(new Error('permission denied for schema drizzle'), { code: '42501' })), false);
   assert.equal(isUnreachable(new Error('no such table: __drizzle_migrations')), false);
-  // Hyperdrive, with every connection of its pool to the database busy, or none to be made.
-  const pool = Object.assign(new Error('Timed out while waiting for an open slot in the pool.'), { code: '58000', severity: 'FATAL' });
-  assert.equal(isUnreachable(new Error('Failed query: select 1', { cause: pool })), true);
-  assert.equal(isUnreachable(new Error('Failed to acquire a connection from the pool.')), true);
+  // Hyperdrive with no connection to be made; local workerd's says less.
   assert.equal(isUnreachable(new Error('Server connection attempt failed: destination_unavailable')), true);
-  assert.equal(isUnreachable(Object.assign(new Error('sorry, too many clients already'), { code: '53300' })), true);
+  assert.equal(isUnreachable(new Error('connection attempt failed')), true);
+  // Hyperdrive with every connection of its pool busy is the database busy, as a statement that gave up waiting:
+  // unavailable, and no outage (D238). So is the code the vault's answer gives it.
+  const pool = Object.assign(new Error('Timed out while waiting for an open slot in the pool.'), { code: '58000', severity: 'FATAL' });
+  const tooMany = Object.assign(new Error('sorry, too many clients already'), { code: '53300' });
+  for (const full of [new Error('Failed query: select 1', { cause: pool }), new Error('Failed to acquire a connection from the pool.'), tooMany, { code: '53000' }]) {
+    assert.deepEqual([isUnreachable(full), poolFull(full), isUnavailable(full)], [false, true, true]);
+  }
+  assert.equal(poolFull(new Error('Failed query: select 1\nparams: open slot in the pool')), false);
   // A statement that gave up waiting had its connection: the door is no place to let it through.
   assert.equal(isUnreachable(Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' })), false);
 });
