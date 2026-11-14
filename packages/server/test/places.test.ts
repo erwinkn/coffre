@@ -77,6 +77,28 @@ const call = async (label: string, method: string, path: string, body?: unknown)
   return [got.status, (await got.json()) as Body];
 };
 /** What one request cost: its answer, the vault's calls it made, and the app's statements. */
+test('a fork that copies, or holds references, is one change: the environment and its keys, as its source reads them', async () => {
+  // prod reads A alone: B holds no value and C is archived.
+  const [[status, body], calls, statements] = await cost(() => call('bo-cli', 'PUT', '/projects/market/copy', { from: 'prod' }));
+  assert.deepEqual([status, body], [200, { environment: { slug: 'copy', name: 'copy', archivedAt: null, protected: false }, created: true, forked: { from: 'prod', keys: 1, references: 0, copied: [], inherits: false } }]);
+  assert.deepEqual([calls, statements], [['change'], 0]);
+  assert.deepEqual(await environmentRow('copy'), { slug: 'copy', archived: false, protected: false, parent: null });
+  const held = async (slug: string) => rowsOf<{ key: string; current: number | null; source: string | null }>(world.owner, sql`SELECT s.key, s.current_version AS current, s.source_id AS source
+    FROM secrets s JOIN environments e ON e.id = s.environment_id WHERE e.project_id = ${ids.market!} AND e.slug = ${slug} ORDER BY s.key`);
+  assert.deepEqual(await held('copy'), [{ key: 'A', current: 1, source: null }]);
+  // As references, A is one to prod's.
+  assert.deepEqual((await call('bo-cli', 'PUT', '/projects/market/linked', { from: 'prod', references: true }))[1].forked, { from: 'prod', keys: 1, references: 1, copied: [], inherits: false });
+  assert.deepEqual((await held('linked')).map((row) => [row.key, row.current, row.source === null]), [['A', null, false]]);
+  // fork reads prod's A again, its own archived, and dismissed B; D holds no value: one key.
+  assert.deepEqual((await call('bo-cli', 'PUT', '/projects/market/fork-copy', { from: 'fork' }))[1].forked, { from: 'fork', keys: 1, references: 0, copied: [], inherits: false });
+  // A fork of a protected environment is protected; one that is there is refused, as any.
+  assert.equal(((await call('bo-cli', 'PUT', '/projects/market/staging-copy', { from: 'staging' }))[1].environment as { protected: boolean }).protected, true);
+  assert.deepEqual(refused(await call('bo-cli', 'PUT', '/projects/market/copy', { from: 'prod' })), [409, 'conflict', 'exists']);
+  // Gus manages environments and reads none; Ed reads prod and manages none.
+  for (const label of ['gus-cli', 'ed-cli']) assert.deepEqual(refused(await call(label, 'PUT', '/projects/market/theirs', { from: 'prod' })), NO_ACCESS, label);
+  assert.deepEqual(refused(await call('bo-cli', 'PUT', '/projects/market/theirs', { from: 'old' })), NO_ACCESS, 'an archived source');
+});
+
 async function cost<T>(run: () => Promise<T>): Promise<[T, string[], number]> {
   const [calls, statements] = [app.calls.length, app.statements];
   const result = await run();
@@ -220,7 +242,7 @@ test('a project is made; one there already is refused', async () => {
   assert.deepEqual(app.calls, []);
 });
 
-test('an environment, an inheriting fork and a personal config are made by one call each; a fork that copies is not served', async () => {
+test('an environment, an inheriting fork and a personal config are made by one call each', async () => {
   assert.deepEqual(await call('bo-cli', 'PUT', '/projects/market/qa'), [200, { environment: { slug: 'qa', name: 'qa', archivedAt: null, protected: false }, created: true, forked: null }]);
   // A fork of staging is protected as staging is, from its first moment.
   assert.deepEqual((await call('bo-cli', 'PUT', '/projects/market/hotfix', { from: 'staging', inherit: true }))[1], { environment: { slug: 'hotfix', name: 'hotfix', archivedAt: null, protected: true }, created: true, forked: { from: 'staging', keys: 0, references: 0, copied: [], inherits: true } });
@@ -248,8 +270,7 @@ test('an environment, an inheriting fork and a personal config are made by one c
 
   app.calls.length = 0;
   const shapes: [string, unknown, number][] = [
-    ['market/copy', { from: 'prod' }, 501], ['market/copy', { from: 'prod', references: true }, 501],
-    ['market/copy', { inherit: true }, 400], ['market/copy', { from: 'prod', inherit: true, references: true }, 400],
+    ['market/copy', { inherit: true }, 400], ['market/copy', { references: true }, 400], ['market/copy', { from: 'prod', references: 'yes' }, 400], ['market/copy', { from: 'prod', inherit: true, references: true }, 400],
     ['market/settings', {}, 400], ['market/Qa', {}, 400], ['market/prod@me', { from: 'prod' }, 400], ['market/prod@me', { inherit: false }, 400], ['market/qa', { from: 'Prod', inherit: true }, 400],
   ];
   for (const [path, input, expected] of shapes) assert.equal((await call('bo-cli', 'PUT', `/projects/${path}`, input))[0], expected, `${path} ${JSON.stringify(input)}`);

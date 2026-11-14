@@ -1,23 +1,18 @@
 import { randomUUID } from 'node:crypto';
 
-import { UNWRITTEN_FORK_MS } from '@coffre/core/access';
 import type { Queryable, Transaction } from '@coffre/db';
-import { isUniqueViolation } from '@coffre/db/dialect';
 import { environments, projects } from '@coffre/db/schema';
 
-import { deletionScope, eraseVersions, forksOf, insert, liveEnvironment, resolvePath, tombstoneSlug, update, type Doomed, type ResolvedPath } from '../db/queries.ts';
+import { deletionScope, eraseVersions, forksOf, resolvePath, tombstoneSlug, update, type Doomed, type ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
 import { allowed, type ApiContext, audited, denied, missing, Refusal, requireInstance, through, vaultCredential, withRefusals } from './context.ts';
-import { conflict, forbidden, notFound, vaultRefused } from './errors.ts';
+import { conflict, forbidden, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
-import { protectedFor } from './roles.ts';
 import { endReferences, referencesAt } from './references.ts';
 
-// 0.14's places, what is left of them: deleting a place for good, and making a fork's environment
-// (forks.ts), the source for those changes until the vault makes them. Lists and every other change of a
-// project or an environment are served on the 0.16 contract (routes/places.ts).
-
-const iso = (value: Date | null) => value?.toISOString() ?? null;
+// 0.14's places, what is left of them: deleting a place for good, the source for that change until the vault
+// makes it. Lists and every other change of a project or an environment are served on the 0.16 contract
+// (routes/places.ts).
 
 export type PlaceView = {
   slug: string;
@@ -27,94 +22,6 @@ export type PlaceView = {
 };
 /** An environment's: whether it is protected too, a personal config as its parent is. */
 export type EnvironmentView = PlaceView & { protected: boolean };
-
-function slugTaken(what: 'project' | 'environment', slug: string): Error {
-  return conflict(`a ${what} named "${slug}" already exists`);
-}
-
-/**
- * The place a request names, resolved again under the log's head, which
- * every change to a place takes first. The router resolved it before the
- * transaction: one deleted since, or re-slugged, is no longer at that path,
- * and a change by its id would undo the deletion's tombstone.
- */
-async function stillThere(tx: Transaction, place: ResolvedPath): Promise<ResolvedPath> {
-  const { project, environment } = place;
-  const now = await resolvePath(tx, { project: project.slug, environment: environment?.slug });
-  if (now === null || now.project.id !== project.id) throw notFound(`no project "${project.slug}"`);
-  if (environment !== null && now.environment?.id !== environment.id) {
-    throw notFound(`no environment "${project.slug}/${environment.slug}"`);
-  }
-  return now;
-}
-
-/**
- * Create an environment unless it exists. Needs `environment.manage` on the
- * project. A fork (forks.ts) creates it this way, and its entry says which
- * environment it forks.
- */
-export async function putEnvironment(
-  ctx: ApiContext,
-  place: ResolvedPath,
-  slug: string,
-  input: { name?: string },
-  {
-    from,
-    parentId = null,
-    id = randomUUID(),
-    protectedAt,
-  }: {
-    from?: string;
-    parentId?: string | null;
-    /** Its id, made before it is: a fork's, which the vault protects first (`protectIds`), the request going on as of that. */
-    id?: string;
-    /** When the vault protected that id, for a fork of a protected environment. */
-    protectedAt?: number;
-  } = {},
-): Promise<{ environment: EnvironmentView; created: boolean }> {
-  const { project, environment } = place;
-  const name = input.name ?? slug;
-  if (environment !== null) {
-    const existing = { slug, name: environment.name, archivedAt: iso(environment.archivedAt), protected: protectedFor(ctx.caller, environment) };
-    return { environment: existing, created: false };
-  }
-  return audited(ctx, async (tx, log) => {
-    // The project as it is under the head: archived, or deleted, since the router found it, it takes nothing new.
-    if ((await stillThere(tx, place)).project.archivedAt !== null) {
-      throw new Refusal(
-        conflict(`${project.slug} is archived; restore it before adding environments`),
-        denied(ctx, 'environment.create', 'project_archived', {
-          projectId: project.id,
-          metadata: { environmentSlug: slug },
-        }),
-      );
-    }
-    // A protected fork's row comes well within the ten minutes the policy keeps its id without one (`UNWRITTEN_FORK_MS`): later,
-    // the policy may have dropped it, and the row would protect it again with no change any request is fenced on.
-    if (protectedAt !== undefined && Date.now() - protectedAt > UNWRITTEN_FORK_MS / 2) {
-      throw conflict(`${project.slug}/${slug} took too long to fork: fork again`);
-    }
-    // The parent too: archived or deleted since the fork checked it, it is no parent.
-    if (parentId !== null && !(await liveEnvironment(tx, parentId))) {
-      throw new Refusal(
-        conflict(`${project.slug}/${from} was archived or deleted meanwhile: it is no parent`),
-        denied(ctx, 'environment.create', 'parent_archived', { projectId: project.id, metadata: { environmentSlug: slug, from } }),
-      );
-    }
-    try {
-      await insert(tx, environments, { id, projectId: project.id, slug, name, parentId });
-    } catch (error) {
-      if (isUniqueViolation(error)) throw slugTaken('environment', slug);
-      throw error;
-    }
-    log.push(allowed(ctx, 'environment.create', {
-      projectId: project.id,
-      environmentId: id,
-      metadata: { slug, name, ...(from === undefined ? {} : { from }), ...(parentId === null ? {} : { inherits: from }) },
-    }));
-    return { environment: { slug, name, archivedAt: null, protected: protectedFor(ctx.caller, { id }) }, created: true };
-  });
-}
 
 /**
  * Delete a personal config for good: its owner may, and the project's

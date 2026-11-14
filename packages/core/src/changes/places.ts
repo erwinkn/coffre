@@ -16,7 +16,7 @@ export type PlacesAnswers = {
    * for it, which only a list for deletion shows. A personal config is
    * `protected` as the environment it is a config of is.
    */
-  'environment.create': { id: string; slug: string; protected: boolean };
+  'environment.create': { id: string; slug: string; protected: boolean; forked?: Forked };
   /** The projects it filed, by slug. */
   'folder.refile': { moved: string[] };
 } & { [K in ProjectEdit['op']]: ProjectEdited } & { [K in EnvironmentEdit['op']]: EnvironmentEdited };
@@ -39,8 +39,9 @@ export type ProjectCreate = {
  * shaped as a project's and none of a project's pages (`PROJECT_PAGES`).
  * With `parent`, a fork that inherits from that environment, live, never
  * a personal config, which the caller reads, and which inherits from two
- * at most, so that the fork inherits from three. A fork of a protected
- * environment is protected, whatever `protected` says.
+ * at most, so that the fork inherits from three; with `copy`, a fork that
+ * copies one (`EnvironmentCopy`). A fork of a protected environment is
+ * protected, whatever `protected` says.
  *
  * With `mine`, the caller's personal config of `environment` instead: a
  * person's, who reads or uses it, live, never a personal config itself,
@@ -48,9 +49,42 @@ export type ProjectCreate = {
  * made here, and it is protected as its environment is, through it.
  */
 export type EnvironmentCreate = { op: 'environment.create'; project: string; environment: string } & (
-  | { mine: false; parent: string | null; protected: boolean }
+  | { mine: false; parent: string | null; protected: boolean; copy?: EnvironmentCopy }
   | { mine: true }
 );
+
+/**
+ * A fork that copies (docs/design/forking.md, "Forks"): with `copy`, the
+ * new environment inherits from nothing (`parent` null) and holds, made in
+ * the same change, each key `from` reads now, as a use of it finds them:
+ * its own and those it inherits, each from the nearest environment that
+ * holds it or dismissed it, with the folder it is filed in there, and none
+ * of its history. A key with no value, a reference broken, is left out.
+ * Who forks manages the project's environments and reads `from`, and each
+ * environment above it a key comes from (`parent_unreadable`); `from` is a
+ * live environment of the project, no personal config, whose chain stands
+ * (`broken_chain`).
+ *
+ * Each key is a copy of its value by default: the vault opens the version
+ * and seals it again as the new key's first version, and nobody else holds
+ * it. It is kept as it was, plain, a secret or sensitive, and its first
+ * date is its source's; it has no recipe and is in no pair, as one typed.
+ * With `references`, each key is a reference instead, one hop, to where its
+ * value is held: the parent's key, a key it inherits, or a reference's
+ * source. That is a reference made, as `secret.write` makes one: its
+ * forker reads the source where it is held, by their own grants, and uses
+ * it there too if it is sensitive. A key whose source they do not is
+ * copied, and named in `copied`. A sensitive value reached through a
+ * reference is never copied, whatever is asked: a copy would hold it under
+ * this project, which another project's value is not. It stays a reference
+ * to its source, which its forker must be able to make, or the fork is
+ * refused, `no_access`. A workload copies or refers to no value it only
+ * uses where it is held (`use_only`).
+ */
+export type EnvironmentCopy = { from: string; references: boolean };
+
+/** What a fork that copies made: how many keys, how many of them references, and those copied where references were asked for. */
+export type Forked = { keys: number; references: number; copied: string[] };
 
 /**
  * A project edited, archived or not, by whoever manages it

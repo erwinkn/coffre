@@ -1,4 +1,4 @@
-import type { Called, EnvironmentEdit, EnvironmentEdited, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
+import type { Called, EnvironmentEdit, EnvironmentEdited, Forked, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
 import { ownsProject, runsInstance, type Permission } from '@coffre/core/access';
 import { displayName, environmentSlug, folderName, personalOf, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
@@ -37,6 +37,18 @@ const notServed = (what: string) => new ApiError('not_implemented', `${what} is 
 const lists = (who: Called, place: ReturnType<typeof placeOf>) => can(who, 'secret.read', place) || can(who, 'secret.use', place);
 
 type Environment = PlaceRow['environments'][number];
+
+/**
+ * An environment made, as 0.14 answered it: `created` always, since one
+ * that is there is refused. `forked` says what a fork made: whether it
+ * inherits, and for a copy how many keys, how many of them references, and
+ * those copied where references were asked for (`Forked` in @coffre/core).
+ */
+type EnvironmentMade = {
+  environment: { slug: string; name: string; archivedAt: string | null; protected: boolean };
+  created: boolean;
+  forked: null | (Forked & { from: string; inherits: boolean });
+};
 
 /** A project's environment as the projects' list shows it: `dev@me` for the caller's own personal config, which only they see. */
 type Listed = {
@@ -188,15 +200,17 @@ export const placeRoutes = {
 
   /**
    * Make an environment, by whoever manages its project's environments; with
-   * `from` and `inherit`, a fork that inherits from that environment, live,
-   * by one who reads it too. `market/dev@me` makes the caller's personal
-   * config of dev: a person's, who reads or uses dev. One that is there is
-   * refused, `exists`. A fork that copies values, or holds references to
-   * its parent's, is not served yet.
+   * `from`, a fork of that environment, live, by one who reads it too: with
+   * `inherit`, one that inherits from it; otherwise one that holds, made in
+   * the same change, a copy of each key it reads now, or with `references`
+   * a reference to where each is held where the forker may make one
+   * (`EnvironmentCopy` in @coffre/core). `market/dev@me` makes the caller's
+   * personal config of dev: a person's, who reads or uses dev. One that is
+   * there is refused, `exists`.
    */
   ...route('PUT /projects/:project/:environment', {
     input: z.object({ name: displayName.optional(), from: slug.optional(), references: z.boolean().optional(), inherit: z.boolean().optional() }),
-    run: async (ctx, { params, input }) => {
+    run: async (ctx, { params, input }): Promise<EnvironmentMade> => {
       const { project } = params;
       const of = personalOf(params.environment);
       const path = `${project}/${params.environment}`;
@@ -210,12 +224,12 @@ export const placeRoutes = {
       const { from } = input;
       if (from === undefined && (input.inherit === true || input.references === true)) throw badRequest('a fork names the environment it forks: `from`');
       if (input.inherit === true && input.references === true) throw badRequest('a fork inherits its parent, or holds references to it: not both');
-      if (from !== undefined && input.inherit !== true) throw notServed(`a fork that ${input.references === true ? 'holds references to' : 'copies'} its parent's values (\`inherit\` makes one that inherits them)`);
-      const made = await changed(ctx, { op: 'environment.create', project, environment: params.environment, mine: false, parent: from ?? null, protected: false }, path);
+      const copy = from === undefined || input.inherit === true ? undefined : { from, references: input.references === true };
+      const made = await changed(ctx, { op: 'environment.create', project, environment: params.environment, mine: false, parent: copy === undefined ? (from ?? null) : null, protected: false, ...(copy === undefined ? {} : { copy }) }, path);
       return {
         environment: { slug: params.environment, name: params.environment, archivedAt: null, protected: made.protected },
         created: true,
-        forked: from === undefined ? null : { from, keys: 0, references: 0, copied: [], inherits: true },
+        forked: from === undefined ? null : { from, ...(made.forked ?? { keys: 0, references: 0, copied: [] }), inherits: copy === undefined },
       };
     },
   }),

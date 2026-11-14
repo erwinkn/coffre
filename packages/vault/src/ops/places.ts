@@ -1,16 +1,17 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
-import { allows, makesProjects, ownsProject } from '@coffre/core/access';
+import { allows, makesProjects, ownsProject, useOnly } from '@coffre/core/access';
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
 import { PROJECT_PAGES } from '@coffre/core/pages';
-import type { Answers, EnvironmentCreate, EnvironmentEdit, EnvironmentEdited, FolderRefile, PlacesChanges, Presented, ProjectCreate, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
-import { environments, projects, secrets } from '@coffre/db/schema';
+import type { Answers, EnvironmentCopy, EnvironmentCreate, EnvironmentEdit, EnvironmentEdited, FolderRefile, Forked, PlacesChanges, Presented, ProjectCreate, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
+import { dismissedKeys, environments, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { callerParts, live, refusedTo, type Asking } from '../caller.ts';
-import { part, put, type Operation, type Parts, type Plan, type Refusal, type Seen } from '../change.ts';
+import { part, put, type Operation, type Part, type Parts, type Plan, type Refusal, type Seen, type Unsealed, type Value, type Write } from '../change.ts';
 import type { Said } from '../entry.ts';
 import type { Fresh, Row, Sealed } from '../rows.ts';
+import { natureOf } from '../value.ts';
 import type { Deciding } from '../vault.ts';
 import { asking, NOWHERE } from './asking.ts';
 import type { Operations } from './index.ts';
@@ -27,12 +28,28 @@ const MAX_PARENTS = 3;
 /** A project's id by its slug, as SQL: the set `callerParts` reads the caller's holdings in. */
 const projectOf = (slug: string) => sql`(SELECT p.id FROM projects p WHERE p.slug = ${slug})`;
 
-/** The environment of `project` by its slug, and those it inherits from, nearest first, `depth` of them at most. */
-const chainFrom = (project: SQL, slug: string, depth: number) =>
-  part(environments, sql`${environments.id} IN (WITH RECURSIVE chain (id, parent_id, depth) AS (
+/** The ids of the environment of `project` by its slug, and of those it inherits from, `depth` of them at most. */
+const chainIds = (project: SQL, slug: string, depth: number) => sql`(WITH RECURSIVE chain (id, parent_id, depth) AS (
     SELECT e.id, e.parent_id, 0 FROM environments e WHERE e.project_id = ${project} AND e.slug = ${slug}
     UNION SELECT e.id, e.parent_id, chain.depth + 1 FROM environments e JOIN chain ON e.id = chain.parent_id WHERE chain.depth < ${depth}
-  ) SELECT id FROM chain)`);
+  ) SELECT id FROM chain)`;
+
+/** The environment of `project` by its slug, and those it inherits from, nearest first, `depth` of them at most. */
+const chainFrom = (project: SQL, slug: string, depth: number) => part(environments, sql`${environments.id} IN ${chainIds(project, slug, depth)}`);
+
+/**
+ * An id for a row a decision makes, of a number it cannot know before its
+ * read: drawn from `seed`, drawn before it, and what the row is. A decision
+ * draws nothing, so made again it makes the same ids. Shaped as a version 4
+ * UUID, which Postgres keeps as written.
+ */
+function drawn(seed: Buffer, what: string): string {
+  const hash = createHash('sha256').update(seed).update(what).digest();
+  hash[6] = (hash[6]! & 0x0f) | 0x40;
+  hash[8] = (hash[8]! & 0x3f) | 0x80;
+  const hex = hash.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 const NO_ACCESS: Refusal = { refused: 'no_access' };
 
@@ -77,40 +94,62 @@ function projectCreate(input: Presented & ProjectCreate, vault: Deciding): Opera
 }
 
 /**
- * An environment in a project, a fork that inherits from one, or the
- * caller's personal config of one (docs/design/forking.md): what
- * `EnvironmentCreate` says. Forks that copy their parent's values come
- * when the engine copies a stored value.
+ * An environment in a project, a fork that inherits from one or copies
+ * one, or the caller's personal config of one (docs/design/forking.md):
+ * what `EnvironmentCreate` says. A fork that copies is made in this one
+ * change, with its keys: each value copied is opened and sealed again by
+ * the engine (`Value`'s `copy`), as a restore's is, and the decision never
+ * holds it. Its keys are resolved as a use resolves them (use.ts): the
+ * nearest environment of `from`'s chain that holds a key live or dismissed
+ * it settles it.
  */
 function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding): Operation<Parts, Answers['environment.create']> {
   const shown = presented(input);
   const { project: projectSlug, environment: named, mine } = input;
+  const copy = mine ? undefined : input.copy;
   const parentSlug = mine ? named : input.parent;
-  if (!text(projectSlug) || typeof mine !== 'boolean' || (mine ? !text(named) : !environmentSlug(named) || !(parentSlug === null || text(parentSlug)) || typeof input.protected !== 'boolean')) {
-    throw new TypeError("an environment is made in a project by its slug, of 1 to 63 of a-z, 0-9 and -, none of a project's pages, with the environment it inherits from or none, and whether it is protected; or as the caller's personal config of one");
+  if (!text(projectSlug) || typeof mine !== 'boolean' || (mine ? !text(named) || (input as { copy?: unknown }).copy !== undefined : !environmentSlug(named) || !(parentSlug === null || text(parentSlug)) || typeof input.protected !== 'boolean' || !copies(copy, parentSlug))) {
+    throw new TypeError("an environment is made in a project by its slug, of 1 to 63 of a-z, 0-9 and -, none of a project's pages, with the environment it inherits from, the one it copies or neither, and whether it is protected; or as the caller's personal config of one");
   }
   const id = randomUUID();
+  // The ids of a copy's keys and values, which the read says how many of: drawn from this.
+  const seed = randomBytes(32);
   // A personal config's slug is never shown but to delete it: its environment's, and enough at random that two never meet.
   const slug = mine ? `${named.slice(0, 48)}-p-${randomBytes(4).toString('hex')}` : named;
+  // The environment read by its slug: the one it inherits from, the one it copies, or none.
+  const baseSlug = copy?.from ?? parentSlug;
 
   const project = projectOf(projectSlug);
   const principal = sql`(SELECT c.principal FROM credentials c WHERE c.token_hash = decode(${shown.token.toString('hex')}, 'hex'))`;
+  // A copy's: the environments whose keys it copies, and the sources of the references among them, live, which may be in other projects.
+  const layers = copy === undefined ? NONE : chainIds(project, copy.from, MAX_PARENTS);
+  const referred = sql`(SELECT s.source_id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id IN ${layers} AND s.archived_at IS NULL AND s.source_id IS NOT NULL)`;
   const read = {
-    ...callerParts(shown.token, project),
+    // A reference's source may be in another project, whose grants and protections the caller is weighed by too.
+    ...callerParts(shown.token, copy === undefined ? project : sql`(SELECT p.id FROM projects p WHERE p.slug = ${projectSlug} UNION SELECT s.project_id FROM secrets s WHERE s.id IN ${referred})`),
     project: part(projects, sql`${projects.slug} = ${projectSlug}`),
-    // The environment it inherits from, and those that one does, nearest first: one more than may be, so that a chain too long shows.
-    chain: parentSlug === null ? part(environments, sql`false`) : chainFrom(project, parentSlug, MAX_PARENTS),
+    // The environment it inherits from or copies, and those that one does, nearest first: one more than may be, so that a chain too long shows.
+    chain: baseSlug === null ? part(environments, sql`false`) : chainFrom(project, baseSlug, MAX_PARENTS),
+    // Every key of those environments, archived ones too: a row edited behind the vault may be a key, live or not, and is not guessed at.
+    held: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} IN ${layers}`),
+    dismissed: part(dismissedKeys, sql`${dismissedKeys.environmentId} IN ${layers}`),
+    source: part(secrets, sql`${secrets.id} IN ${referred}`),
+    sourcePlace: part(environments, sql`${environments.id} IN (SELECT s.environment_id FROM secrets s WHERE s.id IN ${referred})`),
+    sourceProject: part(projects, sql`${projects.id} IN (SELECT s.project_id FROM secrets s WHERE s.id IN ${referred})`),
+    // The value each live key holds now, or its source does.
+    version: part(secretVersions, sql`(${secretVersions.secretId}, ${secretVersions.version}) IN (SELECT s.id, s.current_version FROM secrets s
+      WHERE ((s.project_id = ${project} AND s.environment_id IN ${layers} AND s.archived_at IS NULL) OR s.id IN ${referred}) AND s.current_version IS NOT NULL)`),
     // What would hold its place: the slug in the project, and for a personal config, the caller's of that environment.
     taken: part(environments, sql`(${environments.projectId} = ${project} AND ${environments.slug} = ${slug})${mine
       ? sql` OR (${environments.parentId} = (SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${named}) AND ${environments.owner} = ${principal} AND strpos(${environments.slug}, '~') = 0)`
       : sql``}`),
   };
-  /** The project named, the environment it inherits from and the one already under its slug, as far as they are there: undefined for one that is not, null for no parent asked. */
+  /** The project named, the environment it inherits from or copies and the one already under its slug, as far as they are there: undefined for one that is not, null for none asked. */
   const placed = (seen: Seen<typeof read>) => {
     const place = seen.project.find((row) => row.slug === projectSlug && live(row));
     return {
       place,
-      parent: place === undefined || parentSlug === null ? null : seen.chain.find((row) => row.projectId === place.id && row.slug === parentSlug && live(row) && row.owner === null),
+      parent: place === undefined || baseSlug === null ? null : seen.chain.find((row) => row.projectId === place.id && row.slug === baseSlug && live(row) && row.owner === null),
       there: place === undefined ? undefined : seen.taken.find((row) => row.projectId === place.id && row.slug === slug && live(row)),
     };
   };
@@ -118,13 +157,13 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
     read,
     // A personal config is named by the environment it is of, the page its maker was on; anything else by its own slug, and its parent's if it has one.
     denied: refusedTo('environment.create', shown, vault.workloads, {
-      where: { project: projectSlug, environment: named, ...(mine || parentSlug === null ? {} : { parent: parentSlug }) },
+      where: { project: projectSlug, environment: named, ...(mine || parentSlug === null ? {} : { parent: parentSlug }), ...(copy === undefined ? {} : { from: copy.from }) },
       objects: (seen: Seen<typeof read>) => {
         const { place, parent, there } = placed(seen);
         return [...(place === undefined ? [] : [`project:${place.id}`]), ...(there === undefined ? [] : [`environment:${there.id}`]), ...(parent == null ? [] : [`environment:${parent.id}`])];
       },
     }),
-    decide(seen: Seen<typeof read>, at: number) {
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       const { place, parent } = placed(seen);
@@ -135,28 +174,149 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
         if (!caller.may('secret.read', parent!) && !caller.may('secret.use', parent!)) return { refused: 'no_access' };
       } else {
         if (!allows(caller.holds, 'environment.manage', { projectId: place.id })) return { refused: 'no_access' };
-        // A fork reads its parent's values from its first moment: who makes one reads them too.
+        // A fork reads its parent's values from its first moment, and a copy holds them: who makes either reads them too.
         if (parent !== null && !caller.may('secret.read', parent)) return { refused: 'no_access' };
       }
-      const chained = parent === null ? null : chainOf(parent, seen.chain);
+      // A copy inherits from nothing: its source's chain is read as a use reads it, below.
+      const chained = parent === null || copy !== undefined ? null : chainOf(parent, seen.chain);
       if (chained !== null && chained !== 'ok') return { refused: chained };
       if (seen.taken.some((row) => (row.projectId === place.id && row.slug === slug) || (mine && row.parentId === parent!.id && row.owner === caller.principal))) return { refused: 'exists' };
 
+      // A fork of a protected environment is protected, a copy as one that inherits.
       const guarded = !mine && (input.protected || parent?.protected === true);
-      const row = { id, projectId: place.id, slug, name: slug, createdAt: new Date(at), archivedAt: null, parentId: parent?.id ?? null, owner: mine ? caller.principal : null, protected: guarded, frozenCredentials: [] };
+      const row = { id, projectId: place.id, slug, name: slug, createdAt: new Date(at), archivedAt: null, parentId: copy === undefined ? (parent?.id ?? null) : null, owner: mine ? caller.principal : null, protected: guarded, frozenCredentials: [] };
+      const forked = copy === undefined ? undefined : copied(seen, unsealed, { caller, place, from: parent!, made: row, copy, seed, at });
+      if (forked !== undefined && 'refused' in forked) return forked;
       return {
-        writes: [put(environments, row)],
+        // The environment first, which its keys are made in.
+        writes: [put(environments, row), ...(forked?.writes ?? [])],
+        values: forked?.values ?? [],
         entry: {
           ...by(caller, shown),
           action: 'environment.create',
-          objects: [`project:${place.id}`, `environment:${id}`, ...(parent === null ? [] : [`environment:${parent.id}`]), `principal:${caller.principal}`, `credential:${caller.credential.id}`],
-          detail: { slug, protected: guarded, ...(parent === null ? {} : mine ? { personal: parent.slug } : { inherits: parent.slug }) },
+          objects: [...new Set([`project:${place.id}`, `environment:${id}`, ...(parent === null ? [] : [`environment:${parent.id}`]), `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...(forked?.objects ?? [])])],
+          // A copy's: `from`, the environment it copies, whether references were asked for, and each key made, as `secret.write` says one.
+          detail: { slug, protected: guarded, ...(parent === null ? {} : mine ? { personal: parent.slug } : copy === undefined ? { inherits: parent.slug } : { from: parent.slug, references: copy.references, keys: forked!.lines }) },
         },
         // A personal config is protected as its environment is, through it: its own row never says so.
-        answer: { id, slug, protected: mine ? parent!.protected : guarded },
+        answer: { id, slug, protected: mine ? parent!.protected : guarded, ...(forked === undefined ? {} : { forked: forked.forked }) },
       };
     },
   };
+}
+
+/** What reads nothing, as the set of environments a making that copies none reads keys in. */
+const NONE = sql`(SELECT NULL::uuid WHERE false)`;
+
+/** Whether a making asks for a copy as the contract says one: of an environment by its slug, references or not, and so with no parent. */
+const copies = (copy: unknown, parent: string | null): copy is EnvironmentCopy | undefined =>
+  copy === undefined || (typeof copy === 'object' && copy !== null && text((copy as EnvironmentCopy).from) && typeof (copy as EnvironmentCopy).references === 'boolean' && parent === null);
+
+/** The rows a fork that copies reads beyond any making's. */
+type CopyParts = {
+  chain: Part<typeof environments>;
+  held: Part<typeof secrets>;
+  dismissed: Part<typeof dismissedKeys>;
+  source: Part<typeof secrets>;
+  sourcePlace: Part<typeof environments>;
+  sourceProject: Part<typeof projects>;
+  version: Part<typeof secretVersions>;
+};
+
+/**
+ * A fork's keys, copied or made references (`EnvironmentCopy`): each key
+ * `from` reads now, as a use finds it, in the environment `made`. The
+ * rows they are decided on are each the vault's, or none is guessed past
+ * (`unreadable`): a key, a dismissal or a source edited behind it may be
+ * what the fork would hold.
+ */
+function copied(
+  seen: Seen<CopyParts>,
+  unsealed: Unsealed<CopyParts>,
+  { caller, place, from, made, copy, seed, at }: { caller: Asking; place: Row<typeof projects>; from: Row<typeof environments>; made: Fresh<typeof environments>; copy: EnvironmentCopy; seed: Buffer; at: number },
+): Refusal | { writes: Write[]; values: Value[]; lines: Record<string, unknown>[]; objects: string[]; forked: Forked } {
+  if (unsealed.chain + unsealed.held + unsealed.dismissed + unsealed.source + unsealed.sourcePlace + unsealed.sourceProject > 0) return { refused: 'unreadable' };
+  // `from`, then what it inherits from, nearest first, as a use reads them: a parent gone, archived or out of the project cuts the chain.
+  const layers = [from];
+  for (let last = from; last.parentId !== null; ) {
+    const above = seen.chain.find((row) => row.id === last.parentId);
+    if (above === undefined || !live(above) || above.projectId !== place.id || layers.length > MAX_PARENTS) return { refused: 'broken_chain' };
+    layers.push(above);
+    last = above;
+  }
+  // Each live key by where it is, of this project: a row is held to what it is used for, not to the conditions it was read by.
+  const keyed = new Map(seen.held.filter((row) => row.archivedAt === null && row.projectId === place.id).map((row) => [`${row.environmentId} ${row.key}`, row]));
+  const off = new Set(seen.dismissed.filter((row) => row.restoredAt === null).map((row) => `${row.environmentId} ${row.key}`));
+  const sources = new Map(seen.source.map((row) => [row.id, row]));
+  const versions = new Map(seen.version.map((row) => [`${row.secretId} ${row.version}`, row]));
+  const names = [...new Set([...keyed.values()].filter((row) => layers.some((layer) => layer.id === row.environmentId)).map((row) => row.key))].sort();
+  const now = new Date(at);
+  const writes: Write[] = [];
+  const values: Value[] = [];
+  const lines: Record<string, unknown>[] = [];
+  const objects = new Set<string>();
+  const forked: Forked = { keys: 0, references: 0, copied: [] };
+  for (const key of names) {
+    // The nearest environment that holds the key live, or dismissed it: one that dismissed it passes nothing down.
+    let asked: Row<typeof secrets> | undefined;
+    let layer = from;
+    for (const each of layers) {
+      asked = keyed.get(`${each.id} ${key}`);
+      layer = each;
+      if (asked !== undefined || off.has(`${each.id} ${key}`)) break;
+    }
+    if (asked === undefined) continue;
+    // A key inherited is read where it is held: the forker reads that environment too.
+    if (!caller.may('secret.read', layer)) return { refused: 'parent_unreadable' };
+    // Where the value is held: the key, or the source a reference reads, one hop, live, in a live place and no personal config.
+    let held = asked;
+    let where = layer;
+    if (asked.sourceId !== null) {
+      const source = sources.get(asked.sourceId);
+      const there = source && seen.sourcePlace.find((row) => row.id === source.environmentId && row.projectId === source.projectId);
+      const whose = source && seen.sourceProject.find((row) => row.id === source.projectId);
+      if (source === undefined || source.archivedAt !== null || source.sourceId !== null || there === undefined || !live(there) || there.owner !== null || whose === undefined || !live(whose)) return { refused: 'unreadable' };
+      held = source;
+      where = there;
+    }
+    // A key with no value, a reference broken, has nothing to copy; a source with none is a reference that reads nothing.
+    if (held.currentVersion === null) {
+      if (held === asked) continue;
+      return { refused: 'unreadable' };
+    }
+    // Its value, labelled as its row says it, or none: the engine holds the version to its label as it opens it.
+    const version = versions.get(`${held.id} ${held.currentVersion}`);
+    if (version === undefined || natureOf(version) !== held.nature) return { refused: 'unreadable' };
+    const nature = held.nature;
+    // A workload moves no value it only uses where it is held to a place whose keys it may read: neither by a copy nor a reference.
+    if (nature !== 'plain' && useOnly(caller.holds, { projectId: held.projectId, environmentId: held.environmentId, secretId: held.id })) return { refused: 'use_only' };
+    // A reference is made as `secret.write` makes one: its maker reads the source where it is held, and uses it there if it is sensitive.
+    const refers = caller.may('secret.read', where) && (nature !== 'sensitive' || caller.may('secret.use', where));
+    // A sensitive value of another key's, reached through a reference, stays a reference to it: a copy would hold it where its project does not.
+    const kept = held !== asked && nature === 'sensitive';
+    if (kept && !refers) return { refused: 'no_access' };
+    const secret = drawn(seed, `secret ${key}`);
+    const row = { id: secret, projectId: place.id, environmentId: made.id, key, createdAt: now, updatedAt: now, archivedAt: null, folder: asked.folder, recipe: null, pairId: null, pairHalf: null };
+    if ((copy.references || kept) && refers) {
+      writes.push(put(secrets, { ...row, versions: 0, currentVersion: null, sourceId: held.id, nature: null }));
+      lines.push({ key, secret, refers: held.id, ...(asked.folder === null ? {} : { folder: asked.folder }) });
+      forked.references += 1;
+    } else {
+      writes.push(put(secrets, { ...row, versions: 1, currentVersion: 1, sourceId: null, nature }));
+      // Kept as it was, and opened and sealed again by the engine: nobody else holds it. Its first date is its source's, as a
+      // restore's is: its forker did not write it (the member report's `created_at = first_written_at`), and never saw it.
+      values.push({ version: { id: drawn(seed, `version ${key}`), secretId: secret, version: 1, createdAt: now, createdBy: caller.principal, sensitive: nature === 'sensitive', firstWrittenAt: version.firstWrittenAt, plaintext: nature === 'plain' ? version.plaintext : null }, copy: version });
+      lines.push({ key, secret, version: 1, nature, copied: held.id, ...(asked.folder === null ? {} : { folder: asked.folder }) });
+      if (copy.references) forked.copied.push(key);
+    }
+    forked.keys += 1;
+    // Each key's pages find the fork, and a source elsewhere's place.
+    objects.add(`secret:${secret}`);
+    objects.add(`secret:${held.id}`);
+    if (where.projectId !== place.id) objects.add(`project:${where.projectId}`);
+    if (held !== asked) objects.add(`environment:${where.id}`);
+  }
+  return { writes, values, lines, objects: [...objects], forked };
 }
 
 /**
