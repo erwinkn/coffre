@@ -300,6 +300,13 @@ test("`GET /me` says who sets up service accounts, as the instance's setting let
   // A setting that names billing alone is told to Ed, who does not reach it, as naming none of his.
   assert.equal((await call('cy-cli', 'PUT', '/settings', { serviceAccounts: { projects: { only: ['billing'] } } }))[0], 200);
   assert.deepEqual(await me('ed-cli'), [false, { projects: { only: [] }, environments: 'all' }]);
+  // Dee's Developer role reaches every project, so the statement reads billing; scoped to dev environments, she sees market alone,
+  // and is told billing by no name (D95).
+  assert.equal((await call('cy-cli', 'PUT', `/members/${dee}`, { role: 'developer', scope: { projects: 'all', environments: { only: ['dev'] } } }))[0], 200);
+  // The vault remembers a caller for a while: Dee asks anew.
+  world.memory.callers.clear();
+  assert.deepEqual(((await call('dee-cli', 'GET', '/projects'))[1] as { projects: { slug: string }[] }).projects.map((project) => project.slug), ['market']);
+  assert.deepEqual(await me('dee-cli'), [false, { projects: { only: [] }, environments: 'all' }]);
   // Nowhere: nobody who only holds access sets one up; whoever manages access somewhere still does, as the vault lets them.
   assert.equal((await call('cy-cli', 'PUT', '/settings', { serviceAccounts: { projects: { only: [] } } }))[0], 200);
   assert.deepEqual((await me('ada-cli'))[0], false);

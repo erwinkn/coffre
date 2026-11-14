@@ -3,7 +3,7 @@ import { runsInstance, type Filter, type Scope } from '@coffre/core/access';
 import type { Called } from '@coffre/core/vault';
 
 import { placesWithSetup, type PlaceRow } from '../../db/queries/places.ts';
-import { canAnywhere, permissionsAt, placeOf, projectsReached, settingOf, setsUpAnywhere } from '../caller.ts';
+import { canAnywhere, permissionsAt, placeOf, projectsReached, seesProject, settingOf, setsUpAnywhere } from '../caller.ts';
 import { mcpOf, resourceOf } from '../../mcp/oauth.ts';
 import { route } from '../route.ts';
 import { scopePaths } from './tokens.ts';
@@ -31,7 +31,7 @@ export const meRoutes = {
    * instance's setting and, for a person who does not run the instance,
    * every project role: whether they set up service accounts
    * (`setsUpAnywhere`), and the setting (`serviceSetup`), projects by
-   * slug, those the caller reaches; none for a service account.
+   * slug, those the caller sees; none for a service account.
    *
    * A personal token is named (`personalToken`): its label, which the
    * vault's `caller` answers, and its scope by path, from the places read.
@@ -70,7 +70,8 @@ export const meRoutes = {
         runsInstance: runs,
         canReadAudit: canAnywhere(who, 'audit.read'),
         setsUpServices: setsUpAnywhere(who, setting, read.roles, known),
-        serviceSetup: setting === null ? null : scopeView(setting, known),
+        // Named among the projects the caller sees: those read may hold more (D95); whoever runs the instance sees them all.
+        serviceSetup: setting === null ? null : scopeView(setting, runs ? known : known.filter((project) => seesProject(who, project))),
         features: { mcp: mcp === null ? null : resourceOf(mcp.publicUrl), workloads: ctx.auth.mode === 'signin' && ctx.auth.signin.workloads !== null },
         personalToken: personalToken(who, known),
         credentialExpiresAt: who.credential.expiresAt,

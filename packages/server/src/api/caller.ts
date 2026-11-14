@@ -69,6 +69,17 @@ export function permissionsAt(who: Called, place: Place): Permission[] {
 }
 
 /**
+ * Whether the caller sees `project`, as `GET /projects` lists it: they hold
+ * something in it, on it or in one of its environments, someone else's
+ * personal config aside. What `projectsReached` reads may hold projects
+ * they see nothing in (0.14.7's `seesProject`).
+ */
+export function seesProject(who: Called, project: PlaceRow): boolean {
+  if (permissionsAt(who, placeOf(project, null)).length > 0) return true;
+  return project.environments.some((environment) => (environment.owner === null || environment.owner === who.principal) && permissionsAt(who, placeOf(project, environment)).length > 0);
+}
+
+/**
  * The projects the caller may reach or name, by id, or null for any: those
  * their scope lists, which `GET /me` names by slug, with those they may do
  * something in. On a scoped credential, its scope's: it does nothing
