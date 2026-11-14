@@ -151,7 +151,7 @@ test('a member brought back starts with no grant, in the generation their remova
   assert.equal(await uses('ex-new'), 'no_access', 'one of this membership, which holds nothing yet');
 });
 
-test('an Owner of the whole instance sets a person\'s role and its scope, and a use by them holds it within the vault\'s memory', async () => {
+test('an Owner of the whole instance sets a person\'s role and its scope, and a use by them holds it at once: a person\'s read is never remembered', async () => {
   assert.equal(await uses('eve-cli'), 'no_access');
   assert.deepEqual(await put('ada-cli', eve, 'developer'), as(false, 'developer'));
   const entry = await written();
@@ -161,9 +161,7 @@ test('an Owner of the whole instance sets a person\'s role and its scope, and a 
   world.tick(2000);
   assert.equal(await uses('eve-cli'), 'postgres://market');
   assert.deepEqual(await put('ada-cli', eve, 'developer', { projects: { only: ['billing'] }, environments: 'all' }), as(false, 'developer', { projects: { only: [billing.id] }, environments: 'all' }));
-  assert.equal(await uses('eve-cli'), 'postgres://market', 'within the memory, the read before');
-  world.tick(2000);
-  assert.equal(await uses('eve-cli'), 'no_access');
+  assert.equal(await uses('eve-cli'), 'no_access', 'at once, within what would be the memory');
   // An Owner steps down while another owns the whole instance.
   assert.deepEqual(await put('cy-cli', cy, 'admin'), as(false, 'admin'));
 });
@@ -241,7 +239,7 @@ test('a removed person the deployment names an Owner comes back as one, which on
   assert.deepEqual(await row(ex), { id: ex, status: 'active', role: 'owner', scope: null, generation: 1 });
 });
 
-test('a removal deletes the member\'s grants and moves their generation on, which ends their session within the vault\'s memory', async () => {
+test('a removal deletes the member\'s grants and moves their generation on, which ends their session at once', async () => {
   assert.equal(await uses('bo-cli'), 'postgres://market');
   assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 2 } });
   assert.deepEqual(await row(bo), { id: bo, status: 'removed', role: 'member', scope: null, generation: 1 });
@@ -251,9 +249,7 @@ test('a removal deletes the member\'s grants and moves their generation on, whic
   assert.deepEqual(named(entry), ['credentials read', 'grants dropped', 'grants dropped', 'principals read', 'principals read', 'principals read', 'principals read', 'principals replaced', 'roles read']);
   assert.deepEqual((entry.detail as { revoked: { role: string }[] }).revoked.map((grant) => grant.role), ['developer', 'developer']);
   assert.ok(entry.objects.includes(`project:${market.id}`), 'each project\'s log shows it');
-  assert.equal(await uses('bo-cli'), 'postgres://market', 'within the memory, the read before');
-  world.tick(2000);
-  assert.equal(await uses('bo-cli'), 'unauthenticated');
+  assert.equal(await uses('bo-cli'), 'unauthenticated', 'a person\'s read is never remembered: at once');
   // An Owner of the whole instance removes another, and anyone who runs it removes themselves.
   assert.deepEqual(await remove('ada-cli', cy), { answer: { revoked: 0 } });
   assert.deepEqual(await remove('fay-cli', fay), { answer: { revoked: 0 } });

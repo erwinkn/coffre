@@ -10,7 +10,7 @@ import { KekUnavailableError } from '@coffre/core/kek';
 
 import { memoryOf, peek, recall, read, answer, use, type Ask, type Value } from '../src/use.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
-import { amend, ask, binding, credential, dismissed, environment, grant, identity, instance, principal, project, rewrite, role, rows, secret, session, user, value, write } from './world.ts';
+import { amend, ask, binding, credential, dismissed, environment, grant, identity, instance, principal, project, rewrite, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
 
 const vault = await openTestVault();
 after(() => vault.close());
@@ -303,10 +303,11 @@ test('a version is given only as the nature its secret\'s row says: one that dis
 });
 
 test('within its memory a use reads nothing again, counted from the read; within a minute it logs nothing again, but for another purpose', async () => {
-  const asked = ask('ada', 'market/prod', ['FLAG']);
+  // A service's: a person's own reads are never remembered (the test below).
+  const asked = ask('ci', 'market/prod', ['FLAG']);
   assert.deepEqual(await got(asked), { FLAG: 'on' });
   // The credential's row deleted behind the vault: what was read still answers, for two seconds from the read.
-  await vault.owner.execute(sql`DELETE FROM credentials WHERE label = 'ada'`);
+  await vault.owner.execute(sql`DELETE FROM credentials WHERE label = 'ci'`);
   vault.tick(1999);
   assert.deepEqual(await got(asked), { FLAG: 'on' });
   assert.equal((await logged()).length, 1);
@@ -314,7 +315,7 @@ test('within its memory a use reads nothing again, counted from the read; within
   assert.equal(await got(asked), 'unauthenticated');
 
   // A read that takes its time is no fresher for it: its memory is dated when it read.
-  const slow = ask('cy', 'market/prod', ['FLAG']);
+  const slow = ask('ci-sensitive', 'market/prod', ['FLAG']);
   const found = await read(vault, slow);
   vault.tick(1500);
   assert.ok('values' in (await answer(vault, slow, found)));
@@ -338,8 +339,56 @@ test('within its memory a use reads nothing again, counted from the read; within
   // With no memory, every use reads.
   Object.assign(vault, { memory: memoryOf(0) });
   assert.deepEqual(await got(slow), { FLAG: 'on' });
-  await vault.owner.execute(sql`DELETE FROM credentials WHERE label = 'cy'`);
+  await vault.owner.execute(sql`DELETE FROM credentials WHERE label = 'ci-sensitive'`);
   assert.equal(await got(slow), 'unauthenticated');
+});
+
+test("a person's own read is never remembered, on any credential of theirs: they read back what they just wrote; a service's and a proxied use's are", async () => {
+  let statements = 0;
+  const db = new Proxy(vault.db, {
+    get(target, name, receiver) {
+      const member = Reflect.get(target, name, receiver) as unknown;
+      if (name !== 'execute' || typeof member !== 'function') return member;
+      return (...args: unknown[]) => ((statements += 1), (member as (...args: unknown[]) => unknown).apply(target, args));
+    },
+  });
+  const counted = { ...vault, db };
+  const place = { projectId: w.market.id, environmentId: w.prod.id, role: 'viewer' };
+  const account = identity(ada);
+  await write(vault, ...rows('identities', account), ...rows('credentials', credential('ada-browser', ada, { kind: 'browser', identityId: account.id }), credential('ada-pat', ada, { kind: 'personal', scope: scopeOf(place) }),
+    credential('ada-handle', ada, { kind: 'handle', scope: scopeOf(place), places: JSON.stringify([{ environmentId: w.prod.id, personal: false }]) })));
+  /** What the same ask, twice within the memory, costs the second time, in statements; and what it was given then. */
+  const twice = async (asked: Ask) => {
+    const first = await use(counted, asked);
+    assert.ok(!('refused' in first), JSON.stringify(first));
+    await rewrite(vault, w.database, `postgres://${asked.token.toString('hex').slice(0, 8)}`);
+    statements = 0;
+    const again = await use(counted, asked);
+    assert.ok(!('refused' in again));
+    return [statements > 0 ? 'read again' : 'from memory', again.values.find((item) => item.key === 'DATABASE_URL' && !('refused' in item)) !== undefined] as const;
+  };
+  const value = async (asked: Ask) => {
+    const answer = await use(vault, asked);
+    return 'refused' in answer ? answer.refused : (answer.values.find((item) => item.key === 'DATABASE_URL') as { value: Buffer }).value.toString();
+  };
+  // A person's session, browser or CLI, and their personal token: each reveal, run or compare reads anew.
+  for (const [label, purpose] of [['ada-browser', 'reveal'], ['ada', 'run'], ['ada-pat', 'compare'], ['ada', 'expose']] as const) {
+    vault.tick(60_000);
+    assert.deepEqual((await twice(ask(label, 'market/prod', ['DATABASE_URL'], { purpose })))[0], 'read again', `${label} ${purpose}`);
+    assert.equal(await value(ask(label, 'market/prod', ['DATABASE_URL'], { purpose })), `postgres://${tokenOf(label).toString('hex').slice(0, 8)}`, 'the value just written');
+  }
+  // A peek of theirs too.
+  vault.tick(60_000);
+  const peeked = ask('ada', 'market/prod', null, { purpose: 'run' });
+  await peek(counted, peeked);
+  statements = 0;
+  await peek(counted, peeked);
+  assert.deepEqual([statements, recall(vault, peeked)], [1, undefined]);
+  // A service's, a handle's and a person's session through the credential proxy (`use`) are answered from the memory: 0 statements.
+  for (const [label, purpose] of [['ci', 'run'], ['ada-handle', 'use'], ['ada', 'use']] as const) {
+    vault.tick(60_000);
+    assert.deepEqual((await twice(ask(label, 'market/prod', ['DATABASE_URL'], { purpose })))[0], 'from memory', `${label} ${purpose}`);
+  }
 });
 
 test('a memory decides again as of now: a credential that expires within it stops at once', async () => {
@@ -896,7 +945,8 @@ test('a fresh ask reads its rows now, never from the memory, and is remembered a
     },
   });
   const counted = { ...vault, db };
-  const asked = ask('ada', 'market/prod', ['DATABASE_URL'], { purpose: 'run' });
+  // A service's: a person's are never remembered.
+  const asked = ask('ci', 'market/prod', ['DATABASE_URL'], { purpose: 'run' });
   const fresh = { ...asked, fresh: true };
   const version = async (each: Ask, how: typeof peek | typeof use) => {
     const answer = await how(counted, each);
@@ -938,8 +988,10 @@ test('a peek is what a use would give, key by key, and writes nothing: no entry,
     const first = await peek(counted, asked);
     const cold = statements;
     const again = await peek(counted, asked);
-    // Remembered as a use's rows are, and forgotten on a refusal: a reveal within the memory reads nothing again.
-    assert.deepEqual([cold, statements - cold, again, recall(vault, asked) !== undefined], [1, 'refused' in first ? 1 : 0, first, !('refused' in first)], JSON.stringify(asked.keys));
+    // Remembered as a use's rows are, and forgotten on a refusal: a reveal within the memory reads nothing again. A
+    // service's: a person's own are never remembered.
+    const kept = !('refused' in first) && asked === asks[3];
+    assert.deepEqual([cold, statements - cold, again, recall(vault, asked) !== undefined], [1, kept ? 0 : 1, first, kept], JSON.stringify(asked.keys));
     peeked.push(first);
   }
   await untouched();
@@ -956,7 +1008,7 @@ test('a peek is what a use would give, key by key, and writes nothing: no entry,
   }
   assert.equal((peeked[3] as { items: { key: string }[] }).items.some((item) => item.key === 'STRIPE_KEY' && !('refused' in item)), true);
   // Refused as of now from what it remembers, it forgets it, as a use does: a credential that expires within the memory.
-  await write(vault, ...rows('credentials', credential('brief', ada, { expiresAt: new Date(vault.now() + 1000) })));
+  await write(vault, ...rows('credentials', credential('brief', ci, { scope: JSON.stringify([{ projectId: w.market.id, environmentId: null, role: 'viewer' }]), expiresAt: new Date(vault.now() + 1000) })));
   const brief = ask('brief', 'market/prod', null, run);
   assert.ok('items' in (await peek(vault, brief)) && recall(vault, brief) !== undefined);
   vault.tick(1000);

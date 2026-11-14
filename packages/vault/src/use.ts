@@ -30,7 +30,8 @@ import { contextOf, natureOf } from './value.ts';
  * and the log's pending entries, which no change writes and which point at
  * no other table. Within the vault's short memory a repeat is no database
  * call at all: the rows are remembered from when they were read, and
- * decided on again as of now.
+ * decided on again as of now. Not a person's own read: what they read,
+ * they may just have written, and they read it again (`remembered`).
  *
  * While the database cannot be reached, a proxied use, and no other, is
  * answered from the rows it was last answered from, for as long as the
@@ -159,6 +160,23 @@ export function recall(vault: Serving, ask: Ask): Read | undefined {
 }
 
 /**
+ * Whether a read's rows may answer its ask again: a proxied use's (`use`),
+ * a handle's or a session's through the credential proxy, and a service's
+ * or a workload's; never a person's own read. A person reads back what they
+ * just wrote (`coffre get` after `coffre set`, Reveal after Save), and the
+ * memory, which no change clears, would hand them the value before it. A
+ * service's lag is the memory's length (D218): CI's token sets K, and its
+ * `coffre get K` within two seconds may print the value before. What it
+ * costs a person is a read again where they repeat an ask within that
+ * length, and nothing else.
+ */
+function remembered(ask: Ask, found: Read): boolean {
+  if (ask.purpose === 'use') return true;
+  const [credential] = found.seen.credential;
+  return credential !== undefined && !credential.principal.startsWith('user:');
+}
+
+/**
  * The newest rows read for an ask take the place of older ones, and are
  * kept while they may answer (`keptMs`). A slow use does not put its older
  * rows back over newer ones, nor rows read before the ask was last refused
@@ -169,7 +187,7 @@ function remember(memory: Memory, ask: Ask, found: Read, at: number): void {
   const shape = shapeOfAsk(ask);
   if (Math.max(memory.reads.get(shape)?.at ?? -Infinity, memory.refusals.get(shape)?.at ?? -Infinity) > found.at) return;
   memory.reads.delete(shape);
-  if (keptMs(memory, found) > 0) memory.reads.set(shape, found);
+  if (keptMs(memory, found) > 0 && remembered(ask, found)) memory.reads.set(shape, found);
   for (const [old, read] of memory.reads) if (read.at + keptMs(memory, read) <= at || memory.reads.size > MOST) memory.reads.delete(old);
 }
 
