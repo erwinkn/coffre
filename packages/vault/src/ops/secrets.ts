@@ -408,6 +408,16 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         const down = inherit === undefined && !(was?.archivedAt != null && (value !== undefined || restore !== undefined || ref !== undefined) && archived !== false) ? null : passedDown(key, 'reset');
         if (down === undefined) return { refused: 'unreadable' };
         if (inherit !== undefined && down === null) return { refused: 'not_inherited' };
+        if (replaces !== undefined) {
+          // What the key reads now, as a listing found it: its own live value, or where it holds none live, what it inherits,
+          // which nothing past a parent archived is. Checked before an archived key is refused, as in 0.14.7: a key archived
+          // since it was listed is one whose listed version is no longer read, which a client knows to list again.
+          const now = was !== null && was.archivedAt === null ? was : passedDown(key, 'read');
+          if (now === undefined) return { refused: 'unreadable' };
+          const listed = seen.replaced.find((row) => row.id === replaces);
+          // A reference, holding no version of its own, holds none listed.
+          if (now === null || listed?.secretId !== now.id || listed.version !== now.currentVersion) return { refused: 'stale' };
+        }
         // An archived key keeps its name: it is brought back, not written over. In a fork, one reset to what a parent passes
         // down is an override set aside, which a value, a version or a reference written over it makes one again, as in 0.14.
         if (inherit === undefined && down === null && was?.archivedAt != null && (value !== undefined || restore !== undefined || ref !== undefined) && archived !== false) return { refused: 'archived' };
@@ -422,15 +432,6 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           const newest = restore === undefined ? undefined : versions.get(`${kept.id} ${kept.versions}`);
           if (restore !== undefined && restore > kept.versions) return { refused: 'unknown_version' };
           if (restore !== undefined && (from === undefined || newest === undefined)) return { refused: 'unreadable' };
-          if (replaces !== undefined) {
-            // What the key reads now, as a listing found it: its own live value, or where it holds none live, what it inherits,
-            // which nothing past a parent archived is.
-            const now = was !== null && was.archivedAt === null ? was : passedDown(key, 'read');
-            if (now === undefined) return { refused: 'unreadable' };
-            const listed = seen.replaced.find((row) => row.id === replaces);
-            // A reference, holding no version of its own, holds none listed.
-            if (now === null || listed?.secretId !== now.id || listed.version !== now.currentVersion) return { refused: 'stale' };
-          }
           // What the key's value is now: its own, or what it inherits, and either one's source's: a source is never deleted while referred to.
           // An archived key read what it inherits, and is brought back as its own: it is as sensitive as either.
           const current = asked !== undefined ? [] : was === null ? [passedDown(key)] : was.archivedAt === null ? [kept] : [kept, passedDown(key)];

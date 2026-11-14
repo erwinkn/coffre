@@ -130,9 +130,14 @@ test('a value that replaces a version is written only over the version the key h
   const url = await listed('prod', 'DATABASE_URL');
   assert.deepEqual(await written(vault.change(writing([{ key: 'DATABASE_URL', value: 'postgres://new', replaces: url }]))), { DATABASE_URL: { version: 2, nature: 'secret' } });
   assert.deepEqual(await vault.change(writing([{ key: 'DATABASE_URL', value: 'postgres://newer', replaces: url }])), { refused: 'stale' });
-  // An archived key is brought back first, as for any value.
+  // A key archived since it was listed reads that version no more: the listing is stale, as in 0.14.7, and writes nothing.
+  const current = await listed('prod', 'TOKEN');
   await vault.change(writing([{ key: 'TOKEN', archived: true }]));
-  assert.deepEqual(await regenerate(await listed('prod', 'TOKEN')), { refused: 'archived' });
+  const archived = await versions();
+  assert.deepEqual(await regenerate(current), { refused: 'stale' });
+  assert.equal(await versions(), archived);
+  // Without a version to replace, an archived key is brought back first, as for any value.
+  assert.deepEqual(await vault.change(writing([{ key: 'TOKEN', value: 'typed' }])), { refused: 'archived' });
 });
 
 test('in a fork, a value replaces the version it inherits while it holds none of its own, unless it dismissed the key', async () => {
