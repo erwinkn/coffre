@@ -8,13 +8,18 @@ back up and restore on PlanetScale Postgres or plain Postgres (`coffre
 backup`, `coffre restore`), how to check a backup and the result, and what
 the local drill (`scripts/restore-drill.sh`) shows.
 
+0.16.0 does not ship `coffre backup`, `coffre restore` or `coffre verify
+backup` yet, nor `coffre verify log`: the steps that run them, and the
+heartbeat and checkpoints they check, are 0.14's, and change when backup
+and restore come back. What to keep, below, holds now.
+
 ## What to keep, and where
 
 | What | Where | Without it |
 |---|---|---|
 | The database | PlanetScale's backups, or `pg_dump` files you keep off the server | nothing to restore |
-| The vault key, `VAULT_KEY`, with its vault ID, `VAULT_KEY_ID`, and every earlier vault key in `previousKeks` | your password manager, never beside the backups | no value can be read, ever: the backup holds only wrapped data keys. The vault's signing key comes from the vault key too, so every member's row fails its MAC, and the vault's entries and checkpoints fail verification |
-| The app key, `APP_KEY` | your password manager | the app's entries, sessions and tokens fail their MACs: verification fails, and every session and token is refused |
+| The vault key, `VAULT_KEY`, with its vault ID, `VAULT_KEY_ID`, and every earlier vault key in `previousKeks` | your password manager, never beside the backups | no value can be read, ever: the backup holds only wrapped data keys. The vault's signing key comes from the vault key too, so every member's row and every log entry fails its MAC |
+| The app key, `APP_KEY` | your password manager | little: it seals only the cookies of sign-ins under way and, behind Cloudflare Access, the one that ties a browser to its session. Those sign in again; sessions, tokens and the log are untouched. |
 | The OAuth client secret and the deployment's settings | your password manager and the deployment's repository | nobody can sign in |
 
 With AWS KMS, the vault key is the key in KMS, not a value to escrow: keep

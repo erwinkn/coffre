@@ -50,14 +50,14 @@ export async function anonymousChecks(report: Checks, origin: string, send: type
 
 // --- as no one ----------------------------------------------------------------
 
-/** An instance someone else runs: up, and its scheduled job beating. */
+/** An instance someone else runs: up, and its database migrated. */
 export async function reachable(origin: string, send: typeof fetch): Promise<string> {
   const live = await send(`${origin}/livez`).catch((error: unknown) => {
     throw new Unreachable(origin, error);
   });
   expect(live.ok, `/livez answered ${live.status}`);
   const ready = await send(`${origin}/readyz`);
-  expect(ready.ok, `/readyz answered ${ready.status}: is the scheduled job running?`, await ready.text());
+  expect(ready.ok, `/readyz answered ${ready.status}: can it reach its database, and is it migrated?`, await ready.text());
   return '/livez and /readyz';
 }
 

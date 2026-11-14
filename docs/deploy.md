@@ -193,8 +193,8 @@ every migration lets it ([expand, then contract](architecture.md#expand-then-con
    printenv DATABASE_OWNER_URL | pnpm exec coffre migrate --yes   # the owner's URL, piped in
    pnpm run deploy                  # on Node: pnpm build, then restart both processes
    ```
-3. **Check `/readyz`**, which passes once the new code's scheduled job has
-   run on the new schema.
+3. **Check `/readyz`**, which passes once the database has every migration
+   the new code ships.
 
 In a deployment's directory, `coffre migrate` migrates its database to the
 schema of the version the deployment pins, with that version's own
@@ -605,8 +605,8 @@ the network, never holds what decrypts a value:
 
 | Key | Held by | What it does | If it is lost |
 |---|---|---|---|
-| The vault key, `VAULT_KEY`, named by the vault ID, `VAULT_KEY_ID` | the vault | decrypts every value; the vault also derives from it the key it signs its log entries, member rows and checkpoints with | every value is lost for good |
-| The app key, `APP_KEY` | the app | signs the app's log entries, sessions and tokens | everyone is signed out, every token and binding stops working, and the log stops verifying |
+| The vault key, `VAULT_KEY`, named by the vault ID, `VAULT_KEY_ID` | the vault | decrypts every value; the vault also derives from it the key it signs the log's entries and member rows with | every value is lost for good |
+| The app key, `APP_KEY` | the app | seals the cookie of a sign-in under way and, behind Cloudflare Access, the one that ties a browser to its coffre session | sign-ins under way start again and, behind Access, each browser gets a new session; sessions, tokens, bindings and the log are untouched |
 
 The vault key matters most: with it and a copy of the database, anyone has
 every value, so it never sits beside the backups. `coffre setup` made both,
@@ -1002,7 +1002,9 @@ the runbook, for PlanetScale Postgres and plain Postgres, with the checks to
 run before reopening traffic.
 
 Point an external monitor at `/readyz`, so that someone is paged when it
-turns red. `/livez` only says the process answers.
+turns red: it does when the app cannot reach its database, or the database
+lacks a migration this version ships. `/livez` only says the process
+answers.
 
 ## Conformance
 
