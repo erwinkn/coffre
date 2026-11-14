@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Permission } from '@coffre/core/access';
-import type { Answers, KeyWrite, Presented, SecretsChanges, SecretWrite } from '@coffre/core/vault';
+import type { Answers, KeyWrite, Nature, Presented, SecretsChanges, SecretWrite } from '@coffre/core/vault';
 import { environments, projects, secrets } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
@@ -24,14 +24,14 @@ const written = (value: unknown): value is string => typeof value === 'string' &
 /** A folder as the app's routes have it (`folderName`), within the table's check: 1 to 64 UTF-16 units, no slash or control character, nothing `trim` takes away. */
 const filed = (value: unknown) => value === null || (typeof value === 'string' && wellFormed(value) && value.length >= 1 && value.length <= 64 && !/[/\p{Cc}]/u.test(value) && value === value.trim());
 
-const wrong = () => new TypeError('a write names a place by its slugs and 1 to 2,000 keys, each once, with a value of well-formed text, 64 Ki characters at most and 1 MiB in all, and its nature, an archiving or a folder');
+const wrong = () => new TypeError('a write names a place by its slugs and 1 to 2,000 keys, each once, with a value of well-formed text, 64 Ki characters at most and 1 MiB in all, and its nature if any, an archiving or a folder');
 
 /** One key's item, on its own: what it does, with what it says it with. */
 function valid(item: KeyWrite): boolean {
   if (typeof item !== 'object' || item === null || typeof item.key !== 'string' || !KEY.test(item.key)) return false;
   if (!(item.archived === undefined || typeof item.archived === 'boolean') || !(item.folder === undefined || filed(item.folder))) return false;
   // A key is archived with no value written over it.
-  if (item.value !== undefined) return written(item.value) && NATURES.includes(item.nature) && item.archived !== true;
+  if (item.value !== undefined) return written(item.value) && (item.nature === undefined || NATURES.includes(item.nature)) && item.archived !== true;
   return item.nature === undefined && (item.archived !== undefined || item.folder !== undefined);
 }
 
@@ -47,6 +47,14 @@ function valid(item: KeyWrite): boolean {
  * of a sensitive value and nothing more of a plain one or of none; this
  * asks `secret.read` of each. A key that was a reference holds its own value
  * from a write on.
+ *
+ * A value written with no nature is never looser than the key's value was,
+ * as its sealed row says (0.14.7's `bareLevel`): sensitive stays sensitive,
+ * and anything else is a secret, a plain value's included, since plain is
+ * kept only where a write says so; a new key's value is a secret. A
+ * reference's is its source's, whose row the reference cannot be without:
+ * one the vault does not see refuses the write, `unreadable`, rather than
+ * guess.
  */
 function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation<Parts, Answers['secret.write']> {
   const shown = presented(input);
@@ -64,6 +72,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
     ...(item.archived === false ? ['secret.read' as const] : []),
   ]));
   const archiving = items.flatMap((item) => (item.archived === true ? [item.key] : []));
+  const bare = items.flatMap((item) => (item.value !== undefined && item.nature === undefined ? [item.key] : []));
 
   const project = sql`(SELECT p.id FROM projects p WHERE p.slug = ${projectSlug})`;
   const here = sql`(SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${environmentSlug})`;
@@ -74,6 +83,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
     project: part(projects, sql`${projects.slug} = ${projectSlug}`),
     environment: part(environments, sql`${environments.projectId} = ${project} AND ${environments.slug} = ${environmentSlug}`),
     secret: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} = ${here} AND ${secrets.key} = ANY(${sql.param(items.map((item) => item.key))}::text[])`),
+    // What a key written with no nature refers to, if it is a reference: its value's nature is the source's.
+    source: part(secrets, sql`${secrets.id} IN (SELECT s.source_id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(bare)}::text[]))`),
     reader: part(secrets, sql`${secrets.id} IN ${readers}`),
     readerPlace: part(environments, sql`${environments.id} IN (SELECT r.environment_id FROM secrets r WHERE r.id IN ${readers})`),
     readerProject: part(projects, sql`${projects.id} IN (SELECT r.project_id FROM secrets r WHERE r.id IN ${readers})`),
@@ -104,11 +115,13 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
 
       const now = new Date(at);
       const held = new Map(seen.secret.map((row) => [row.key, row]));
+      const sources = new Map(seen.source.map((row) => [row.id, row]));
       const writes: Write[] = [];
       const sealed: Value[] = [];
       const lines: Record<string, unknown>[] = [];
       const leaves = new Map<string, Fresh<typeof secrets>>();
-      for (const { key, value, nature, archived, folder } of items) {
+      const answered: [string, { version: number; nature: Nature }][] = [];
+      for (const { key, value, nature: asked, archived, folder } of items) {
         const was = held.get(key) ?? null;
         // Only a value makes a key: there is nothing else to archive or file.
         if (was === null && value === undefined) return { refused: 'unknown_key' };
@@ -119,6 +132,10 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         let secret: Fresh<typeof secrets> = { ...kept, archivedAt: archived === undefined ? kept.archivedAt : archived ? (kept.archivedAt ?? now) : null, folder: folder === undefined ? kept.folder : folder };
         const line: Record<string, unknown> = { key, secret: secret.id };
         if (value !== undefined) {
+          // What the key's value is now, its own or its source's: a source is never deleted while referred to.
+          const source = kept.sourceId === null ? kept : sources.get(kept.sourceId);
+          if (asked === undefined && source === undefined) return { refused: 'unreadable' };
+          const nature = asked ?? (source?.nature === 'sensitive' ? 'sensitive' : 'secret');
           const version = kept.versions + 1;
           // Typed, not generated: no recipe for Regenerate, and in no pair.
           secret = { ...secret, versions: version, currentVersion: version, updatedAt: now, sourceId: null, nature, recipe: null, pairId: null, pairHalf: null };
@@ -126,6 +143,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
             version: { id: ids.version, secretId: secret.id, version, createdAt: now, createdBy: caller.principal, plaintext: nature === 'plain' ? value : null, sensitive: nature === 'sensitive' },
             text: Buffer.from(value),
           });
+          answered.push([key, { version, nature }]);
           // `source`: the secret it referred to until now.
           Object.assign(line, { version, nature }, was === null ? { made: true } : {}, was?.sourceId == null ? {} : { source: was.sourceId });
         }
@@ -160,7 +178,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           objects: [`project:${place.id}`, `environment:${environment.id}`, `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...lines.map((line) => `secret:${line.secret as string}`)],
           detail: { keys: lines },
         },
-        answer: { versions: Object.fromEntries(lines.flatMap((line) => (line.version === undefined ? [] : [[line.key, line.version]]))) },
+        // As entries: a key named `__proto__` is a key like any other.
+        answer: { keys: Object.fromEntries(answered) },
       };
     },
   };

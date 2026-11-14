@@ -48,7 +48,7 @@ type Answer = { status: number; body: Used & { refused?: string; error?: string 
 /** A fresh isolate of the vault Worker and its signer, over the suite's database through the vault's login. */
 async function freshVault(database: string, { signer = true } = {}): Promise<{
   reveal(bearer: string, path: string, keys: string[] | null): Promise<Answer>;
-  write(bearer: string, path: string, values: Record<string, string>): Promise<{ status: number; body: { answer?: { versions: Record<string, number> }; refused?: string; error?: string } }>;
+  write(bearer: string, path: string, values: Record<string, string>): Promise<{ status: number; body: { answer?: { keys: Record<string, { version: number; nature: string }> }; refused?: string; error?: string } }>;
   post(path: string): Promise<{ error?: string }>;
   stop(): Promise<void>;
 }> {
@@ -88,7 +88,7 @@ async function freshVault(database: string, { signer = true } = {}): Promise<{
     },
     async write(bearer, path, values) {
       const response = await worker.fetch('/secrets', { method: 'PATCH', headers: { authorization: `Bearer ${bearer}` }, body: JSON.stringify({ path, values }), signal: AbortSignal.timeout(20_000) });
-      return { status: response.status, body: (await response.json()) as { answer?: { versions: Record<string, number> }; refused?: string; error?: string } };
+      return { status: response.status, body: (await response.json()) as { answer?: { keys: Record<string, { version: number; nature: string }> }; refused?: string; error?: string } };
     },
     async post(path) {
       return (await (await worker.fetch(path, { method: 'POST', signal: AbortSignal.timeout(20_000) })).json()) as { error?: string };
@@ -151,7 +151,7 @@ test('a value written through the app is sealed by the vault, signed into the lo
     const refused = await vault.write('ada-cli', 'market/prod', { KEY_0: 'not hers to write' });
     assert.deepEqual([refused.status, refused.body], [403, { refused: 'no_access' }]);
     const done = await vault.write('bo-cli', 'market/prod', { KEY_0: 'the next value', KEY_NEW: 'a new këy' });
-    assert.deepEqual([done.status, done.body], [200, { answer: { versions: { KEY_0: 2, KEY_NEW: 1 } } }]);
+    assert.deepEqual([done.status, done.body], [200, { answer: { keys: { KEY_0: { version: 2, nature: 'secret' }, KEY_NEW: { version: 1, nature: 'secret' } } } }]);
     assert.deepEqual(given(await vault.reveal('ada-cli', 'market/prod', ['KEY_0', 'KEY_NEW'])), [{ key: 'KEY_0', value: 'the next value' }, { key: 'KEY_NEW', value: 'a new këy' }]);
 
     // The change's entry among those kept for good, the read's among those that age out: both signed, nothing waiting.

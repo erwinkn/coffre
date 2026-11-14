@@ -82,7 +82,7 @@ const given = async (label: string, keys: string[]) => {
 test('a write gives each key its next version, makes the keys the environment lacks, and a use then opens them as written', async () => {
   const before = [await count('log_pending'), await count('secret_versions')];
   const done = await vault.change(writing('ada-cli', { DATABASE_URL: 'postgres://nëw', API_KEY: ['sk_test', 'sensitive'], ACCOUNT: ['acct_1', 'plain'] }));
-  assert.deepEqual(done, { answer: { versions: { DATABASE_URL: 2, API_KEY: 1, ACCOUNT: 1 } } });
+  assert.deepEqual(done, { answer: { keys: { DATABASE_URL: { version: 2, nature: 'secret' }, API_KEY: { version: 1, nature: 'sensitive' }, ACCOUNT: { version: 1, nature: 'plain' } } } });
   assert.deepEqual([await count('log_pending'), await count('secret_versions')], [before[0]! + 1, before[1]! + 3]);
   // A plain value's row carries its copy for the pages, and no other does.
   const copies = await rowsOf<{ key: string; plaintext: string | null; sensitive: boolean }>(world.owner, sql`SELECT s.key, v.plaintext, v.sensitive FROM secret_versions v JOIN secrets s ON s.id = v.secret_id AND s.current_version = v.version WHERE s.key IN ('DATABASE_URL', 'API_KEY', 'ACCOUNT') ORDER BY s.key`);
@@ -186,7 +186,7 @@ test('a generated key written by hand loses its recipe and its pair; one whose r
     { ...value(world, secret(place, 'SIGNING_KEY_PUB'), 'public', { plain: true }), ...made, pairHalf: 'public' },
     { ...value(world, secret(place, 'TOKEN'), 'abcd'), recipe: 'bytes:32:hex' }));
   const said = async () => rowsOf(world.owner, sql`SELECT key, nature, recipe, pair_id AS pair, pair_half AS half FROM secrets WHERE environment_id = ${prod} AND key IN ('SIGNING_KEY', 'SIGNING_KEY_PUB', 'TOKEN') ORDER BY key`);
-  assert.deepEqual(await vault.change(writing('ada-cli', { SIGNING_KEY: 'typed' })), { answer: { versions: { SIGNING_KEY: 2 } } });
+  assert.deepEqual(await vault.change(writing('ada-cli', { SIGNING_KEY: 'typed' })), { answer: { keys: { SIGNING_KEY: { version: 2, nature: 'secret' } } } });
   // Only the key written: its other half keeps what it was made by, and its pair, which a regeneration of the pair checks.
   assert.deepEqual(await said(), [
     { key: 'SIGNING_KEY', nature: 'secret', recipe: null, pair: null, half: null },
@@ -194,7 +194,7 @@ test('a generated key written by hand loses its recipe and its pair; one whose r
     { key: 'TOKEN', nature: 'secret', recipe: 'bytes:32:hex', pair: null, half: null },
   ]);
   // A value of another nature says so on the row.
-  assert.deepEqual(await vault.change(writing('ada-cli', { SIGNING_KEY: ['now sensitive', 'sensitive'] })), { answer: { versions: { SIGNING_KEY: 3 } } });
+  assert.deepEqual(await vault.change(writing('ada-cli', { SIGNING_KEY: ['now sensitive', 'sensitive'] })), { answer: { keys: { SIGNING_KEY: { version: 3, nature: 'sensitive' } } } });
   assert.deepEqual((await said())[0], { key: 'SIGNING_KEY', nature: 'sensitive', recipe: null, pair: null, half: null });
   // Its recipe set to one byte in the database: the row is not the vault's, so nothing reads it, and nothing is made by it.
   await world.owner.execute(sql`UPDATE secrets SET recipe = 'bytes:1:hex' WHERE environment_id = ${prod} AND key = 'TOKEN'`);
@@ -208,11 +208,38 @@ test('a generated key written by hand loses its recipe and its pair; one whose r
 
 test('a reference written over holds its own value from then on, and its entry says what it referred to', async () => {
   assert.deepEqual(await given('ada-cli', ['STRIPE_KEY']), [[1, 'sk_live']]);
-  assert.deepEqual(await vault.change(writing('ada-cli', { STRIPE_KEY: 'sk_own' })), { answer: { versions: { STRIPE_KEY: 1 } } });
+  assert.deepEqual(await vault.change(writing('ada-cli', { STRIPE_KEY: 'sk_own' })), { answer: { keys: { STRIPE_KEY: { version: 1, nature: 'secret' } } } });
   world.tick(2000);
   assert.deepEqual(await given('ada-cli', ['STRIPE_KEY']), [[1, 'sk_own']]);
   const [key] = ((await written()).detail as { keys: { source?: string }[] }).keys;
   assert.equal(key!.source, stripe.id);
+});
+
+test('a value written with no nature keeps a sensitive key sensitive and makes any other a secret; a reference\'s is its source\'s, which it is not written without', async () => {
+  const prod = { id: url.environmentId, projectId: market.id };
+  const bare = (keys: string[]): Presented & SecretWrite => ({ ...shown('ada-cli'), op: 'secret.write', project: 'market', environment: 'prod', keys: keys.map((key) => ({ key, value: `bare ${key}` })) });
+  const signing = value(world, secret(elsewhere, 'SIGNING'), 'sig', { sensitive: true });
+  await write(world, ...rows('secrets', value(world, secret(prod, 'HIDDEN'), 'h', { sensitive: true }), value(world, secret(prod, 'FLAG'), 'on', { plain: true }), signing,
+    secret(prod, 'SIGNING', { sourceId: signing.id }), secret(prod, 'LINKED', { sourceId: signing.id })));
+  // Plain is kept only where a write says so; a sensitive value, by whoever writes over it, unless they say otherwise.
+  assert.deepEqual(await vault.change(bare(['HIDDEN', 'FLAG', 'DATABASE_URL', 'STRIPE_KEY', 'SIGNING', 'NEW'])), { answer: { keys: {
+    HIDDEN: { version: 2, nature: 'sensitive' }, FLAG: { version: 2, nature: 'secret' }, DATABASE_URL: { version: 2, nature: 'secret' },
+    STRIPE_KEY: { version: 1, nature: 'secret' }, SIGNING: { version: 1, nature: 'sensitive' }, NEW: { version: 1, nature: 'secret' },
+  } } });
+  const natures = async () => Object.fromEntries((await rowsOf<{ key: string; nature: string }>(world.owner, sql`SELECT key, nature FROM secrets WHERE environment_id = ${prod.id} AND nature IS NOT NULL`)).map((row) => [row.key, row.nature]));
+  assert.deepEqual(await natures(), { HIDDEN: 'sensitive', FLAG: 'secret', DATABASE_URL: 'secret', STRIPE_KEY: 'secret', SIGNING: 'sensitive', NEW: 'secret' });
+  assert.deepEqual(((await written()).detail as { keys: { key: string; nature: string }[] }).keys.map((item) => `${item.key} ${item.nature}`), ['HIDDEN sensitive', 'FLAG secret', 'DATABASE_URL secret', 'STRIPE_KEY secret', 'SIGNING sensitive', 'NEW secret']);
+  world.tick(2000);
+  assert.deepEqual(await given('ada-cli', ['HIDDEN', 'FLAG', 'SIGNING']), ['sensitive', [2, 'bare FLAG'], 'sensitive']);
+  // A nature said is the one written, looser included.
+  assert.deepEqual(await vault.change(writing('ada-cli', { HIDDEN: 'typed' })), { answer: { keys: { HIDDEN: { version: 3, nature: 'secret' } } } });
+
+  // A source the vault does not see, its row edited behind it: a reference is never without one, so a bare value is not written over it.
+  await world.owner.execute(sql`UPDATE secrets SET folder = 'moved' WHERE id = ${signing.id}`);
+  const before = [await count('log_pending'), await count('secret_versions')];
+  assert.deepEqual(await vault.change(bare(['LINKED'])), { refused: 'unreadable' });
+  assert.deepEqual(await count('secret_versions'), before[1]);
+  assert.deepEqual(await vault.change(writing('ada-cli', { LINKED: ['said sensitive', 'sensitive'] })), { answer: { keys: { LINKED: { version: 1, nature: 'sensitive' } } } });
 });
 
 test('two writes of one key decided on the same rows are two versions, one after the other: the second starts over, and leaves nothing of its first try', async () => {
@@ -226,7 +253,7 @@ test('two writes of one key decided on the same rows are two versions, one after
   assert.deepEqual(await versions(), [1, 2], 'the version it sealed for its first try is not there');
   // Asked again, as `change` does by itself, it is the next version.
   // The key both would have made is there by now: hers is its next version, not a second key.
-  assert.deepEqual(await vault.change(writing('cy-cli', { DATABASE_URL: 'by cy-cli', NEW: 'new by cy-cli' })), { answer: { versions: { DATABASE_URL: 3, NEW: 2 } } });
+  assert.deepEqual(await vault.change(writing('cy-cli', { DATABASE_URL: 'by cy-cli', NEW: 'new by cy-cli' })), { answer: { keys: { DATABASE_URL: { version: 3, nature: 'secret' }, NEW: { version: 2, nature: 'secret' } } } });
   assert.deepEqual(await versions(), [1, 2, 3]);
   world.tick(2000);
   assert.deepEqual(await given('ada-cli', ['DATABASE_URL', 'NEW']), [[3, 'by cy-cli'], [2, 'new by cy-cli']]);
@@ -247,7 +274,7 @@ test('a write that is not what the contract says is a fault, before any read', a
   assert.equal(world.woken.length, 0);
   // What the contract does say: 2,000 keys, and a value of 64 Ki characters.
   const most = await vault.change(writing('ada-cli', Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`K${i}`, i === 0 ? 'é'.repeat(64 * 1024) : 'x']))));
-  assert.ok('answer' in most && Object.keys(most.answer.versions).length === 2000, JSON.stringify(most).slice(0, 80));
+  assert.ok('answer' in most && Object.keys(most.answer.keys).length === 2000, JSON.stringify(most).slice(0, 80));
 });
 
 test('a workload\'s session writes as its service may, with its key; one that is narrowed or stopped changes nothing', async () => {
@@ -256,7 +283,7 @@ test('a workload\'s session writes as its service may, with its key; one that is
   await write(world, ...rows('bindings', bound), ...rows('credentials', pod, session('tool', bound, { ancestors: JSON.stringify([pod.id]) })));
   const by = (label: string, proof: string | null = label) => vault.change({ ...writing(label, { DATABASE_URL: `by ${label}` }), proof });
 
-  assert.deepEqual(await by('pod'), { answer: { versions: { DATABASE_URL: 2 } } });
+  assert.deepEqual(await by('pod'), { answer: { keys: { DATABASE_URL: { version: 2, nature: 'secret' } } } });
   // Its entry names the binding that issued the session and the instance's policy row: both decided it.
   const tables = (await written()).rows.map(({ row }) => (JSON.parse(row) as string[])[0]);
   assert.ok(tables.includes('bindings') && tables.includes('policy'), tables.join());

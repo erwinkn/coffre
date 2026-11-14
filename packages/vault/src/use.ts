@@ -10,7 +10,7 @@ import { callerOf, ID, live, touch, type Caller, type CallerRead, type Workloads
 import { bounded, keep, type Refusal, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts';
-import { contextOf } from './value.ts';
+import { contextOf, natureOf } from './value.ts';
 
 /**
  * A use: anything that opens a value (docs/design/0.16.md, "A use"). A
@@ -233,7 +233,8 @@ export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): 
     }
     if (held.currentVersion === null) return { key, refused: held === asked ? 'no_value' : 'unreadable' };
     const version = versions.get(`${held.id} ${held.currentVersion}`);
-    if (version === undefined) return { key, refused: 'unreadable' };
+    // A version labelled other than its secret's row says is no value of it: it may open as its label says, but is not given.
+    if (version === undefined || natureOf(version) !== held.nature) return { key, refused: 'unreadable' };
     // A workload is handed only what its credential lists where the value is held, and a person no sensitive value, ever;
     // a service account one, on a credential an Owner of the value's project issued.
     // A plain value is no secret, use-only to nobody: and it opens as plain, or not at all (`answer`).

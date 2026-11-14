@@ -189,6 +189,9 @@ test('a write is one change of the vault and no statement of the app; what it re
   assert.deepEqual(body.keys, { API_KEY: { version: 1, sensitivity: 'secret' }, FLAG: { version: 2, sensitivity: 'plain' }, STRIPE_KEY: { version: 2, sensitivity: 'sensitive' } });
   world.memory.reads.clear();
   assert.deepEqual((await reveal('bo-cli', 'market/prod'))[1].values, { API_KEY: 'k1', DATABASE_URL: 'postgres://märkt', FLAG: 'off' });
+  // A bare value keeps a sensitive key sensitive, and makes a plain one a secret: plain is kept only where a write says so.
+  const [, bare] = await patch('bo-cli', 'market/prod', { STRIPE_KEY: 'sk_3', FLAG: 'on' });
+  assert.deepEqual(bare.keys, { STRIPE_KEY: { version: 3, sensitivity: 'sensitive' }, FLAG: { version: 3, sensitivity: 'secret' } });
 
   // A viewer writes nothing, and is told no more than for a place that is not there.
   for (const path of ['market/prod', 'nope/prod']) {
