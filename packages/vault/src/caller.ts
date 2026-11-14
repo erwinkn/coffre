@@ -2,7 +2,7 @@ import { allows, EVERYWHERE, isCredentialScope, isInstanceRole, isScope, scopeWi
 import { addressWithin, checkConstraints, type BindingPolicy, type Constraints } from '@coffre/core/identity';
 import { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
 import { parseScopes, type McpScope } from '@coffre/core/mcp';
-import type { Called, SignedHead } from '@coffre/core/vault';
+import type { Called, LogAction, SignedHead } from '@coffre/core/vault';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { keep, part, readParts, type Denied, type Refusal, type Running, type Seen } from './change.ts';
@@ -367,7 +367,7 @@ const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
  * unknown token is one answer, and no entry.
  */
 export function refusedTo<S extends Seen<ReturnType<typeof callerParts>>>(
-  action: string,
+  action: LogAction,
   shown: Shown & { request: string | null },
   workloads: Workloads,
   about: { where?: Record<string, string>; objects?(seen: S): string[] } = {},

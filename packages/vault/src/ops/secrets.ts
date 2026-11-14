@@ -8,6 +8,7 @@ import { sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, live, refusedTo, type Asking } from '../caller.ts';
 import { amended, aside, copying, overweight, part, put, type Operation, type Parts, type Refusal, type Seen, type Value, type Write } from '../change.ts';
+import type { Said } from '../entry.ts';
 import type { Fresh, Row } from '../rows.ts';
 import { natureOf } from '../value.ts';
 import type { Deciding } from '../vault.ts';
@@ -758,7 +759,7 @@ function secretRename(input: Presented & SecretRename, vault: Deciding): Operati
       // Held to what its author read, as a write is, before an archived key is refused: an archived key reads nothing here, and is renamed by nobody.
       if (replaces !== undefined && stale(replaces, row.archivedAt === null ? row : null, seen.replaced)) return { refused: 'stale' };
       if (row.archivedAt !== null) return { refused: 'archived' };
-      const entry = (lines: Record<string, unknown>[], forks: string[]) => ({
+      const entry = (lines: Record<string, unknown>[], forks: string[]): Said => ({
         kept: true,
         action: 'secret.rename',
         actor: caller.principal,

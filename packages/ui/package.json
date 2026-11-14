@@ -27,6 +27,11 @@
       "types": "./dist/pages/*.d.ts",
       "default": "./dist/pages/*.js"
     },
+    "./audit-sentences": {
+      "coffre:source": "./src/lib/audit-sentences.ts",
+      "types": "./dist/audit-sentences.d.ts",
+      "default": "./dist/audit-sentences.js"
+    },
     "./vite": {
       "coffre:source": "./src/vite.ts",
       "types": "./dist/vite.d.ts",

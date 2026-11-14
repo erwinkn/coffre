@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { leafHash } from '@coffre/core/log';
+import type { LogAction } from '@coffre/core/vault';
 
 import { checked, macOf, type Key } from './rows.ts';
 
@@ -15,8 +16,8 @@ export type Entry = {
   id: string;
   /** When, in milliseconds, by the vault's clock. The signer refuses an entry past its date, and prunes by this. */
   at: number;
-  /** What was done: `member.role`, `secret.read`. */
-  action: string;
+  /** What was done: `member.role`, `secret.read`, one of `LOG_ACTIONS`; or a test's own, `test.write`. */
+  action: LogAction | `test.${string}`;
   /** Who did it, `user:<email>` or `token:<name>`, and with which credential. Null for what the vault does by itself. */
   actor: string | null;
   credential: string | null;

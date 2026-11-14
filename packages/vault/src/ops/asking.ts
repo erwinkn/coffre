@@ -1,4 +1,5 @@
 import { ownsInstance } from '@coffre/core/access';
+import type { LogAction } from '@coffre/core/vault';
 import { sql } from 'drizzle-orm';
 
 import { callerFrom, type Asking, type callerParts, type Shown } from '../caller.ts';
@@ -34,7 +35,7 @@ export function managing(seen: Seen<ReturnType<typeof callerParts>>, shown: Show
 }
 
 /** An entry of a change a caller asks: who asked, on what, and what it mentions. */
-export function said(action: string, caller: Asking, shown: { request: string | null; ip: string | null }, objects: string[], detail: Record<string, unknown>): Said {
+export function said(action: LogAction, caller: Asking, shown: { request: string | null; ip: string | null }, objects: string[], detail: Record<string, unknown>): Said {
   return {
     kept: true,
     action,

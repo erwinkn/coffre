@@ -5,7 +5,7 @@ import {
   ROLE_ID, ROLES, setsUpServices, unscoped,
   type Filter, type Holdings, type InstanceRole, type Permission, type Place, type RoleDefinition, type Scope, type ServiceAccount,
 } from '@coffre/core/access';
-import { ROLE_REVISION, roleRevision, type AccessAnswers, type AccessChange, type AccessChanges, type AccessGrant, type MemberPut, type MemberRemove, type Presented, type RoleEdit, type ScopeInput, type SettingsEdit, type Standing } from '@coffre/core/vault';
+import { ROLE_REVISION, roleRevision, type AccessAnswers, type AccessChange, type AccessChanges, type AccessGrant, type LogAction, type MemberPut, type MemberRemove, type Presented, type RoleEdit, type ScopeInput, type SettingsEdit, type Standing } from '@coffre/core/vault';
 import { environments, grants, identities, policy, principals, projects, roles } from '@coffre/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
 
@@ -93,7 +93,7 @@ const named = (vault: Deciding, principal: string) => vault.owners.some((email) 
  * found. No place: these changes name none, and a member's name as typed is
  * free text the log does not take.
  */
-const deniedTo = <S extends Seen<ReturnType<typeof callerParts>> & { member: Row<typeof principals>[]; scoped?: Row<typeof projects>[] }>(action: string, shown: Shown & { request: string | null }, vault: Deciding) =>
+const deniedTo = <S extends Seen<ReturnType<typeof callerParts>> & { member: Row<typeof principals>[]; scoped?: Row<typeof projects>[] }>(action: LogAction, shown: Shown & { request: string | null }, vault: Deciding) =>
   refusedTo<S>(action, shown, vault.workloads, {
     objects: (seen) => [...seen.member.map((row) => `principal:${row.id}`), ...(seen.scoped ?? []).map((project) => `project:${project.id}`)],
   });

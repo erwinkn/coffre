@@ -101,7 +101,7 @@ test('the head the signer wrote is the one a caller is answered, whole, and agai
   // Her session, written as a change writes one, so that the signer's mirror has its row.
   const made = await change(vault, {
     read: { found: part(credentials, sql`false`) },
-    decide: () => ({ writes: [put(credentials, credential('ada', ada, { lastUsedAt: new Date(vault.now()) }), null)], entry: { kept: true, action: 'signin', actor: ada, credential: null, request: null, ip: null, objects: [`principal:${ada}`], detail: {} }, answer: null }),
+    decide: () => ({ writes: [put(credentials, credential('ada', ada, { lastUsedAt: new Date(vault.now()) }), null)], entry: { kept: true, action: 'sign_in', actor: ada, credential: null, request: null, ip: null, objects: [`principal:${ada}`], detail: {} }, answer: null }),
   });
   assert.ok('answer' in made);
   const asked = async () => {
