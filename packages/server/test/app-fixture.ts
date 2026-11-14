@@ -28,6 +28,8 @@ export type TestApp = {
   readonly statements: number;
   /** What it executed, oldest first, as Drizzle's `SQL`: for a test to read a statement's parameters. */
   executed: unknown[];
+  /** The rows each statement it executed answered, as `executed`: for a test to see how many a bounded read took. */
+  answered: unknown[][];
   /** A request, as a deployment's Start app answers one: coffre's middleware around coffre's route. */
   request(path: string, init?: RequestInit): Promise<Response>;
   /** A page's render for a request, with what coffre hands it. */
@@ -44,14 +46,21 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
   const calls: string[] = [];
   let statements = 0;
   const executed: unknown[] = [];
+  const answered: unknown[][] = [];
   const counted = new Proxy(app.db, {
     get(target, name, receiver) {
       const member = Reflect.get(target, name, receiver) as unknown;
       if (typeof member !== 'function' || !['execute', 'select', 'insert', 'update', 'delete', 'transaction'].includes(String(name))) return member;
       return (...args: unknown[]) => {
         statements += 1;
-        if (name === 'execute') executed.push(args[0]);
-        return (member as (...args: unknown[]) => unknown).apply(target, args);
+        const result = (member as (...args: unknown[]) => unknown).apply(target, args);
+        if (name !== 'execute') return result;
+        executed.push(args[0]);
+        const at = answered.push([]) - 1;
+        return (result as Promise<Iterable<unknown>>).then((rows) => {
+          answered[at] = [...rows];
+          return rows;
+        });
       };
     },
   }) as Database;
@@ -76,6 +85,7 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
       return statements;
     },
     executed,
+    answered,
     request(path, init) {
       const request = new Request(`${PUBLIC_URL}${path}`, init);
       return scope.respond(request, () => scope.route(request));

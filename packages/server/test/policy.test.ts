@@ -9,8 +9,10 @@ import { after, beforeEach, test } from 'node:test';
 import { INSTANCE_ROLES, normalDefinition, ROLES, type RoleDefinition } from '@coffre/core/access';
 import { roleRevision } from '@coffre/core/vault';
 import { credential, emptyDatabase, environment, grant, instance, principal, project, rows, user, write } from '@coffre/vault/testing';
+import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
+import { WEIGHED_MOST } from '../src/api/routes/roles.ts';
 import { openApp } from './app-fixture.ts';
 
 const app = await openApp();
@@ -141,6 +143,63 @@ test('a change weighed is caller and three statements, and changes nothing; made
   // Nothing changes for anyone: said so.
   const [, idle] = await call('cy-cli', 'PUT', '/roles/auditor?dryRun=1', { ...normalDefinition(ROLES.auditor), name: 'Inspector' });
   assert.deepEqual([idle.impact, idle.sentence], [[], 'Changes what nobody holds']);
+});
+
+test(`a change is weighed across at most ${WEIGHED_MOST} roles, members, grants of one and environments: past any, refused, named, and made unweighed`, async () => {
+  const [most, auditor, viewer] = [WEIGHED_MOST, normalDefinition(INSTANCE_ROLES.auditor), normalDefinition(ROLES.viewer)];
+  // Each read the three; one past the most roles, the first alone. `took`: the rows each of them answered.
+  const took = (read: number) => app.answered.slice(-read) as [[{ roles: unknown[]; granted: number | string }], { grants: unknown[] | null }[]?, unknown[]?];
+  const weighed = async (path: string, definition: unknown, read = 3) => {
+    const [[status, body], calls, statements] = await cost(() => call('cy-cli', 'PUT', `${path}?dryRun=1`, definition));
+    assert.deepEqual([calls, statements], [['caller'], read]);
+    return status === 200 ? [200] : [...refused([status, body]), body.message];
+  };
+  const counted = async (query: ReturnType<typeof sql>) => Number((await rowsOf<{ n: number | string }>(world.owner, query))[0]!.n);
+  const tooMany = (what: string) => [409, 'conflict', 'too_many_to_weigh', `too much to weigh: more than 1,000 ${what}. Make the change without weighing it first`];
+  // Copies of Bo's row, of market/dev's and of Eve's grant on market/prod: the rows a weighing reads as they are.
+  const members = (from: number, to: number, role: string) => world.owner.execute(sql`INSERT INTO principals (id, status, role, scope, generation, created_at, created_by, status_changed_at, status_changed_by, mac)
+    SELECT 'user:m' || i || '@acme.example', 'active', ${role}, NULL, generation, created_at, created_by, status_changed_at, status_changed_by, mac FROM principals, generate_series(${from}::int, ${to}::int) i WHERE id = ${bo}`);
+  const environments = (from: number, to: number) => world.owner.execute(sql`INSERT INTO environments (id, project_id, slug, name, created_at, protected, frozen_credentials, mac)
+    SELECT gen_random_uuid(), project_id, 'e' || i, 'e' || i, created_at, false, '{}', mac FROM environments, generate_series(${from}::int, ${to}::int) i WHERE id = ${prod.id}`);
+
+  // The instance's Auditors: as many as it weighs, then two more, of which it reads one.
+  const existing = await counted(sql`SELECT count(*) AS n FROM principals WHERE role = 'auditor'`);
+  await members(1, most - existing, 'auditor');
+  assert.deepEqual(await weighed('/instance-roles/auditor', { ...auditor, name: 'Inspector' }), [200]);
+  await members(most - existing + 1, most - existing + 2, 'auditor');
+  assert.deepEqual(await weighed('/instance-roles/auditor', { ...auditor, name: 'Inspector' }), tooMany('members it reaches'));
+  assert.equal(took(3)[1]!.length, most + 1);
+  // Made unweighed, it is made.
+  assert.equal((await call('cy-cli', 'PUT', '/instance-roles/auditor', { ...auditor, name: 'Inspector' }))[0], 200);
+
+  // Eve views market/prod: market's environments, as many as it weighs, then two more, of which it reads one.
+  const places = await counted(sql`SELECT count(*) AS n FROM environments WHERE project_id = ${market.id}`);
+  await environments(1, most - places);
+  assert.deepEqual(await weighed('/roles/viewer', { ...viewer, name: 'Reader' }), [200]);
+  await environments(most - places + 1, most - places + 2);
+  assert.deepEqual(await weighed('/roles/viewer', { ...viewer, name: 'Reader' }), tooMany('environments where it reaches'));
+  assert.equal(took(3)[2]!.length, most + 1);
+
+  // Eve given a release grant on more environments than it weighs: one member's grants, and its deletion counts them.
+  await environments(most - places + 3, most - places + 3);
+  await write(world, ...rows('roles', roleRow(false, 'release', release)));
+  await world.owner.execute(sql`INSERT INTO grants (id, principal, generation, environment_id, role, granted_at, granted_by, mac)
+    SELECT gen_random_uuid(), g.principal, g.generation, e.id, 'release', g.granted_at, g.granted_by, g.mac FROM grants g, environments e WHERE g.principal = ${eve} AND e.project_id = ${market.id} AND e.id <> ${prod.id}`);
+  assert.deepEqual(await weighed('/roles/release', { ...release, name: 'Shipper' }), tooMany('grants of one member it reaches'));
+  assert.deepEqual(took(3)[1]!.map((member) => member.grants?.length), [most + 1]);
+  const [[status, body], calls, statements] = await cost(() => call('cy-cli', 'DELETE', '/roles/release?dryRun=1'));
+  assert.deepEqual([...refused([status, body]), body.message, calls, statements], [409, 'conflict', 'role_granted', 'more than 1,000 grants name release: revoke them first', ['caller'], 1]);
+  assert.equal(Number(took(1)[0][0].granted), most + 1);
+
+  // Roles: as many as it weighs, then two more, of which it reads one.
+  const roles = await counted(sql`SELECT count(*) AS n FROM roles`);
+  const made = (from: number, to: number) => world.owner.execute(sql`INSERT INTO roles (instance, id, name, description, permissions, protected, mac)
+    SELECT false, 'r-' || i, 'R', '', permissions, protected, mac FROM roles, generate_series(${from}::int, ${to}::int) i WHERE NOT instance AND id = 'auditor'`);
+  await made(1, most - roles);
+  assert.deepEqual(await weighed('/roles/auditor', { ...normalDefinition(ROLES.auditor), name: 'Inspector' }), [200]);
+  await made(most - roles + 1, most - roles + 2);
+  assert.deepEqual(await weighed('/roles/auditor', { ...normalDefinition(ROLES.auditor), name: 'Inspector' }, 1), tooMany('roles'));
+  assert.equal(took(1)[0][0].roles.length, most + 1);
 });
 
 test('roles defined, put back and deleted: a grant naming one an Owner made refuses its deletion, and one not there is not found', async () => {

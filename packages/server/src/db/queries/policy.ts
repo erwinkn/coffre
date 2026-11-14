@@ -31,6 +31,23 @@ export async function roleRows(db: Queryable): Promise<{ roles: RoleRow[]; grant
 }
 
 /**
+ * What weighing a change to one role reads of the roles: every role's row,
+ * at most one past `most`, and how many grants name `role`, a project role,
+ * counted as `roleRows` counts them, to one past `most`. One statement.
+ */
+export async function rolesWeighed(db: Queryable, role: { instance: boolean; id: string }, most: number): Promise<{ roles: RoleRow[]; granted: number }> {
+  const [row] = await rowsOf<{ roles: RoleRow[] | null; granted: number | string }>(
+    db,
+    sql`
+      SELECT
+        (SELECT json_agg(json_build_object('instance', r.instance, 'id', r.id, 'name', r.name, 'description', r.description, 'permissions', r.permissions, 'protected', r.protected)
+          ORDER BY r.instance, r.id) FROM (SELECT * FROM roles ORDER BY instance, id LIMIT ${most + 1}) r) AS roles,
+        (SELECT count(*) FROM (SELECT 1 FROM grants WHERE ${!role.instance} AND role = ${role.id} LIMIT ${most + 1}) g) AS granted`,
+  );
+  return { roles: row?.roles ?? [], granted: Number(row?.granted ?? 0) };
+}
+
+/**
  * Where people set up service accounts themselves, as the policy row keeps
  * it (JSON, projects by id), with the slug of each project its text names,
  * by id: a superset of those it lists, which the route picks from. Null

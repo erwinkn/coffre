@@ -24,7 +24,7 @@ import { z } from 'zod';
 
 import { members } from '../../db/queries/members.ts';
 import { places } from '../../db/queries/places.ts';
-import { roleRows, type RoleRow } from '../../db/queries/policy.ts';
+import { roleRows, rolesWeighed, type RoleRow } from '../../db/queries/policy.ts';
 import { changed } from '../change.ts';
 import type { ApiContext } from '../context.ts';
 import { ApiError, badRequest, notFound, refusal } from '../errors.ts';
@@ -175,26 +175,46 @@ async function changeRole(ctx: ApiContext, kind: Kind, id: string, definition: R
 const EXAMPLES = 3;
 
 /**
+ * The most of anything a change is weighed across: roles, members it
+ * reaches, grants of one of them, environments where it reaches. Each read
+ * takes one past it; past it, the change is refused 409
+ * `too_many_to_weigh`, and is made without being weighed first.
+ */
+export const WEIGHED_MOST = 1000;
+
+const tooMany = (what: string) =>
+  new ApiError('conflict', `too much to weigh: more than ${WEIGHED_MOST.toLocaleString('en-US')} ${what}. Make the change without weighing it first`, 'too_many_to_weigh');
+
+/**
  * What a change to a role would do, weighed from the rows as stored: the
- * roles (and whether a grant names one being deleted), every active member
- * with their live grants, and every place. A display of the rules
- * (`allows`); the vault decides. For an Owner of the whole instance:
- * `caller` and three statements.
+ * roles (and whether a grant names one being deleted), the active members
+ * the role reaches with their live grants, and the places it reaches:
+ * for a project role, the projects a grant naming it is on; for an
+ * instance role, every one. A display of the rules (`allows`); the vault
+ * decides. For an Owner of the whole instance: `caller` and three
+ * statements, each of at most `WEIGHED_MOST` and one.
  */
 async function weigh(ctx: ApiContext, kind: Kind, id: string, next: RoleDefinition | null): Promise<RoleImpact> {
   const who = await ctx.caller();
   if (!editsRoles(who)) throw refusal('no_access', id);
-  const { roles, granted } = await roleRows(ctx.db);
   const instance = kind === 'instance-role';
+  const { roles, granted } = await rolesWeighed(ctx.db, { instance, id }, WEIGHED_MOST);
+  if (roles.length > WEIGHED_MOST) throw tooMany('roles');
   const row = roles.find((candidate) => candidate.instance === instance && candidate.id === id);
   const shipped = shippedAs(kind, id);
   if (next === null && shipped === null && row === undefined) throw notFound(`no role ${id}`);
   // Deleting one an Owner made, or defining one that is not there, while a grant names it: refused, as the vault refuses it.
-  const grants = instance ? 0 : (granted[id] ?? 0);
-  if (grants > 0 && shipped === null && (next === null || row === undefined)) {
-    throw new ApiError('conflict', `${grants === 1 ? '1 grant names' : `${grants} grants name`} ${id}: revoke ${grants === 1 ? 'it' : 'them'} first`, 'role_granted');
+  if (granted > 0 && shipped === null && (next === null || row === undefined)) {
+    const count = granted > WEIGHED_MOST ? `more than ${WEIGHED_MOST.toLocaleString('en-US')} grants name` : granted === 1 ? '1 grant names' : `${granted.toLocaleString('en-US')} grants name`;
+    throw new ApiError('conflict', `${count} ${id}: revoke ${granted === 1 ? 'it' : 'them'} first`, 'role_granted');
   }
-  const [held, known] = await Promise.all([members(ctx.db, { within: null, listed: 'all', removed: false, scopes: false, now: new Date() }), places(ctx.db, null)]);
+  const [held, known] = await Promise.all([
+    members(ctx.db, { within: null, listed: 'all', removed: false, scopes: false, reaching: { instance, role: id }, most: WEIGHED_MOST, now: new Date() }),
+    places(ctx.db, null, { ...(instance ? {} : { granting: id }), most: WEIGHED_MOST }),
+  ]);
+  if (held.length > WEIGHED_MOST) throw tooMany('members it reaches');
+  if (held.some((member) => member.grants.length > WEIGHED_MOST)) throw tooMany('grants of one member it reaches');
+  if (known.reduce((sum, project) => sum + Math.max(project.environments.length, 1), 0) > WEIGHED_MOST) throw tooMany('environments where it reaches');
   const before = policyOf(roles, known);
   const after = changedPolicy(before, kind, id, next ?? (shipped === null ? null : normalDefinition(shipped)));
   return { ...impactOf(kind, id, before, after, held, known), revision: roleRevision(row === undefined ? null : definitionIn(row)) };
