@@ -1,7 +1,7 @@
 import { readsWholeLog } from '@coffre/core/access';
 import { inclusionProof, leafHash, nodesFrom, tileKey, tilesFor, verifyInclusion, type Hash, type Nodes } from '@coffre/core/log';
 import { personalOf } from '@coffre/core/schemas';
-import type { Called, SignedHead } from '@coffre/core/vault';
+import type { Called, LogAction, SignedHead } from '@coffre/core/vault';
 
 import { logPlaces, logProofs, logStretch, MOST_OBJECTS, type LogPlaces, type LogRow, type TileAt } from '../db/queries/audit.ts';
 import { can, canAnywhere, placeOf, projectsReached } from './caller.ts';
@@ -53,7 +53,7 @@ export type AuditEntryView = {
   key: string | null;
   /** The version a read released, or a write stored. */
   version: number | null;
-  /** For a read of several secrets at one place, logged as one entry: each key, with the version released. `key` and `version` are then null. */
+  /** For a read or a write of several secrets at one place, logged as one entry: each key, with the version released or stored. `key` and `version` are then null. */
   secrets: { key: string | null; version: number | null }[] | null;
   /** 0.14.7's: no 0.16 entry has one. */
   operationId: string | null;
@@ -74,29 +74,29 @@ export type AuditEntryView = {
 /**
  * Technical steps and sign-ins: in the log and under its trees like
  * everything else, but not what someone did with secrets or access, so a
- * page leaves them out unless asked.
+ * page leaves them out unless asked. 0.14.7's, by their 0.16 names.
  */
 export const DETAIL_ACTIONS = [
   'sign_in',
   'sign_out',
-  'credential.end',
   'token.create',
   'token.revoke',
+  // A CLI's sign-in asked, by whoever holds its code, and decided.
   'device.start',
   'device.approve',
   'device.deny',
-  'device.decide',
-  'device.redeem',
   // An MCP client's code redeemed, or its tokens refreshed: every hour of its use.
   'mcp.token',
+  // An MCP client registered, by anyone who asks: what it may do is the person's to connect.
+  'oauth.register',
   'account.link',
   'account.unlink',
-  // A workload's session: each CI run's, and each sidecar's renewal.
-  'workload.signin',
+  // A workload's session: each CI run's exchange, and each sidecar's renewal.
+  'token.exchange',
   'workload.renew',
   // What lapsed, removed by the vault itself.
   'upkeep.expire',
-] as const;
+] as const satisfies readonly LogAction[];
 
 /** Detail entries a page left out, by action. */
 export type HiddenCount = { action: string; count: number };
@@ -448,8 +448,8 @@ function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logPro
   const projectId = environment?.projectId ?? ids('project').find((id) => names.projects.has(id));
   const actor = actorOf(body);
   const subject = ids('principal').find((principal) => principal !== actor) ?? null;
-  // A use names each key it released; a change of one secret, the secret.
-  const released = Array.isArray(detail.keys) && body.action === 'secret.read'
+  // A use names each key it released, and a write each it wrote; a change of one secret, the secret.
+  const released = Array.isArray(detail.keys) && (body.action === 'secret.read' || body.action === 'secret.write')
     ? (detail.keys as unknown[]).map((item) => {
         const { key, version } = (item ?? {}) as { key?: unknown; version?: unknown };
         return { key: typeof key === 'string' ? key : null, version: typeof version === 'number' ? version : null };

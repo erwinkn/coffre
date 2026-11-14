@@ -1,4 +1,5 @@
 import { Edge, HASH_SIZE, leafHash, tileMap, WIDTH } from '@coffre/core/log';
+import type { LogAction } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import * as schema from '@coffre/db/schema';
 import { is, sql, type SQL } from 'drizzle-orm';
@@ -93,7 +94,7 @@ export type Tree = (typeof TREES)[number];
 const treeOf = (kept: boolean): Tree => (kept ? 'kept' : 'aging');
 
 /** The action of the log's first entry, the adoption's (adopt.ts): the mirror starts from the rows it sealed. */
-export const ADOPTION = 'vault.adopt';
+export const ADOPTION = 'vault.adopt' satisfies LogAction;
 
 /** Every table whose rows carry the vault's MAC: the mirror holds each one's, and the adoption seals each one. */
 export const MIRRORED = (Object.values(schema) as unknown[]).filter((table): table is Sealed => is(table, PgTable) && 'mac' in table && table !== schema.logPending && table !== schema.logHead && table !== schema.auditArchive);

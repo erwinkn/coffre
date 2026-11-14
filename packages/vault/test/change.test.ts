@@ -28,7 +28,8 @@ beforeEach(async () => {
   vault.refused.clear();
 });
 
-const said = (action: string, actor: string | null = null): Said => ({ kept: true, action, actor, credential: null, request: null, ip: null, objects: [], detail: {} });
+// The engine's own tests name their entries as they like: no writer's action.
+const said = (action: string, actor: string | null = null): Said => ({ kept: true, action: action as Said['action'], actor, credential: null, request: null, ip: null, objects: [], detail: {} });
 const nothing = { none: part(principals, sql`false`) };
 const owning = and(eq(principals.role, 'owner'), eq(principals.status, 'active'));
 /** A change that reads nothing and writes `writes`. */
@@ -497,7 +498,7 @@ test('a change weighed and refused is refused as the change is, and logged as on
   await done(writing(put(principals, member(ada, 'owner')), put(principals, member(bo))));
   const denied = (operation: ReturnType<typeof setRole>, actor: string) => ({
     ...operation,
-    denied: (_seen: unknown, _at: number, refusal: Refusal) => ({ action: 'member.role', actor, credential: null, request: null, ip: null, objects: [], detail: { refused: refusal.refused } }),
+    denied: (_seen: unknown, _at: number, refusal: Refusal) => ({ action: 'member.role' as const, actor, credential: null, request: null, ip: null, objects: [], detail: { refused: refusal.refused } }),
   });
   const logged = async () => (await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(vault.owner, sql`SELECT kept, body, mac FROM log_pending ORDER BY id`)).map((row) => entryOf(vault.keys, row)!);
   const before = (await logged()).length;
@@ -685,7 +686,7 @@ test('a refused change is logged once a minute for who asked and what, and the l
   const refusing = (reason: string, actor: string | null = ada, action = 'member.role'): Operation<typeof nothing, null> => ({
     read: nothing,
     decide: () => ({ refused: reason }),
-    denied: (_seen, _at, refusal) => (actor === null ? null : { action, actor, credential: null, request: null, ip: null, objects: [], detail: { refused: refusal.refused } }),
+    denied: (_seen, _at, refusal) => (actor === null ? null : { action: action as Said['action'], actor, credential: null, request: null, ip: null, objects: [], detail: { refused: refusal.refused } }),
   });
   const logged = async () => (await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(vault.owner, sql`SELECT kept, body, mac FROM log_pending ORDER BY id`)).map((row) => ({ kept: row.kept, ...entryOf(vault.keys, row)! }));
 

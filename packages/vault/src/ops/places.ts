@@ -4,7 +4,7 @@ import { allows, makesProjects, ownsProject, runsInstance, useOnly } from '@coff
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
 import { PROJECT_PAGES } from '@coffre/core/pages';
 import { tombstoneOf } from '@coffre/core/schemas';
-import type { Answers, EnvironmentCopy, EnvironmentCreate, EnvironmentEdit, EnvironmentEdited, FolderRefile, Forked, PlaceDelete, PlaceDeleted, PlacesChanges, Presented, ProjectCreate, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
+import type { Answers, LogAction, EnvironmentCopy, EnvironmentCreate, EnvironmentEdit, EnvironmentEdited, FolderRefile, Forked, PlaceDelete, PlaceDeleted, PlacesChanges, Presented, ProjectCreate, ProjectEdit, ProjectEdited } from '@coffre/core/vault';
 import { dismissedKeys, environments, grants, principals, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
@@ -422,7 +422,7 @@ type Asked<E extends Parts> = {
  * the rows found of it.
  */
 function editing<E extends Parts, A>(
-  input: Presented & { op: string; project: string },
+  input: Presented & { op: LogAction; project: string },
   environmentSlug: string | undefined,
   vault: Deciding,
   how: { where?: Record<string, string>; read?(project: SQL, environment: SQL): E; decide(asked: Asked<E> & { environment: Row<typeof environments> | undefined }): Plan<A> | Refusal },

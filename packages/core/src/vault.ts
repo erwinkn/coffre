@@ -254,6 +254,25 @@ export type Refused = { refused: string };
 export type Change = SecretsChanges | PlacesChanges | AccessChanges | SigninChanges | WorkloadChanges | FreezeChanges | McpChanges;
 export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers & SigninAnswers & WorkloadAnswers & FreezeAnswers & McpAnswers;
 
+/**
+ * Every action the vault writes to the log, an entry's `action`: each
+ * writer's is typed on it, and the audit page keys its sentences on it
+ * (`@coffre/ui`, `TEMPLATES`), so an action added without its sentence,
+ * or a sentence left for one no writer writes, fails the typecheck.
+ */
+export const LOG_ACTIONS = [
+  'secret.read', 'secret.write', 'secret.rename', 'secret.refile', 'reference.break', 'missing.dismiss',
+  'project.create', 'project.update', 'project.archive', 'project.restore', 'project.move', 'project.delete', 'folder.refile',
+  'environment.create', 'environment.update', 'environment.archive', 'environment.restore', 'environment.delete',
+  'environment.protect', 'environment.unprotect', 'upstream.freeze', 'upstream.thaw',
+  'member.add', 'member.restore', 'member.role', 'member.remove', 'access.grant', 'access.revoke', 'policy.change', 'settings.change',
+  'sign_in', 'sign_out', 'token.create', 'token.revoke', 'account.link', 'account.unlink', 'device.start', 'device.approve', 'device.deny',
+  'token.exchange', 'workload.renew', 'token.bind', 'token.unbind', 'workload.freeze', 'workload.unfreeze',
+  'mcp.connect', 'mcp.token', 'mcp.disconnect', 'oauth.register', 'mcp.ask', 'mcp.approve', 'mcp.deny',
+  'upkeep.expire', 'vault.adopt',
+] as const;
+export type LogAction = (typeof LOG_ACTIONS)[number];
+
 export type * from './changes/access.ts';
 export type * from './changes/freezes.ts';
 export type * from './changes/mcp.ts';

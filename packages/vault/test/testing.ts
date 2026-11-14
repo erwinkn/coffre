@@ -4,6 +4,7 @@
 // alone: it is not built, and a published package has none.
 import type { Vault } from '@coffre/core/vault';
 
+import { adopt } from '../src/adopt.ts';
 import { resolveVaultConfig, type VaultConfig } from '../src/config.ts';
 import { openLocalVault } from '../src/local.ts';
 import { Signer } from '../src/signer.ts';
@@ -32,12 +33,20 @@ export async function openConfiguredVault(config: VaultConfig): Promise<{ world:
  * test wrote with `write` are no change it signed, and what it finds of
  * them is left untaken: it signs the entries all the same.
  */
-export async function signerOf(world: TestVault): Promise<{ sign(): Promise<void> }> {
+export async function signerOf(world: TestVault): Promise<{ sign(full?: boolean): Promise<void> }> {
   const signer = await Signer.open({ db: world.db, keys: world.keys, now: world.now, store: memoryStore(), keepUsesDays: null });
   return {
-    async sign() {
+    /** Sign what waits; `full`, then read the whole log again and do the upkeep, as each minute's run does. */
+    async sign(full = false) {
       for (const hash of world.woken.splice(0)) await signer.wake(hash);
-      while (await signer.run(false));
+      for (let again = await signer.run(full); again; again = await signer.run(false));
     },
   };
+}
+
+/** The emptied database adopted as a fresh install's signer adopts it: the roles as they ship, `owners` its Owners, the log's first entry `vault.adopt`. */
+export async function adoptFresh(world: TestVault, owners: readonly string[]): Promise<void> {
+  const signer = await Signer.open({ db: world.db, keys: world.keys, now: world.now, store: memoryStore(), keepUsesDays: null });
+  // No archive of 0.14's to check, so no key of its.
+  if (!(await adopt(signer, world, { keks: world.keks, owners: [...owners], signingKeys: [] }))) throw new Error('the database has a log already');
 }

@@ -28,7 +28,8 @@ export default defineConfig({
     minify: false,
     sourcemap: true,
     target: 'es2022',
-    lib: { entry: { index: here('src/index.ts'), ...pages }, formats: ['es'] },
+    // The audit log's sentences too, which the server's tests hold to the entries its vault writes.
+    lib: { entry: { index: here('src/index.ts'), 'audit-sentences': here('src/lib/audit-sentences.ts'), ...pages }, formats: ['es'] },
     rollupOptions: {
       // Every package stays an import: the deployment installs and bundles it once.
       external: (id) => !id.startsWith('.') && !id.startsWith('/') && !id.startsWith('\0') && !/^[A-Za-z]:/.test(id),
