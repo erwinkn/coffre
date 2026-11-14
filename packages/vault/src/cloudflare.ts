@@ -103,14 +103,17 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
 
   /** Whether the signer says the database is adopted, within `ADOPTION_WAIT_MS`. The call lives on until it has answered. */
   async #adopted(SIGNER: SignerNamespace): Promise<boolean> {
-    const asked = signerOf(SIGNER).adopt();
-    this.ctx.waitUntil(asked.catch(() => {}));
+    // Its failure logged once, whether it comes before the wait is over or after.
+    const asked = signerOf(SIGNER)
+      .adopt()
+      .catch((error: unknown) => {
+        console.error('coffre: the signer did not say whether the database is adopted', error);
+        return false;
+      });
+    this.ctx.waitUntil(asked);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([asked, new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), ADOPTION_WAIT_MS)))]);
-    } catch (error) {
-      console.error('coffre: the signer did not say whether the database is adopted', error);
-      return false;
     } finally {
       clearTimeout(timer);
     }

@@ -56,7 +56,10 @@
   sign-in waits for it. Nothing to configure: `CoffreSigner` takes the
   vault's keys and Owners from the same `vault(env => …)`. An adoption
   that fails writes nothing, says why in the Worker's log, and is tried
-  again by a call 10 seconds on.
+  again by a call 10 seconds on. It must fit in one call of the object,
+  which Cloudflare resets past 30 seconds (5 seconds at 10,000 versions on
+  the local key): one cut off says so in the log and in `status` at the
+  next try, and an instance it does not fit waits for 0.16.x.
 
 - **A restored version comes back as typed.** Restoring a version a recipe
   made, or one half of a key pair, writes it as a value typed by hand:

@@ -13,8 +13,9 @@ import { sql } from 'drizzle-orm';
 import { adopt, adopted } from '../src/adopt.ts';
 import { keyOf, sealedBy, shapeOf, type Fresh } from '../src/rows.ts';
 import { MIRRORED, Signer, type Finding } from '../src/signer.ts';
+import { ADOPT_AGAIN_MS, SignerHost } from '../src/signer-host.ts';
 import { use, type Value } from '../src/use.ts';
-import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
+import { emptyDatabase, memoryStore, objectStorage, openTestVault } from './database.ts';
 import { amend, ask, credential, environment, grant, principal, project, rows, secret, user, value, write } from './world.ts';
 
 /**
@@ -300,6 +301,56 @@ test('a value marked plain that is not its plaintext column stops the adoption, 
   await vault.owner.execute(sql`UPDATE secret_versions v SET ciphertext = o.ciphertext, iv = o.iv, auth_tag = o.auth_tag FROM secret_versions o WHERE v.secret_id = ${w.database.id} AND o.secret_id = v.secret_id AND o.version <> v.version`);
   await assert.rejects(adopting(), /version \d of secret .* does not open: .*(authenticate|auth)/i);
   await untouched();
+});
+
+test("an adoption cut off by a reset of the signer's object is said by the next host, in the log and the status, has written nothing, and is done once it fits", async (t) => {
+  await upgraded();
+  const logged = t.mock.method(console, 'error', () => {});
+  // A key service too slow for the object's call: its wraps answer only when told.
+  let slow = true;
+  let stuck: ((error: Error) => void) | undefined;
+  let wrapping!: () => void;
+  const reached = new Promise<void>((resolve) => (wrapping = resolve));
+  const keks = new Proxy(vault.keks, {
+    get(keks, key) {
+      const own = Reflect.get(keks, key) as unknown;
+      if (typeof own !== 'function') return own;
+      if (key !== 'wrap' || !slow) return own.bind(keks) as unknown;
+      return () => {
+        wrapping();
+        return new Promise((_, reject) => (stuck ??= reject));
+      };
+    },
+  });
+  const host = (storage: ReturnType<typeof objectStorage>) => new SignerHost({ storage, alone: (run) => run(), keys: vault.keys, db: vault.db, now: vault.now, keepUsesDays: 90, adopting: { ...config, keks } });
+  const started = new Date(vault.now()).toISOString();
+  const storage = objectStorage();
+  const cut = host(storage).adopt();
+  await reached;
+  // The reset: the object's storage stays as it is on disk, and its transaction is rolled back.
+  const kept = objectStorage();
+  for (const [key, value] of storage.kept) kept.kept.set(key, structuredClone(value));
+  stuck!(new Error('reset'));
+  await cut;
+  await untouched();
+
+  slow = false;
+  vault.tick(1000);
+  const next = host(kept);
+  assert.equal(await next.adopt(), false);
+  const said = `the adoption started at ${started} never returned: Cloudflare resets the signer's call past 30 s, and 0.16.0 adopts what fits in one call (docs/design/0.16.md, "The adoption")`;
+  assert.deepEqual((await next.status()).adoption, { at: Date.parse(started), error: said });
+  const lines = () => logged.mock.calls.filter((call) => String(call.arguments[0]).includes('never returned'));
+  assert.deepEqual(lines().map((call) => call.arguments[0]), [`coffre: ${said}`]);
+  // Once: a call before it is tried again says nothing more.
+  assert.equal(await next.adopt(), false);
+  assert.equal(lines().length, 1);
+  await untouched();
+
+  vault.tick(ADOPT_AGAIN_MS);
+  assert.equal(await next.adopt(), true);
+  assert.deepEqual(await rowsOf(vault.owner, sql`SELECT envelope_version AS format, count(*)::int AS n FROM secret_versions GROUP BY 1 ORDER BY 1`), [{ format: 1, n: 1 }, { format: 2, n: 5 }]);
+  assert.equal(kept.kept.has('adopting since'), false);
 });
 
 test('a database is adopted once: again, it changes nothing, and two vaults at once adopt it once', async () => {

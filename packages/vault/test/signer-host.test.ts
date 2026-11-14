@@ -675,12 +675,17 @@ test('a database whose adoption fails is left as it was, answered `adopting`, sa
   assert.equal(adoption!.at, vault.now());
   assert.match(String(logged.mock.calls[0]!.arguments[0]), /did not adopt its database/);
   assert.deepEqual(await signin('root@acme.example'), { refused: 'adopting' });
+  // It returned: a host that starts over the same storage tries again, and does not take it for one a reset cut off.
+  const again = start();
+  assert.equal(await again.adopt(), false);
+  assert.match((await again.status()).adoption!.error, /does not carry its vault's MAC/);
+  assert.equal(logged.mock.callCount(), 2);
 
   // Fixed: tried again by the first call a while on, not before.
   await vault.owner.execute(sql`DELETE FROM audit_archive`);
   vault.tick(ADOPT_AGAIN_MS - 1);
   assert.equal(await host.adopt(), false);
-  assert.equal(logged.mock.callCount(), 1);
+  assert.equal(logged.mock.callCount(), 2);
   vault.tick(1);
   assert.equal(await host.adopt(), true);
   assert.deepEqual([await actions('log'), (await host.status()).adoption], [['vault.adopt'], null]);

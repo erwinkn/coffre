@@ -122,6 +122,8 @@ export const storeOf = (storage: Storage): Store => ({
 
 /** What the host keeps beside the signer's own, under a key the signer does not read: that it said the signer is stopped. */
 const STOPPED = 'stopped said';
+/** When the adoption under way started, on disk while it runs: one found there at the next call never returned, cut off by a reset of the object. */
+const ADOPTING = 'adopting since';
 
 export class SignerHost {
   readonly #on: Hosting;
@@ -174,7 +176,9 @@ export class SignerHost {
    * before it was signed, is signed now; one whose head counts an entry,
    * to a signer whose storage is new, serves, and its checks say what they
    * find; to one that has signed or been told, waits for what it expects. One that fails is in the log and in `status`, and is tried again
-   * by the first call `ADOPT_AGAIN_MS` on.
+   * by the first call `ADOPT_AGAIN_MS` after it failed. So is one that
+   * never returned: Cloudflare resets an object whose call runs past 30 s,
+   * and the next host finds its mark (`ADOPTING`).
    */
   async adopt(): Promise<boolean> {
     if (this.#adopted) return true;
@@ -182,10 +186,19 @@ export class SignerHost {
       const signer = await this.#load();
       if (this.#knows(signer)) return true;
       const now = this.#on.now();
+      const since = this.#on.storage.kv.get(ADOPTING);
+      if (this.#failed === null && typeof since === 'number') {
+        const error = `the adoption started at ${new Date(since).toISOString()} never returned: Cloudflare resets the signer's call past 30 s, and 0.16.0 adopts what fits in one call (docs/design/0.16.md, "The adoption")`;
+        this.#failed = { at: since, error };
+        console.error(`coffre: ${error}`);
+      }
       if (this.#failed !== null && now < this.#failed.at + ADOPT_AGAIN_MS) return false;
       try {
         // Before anything is written: an object that stops before the adoption's entry is signed has its alarm sign it.
         await this.#by(now + TICK_MS);
+        // On disk before the first statement, so that an attempt cut off anywhere, its first run included, is said by the next.
+        this.#on.storage.kv.put(ADOPTING, now);
+        await this.#on.storage.sync();
         const begun = !(await adopt(signer, { db: this.#on.db, keys: this.#on.keys, now: this.#on.now }, this.#on.adopting));
         await signer.run(false);
         // A signer whose storage is new, before a log begun: its head says. One that signed, or was told, waits for its own.
@@ -193,9 +206,12 @@ export class SignerHost {
         if (!this.#adopted) throw new Error("the database's log is begun, and its signer has signed none of it: it adopts nothing begun, and waits for an entry it may sign");
         this.#failed = null;
       } catch (error) {
-        this.#failed = { at: now, error: error instanceof Error ? error.message : String(error) };
+        this.#failed = { at: this.#on.now(), error: error instanceof Error ? error.message : String(error) };
         console.error('coffre: the vault did not adopt its database, and every call is answered 503 adopting until it does', error);
       }
+      // It returned, done or not.
+      this.#on.storage.kv.delete(ADOPTING);
+      await this.#on.storage.sync();
       return this.#adopted;
     });
   }
