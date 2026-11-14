@@ -10,6 +10,7 @@ type Env = { HYPERDRIVE: { connectionString: string }; SIGNING_KEY: string; ALER
 export class CoffreSigner extends signerObject((env: Env) => ({
   database: postgres(env.HYPERDRIVE),
   signingKeys: [Buffer.from(env.SIGNING_KEY, 'base64')],
+  keepUsesDays: 90,
   // A deployment's own: a webhook.
   alert: async (alert) => {
     const response = await fetch(env.ALERT_URL, { method: 'POST', body: JSON.stringify(alert) });

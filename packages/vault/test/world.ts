@@ -36,7 +36,7 @@ export function principal(id: string, more: Partial<Fresh<typeof principals>> = 
 }
 
 export function grant(to: string, role: string, on: { project?: { id: string }; environment?: { id: string } }, more: Partial<Fresh<typeof grants>> = {}): Fresh<typeof grants> {
-  return { id: randomUUID(), principal: to, projectId: on.project?.id ?? null, environmentId: on.environment?.id ?? null, role, expiresAt: null, grantedAt: at, grantedBy: root, ...more };
+  return { id: randomUUID(), principal: to, generation: 0, projectId: on.project?.id ?? null, environmentId: on.environment?.id ?? null, role, expiresAt: null, grantedAt: at, grantedBy: root, ...more };
 }
 
 export function role(instance: boolean, id: string, permissions: string[], guarded: string[] = permissions): Fresh<typeof roles> {

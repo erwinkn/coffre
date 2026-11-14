@@ -330,6 +330,8 @@ export const grants = pgTable(
   {
     id: uuid().primaryKey(),
     principal: text().notNull(),
+    // Its member's generation when it was granted: a removal moves that on, so a grant made before it reaches nothing after.
+    generation: integer().notNull(),
     projectId: uuid('project_id'),
     environmentId: uuid('environment_id'),
     role: text().notNull(),

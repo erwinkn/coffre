@@ -21,6 +21,8 @@ export type SignerConfig = {
   database: PostgresDatabase;
   /** The seeds of the vault's keys (`signingKeys` in config.ts): the first signs, each verifies. */
   signingKeys: readonly Uint8Array[];
+  /** How long a use is kept, in days (`log.keepUsesDays` in config.ts). Null keeps every one. */
+  keepUsesDays: number | null;
   alert?: ((alert: SignerAlert) => void | Promise<void>) | undefined;
 };
 
@@ -46,7 +48,7 @@ export function signerObject<Env>(configure: (env: Env) => SignerConfig) {
 
     constructor(ctx: DurableObjectState, env: Env) {
       super(ctx, env);
-      const { database, signingKeys, alert } = configure(env);
+      const { database, signingKeys, keepUsesDays, alert } = configure(env);
       this.#host = new SignerHost({
         storage: ctx.storage,
         alone: (run) => ctx.blockConcurrencyWhile(run),
@@ -54,6 +56,7 @@ export function signerObject<Env>(configure: (env: Env) => SignerConfig) {
         // The object's client lasts as long as it does: it opens with a run's first statement and closes once idle.
         db: createDatabase(new HyperdrivePool(database.hyperdrive.connectionString, { closeIdleMs: IDLE_DATABASE_MS })),
         now: Date.now,
+        keepUsesDays,
         alert,
       });
     }

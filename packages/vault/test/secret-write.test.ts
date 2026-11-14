@@ -65,7 +65,7 @@ beforeEach(async () => {
 
 const shown = (label: string): Presented => ({ token: tokenOf(label).toString('hex'), proof: null, request: 'req-1', ip: '192.0.2.7' });
 const writing = (label: string, values: Record<string, string | [string, Nature]>, more: Partial<SecretWrite> = {}): Presented & SecretWrite =>
-  ({ ...shown(label), op: 'secret.write', project: 'market', environment: 'prod', values: Object.entries(values).map(([key, item]) => (typeof item === 'string' ? { key, value: item, nature: 'secret' as const } : { key, value: item[0], nature: item[1] })), ...more });
+  ({ ...shown(label), op: 'secret.write', project: 'market', environment: 'prod', keys: Object.entries(values).map(([key, item]) => (typeof item === 'string' ? { key, value: item, nature: 'secret' as const } : { key, value: item[0], nature: item[1] })), ...more });
 const reveal = (label: string, keys: string[]): UseInput => ({ ...shown(label), project: 'market', environment: 'prod', mine: false, keys, purpose: 'reveal', upstream: null });
 const count = async (table: 'log_pending' | 'secret_versions') => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM ${sql.identifier(table)}`))[0]!.n;
 /** The newest change's entry, as the signer will read it: under the vault's MAC. */
@@ -200,13 +200,13 @@ test('two writes of one key decided on the same rows are two versions, one after
 });
 
 test('a write that is not what the contract says is a fault, before any read', async () => {
-  const one = (value: unknown, key: unknown = 'A', nature: unknown = 'secret') => ({ values: [{ key, value, nature }] });
+  const one = (value: unknown, key: unknown = 'A', nature: unknown = 'secret') => ({ keys: [{ key, value, nature }] });
   const bad: Partial<Record<keyof SecretWrite, unknown>>[] = [
-    { values: [] }, { values: 'A' }, { values: [null] }, one('x', 'A', 'public'), one(7), one('x'.repeat(64 * 1024 + 1)), one('a\0b'), one('half \ud83d'), one('x', 'a-b'), one('x', '1A'), one('x', 'A'.repeat(129)), one('x', 7),
-    { values: [{ key: 'A', value: 'x', nature: 'secret' }, { key: 'A', value: 'y', nature: 'secret' }] },
-    { values: Array.from({ length: 2001 }, (_, i) => ({ key: `K${i}`, value: 'x', nature: 'secret' })) },
+    { keys: [] }, { keys: 'A' }, { keys: [null] }, one('x', 'A', 'public'), one(7), one('x'.repeat(64 * 1024 + 1)), one('a\0b'), one('half \ud83d'), one('x', 'a-b'), one('x', '1A'), one('x', 'A'.repeat(129)), one('x', 7),
+    { keys: [{ key: 'A', value: 'x', nature: 'secret' }, { key: 'A', value: 'y', nature: 'secret' }] },
+    { keys: Array.from({ length: 2001 }, (_, i) => ({ key: `K${i}`, value: 'x', nature: 'secret' })) },
     // Each within its own bound, and more than a request's body between them.
-    { values: Array.from({ length: 17 }, (_, i) => ({ key: `K${i}`, value: 'x'.repeat(64 * 1024), nature: 'secret' })) },
+    { keys: Array.from({ length: 17 }, (_, i) => ({ key: `K${i}`, value: 'x'.repeat(64 * 1024), nature: 'secret' })) },
     { project: 7 }, { environment: 'x'.repeat(257) }, { op: 'secret.erase' }, { op: 'toString' },
   ];
   for (const more of bad) await assert.rejects(vault.change(writing('ada-cli', { A: 'x' }, more as Partial<SecretWrite>)), TypeError, JSON.stringify(more).slice(0, 60));
@@ -264,4 +264,38 @@ test('what a caller holds in a change\'s project is whole, whatever else the ope
   assert.deepEqual((await asking('cy-cli')).holds.policy, { ...cy.holds.policy, protected: [], protectedIn: {} });
   await amend(world, 'environments', eq(environments.id, prod!), { slug: 'prod~1', protected: true });
   assert.deepEqual((await asking('eve-cli')).holds.policy.protectedIn, {});
+});
+
+test('a grant counts in its member\'s generation alone: one a writer hid from a removal and put back reaches nothing once the member is let back in', async () => {
+  const asking = async (label: string) => {
+    let found!: Asking;
+    await prepare(world, { read: callerParts(tokenOf(label), sql`(SELECT p.id FROM projects p WHERE p.slug = 'market')`), decide: (seen, at) => ((found = callerFrom(seen, { proof: null, ip: null }, world.workloads, at)!), { refused: 'only a read' }) });
+    return found;
+  };
+  // A database writer takes Ada's grants away, rows the vault wrote, each with its MAC.
+  const [{ hidden }] = (await rowsOf<{ hidden: string }>(world.owner, sql`WITH gone AS (DELETE FROM grants WHERE principal = ${ada} RETURNING *) SELECT json_agg(gone)::text AS hidden FROM gone`)) as [{ hidden: string }];
+  // Her removal finds none to delete, and moves her generation on.
+  await amend(world, 'principals', sql`id = ${ada}`, { status: 'removed', generation: 1 });
+  // The writer puts them back as they were; she is let back in, and signs in again.
+  await world.owner.execute(sql`INSERT INTO grants SELECT * FROM json_populate_recordset(NULL::grants, ${hidden}::json)`);
+  await amend(world, 'principals', sql`id = ${ada}`, { status: 'active' });
+  await write(world, ...rows('credentials', credential('ada-again', ada, { generation: 1 })));
+  assert.deepEqual(await rowsOf(world.owner, sql`SELECT role, generation FROM grants WHERE principal = ${ada} ORDER BY project_id = ${market.id}`), [{ role: 'developer', generation: 0 }, { role: 'developer', generation: 0 }]);
+
+  assert.deepEqual(await vault.use(reveal('ada-again', ['DATABASE_URL'])), { refused: 'no_access' });
+  assert.deepEqual(await vault.change(writing('ada-again', { DATABASE_URL: 'x' })), { refused: 'no_access' });
+  assert.deepEqual((await asking('ada-again')).holds.grants, []);
+  // Nor does the writer revive them by moving their generation on in place: the MAC covers it.
+  await world.owner.execute(sql`UPDATE grants SET generation = 1 WHERE principal = ${ada}`);
+  world.memory.reads.clear();
+  assert.deepEqual(await vault.use(reveal('ada-again', ['DATABASE_URL'])), { refused: 'no_access' });
+  assert.deepEqual((await asking('ada-again')).holds.grants, []);
+
+  // A grant of her generation, beside the old ones, is all she holds: she views prod, and writes nowhere.
+  const [prod] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM environments WHERE project_id = ${market.id} AND slug = 'prod'`);
+  await write(world, ...rows('grants', grant(ada, 'viewer', { environment: prod! }, { generation: 1 })));
+  world.memory.reads.clear();
+  assert.deepEqual(await given('ada-again', ['DATABASE_URL']), [[1, 'postgres://old']]);
+  assert.deepEqual(await vault.change(writing('ada-again', { DATABASE_URL: 'x' })), { refused: 'no_access' });
+  assert.deepEqual((await asking('ada-again')).holds.grants, [{ projectId: market.id, environmentId: prod!.id, role: 'viewer' }]);
 });
