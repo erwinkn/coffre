@@ -135,12 +135,13 @@ while npm's newest `@coffre/cli` is below 0.16.0, and holds 0.16.0 from
 
 **Transactions and the vault.** The app's database login only reads: the
 vault writes every row and every log entry (`docs/design/0.16.md`, "Four
-rules"), so the app opens no transaction. A vault change reads its rows with
-no transaction open, runs its `check` (a signature, asynchronous on Workers)
-still outside one, decides synchronously on what it read, then writes its
-rows and its entry in one bounded statement, which nothing is awaited inside
-(`bounded` in `packages/vault/src/change.ts`); a row read that moved by then
-starts the change over.
+rules"), so the app opens no transaction. A vault change reads its rows in
+a short transaction of its own, then, with none open, runs its `check` (a
+signature, asynchronous on Workers) and decides synchronously on what it
+read, and writes its rows and its entry in one more. Each is `bounded` in
+`packages/vault/src/change.ts`: its lock waits and run are capped, and
+nothing is awaited inside it. A row read that moved by the write starts the
+change over.
 
 **Reviews.** coffre's adversary can write any row of its database but holds
 none of the vault's keys (`docs/design/0.16.md`, "What it promises"). A
