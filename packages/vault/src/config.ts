@@ -25,7 +25,7 @@ export const MAX_BULK_WINDOW_MINUTES = 24 * 60;
 export const DEFAULT_MEMORY_SECONDS = 2;
 /** The longest it remembers them: up to a thousand reads, each with the values it opened, sit in an isolate for as long. */
 export const MAX_MEMORY_SECONDS = 600;
-/** The longest a proxied use is answered while the database cannot be reached (`outageSeconds`): an hour, 0.14's longest `cacheSeconds`. */
+/** The longest a proxied use is answered while the database cannot be reached (`outageSeconds`), and the values opened for one sit in an isolate: an hour, 0.14's longest `cacheSeconds`. */
 export const MAX_OUTAGE_SECONDS = 3600;
 
 /** The vault as it runs: keys decoded, emails checked. */
@@ -97,12 +97,14 @@ export type VaultConfig = {
   memorySeconds?: number;
   /**
    * How long a proxied use is still answered while the database cannot be
-   * reached, in seconds, from the rows the vault last read for it: never
-   * unless set, an hour at most. Only then: while the database answers,
-   * `memorySeconds` alone says how long a revocation waits. A revocation
-   * made just before the outage, or through an instance that still reaches
-   * the database, is not seen for as long (docs/design/0.16.md, "The
-   * vault's short memory"). 0.14's `cacheSeconds`, for outages alone.
+   * reached, in seconds, from the rows the vault last answered it from:
+   * never unless set, an hour at most. Only then: while the database
+   * answers, `memorySeconds` alone says how long a revocation waits. In an
+   * outage, a revocation made since that use was last answered, or through
+   * an instance that still reaches the database, is not seen for as long.
+   * The values opened for a proxied use stay in memory that long too
+   * (docs/design/0.16.md, "Through an outage of the database"). 0.14's
+   * `cacheSeconds`, for outages alone.
    */
   outageSeconds?: number;
   /**
