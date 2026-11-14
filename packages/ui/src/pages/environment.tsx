@@ -35,7 +35,7 @@ import {
   type SecretDraft,
 } from '../lib/secret-edit-batch';
 import { createCopier } from '../lib/copy-attempts';
-import { revealIsCurrent, type Reveal } from '../lib/reveal';
+import { revealIsCurrent, stampedRead, type Read, type Reveal } from '../lib/reveal';
 import { noReads, revealToggleDisabled, rowReads, valueToEdit } from '../lib/row-reads';
 import { sortKeys, type Sort } from '../lib/secret-order';
 import { inDialog } from '../lib/shortcuts';
@@ -1305,6 +1305,7 @@ function SecretRow({
   const { reveal, revealing, error, copyError } = reads;
   const setReveal = (next: Reveal | null) => dispatch({ type: 'set-reveal', reveal: next });
   const coffre = useCoffre();
+  const queryClient = useQueryClient();
   const [historyOpen, setHistoryOpen] = useState(false);
   const [moving, setMoving] = useState(false);
   const [referring, setReferring] = useState(false);
@@ -1333,8 +1334,8 @@ function SecretRow({
   const canRead = entry.readable;
   // What a reveal shows: its own version, or, as a reference, its source's.
   const readVersion = reference === null ? entry.version : reference.version;
-  // And where that version is held: a reset, an override or a new reference changes it under the same number.
-  const readFrom = `${inherited ? parent!.from : '.'}:${reference?.source ?? ''}`;
+  // And the secret it is held in: a reset, an override or a new reference changes it, maybe under the same number.
+  const readFrom = entry.secret;
   const holderPath = `${project}/${environment}/${entry.key}`;
   // A plain value is no secret: listed as it is, shown inline and copied with no read.
   const rowPlain = entry.value !== null;
@@ -1373,26 +1374,26 @@ function SecretRow({
     if (!editing) setBase(null);
   }, [editing]);
 
-  async function readValue({ show = true } = {}): Promise<string | null> {
-    if (shown !== null) return shown.value;
+  // A value read is stamped with the version it opened, after the listing has caught up with it (`stampedRead`).
+  async function readValue({ show = true } = {}): Promise<Reveal | null> {
+    if (shown !== null) return shown;
     dispatch({ type: 'read-started' });
     try {
-      const value = await fetchValue();
-      dispatch({
-        type: 'read-succeeded',
-        reveal: show ? { value, version: readVersion, from: readFrom, at: Date.now() } : null,
-      });
-      return value;
+      const read = await stampedRead({ version: readVersion, from: readFrom }, fetchValue, () =>
+        queryClient.refetchQueries({ queryKey: queryKeys.secrets({ project, environment }) }),
+      );
+      dispatch({ type: 'read-succeeded', reveal: show ? read : null });
+      return read;
     } catch (failure) {
       dispatch({ type: 'read-failed', message: readFailureMessage(failure) });
       return null;
     }
   }
 
-  async function fetchValue(): Promise<string> {
-    if (entry.value !== null) return entry.value;
-    const { values } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
-    return values[entry.key];
+  async function fetchValue(): Promise<Read> {
+    if (entry.value !== null) return { value: entry.value, version: readVersion, from: readFrom };
+    const { values, versions, secrets } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
+    return { value: values[entry.key], version: versions[entry.key], from: secrets[entry.key] };
   }
 
   function toggleReveal() {
@@ -1414,7 +1415,7 @@ function SecretRow({
     const text =
       shown !== null
         ? shown.value
-        : fetchValue().catch((failure: unknown) => {
+        : fetchValue().then(({ value }) => value, (failure: unknown) => {
             read.failed = true;
             read.failure = failure;
             throw failure;
@@ -1444,9 +1445,9 @@ function SecretRow({
   async function startEdit({ name = false } = {}) {
     setFocusName(name);
     setOpening(entry.value === null && canRead);
-    const value = await valueToEdit(entry, () => readValue({ show: false }));
+    const value = await valueToEdit(entry, () => readValue({ show: false }), (listed) => ({ value: listed, version: readVersion, from: readFrom, at: Date.now() }));
     setOpening(false);
-    if (value !== null) setBase({ value, version: readVersion, from: readFrom, at: Date.now() });
+    if (value !== null) setBase(value);
     setReveal(null);
     onEdit();
   }

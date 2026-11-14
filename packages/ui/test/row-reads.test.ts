@@ -11,7 +11,7 @@ import {
   valueToEdit,
 } from '../src/lib/row-reads.ts';
 
-const value: Reveal = { value: 'hunter2', version: 1, at: 0 };
+const value: Reveal = { value: 'hunter2', version: 1, from: 'own', at: 0 };
 
 function run(...actions: RowReadsAction[]): RowReads {
   return actions.reduce(rowReads, noReads);
@@ -19,7 +19,7 @@ function run(...actions: RowReadsAction[]): RowReads {
 
 /** What the row passes the eye button: the reveal, while it is the current version. */
 function shownOf(state: RowReads): Reveal | null {
-  return revealIsCurrent(state.reveal, 1) ? state.reveal : null;
+  return revealIsCurrent(state.reveal, 1, 'own') ? state.reveal : null;
 }
 
 test('Copy finishing before Reveal leaves the value shown and Hide enabled', () => {
@@ -108,12 +108,13 @@ test('a new Copy clears the last one\'s complaint', () => {
 test('an edit always opens: from a plain value as listed, a value read, or empty where the read is refused or fails', async () => {
   const asked: string[] = [];
   const read = (answer: string | null) => async () => (asked.push('read'), answer);
-  assert.equal(await valueToEdit({ value: 'eu-west-3', readable: true }, read('never')), 'eu-west-3');
-  assert.equal(await valueToEdit({ value: null, readable: true }, read('hunter2')), 'hunter2');
+  const listed = (value: string) => `listed ${value}`;
+  assert.equal(await valueToEdit({ value: 'eu-west-3', readable: true }, read('never'), listed), 'listed eu-west-3');
+  assert.equal(await valueToEdit({ value: null, readable: true }, read('hunter2'), listed), 'hunter2');
   // A read refused, as 0.9's vault refused every person's under `people: 'stand-ins'`, opens it empty, to replace the value.
-  assert.equal(await valueToEdit({ value: null, readable: true }, read(null)), null);
+  assert.equal(await valueToEdit({ value: null, readable: true }, read(null), listed), null);
   assert.equal(asked.length, 2);
   // A value nobody reads (sensitive, an Owner's override of one in their dev@me included) or a parent's they do not: no read.
-  assert.equal(await valueToEdit({ value: null, readable: false }, read('never')), null);
+  assert.equal(await valueToEdit({ value: null, readable: false }, read('never'), listed), null);
   assert.equal(asked.length, 2);
 });

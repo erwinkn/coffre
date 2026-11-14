@@ -57,6 +57,17 @@
   binding removed ends the credentials its runs hold within the vault's
   memory, 2 seconds, where 0.14.7 ended them at once.
 
+- **A reveal says which version it opened.** `POST /api/reveals` answers
+  `versions` and `secrets` beside `values`: each value's version number,
+  and the id of the secret it is held in (a reference's source, a fork's
+  parent), from the vault's one answer, at no extra cost; an environment's
+  listing names each key's the same way (`secret`). The environment page
+  keeps a revealed value, or an edit's starting value, only while both are
+  the row's: a read that opened another version than the listing showed
+  refetches the listing first, and one the listing has moved past by then
+  hides, where it was shown under the number the row had when clicked. A
+  fork's key reset to its parent's and overridden again can reach the
+  parent's number; the secret tells the two apart.
 - **A key marked in place, as one change.** `coffre mark` (`{ "KEY": {
   "sensitivity" } }` alone in a write) is served again: the value is kept
   as the key's next version, with its first date, recipe and pair. A

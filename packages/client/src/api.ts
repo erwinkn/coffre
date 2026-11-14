@@ -14,6 +14,12 @@ export type Api = {
       values: {
         [key: string]: string;
       };
+      versions: {
+        [key: string]: number;
+      };
+      secrets: {
+        [key: string]: string;
+      };
       sensitive: string[];
       useOnly: string[];
       version: string | null;
@@ -150,6 +156,7 @@ export type Api = {
         archived: boolean;
         version: number | null;
         versionId: string | null;
+        secret: string | null;
         updatedAt: string | null;
         updatedBy: string | null;
         generated: null | {
@@ -2322,6 +2329,7 @@ export type SecretKey = {
   archived: boolean;
   version: number | null;
   versionId: string | null;
+  secret: string | null;
   updatedAt: string | null;
   updatedBy: string | null;
   generated: null | {
