@@ -87,6 +87,8 @@ test('the shape is checked before anything is trusted', () => {
   assert.equal(decodeWorkloadToken(token(good)).claims.iss, ISSUER);
   for (const [claims, why] of [
     [{ ...good, iss: '' }, /no iss/],
+    [{ ...good, iss: `${ISSUER}\u0000` }, /iss with a NUL/],
+    [{ ...good, sub: 'a\ud800' }, /sub with a NUL or a lone surrogate/],
     [{ ...good, sub: 7 }, /no sub/],
     [{ ...good, exp: '1' }, /no exp/],
     [{ ...good, iat: null }, /no iat/],

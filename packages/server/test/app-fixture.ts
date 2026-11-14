@@ -31,6 +31,8 @@ export type TestApp = {
   executed: unknown[];
   /** The rows each statement it executed answered, as `executed`: for a test to see how many a bounded read took. */
   answered: unknown[][];
+  /** The work coffre told the platform to keep the request alive for, oldest first: the request's own, and what outlives its response. */
+  tracked: Promise<unknown>[];
   /** A request, as a deployment's Start app answers one: coffre's middleware around coffre's route. */
   request(path: string, init?: RequestInit): Promise<Response>;
   /** A page's render for a request, with what coffre hands it. */
@@ -83,7 +85,8 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
     auth,
     auditChainKey: Buffer.alloc(32, 3).toString('base64'),
   });
-  const scope = requestScope(createRuntime(config, counted, recorded, transport ?? FETCHES_NOTHING), () => '192.0.2.7');
+  const tracked: Promise<unknown>[] = [];
+  const scope = requestScope(createRuntime(config, counted, recorded, transport ?? FETCHES_NOTHING), () => '192.0.2.7', (work) => tracked.push(work));
   return {
     world,
     vault,
@@ -93,6 +96,7 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
     },
     executed,
     answered,
+    tracked,
     request(path, init) {
       const request = new Request(`${PUBLIC_URL}${path}`, init);
       return scope.respond(request, () => scope.route(request));

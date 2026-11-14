@@ -111,6 +111,8 @@ async function cost<T>(run: () => Promise<T>): Promise<[T, string[], number]> {
   return [result, app.calls.slice(calls), app.statements - statements];
 }
 const refused = (answer: Answer) => [answer.status, answer.body.error, answer.body.reason];
+/** Whether each of `works` has settled, as of now. */
+const settledOf = (works: Promise<unknown>[]) => Promise.all(works.map((work) => Promise.race([work.then(() => true, () => true), new Promise<boolean>((resolve) => setImmediate(resolve, false))])));
 
 test("a run's token buys a five-minute token of its service: one statement, the issuer's keys fetched once, one change; it reads as the service", async () => {
   const [answer, calls, statements] = await cost(() => exchange(idToken()));
@@ -171,6 +173,19 @@ test('a service named as the vault takes none is told no binding trusts it, and 
   }
 });
 
+test("a service's name as long as the vault's contract allows is looked up; one longer is a bad request", async () => {
+  const [longest, , statements] = await cost(() => exchange(idToken(), `token:${'a'.repeat(250)}`));
+  assert.deepEqual([refused(longest), statements], [[401, 'unauthenticated', 'no_match'], 1]);
+  assert.equal((await exchange(idToken(), `token:${'a'.repeat(251)}`)).status, 400);
+});
+
+test('an issuer no database could store is malformed, refused before anything is read', async () => {
+  for (const iss of [`${KUBE}\0`, `${KUBE}\ud800`]) {
+    const [answer, calls, statements] = await cost(() => exchange(idToken({ iss })));
+    assert.deepEqual([refused(answer), calls, statements], [[401, 'unauthenticated', 'malformed'], [], 0], JSON.stringify(iss));
+  }
+});
+
 test('a token that does not decode is refused before anything is read, and logged once a minute', async () => {
   const logged = mock.method(console, 'error', () => {});
   const refusals = () => logged.mock.calls.filter((call) => (call.arguments[0] as { event?: string; reason?: string } | undefined)?.event === 'workload_exchange_refused').map((call) => (call.arguments[0] as { reason: string }).reason);
@@ -182,15 +197,16 @@ test('a token that does not decode is refused before anything is read, and logge
   assert.deepEqual(refusals(), ['malformed']);
 });
 
-test("an unknown key's alert quotes the service's name as the shell reads it", async () => {
-  const odd = 'token:ci;id$(x)';
+test("an unknown key's alert names the service in full, quoted as the shell reads it", async () => {
+  for (const [odd, named] of [['token:ci;id$(x)', /then coffre trust 'service:ci;id\$\(x\)' --issuer https:\/\/kubernetes\.acme\.example --replace-keys/], ['token:token:prod', /then coffre trust service:token:prod --issuer/], ['token:-x', /then coffre trust service:-x --issuer/]] as const) {
   await write(world, ...rows('principals', principal(odd)), ...rows('grants', grant(odd, 'developer', { project: market })));
   await write(world, ...rows('bindings', binding(odd, { profile: 'custom', issuer: KUBE, jwksUri: `sha256:${createHash('sha256').update(KUBE_JWKS).digest('hex')}`, jwks: KUBE_JWKS, claims: canonicalClaims({ sub: 'system:serviceaccount:ci:runner' }), scope: VIEWER })));
   const logged = mock.method(console, 'error', () => {});
   const answer = await exchange(idToken({ iss: KUBE, sub: 'system:serviceaccount:ci:runner' }, { key: pair().privateKey, kid: 'rotated' }), odd);
   logged.mock.restore();
   assert.deepEqual(refused(answer), [401, 'unauthenticated', 'unknown_signer']);
-  assert.match(alerts[0]!.text, /then coffre trust 'ci;id\$\(x\)' --issuer https:\/\/kubernetes\.acme\.example --replace-keys/);
+  assert.match(alerts.at(-1)!.text, named);
+  }
 });
 
 test("claims no binding trusts are named, never the values a binding expects", async () => {
@@ -215,13 +231,16 @@ test("a binding that carries its keys: the app fetches nothing, the vault verifi
   const [made, calls, statements] = await cost(() => exchange(kube(kube1.privateKey, 'kube-1')));
   assert.deepEqual([made.status, calls, statements, fetched], [200, ['change'], 1, []]);
   const stranger = pair();
+  const before = app.tracked.length;
   const started = performance.now();
   const [unknown] = await cost(() => exchange(kube(stranger.privateKey, 'rotated')));
   const waited = performance.now() - started;
   assert.deepEqual(refused(unknown), [401, 'unauthenticated', 'unknown_signer']);
   assert.ok(waited >= 1_900 && waited < 4_000, `answered after ${Math.round(waited)} ms`);
+  // The hook, still unanswered, is work the platform keeps the request alive for: on Workers, the response's end would cancel it.
+  assert.equal((await settledOf(app.tracked.slice(before))).filter((settled) => !settled).length, 1);
   assert.equal(alerts.length, 1);
-  assert.match(alerts[0]!.text, /save its JWKS as keys\.json, then coffre trust deploy --issuer https:\/\/kubernetes\.acme\.example --replace-keys/);
+  assert.match(alerts[0]!.text, /save its JWKS as keys\.json, then coffre trust service:deploy --issuer https:\/\/kubernetes\.acme\.example --replace-keys/);
   assert.equal(refusals(), 1);
   assert.deepEqual({ kind: alerts[0]!.kind, service: alerts[0]!.service, binding: alerts[0]!.binding }, { kind: 'unknown_key', service: DEPLOY, binding: carried.id });
   assert.match(alerts[0]!.text, /names key "rotated", not one uploaded for https:\/\/kubernetes\.acme\.example/);

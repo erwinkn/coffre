@@ -69,6 +69,8 @@ function base64url(text: string): Buffer | null {
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value !== '';
+/** A claim the reader takes as text: nonempty, with no NUL and no lone surrogate. */
+const text = (value: unknown): value is string => nonempty(value) && !/[\0\p{Cs}]/u.test(value);
 
 /** A refusal the oracle expects: what is wrong, and the reasons that say it, null for any. */
 type Defect = { what: string; reasons: readonly WorkloadRefusal[] | null };
@@ -121,7 +123,7 @@ function oracle(token: string, keys: Jwk[], expected: { nowMs: number; maxLifeti
   // A length no encoding has is refused, but which check notices first is jose's business.
   if (header === 'not base64url' || claims === 'not base64url') return malformed('a part is not base64url', null);
   if (header === null || claims === null) return malformed('a part is not a JSON object');
-  if (!nonempty(claims.iss) || !nonempty(claims.sub) || !finite(claims.exp) || !finite(claims.iat)) return malformed('claim types');
+  if (!text(claims.iss) || !text(claims.sub) || !finite(claims.exp) || !finite(claims.iat)) return malformed('claim types');
   if (claims.nbf !== undefined && !finite(claims.nbf)) return malformed('nbf type');
 
   // Any critical extension is one the reader does not know (it reads alg and kid alone), `b64` included: a JWT never leaves its payload unencoded.
@@ -198,8 +200,8 @@ function signature(input: string, signing: Signing, published: Jwk[]): string {
 const NUMBERS_WRONG = ['"1791028800"', '1e400', '-1e400', 'null', 'true', '[]', '{}', '"NaN"'];
 const NUMBERS_ODD = ['-0', '1e308', '-1e308', '0.5', '9007199254740993'];
 const CLAIM_EDITS: Record<string, readonly (string | null)[]> = {
-  iss: [`"${ISSUER}/"`, `"${ISSUER.toUpperCase()}"`, `"${ISSUER.replace('kube', 'Kube')}"`, `" ${ISSUER}"`, '"https://evil.example"', '""', '7', 'null', `["${ISSUER}"]`, null],
-  sub: ['""', '7', 'null', '["s"]', '{}', '"system:serviceaccount:ci:deploy"', null],
+  iss: [`"${ISSUER}/"`, `"${ISSUER.toUpperCase()}"`, `"${ISSUER.replace('kube', 'Kube')}"`, `" ${ISSUER}"`, '"https://evil.example"', '""', `"${ISSUER}\\u0000"`, `"${ISSUER}\\ud800"`, '7', 'null', `["${ISSUER}"]`, null],
+  sub: ['""', '"s\\u0000"', '7', 'null', '["s"]', '{}', '"system:serviceaccount:ci:deploy"', null],
   aud: [
     `["${AUDIENCE}"]`, `["${AUDIENCE}","https://other.example"]`, `["https://other.example","${AUDIENCE}"]`, `["${AUDIENCE}","${AUDIENCE}"]`,
     '"https://other.example"', `"${AUDIENCE}/"`, `"${AUDIENCE.toUpperCase()}"`, '[]', 'null', '5', `{"aud":"${AUDIENCE}"}`, null,
