@@ -3,7 +3,7 @@ import { inclusionProof, leafHash, nodesFrom, tileKey, tilesFor, verifyInclusion
 import { personalOf } from '@coffre/core/schemas';
 import type { Called, SignedHead } from '@coffre/core/vault';
 
-import { logPlaces, logProofs, logStretch, MOST_OBJECTS, type LogPlaces, type LogRow, type TileAt } from '../db/queries/audit.ts';
+import { logPlaces, logProofs, logStretch, logTiles, MOST_OBJECTS, type LogPlaces, type LogRow, type TileAt } from '../db/queries/audit.ts';
 import { can, canAnywhere, placeOf, projectsReached } from './caller.ts';
 import type { ApiContext } from './context.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
@@ -246,8 +246,19 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
     credentials: [...ids.credentials],
     runs: [...ids.runs],
   });
+  // A run's exchange counts only as the tree proves it: a writer may edit its body, or point the index elsewhere. Its
+  // tiles are most often the page's own; those it lacks take one more read.
+  const exchanges = head === null ? [] : [...found.firsts.values()].filter((row) => placed(head, row) === 'within');
+  const lacking = tilesOf(head, exchanges).filter(({ kept, level, index }) => !found.tiles[kept ? 'kept' : 'aging'].has(tileKey(level, index)));
+  if (lacking.length > 0) {
+    const fetched = await logTiles(ctx.db, lacking);
+    for (const tree of ['kept', 'aging'] as const) for (const [key, hashes] of fetched[tree]) found.tiles[tree].set(key, hashes);
+  }
   const proofOf = prover(head, found.tiles);
-  const entries = shown.map(({ row, body }) => ({ ...viewOf(row, body, found), proof: proofOf(row) }));
+  const entries = shown.map(({ row, body }) => {
+    const proof = proofOf(row);
+    return { ...viewOf(row, body, found, (exchange) => standsBy(proofOf(exchange), proof)), proof };
+  });
   const holes = head !== null && unfiltered ? holesOf(head, query.before === undefined ? 'head' : anchor, stretch, more) : null;
   const page: AuditPage = { entries, more, next, head: head === null ? null : { size: head.size, signedAt: head.signedAt }, holes };
   if (query.detail === true) return page;
@@ -445,7 +456,7 @@ export function holesOf(head: SignedHead, top: 'head' | LogRow | null, stretch: 
 }
 
 /** An entry as the page shows it, its places and keys by name. */
-function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logProofs>>): Omit<AuditEntryView, 'proof'> {
+function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logProofs>>, stands: (exchange: LogRow) => boolean): Omit<AuditEntryView, 'proof'> {
   const detail = detailOf(body);
   const mentions = mentionsOf(body);
   const ids = (kind: string) => mentions.filter((object) => object.startsWith(`${kind}:`)).map((object) => object.slice(kind.length + 1));
@@ -482,7 +493,7 @@ function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logPro
     operationId: null,
     relatedSeq: null,
     requestId: typeof body.request === 'string' ? body.request : null,
-    run: body.action === 'token.exchange' ? { exchangeSeq: row.seq, claims: runClaims(detail.run) } : runOf(body, names.firsts),
+    run: body.action === 'token.exchange' ? { exchangeSeq: row.seq, claims: runClaims(detail.run) } : runOf(body, names.firsts, stands),
     token: credential?.kind === 'personal' ? { id: body.credential as string, label: credential.label ?? '' } : null,
     metadata: detail,
   };
@@ -498,15 +509,25 @@ function actorParts(actor: string | null): Pick<AuditEntryView, 'actorType' | 'a
 
 /**
  * The run a service's entry was written for: its credential's exchange, the
- * first entry naming it, by the same service. Null for any other credential,
- * or once the exchange has aged out of the log.
+ * first entry naming it, by the same service, and proven as the entry is.
+ * Null for any other credential, once the exchange has aged out of the log,
+ * or when the tree does not vouch for it.
  */
-function runOf(body: Body, firsts: ReadonlyMap<string, { seq: number; body: string }>): AuditEntryView['run'] {
+function runOf(body: Body, firsts: ReadonlyMap<string, LogRow>, stands: (exchange: LogRow) => boolean): AuditEntryView['run'] {
   const first = typeof body.credential === 'string' ? firsts.get(body.credential) : undefined;
-  if (first === undefined) return null;
+  if (first === undefined || !stands(first)) return null;
   const exchange = parsed(first.body);
   if (actionOf(exchange) !== 'token.exchange' || actorOf(exchange) !== actorOf(body) || exchange.credential !== body.credential) return null;
   return { exchangeSeq: first.seq, claims: runClaims(detailOf(exchange).run) };
+}
+
+/**
+ * Whether an exchange may say the run of an entry proven as `entry` is: a
+ * proven entry needs a proven exchange; one the head has not reached yet,
+ * an exchange no worse. A failed one never says anything.
+ */
+function standsBy(exchange: AuditEntryView['proof'], entry: AuditEntryView['proof']): boolean {
+  return exchange === 'proven' || (exchange === 'unproven' && entry !== 'proven');
 }
 
 function runClaims(run: unknown): Record<string, string | number> {

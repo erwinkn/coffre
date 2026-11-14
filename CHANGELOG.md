@@ -39,7 +39,8 @@
 - **A run's trail on the audit page.** Each entry a CI run's credential
   wrote, its reads included, names the run again (`run`, with the
   exchange's `seq` and the issuer's claims), as 0.14.7's page did, read
-  from the log alone, so it outlives the credential. A token out of its
+  from the log alone, so it outlives the credential, and only once the
+  head proves the exchange as it proves the entry. A token out of its
   time is refused as `too_old`, where 0.14.7 also said `too_long` and
   `not_yet_valid`, and its message now names all three cases. A
   binding removed ends the credentials its runs hold within the vault's

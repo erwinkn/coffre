@@ -10,7 +10,7 @@ import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:cryp
 import { after, beforeEach, mock, test } from 'node:test';
 
 import { canonicalClaims, github, signin, type RateLimiter, type WorkloadAlert } from '@coffre/core/identity';
-import { credentials } from '@coffre/db/schema';
+import { credentials, log, logIndex } from '@coffre/db/schema';
 import { binding, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, signerOf, write } from '@coffre/vault/testing';
 import { eq } from 'drizzle-orm';
 
@@ -159,6 +159,41 @@ test("the audit page leads each entry a run's credential wrote to its run, throu
   assert.equal(exchanged.run?.claims.ref, MAIN.ref);
   assert.deepEqual(read.run, exchanged.run);
   assert.equal(written.run, null);
+});
+
+test("an exchange the tree does not prove says no entry's run: a writer who forges one, and points a credential's index at it, is not believed", async () => {
+  const AUD = 'user:aud@acme.example';
+  // A service token of the same service, which no run ever bought.
+  const plain = credential('deploy-cli', DEPLOY, { scope: VIEWER });
+  await write(world, ...rows('roles', role(true, 'auditor', ['secret.write', 'audit.read'])), ...rows('principals', principal(AUD, { role: 'auditor' })), ...rows('credentials', credential('aud-cli', AUD), plain));
+  const call = (bearer: string, path: string, init: RequestInit = {}) => app.request(path, { ...init, headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' } });
+  assert.equal((await call('aud-cli', '/api/secrets/market/prod', { method: 'PATCH', body: JSON.stringify({ API_KEY: 'v1' }) })).status, 200);
+  const run = await exchange(idToken());
+  assert.equal(run.status, 200, JSON.stringify(run.body));
+  assert.equal((await call(run.body.token!, '/api/reveals', { method: 'POST', body: JSON.stringify({ path: 'market/prod/API_KEY' }) })).status, 200);
+  const plainly = await call('deploy-cli', '/api/reveals', { method: 'POST', body: JSON.stringify({ path: 'market/prod/API_KEY' }) });
+  assert.equal(plainly.status, 200, await plainly.text());
+  await (await signerOf(world)).sign();
+
+  type Entry = { seq: number; action: string; actorId: string; proof: string; run: { exchangeSeq: number; claims: Record<string, unknown> } | null };
+  const page = async () => ((await (await call('aud-cli', '/api/audit?detail=1')).json()) as { entries: Entry[] }).entries.filter((entry) => entry.action !== 'test.write');
+  const [, , exchanged, written] = (await page()) as [Entry, Entry, Entry, Entry];
+  assert.deepEqual([exchanged.action, written.action], ['token.exchange', 'secret.write']);
+  // The writer turns the auditor's entry, signed and below both reads, into an exchange that bought `deploy-cli`, by a run of its choosing.
+  const [real] = await world.owner.select({ body: log.body }).from(log).where(eq(log.seq, BigInt(exchanged.seq)));
+  const forged = JSON.parse(real!.body) as { credential: string; detail: { run: Record<string, unknown> } };
+  forged.credential = plain.id;
+  forged.detail.run = { ...forged.detail.run, ref: 'refs/heads/FORGED' };
+  await world.owner.update(log).set({ body: JSON.stringify(forged) }).where(eq(log.seq, BigInt(written.seq)));
+  await world.owner.insert(logIndex).values({ object: `credential:${plain.id}`, seq: BigInt(written.seq) });
+
+  const [plainRead, runRead, exchangedAgain, rewritten] = (await page()) as [Entry, Entry, Entry, Entry];
+  assert.deepEqual([plainRead, runRead].map((entry) => `${entry.actorId} ${entry.action} ${entry.proof}`), ['deploy secret.read proven', 'deploy secret.read proven']);
+  assert.equal(rewritten.proof, 'failed');
+  assert.equal(plainRead.run, null);
+  // The run's own read still leads to its exchange, which the tree proves.
+  assert.deepEqual(runRead.run, exchangedAgain.run);
+  assert.equal(runRead.run?.claims.ref, MAIN.ref);
 });
 
 test('a token is spent once: the same token again is replayed, by the vault', async () => {
