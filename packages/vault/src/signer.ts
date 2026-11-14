@@ -114,8 +114,8 @@ const ROWS = sql.join(
 // Where each tree ends: its last leaf and that entry's hash, one step down an index. A count would read the whole log.
 const ENDS = sql`SELECT 'end', encode(${leafOf('last.body')}, 'hex'), to_jsonb(coalesce(last.leaf + 1, 0)), tree.kept, NULL, NULL
   FROM (VALUES (true), (false)) tree(kept) LEFT JOIN LATERAL (SELECT leaf, body FROM log WHERE log.kept = tree.kept ORDER BY leaf DESC LIMIT 1) last ON true`;
-// The head as the database holds it, by its MAC: no entry writes it, so the mirror has no row for it.
-const HEAD = sql`SELECT 'head', NULL, NULL, NULL, NULL, mac FROM log_head`;
+// The head as the database holds it, every column (`headRow`): no entry writes it, so the mirror has no row for it.
+const HEAD = sql`SELECT 'head', NULL, jsonb_build_array(size, kept_size, encode(kept_root, 'hex'), aging_size, encode(aging_root, 'hex'), aging_from, round(extract(epoch FROM signed_at) * 1000)::bigint), NULL, NULL, mac FROM log_head`;
 /** What a finding names when the head is not the one last signed, as it names a row. */
 export const HEAD_ROW = JSON.stringify(['log_head']);
 
@@ -130,7 +130,7 @@ export type Snapshot = {
   pending: Waiting[];
   /** Nothing waits past these. Only then is a missing entry missing, and the rows comparable. */
   drained: boolean;
-  /** On a full run: each sealed row's MAC by the row's name, where each tree ends, and the head's MAC, hex, if there is a head. */
+  /** On a full run: each sealed row's MAC by the row's name, where each tree ends, and the head's row (`headRow`), if there is a head. */
   rows: Map<string, string> | null;
   ends: Record<Tree, End> | null;
   head: string | null;
@@ -152,6 +152,9 @@ type Move = {
 
 /** What the head's MAC covers: both trees at once, so the two never disagree about when. No entry's body begins as it does. */
 export const headText = (head: Omit<Move['head'], 'mac'>) => `head\n${JSON.stringify([head.size, head.keptSize, head.keptRoot, head.agingSize, head.agingRoot, head.agingFrom, head.signedAt])}`;
+
+/** A head's row, whole, as one text: what was signed and what is read compare by it. */
+const headRow = (head: Move['head']) => JSON.stringify([head.size, head.keptSize, head.keptRoot, head.agingSize, head.agingRoot, head.agingFrom, head.signedAt, head.mac]);
 
 /** The entries among `taken` that are in the log as they were signed: number, tree, leaf and hash. */
 const asSigned = (taken: Move['taken']) => sql`
@@ -178,9 +181,10 @@ export class Signer {
   #last: Record<Tree, string | null> = { kept: null, aging: null };
   #moving: Move | null = null;
   /**
-   * The MAC, hex, of the head it last signed: what `log_head` must hold. A
-   * head's own MAC says the vault signed it, not that it signed none since:
-   * an older one put back is genuine, and only this tells it from the last.
+   * The head it last signed, as its row (`headRow`): what `log_head` must
+   * hold, column for column. A head's own MAC says the vault signed it, not
+   * that it signed none since: an older one put back is genuine, and only
+   * this tells it from the last.
    */
   #head: string | null = null;
   /** The first use of the aging tree it keeps: those before it are pruned. */
@@ -362,7 +366,7 @@ export class Signer {
       drained: waiting.length <= MOST,
       rows: full ? new Map(found.filter((row) => row.part === 'row').map((row) => [JSON.stringify([row.name, ...(row.key as unknown[])]), Buffer.from(row.mac).toString('hex')])) : null,
       ends: full ? (Object.fromEntries(found.filter((row) => row.part === 'end').map((row) => [treeOf(row.kept), { size: row.key, last: row.name }])) as Record<Tree, End>) : null,
-      head: found.filter((row) => row.part === 'head').map((row) => Buffer.from(row.mac).toString('hex'))[0] ?? null,
+      head: found.filter((row) => row.part === 'head').map((row) => JSON.stringify([...(row.key as unknown[]), Buffer.from(row.mac).toString('hex')]))[0] ?? null,
     };
   }
 
@@ -421,7 +425,7 @@ export class Signer {
           ...(wrong.length > MOST_ROWS ? wrong.sort().slice(0, MOST_ROWS) : wrong).map((of) => ({ found: 'row' as const, of })),
           // Before this run's entries: the log read is the one the last run signed, and must end as that one did.
           ...TREES.filter((tree) => snapshot.ends![tree].size !== this.#trees[tree].size || snapshot.ends![tree].last !== this.#last[tree]).map((of) => ({ found: 'cut' as const, of })),
-          // Before this run's head: the one read is the last signed, or an older one was put back, it was edited, or it is gone.
+          // Before this run's head: the one read is the last signed, column for column, or an older one was put back, it was edited, or it is gone.
           ...(snapshot.head === this.#head ? [] : [{ found: 'row' as const, of: HEAD_ROW }]),
         ];
         // Found when it turns wrong, once: what the last check found wrong too is no news, nor what still waits to be said.
@@ -462,7 +466,7 @@ export class Signer {
     this.#moving = { ...move, head: { ...head, mac: macOf(key, key.entries, headText(head)).toString('hex') } };
     changes.set('moving', this.#moving);
     // With the move, in one write: no read comes before the move is done (`read`), so the head read is this one or not the last.
-    this.#head = this.#moving.head.mac;
+    this.#head = headRow(this.#moving.head);
     changes.set('head', this.#head);
   }
 

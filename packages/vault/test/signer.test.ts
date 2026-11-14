@@ -322,8 +322,10 @@ test('the full run finds a row put back, one deleted, one written behind the vau
   assert.deepEqual(signer.standing, [{ found: 'row', of: named(bo) }, ...found]);
 });
 
-test('the full run finds an older head put back, though it is genuine, and one deleted; the next signing writes the head again, and a signer opened again holds it still', async () => {
+test('the full run finds an older head put back, though it is genuine, one edited under its MAC, and one deleted; the next signing writes the head again, and a signer opened again holds it still', async () => {
   const head = async () => (await rowsOf<{ mac: string }>(vault.owner, sql`SELECT encode(mac, 'hex') AS mac FROM log_head`))[0]?.mac ?? null;
+  /** The head it signed last, as the signer keeps it: its MAC is the last field. */
+  const kept = () => (JSON.parse(store.kept.get('head') as string) as unknown[]).at(-1);
   const wrong = [{ found: 'row', of: HEAD_ROW }];
   // No head yet, and none signed: nothing to find.
   assert.deepEqual(await run(), []);
@@ -333,7 +335,7 @@ test('the full run finds an older head put back, though it is genuine, and one d
   await member(bo, 'member');
   assert.deepEqual(await run(), []);
   const last = await head();
-  assert.equal(store.kept.get('head'), last);
+  assert.equal(kept(), last);
   // The head of one entry ago, whole: under the vault's MAC, as `caller` would find, and not the last.
   await vault.owner.execute(sql`UPDATE log_head SET (size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac) = (SELECT size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac FROM jsonb_populate_record(NULL::log_head, ${JSON.stringify(older)}::jsonb))`);
   assert.notEqual(await head(), last);
@@ -350,8 +352,22 @@ test('the full run finds an older head put back, though it is genuine, and one d
   assert.deepEqual(signer.standing, wrong);
   assert.deepEqual(await run(), []);
   assert.deepEqual(signer.standing, []);
-  assert.equal(await head(), store.kept.get('head'));
+  assert.equal(await head(), kept());
   await proven();
+  // Opened again from its storage with the head right: it holds the head it signed, and finds nothing.
+  signer = await open();
+  assert.deepEqual(await run(), []);
+  assert.deepEqual(signer.standing, []);
+  // Each column edited in turn, the MAC left: no caller is answered such a head, and it is not the one signed.
+  for (const edit of [sql`aging_from = aging_from + 1, aging_size = aging_size + 1, size = size + 1`, sql`kept_root = sha256(kept_root)`, sql`aging_root = sha256(aging_root)`, sql`signed_at = signed_at + interval '1 millisecond'`, sql`kept_size = kept_size + 1, size = size + 1`]) {
+    const [{ before }] = (await rowsOf<{ before: unknown }>(vault.owner, sql`SELECT to_jsonb(log_head) AS before FROM log_head`)) as [{ before: unknown }];
+    await vault.owner.execute(sql`UPDATE log_head SET ${edit}`);
+    assert.equal(await head(), kept());
+    assert.deepEqual(await run(), wrong);
+    await vault.owner.execute(sql`UPDATE log_head SET (size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at) = (SELECT size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at FROM jsonb_populate_record(NULL::log_head, ${JSON.stringify(before)}::jsonb))`);
+    assert.deepEqual(await run(), []);
+    assert.deepEqual(signer.standing, []);
+  }
   // Gone: news again.
   await vault.owner.execute(sql`DELETE FROM log_head`);
   assert.deepEqual(await run(), wrong);
