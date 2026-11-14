@@ -59,7 +59,7 @@ function valid(item: KeyWrite): boolean {
  * from nowhere is a secret. An archived key the environment brings back
  * with a value read what it inherits until then: it is as sensitive as either
  * its own or that. A reference's is its source's, whose row the
- * reference cannot be without. A row the vault does not see, a source or a
+ * reference cannot be without. A row the vault does not see, the key's own, a source or a
  * parent, refuses the write, `unreadable`, rather than guess.
  */
 function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation<Parts, Answers['secret.write']> {
@@ -127,6 +127,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       const { place, environment } = placed(seen);
       // The same answer whether the place is not there, is someone's personal config, or is not theirs to write in: none says which.
       if (place === undefined || environment === undefined || environment.owner !== null || ![...needs].every((permission) => caller.may(permission, environment))) return { refused: 'no_access' };
+      // A key's own row edited behind the vault still holds its name: the key is neither made again nor guessed at.
+      if (unsealed.secret > 0) return { refused: 'unreadable' };
 
       const now = new Date(at);
       const held = new Map(seen.secret.map((row) => [row.key, row]));

@@ -199,11 +199,14 @@ test('a generated key written by hand loses its recipe and its pair; one whose r
   // Its recipe set to one byte in the database: the row is not the vault's, so nothing reads it, and nothing is made by it.
   await world.owner.execute(sql`UPDATE secrets SET recipe = 'bytes:1:hex' WHERE environment_id = ${prod} AND key = 'TOKEN'`);
   assert.deepEqual(await given('ada-cli', ['TOKEN', 'SIGNING_KEY_PUB']), ['unknown_key', [1, 'public']]);
-  assert.deepEqual(await vault.change(writing('ada-cli', {}, { keys: [{ key: 'TOKEN', folder: 'Keys' }] })), { refused: 'unknown_key' });
-  const before = [await count('log_pending'), await count('secret_versions')];
-  // A value over it is no value: the row the vault does not see still holds the key's name, so the new one is not made.
-  await assert.rejects(vault.change(writing('ada-cli', { TOKEN: 'efgh' })));
-  assert.deepEqual([await count('log_pending'), await count('secret_versions')], before);
+  const before = await count('secret_versions');
+  // Nor is it filed or written over, said nature or not: the row the vault does not see still holds the key's name, so no new one is made.
+  for (const item of [{ key: 'TOKEN', folder: 'Keys' }, { key: 'TOKEN', value: 'efgh' }, { key: 'TOKEN', value: 'efgh', nature: 'plain' as const }]) {
+    assert.deepEqual(await vault.change(writing('ada-cli', {}, { keys: [item] })), { refused: 'unreadable' }, JSON.stringify(item));
+  }
+  // One such key refuses the whole write.
+  assert.deepEqual(await vault.change(writing('ada-cli', { SIGNING_KEY: 'with it', TOKEN: 'efgh' })), { refused: 'unreadable' });
+  assert.deepEqual(await count('secret_versions'), before);
 });
 
 test('a reference written over holds its own value from then on, and its entry says what it referred to', async () => {
@@ -256,7 +259,8 @@ test('a value written with no nature over a key the environment inherits is as s
       // A key the fork archived reads its parent's until it is brought back, and is as sensitive as either then.
       value(world, secret(prod, 'RETURNED'), 'p', { sensitive: true }), value(world, secret(twig, 'RETURNED', { archivedAt: new Date(Date.UTC(2026, 10, 1)) }), 'own'),
       value(world, secret(prod, 'OVERLAID'), 'p'), value(world, secret(twig, 'OVERLAID', { archivedAt: new Date(Date.UTC(2026, 10, 1)) }), 'own', { sensitive: true }),
-      value(world, secret(prod, 'PLAINLY'), 'p'), value(world, secret(twig, 'PLAINLY', { archivedAt: new Date(Date.UTC(2026, 10, 1)) }), 'own', { plain: true })),
+      value(world, secret(prod, 'PLAINLY'), 'p'), value(world, secret(twig, 'PLAINLY', { archivedAt: new Date(Date.UTC(2026, 10, 1)) }), 'own', { plain: true }),
+      value(world, secret(twig, 'SHUT', { archivedAt: new Date(Date.UTC(2026, 10, 1)) }), 's'), secret(twig, 'POINTER', { sourceId: signing.id })),
     ...rows('dismissedKeys', dismissed(fork, 'SKIPPED')));
   const inTwig = (keys: string[]): Presented & SecretWrite => ({ ...shown('ada-cli'), op: 'secret.write', project: 'market', environment: 'twig', keys: keys.map((key) => ({ key, value: `bare ${key}` })) });
   assert.deepEqual(await vault.use({ ...reveal('ada-cli', ['TOKEN', 'SIGNING', 'NEAREST', 'SKIPPED']), environment: 'twig' }).then((answer) => 'refused' in answer ? answer : answer.values.map((item) => ('refused' in item ? item.refused : item.value.toString()))),
@@ -279,6 +283,13 @@ test('a value written with no nature over a key the environment inherits is as s
   assert.deepEqual(await vault.change(inTwig(['LATER'])), { refused: 'unreadable' });
   assert.deepEqual(await count('secret_versions'), before[1]);
   assert.deepEqual(await vault.change({ ...inTwig([]), keys: [{ key: 'LATER', value: 'said', nature: 'sensitive' }] }), { answer: { keys: { LATER: { version: 1, nature: 'sensitive' } } } });
+
+  // Nor its own key, archived or a reference: brought back, written over or archived, it is not made again in its place.
+  await world.owner.execute(sql`UPDATE secrets SET folder = 'moved' WHERE environment_id = ${twig.id} AND key IN ('SHUT', 'POINTER')`);
+  for (const item of [{ key: 'SHUT', value: 'v', archived: false }, { key: 'SHUT', archived: false }, { key: 'POINTER', value: 'v' }, { key: 'POINTER', value: 'v', nature: 'sensitive' as const }, { key: 'POINTER', archived: true }]) {
+    assert.deepEqual(await vault.change({ ...inTwig([]), keys: [item] }), { refused: 'unreadable' }, JSON.stringify(item));
+  }
+  assert.deepEqual(await count('secret_versions'), before[1] + 1);
 });
 
 test('two writes of one key decided on the same rows are two versions, one after the other: the second starts over, and leaves nothing of its first try', async () => {
