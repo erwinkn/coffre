@@ -215,6 +215,8 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
   const keyed = (key: SQL) => (ask.keys === null ? sql`true` : sql`${key} = ANY(${sql.param(ask.keys)}::text[])`);
   // The database's clock is read with the rows so that no pooler answers from a cache: Hyperdrive caches no
   // statement that reads it. Its caching is off in every deployment besides (docs/deploy.md); this holds if one forgets.
+  // Prepared, as the read every use makes: Postgres planned it at each use, unnamed, in several times what it took to
+  // run. Its text is one of two, by whether the ask names keys; every other value is a parameter.
   const found = await rowsOf<{ part: keyof Seen; row: Wire }>(vault.db, sql`
     WITH RECURSIVE
       c AS (SELECT * FROM credentials WHERE token_hash = decode(${ask.token.toString('hex')}, 'hex')),
@@ -242,7 +244,7 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
     UNION ALL SELECT 'environment', to_jsonb(t) FROM environments t WHERE t.id IN (SELECT environment_id FROM held UNION ALL SELECT id FROM chain)
     UNION ALL SELECT 'secret', to_jsonb(t) FROM held t
     UNION ALL SELECT 'dismissed', to_jsonb(t) FROM dismissed_keys t WHERE t.environment_id IN (SELECT id FROM chain) AND t.restored_at IS NULL AND ${keyed(sql`t.key`)}
-    UNION ALL SELECT 'version', to_jsonb(t) FROM secret_versions t JOIN held ON t.secret_id = held.id AND t.version = held.current_version) parts`);
+    UNION ALL SELECT 'version', to_jsonb(t) FROM secret_versions t JOIN held ON t.secret_id = held.id AND t.version = held.current_version) parts`, { prepare: true });
   const seen = Object.fromEntries(Object.keys(READ).map((part) => [part, []])) as unknown as Seen;
   for (const { part, row: wire } of found) {
     const table = READ[part];

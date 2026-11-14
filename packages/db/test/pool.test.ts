@@ -12,7 +12,7 @@ import { createServer, type AddressInfo } from 'node:net';
 import { sql } from 'drizzle-orm';
 
 import { createDatabase } from '../src/database.ts';
-import { isUnavailable } from '../src/dialect.ts';
+import { isUnavailable, rowsOf } from '../src/dialect.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
 import postgres, { type TransactionSql } from '../src/postgres-js/index.ts';
 import { postgresClient, postgresOptions, postgresSession, SessionLost } from '../src/postgres.ts';
@@ -917,6 +917,70 @@ test("a transaction's statements go in the order they were started, whatever ord
       return Promise.all([insert, count]);
     });
     assert.deepEqual(counted, { n: 1 });
+  } finally {
+    await client.end();
+  }
+});
+
+test('a statement sent prepared is parsed once on its connection, by a name every connection gives it; one that fails as it runs is not parsed again, one whose Parse failed is', async () => {
+  const [one, two] = [postgresClient(DATABASE, { max: 1 }), postgresClient(DATABASE, { max: 1 })];
+  const named = async (client: typeof one) => (await client.unsafe(`select name, statement from pg_prepared_statements where statement like '%as w424_n%'`)) as { name: string }[];
+  try {
+    const asked = (client: typeof one, value: number) => client.unsafe('select 6 / $1::int as w424_n', [value], { prepare: true });
+    assert.deepEqual([...(await asked(one, 1))], [{ w424_n: 6 }]);
+    assert.deepEqual([...(await asked(one, 2))], [{ w424_n: 3 }]);
+    // Failed as it ran, past its Parse: still the connection's, only bound again, else Postgres would refuse a second Parse (42P05).
+    await assert.rejects(asked(one, 0), { code: '22012' });
+    assert.deepEqual([...(await asked(one, 3))], [{ w424_n: 2 }]);
+    const [mine] = await named(one);
+    assert.equal((await named(one)).length, 1);
+    assert.match(mine!.name, /^coffre_[0-9a-f]{8}$/);
+    // Another connection names it alike: what a pooler that keeps statements prepared knows it again by.
+    await asked(two, 6);
+    assert.deepEqual((await named(two)).map(({ name }) => name), [mine!.name]);
+    // A Parse that failed leaves nothing: sent again, it is parsed again, and fails as Postgres says, not as a name unknown.
+    for (let i = 0; i < 2; i += 1) await assert.rejects(one.unsafe('select 6 / $1::int as w424_n from nowhere', [1], { prepare: true }), { code: '42P01' });
+    // Unnamed, as ever, without it.
+    await one.unsafe('select 6 / $1::int as w424_m', [1]);
+    assert.equal((await one.unsafe(`select count(*)::int as n from pg_prepared_statements where statement like '%w424_m%'`))[0]!.n, 0);
+  } finally {
+    await Promise.all([one.end(), two.end()]);
+  }
+});
+
+test('a name goes without its Parse only for the statement parsed under it, once Postgres has said so: one sent meanwhile, or whose hash another holds, goes unnamed', async () => {
+  const client = postgresClient(DATABASE, { max: 1 });
+  const held = async () => (await client.unsafe(`select name, statement from pg_prepared_statements where name like 'coffre_%' order by statement`)) as { name: string; statement: string }[];
+  try {
+    // These two hash alike (coffre_25588cb2): the second must run as itself, pipelined behind a Parse of its own that
+    // Postgres would refuse (42P05) had it gone named, and never as the first, which holds the name.
+    const [first, second] = ['select 939224607::bigint as n', 'select 76824201::bigint as n'];
+    assert.deepEqual([...(await client.unsafe(first, [], { prepare: true }))], [{ n: '939224607' }]);
+    const answers = await Promise.all([client.unsafe(second, [], { prepare: true }), client.unsafe(second, [], { prepare: true })]);
+    assert.deepEqual(answers.map((rows) => [...rows]), [[{ n: '76824201' }], [{ n: '76824201' }]]);
+    assert.deepEqual((await held()).map(({ name, statement }) => [name, statement]), [['coffre_25588cb2', first]]);
+    // A statement sent again while its first Parse is unanswered goes unnamed, then by name once it is answered.
+    const third = (value: number) => client.unsafe('select $1::int * 2 as w424_p', [value], { prepare: true });
+    assert.deepEqual((await Promise.all([third(1), third(2), third(3)])).map((rows) => [...rows]), [[{ w424_p: 2 }], [{ w424_p: 4 }], [{ w424_p: 6 }]]);
+    assert.deepEqual([...(await third(4))], [{ w424_p: 8 }]);
+    assert.equal((await held()).filter(({ statement }) => statement.includes('w424_p')).length, 1);
+  } finally {
+    await client.end();
+  }
+});
+
+test('rowsOf asked to prepare sends its statement named, through the database\'s execute; in a transaction, unnamed', async () => {
+  const client = postgresClient(DATABASE, { max: 1 });
+  const db = createDatabase(client);
+  const named = async (tag: string) => (await rowsOf<{ n: number }>(db, sql`select count(*)::int as n from pg_prepared_statements where statement like ${`%${tag}%`} and name like 'coffre_%'`))[0]!.n;
+  try {
+    for (const n of [1, 2]) assert.deepEqual(await rowsOf(db, sql`select ${n}::int as w424_rows`, { prepare: true }), [{ w424_rows: n }]);
+    assert.equal(await named('w424_rows'), 1);
+    await db.transaction(async (tx) => {
+      await rowsOf(tx, sql`select 1 as w424_begun`);
+      await rowsOf(tx, sql`select ${1}::int as w424_tx`, { prepare: true });
+    });
+    assert.equal(await named('w424_tx'), 0);
   } finally {
     await client.end();
   }

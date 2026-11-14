@@ -1046,11 +1046,11 @@ its queries take turns on and a transaction holds until it ends.
 postgres.js is coffre's own copy, in TypeScript, in `packages/db/src/postgres-js`,
 so a deployment installs no driver. It keeps what coffre uses (statements,
 transactions and savepoints, reserved connections, the pool) and leaves the
-rest out: COPY, LISTEN/NOTIFY, cursors, named prepared statements, the
+rest out: COPY, LISTEN/NOTIFY, cursors, the cache of named prepared statements, the
 tagged template, reading URLs and the environment. One tree runs on Node and
 on Workers: its sockets, TLS and hashes are behind `@coffre/db`'s
 `#postgres/platform` import, Node's own modules or `cloudflare:sockets` and
-WebCrypto, chosen where the package runs. It differs from upstream in nine
+WebCrypto, chosen where the package runs. It differs from upstream in ten
 places (`packages/db/src/postgres-js/README.md`): a statement's values go with the
 statement, as text the server types, as node-postgres sends them, where
 upstream first asks the server for their types, a round trip more for every
@@ -1065,7 +1065,11 @@ dialled again for ever, an ending client opens no connection again, a
 cannot write fails alone;
 the pool takes the connection idle the shortest, as pg-pool does, so
 that a steady load keeps to a few warm backends rather than cycling through
-all of them; and a sign-in the client cannot work out fails its connection
+all of them; a statement is prepared by name only when asked, named by a
+hash of its text so that a pooler that keeps statements prepared knows it
+from any client (a use's read, through `rowsOf(…, { prepare: true })`),
+where upstream prepared every statement, named in the order a process sent
+them; and a sign-in the client cannot work out fails its connection
 rather than leave an unhandled rejection.
 
 A postgres.js client dials a new connection for the next statement once its
@@ -1074,7 +1078,7 @@ session's state across statements, its own BEGIN, SETs or advisory locks
 (the migrator, `coffre backup` and `restore`, `coffre setup`'s probes),
 opens a `postgresSession` instead: once its connection has closed, every
 statement after fails (`SessionLost`). `postgresClient` (`packages/db/src/postgres.ts`)
-opens each client as coffre needs it: unnamed statements, no type lookup on
+opens each client as coffre needs it: statements unnamed unless asked, no type lookup on
 connecting, arrays, dates and objects sent and arrays read as node-postgres
 does, and the URL read as node-postgres reads it, TLS included.
 
