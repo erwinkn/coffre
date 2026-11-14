@@ -23,6 +23,7 @@ after(() => vault.close());
 beforeEach(async () => {
   await emptyDatabase(vault.owner);
   vault.woken.length = 0;
+  vault.refused.clear();
 });
 
 const said = (action: string, actor: string | null = null): Said => ({ kept: true, action, actor, credential: null, request: null, ip: null, objects: [], detail: {} });
@@ -410,4 +411,62 @@ test('a value is the current version of a secret the same change writes, in an e
   const next = version(id, 2);
   const dropping = { place: part(environments, eq(environments.id, place)), held: part(secrets, eq(secrets.id, id)) };
   await assert.rejects(change(vault, { read: dropping, decide: ({ place: [was], held: [row] }) => ({ writes: [drop(environments, was!), put(secrets, secret(2, 2), row!)], values: [next], entry: said('test.write'), answer: null }) }), /that it read/);
+});
+
+test('a refused change is logged once a minute for who asked and what, and the log never costs its refusal', async (t) => {
+  const refusing = (reason: string, actor: string | null = ada, action = 'member.role'): Operation<typeof nothing, null> => ({
+    read: nothing,
+    decide: () => ({ refused: reason }),
+    denied: (_seen, _at, refusal) => (actor === null ? null : { action, actor, credential: null, request: null, ip: null, objects: [], detail: { refused: refusal.refused } }),
+  });
+  const logged = async () => (await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(vault.owner, sql`SELECT kept, body, mac FROM log_pending ORDER BY id`)).map((row) => ({ kept: row.kept, ...entryOf(vault.keys, row)! }));
+
+  // Twenty at once, before any has written: one entry between them.
+  assert.deepEqual(await Promise.all(Array.from({ length: 20 }, () => change(vault, refusing('not_owner')))), Array.from({ length: 20 }, () => ({ refused: 'not_owner' })));
+  assert.equal((await logged()).length, 1);
+  const [first] = await logged();
+  assert.deepEqual([first!.kept, first!.action, first!.actor, first!.detail, first!.rows], [false, 'member.role', ada, { refused: 'not_owner' }, []]);
+  assert.equal(vault.woken.length, 1, 'the signer is told of it');
+  // Again within the minute, for another reason even: nothing more. Another caller: theirs. One who does not stand: none.
+  assert.deepEqual(await change(vault, refusing('last_owner')), { refused: 'last_owner' });
+  assert.equal((await logged()).length, 1);
+  await change(vault, refusing('not_owner', bo));
+  await change(vault, refusing('unauthenticated', null));
+  assert.deepEqual((await logged()).map((entry) => entry.actor), [ada, bo]);
+  // The same caller refused something else: that is another entry, then once a minute too.
+  await change(vault, refusing('no_access', bo, 'member.remove'));
+  await change(vault, refusing('no_access', bo, 'member.remove'));
+  assert.deepEqual((await logged()).map((entry) => `${entry.actor} ${entry.action}`), [`${ada} member.role`, `${bo} member.role`, `${bo} member.remove`]);
+  vault.tick(59_999);
+  await change(vault, refusing('not_owner'));
+  assert.equal((await logged()).length, 3);
+  vault.tick(1);
+  await change(vault, refusing('not_owner'));
+  assert.deepEqual((await logged()).map((entry) => entry.actor), [ada, bo, bo, ada]);
+  // An operation that says nothing of its refusals logs none.
+  await change(vault, { read: nothing, decide: () => ({ refused: 'no' }) });
+  assert.equal((await logged()).length, 4);
+
+  // The log held by someone else: the refusal is answered all the same, two seconds later, and said in the Worker's log.
+  const errors = t.mock.method(console, 'error', () => {});
+  vault.tick(60_000);
+  let release!: () => void;
+  const holding = vault.owner.transaction(async (tx) => {
+    await tx.execute(sql`LOCK TABLE log_pending IN ACCESS EXCLUSIVE MODE`);
+    await new Promise<void>((resolve) => (release = resolve));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  try {
+    assert.deepEqual(await change(vault, refusing('not_owner')), { refused: 'not_owner' });
+    assert.equal(errors.mock.callCount(), 1);
+  } finally {
+    release();
+    await holding;
+  }
+  // Not remembered as logged: the next one is.
+  await change(vault, refusing('not_owner'));
+  assert.equal((await logged()).length, 5);
+  // An operation that cannot say its refusal: refused all the same, said in the vault's own log, and not in the audit log.
+  assert.deepEqual(await change(vault, { read: nothing, decide: () => ({ refused: 'no' }), denied: () => { throw new Error('nothing to say'); } }), { refused: 'no' });
+  assert.deepEqual([errors.mock.callCount(), (await logged()).length], [2, 5]);
 });

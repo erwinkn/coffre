@@ -19,10 +19,10 @@ import { memoryOf, use, type Ask, type Serving } from './use.ts';
  * vault's short memory. Settled values only, never work under way, which on
  * Workers would belong to the call that started it.
  */
-export type PreparedVault = Pick<Serving, 'keys' | 'keks' | 'cap' | 'workloads' | 'memory'>;
+export type PreparedVault = Pick<Serving, 'keys' | 'keks' | 'cap' | 'workloads' | 'memory' | 'refused'>;
 
 export function prepareVault(config: ResolvedVaultConfig): PreparedVault {
-  return { keys: config.signingKeys.map(keyOf), keks: config.keks, cap: config.bulkLimit, workloads: config.workloads, memory: memoryOf(config.memorySeconds) };
+  return { keys: config.signingKeys.map(keyOf), keks: config.keks, cap: config.bulkLimit, workloads: config.workloads, memory: memoryOf(config.memorySeconds), refused: new Map() };
 }
 
 /** What one call runs on: its database, and the signer's wake-up, which never holds the reply nor fails the call. */

@@ -27,14 +27,17 @@ export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames
  * decides on.
  *
  * A decision comes back as a value: `{ refused }` for a refusal, which
- * wrote nothing. Only a fault throws: a bug, or the database down.
+ * wrote nothing of what was asked. A refused use writes nothing at all; a
+ * change refused to a caller who stands, one log entry that says so, once
+ * a minute in each instance for that caller and what they asked. Only a
+ * fault throws: a bug, or the database down.
  */
 export interface Vault {
   /** Open values for whoever presented a token: a reveal, `coffre run`, an export, a proxied request, a signature. */
   use(input: UseInput): Promise<Used | Refused>;
   /**
    * Make a change: one operation, named as its log entry's action is, with
-   * its input. All of it, or none: a refusal wrote nothing.
+   * its input. All of it, or none.
    */
   change<O extends Change['op']>(input: Presented & Extract<Change, { op: O }>): Promise<{ answer: Answers[O] } | Refused>;
 }
@@ -94,7 +97,7 @@ export type Used = {
   workload: { binding: string; profile: string; policy: BindingPolicy; constraints: Constraints | null } | null;
 };
 
-/** Why a call is not answered. It wrote nothing, the log included. */
+/** Why a call is not answered. Nothing it asked was written. */
 export type Refused = { refused: string };
 
 /**

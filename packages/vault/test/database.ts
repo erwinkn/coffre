@@ -45,6 +45,7 @@ export async function openTestVault(more: Partial<Serving> = {}): Promise<TestVa
     cap: { count: 1000, windowMs: 15 * 60_000 },
     workloads: { noReads: false, useOnly: false },
     memory: memoryOf(2),
+    refused: new Map(),
     now: () => now,
     tick: (ms) => void (now += ms),
     wake: (hash) => void woken.push(hash),

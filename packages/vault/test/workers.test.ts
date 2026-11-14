@@ -195,7 +195,8 @@ test('a value written through the app is sealed by the vault, signed into the lo
     await until(async () => (await count('log_pending')) === 0, 15_000, 'the signer has taken every entry');
     const kept = (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log WHERE kept ORDER BY seq DESC LIMIT 1`)).map(({ body }) => JSON.parse(body) as { action: string; actor: string });
     assert.deepEqual(kept.map((entry) => [entry.action, entry.actor]), [['secret.write', bo]]);
-    assert.deepEqual([await count('log'), (await reads()).length], [written + 2, 1]);
+    // And Ada's refused write, said once: three entries in all, two of them among those that age out.
+    assert.deepEqual([await count('log'), (await reads()).map((entry) => [entry.action, entry.actor])], [written + 3, [['secret.write', ada], ['secret.read', ada]]]);
   } finally {
     await vault.stop();
   }

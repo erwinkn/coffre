@@ -3,7 +3,7 @@ import { addressWithin, checkConstraints, type BindingPolicy, type Constraints }
 import { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { part, type Seen } from './change.ts';
+import { part, type Denied, type Refusal, type Seen } from './change.ts';
 import type { Row } from './rows.ts';
 
 /**
@@ -275,5 +275,39 @@ export function callerFrom(seen: Seen<ReturnType<typeof callerParts>>, shown: Sh
     // By the row itself too: an environment of a project the change did not name is as protected as it says.
     may: (permission, environment) =>
       allows(environment.protected ? { ...holds, policy: { ...holds.policy, protected: [...holds.policy.protected, environment.id] } } : holds, permission, { projectId: environment.projectId, environmentId: environment.id, environmentSlug: environment.slug }),
+  };
+}
+
+/** A place's slug as the tables hold one: what a caller typed is logged only if it could be one. */
+const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/**
+ * What the log says of a change refused to a caller who stands (D236): who
+ * asked, on which credential, what, and why not. `where` is the place as
+ * the caller named it, each slug logged if it could be one and null
+ * otherwise: the log takes no free text from a caller. `objects` are the
+ * rows the read found of what was asked about, by which the entry is
+ * found from their pages. Nothing for a caller who does not stand: an
+ * unknown token is one answer, and no entry.
+ */
+export function refusedTo<S extends Seen<ReturnType<typeof callerParts>>>(
+  action: string,
+  shown: Shown & { request: string | null },
+  workloads: Workloads,
+  about: { where?: Record<string, string>; objects?(seen: S): string[] } = {},
+) {
+  return (seen: S, at: number, refusal: Refusal): Denied | null => {
+    const caller = callerFrom(seen, shown, workloads, at);
+    if (caller === null) return null;
+    const where = Object.fromEntries(Object.entries(about.where ?? {}).map(([name, slug]) => [name, SLUG.test(slug) ? slug : null]));
+    return {
+      action,
+      actor: caller.principal,
+      credential: caller.credential.id,
+      request: shown.request,
+      ip: shown.ip,
+      objects: [`principal:${caller.principal}`, `credential:${caller.credential.id}`, ...(about.objects?.(seen) ?? [])],
+      detail: { ...where, refused: refusal.refused },
+    };
   };
 }
