@@ -204,9 +204,9 @@ export async function listAudit(ctx: ApiContext, query: AuditQuery): Promise<Aud
     if (!whole && !visibleTo(who, mentions, places!)) continue;
     // What the index says an entry mentions is a writer's to edit: the body, under the tree, decides.
     if (about !== null && !about.some((object) => mentions.includes(object))) continue;
-    if (actors !== null && !actors.includes(String(body.actor))) continue;
+    if (actors !== null && !actors.includes(actorOf(body) ?? '')) continue;
     if (query.decision !== undefined && decisionOf(body) !== query.decision) continue;
-    const action = String(body.action);
+    const action = actionOf(body);
     if (query.detail !== true && DETAIL.has(action)) hidden.set(action, (hidden.get(action) ?? 0) + 1);
     else shown.push({ row, body });
   }
@@ -325,6 +325,9 @@ function parsed(text: string): Body {
 const mentionsOf = (body: Body): string[] => (Array.isArray(body.objects) ? body.objects.filter((object): object is string => typeof object === 'string') : []);
 const detailOf = (body: Body): Record<string, unknown> => (typeof body.detail === 'object' && body.detail !== null && !Array.isArray(body.detail) ? (body.detail as Record<string, unknown>) : {});
 /** A refused change's entry says why (D236): what tells it from one that went through. */
+// A body is a writer's to edit: a field that is no string reads as none, never coerced (an object's `toString` may throw).
+const actionOf = (body: Body): string => (typeof body.action === 'string' ? body.action : '');
+const actorOf = (body: Body): string | null => (typeof body.actor === 'string' ? body.actor : null);
 const decisionOf = (body: Body): 'allow' | 'deny' => (typeof detailOf(body).refused === 'string' ? 'deny' : 'allow');
 /** An entry's time, or none: an edited body may hold any number, and `Date` takes only some. */
 const timeOf = (at: unknown): string => {
@@ -435,7 +438,7 @@ function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logPro
   const ids = (kind: string) => mentions.filter((object) => object.startsWith(`${kind}:`)).map((object) => object.slice(kind.length + 1));
   const environment = ids('environment').map((id) => names.environments.get(id)).find((found) => found !== undefined);
   const projectId = environment?.projectId ?? ids('project').find((id) => names.projects.has(id));
-  const actor = typeof body.actor === 'string' ? body.actor : null;
+  const actor = actorOf(body);
   const subject = ids('principal').find((principal) => principal !== actor) ?? null;
   // A use names each key it released; a change of one secret, the secret.
   const released = Array.isArray(detail.keys) && body.action === 'secret.read'
@@ -453,10 +456,10 @@ function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logPro
     author: 'vault',
     occurredAt: timeOf(body.at),
     ...actorParts(actor),
-    action: typeof body.action === 'string' ? body.action : '',
+    action: actionOf(body),
     decision: decisionOf(body),
     reason: typeof detail.refused === 'string' ? detail.refused : null,
-    detail: DETAIL.has(String(body.action)),
+    detail: DETAIL.has(actionOf(body)),
     subject,
     project: projectId === undefined ? null : (names.projects.get(projectId) ?? null),
     environment: environment?.slug ?? null,

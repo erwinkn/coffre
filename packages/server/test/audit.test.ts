@@ -158,6 +158,11 @@ test('an entry edited within the head fails its proof, and so does one whose til
   const [timeless] = await page('aud-cli');
   const created = timeless.entries.find((entry) => entry.action === 'project.create' && entry.decision === 'allow')!;
   assert.deepEqual([(created as Entry & { occurredAt: string }).occurredAt, created.proof], ['', 'failed']);
+  // Nor does an action or an actor a writer made an object no string can be made of: the entry shows, with none, and fails.
+  await world.owner.execute(sql`UPDATE log SET body = replace(replace(body, '"action":"project.create"', '"action":{"toString":null}'), '"actor":"', '"actor":{"toString":null},"was":"') WHERE body LIKE '%"slug":"shoq"%' AND kept`);
+  const [actionless] = await page('aud-cli');
+  assert.deepEqual(actionless.entries.filter((entry) => entry.action === '').map((entry) => entry.proof), ['failed']);
+  assert.equal((await page('aud-cli', '?actor=cy@acme.example'))[0].entries.every((entry) => entry.action !== ''), true);
   await world.owner.execute(sql`DELETE FROM log_tiles WHERE NOT kept`);
   // The aging tree holds two entries, which prove from one another's leaf in the lowest tile: gone, neither proves.
   assert.deepEqual((await page('aud-cli'))[0].entries.slice(0, 2).map((entry) => entry.proof), ['failed', 'failed']);
