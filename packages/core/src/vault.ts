@@ -6,6 +6,7 @@ import type { AccessAnswers, AccessChanges } from './changes/access.ts';
 import type { PlacesAnswers, PlacesChanges } from './changes/places.ts';
 import type { SecretsAnswers, SecretsChanges } from './changes/secrets.ts';
 import type { SigninAnswers, SigninChanges, Unasked } from './changes/signin.ts';
+import type { WorkloadAnswers, WorkloadChanges, WorkloadsUnasked } from './changes/workloads.ts';
 import type { BindingPolicy, Constraints } from './identity/index.ts';
 
 export type { CallerKind } from './access.ts';
@@ -78,7 +79,7 @@ export type Presented = Trace & {
  * request showed, or for one nobody asks (`Unasked`), where it came from
  * alone.
  */
-export type Asked<O extends Change['op']> = O extends Change['op'] ? (O extends Unasked ? Trace : Presented) & Extract<Change, { op: O }> : never;
+export type Asked<O extends Change['op']> = O extends Change['op'] ? (O extends Unasked | WorkloadsUnasked ? Trace : Presented) & Extract<Change, { op: O }> : never;
 
 export type UseInput = Presented & {
   /** The place, by its slugs. */
@@ -140,13 +141,14 @@ export type Refused = { refused: string };
  * Each area's are in a file of its own (`changes/`), with what each
  * answers once it is made.
  */
-export type Change = SecretsChanges | PlacesChanges | AccessChanges | SigninChanges;
-export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers & SigninAnswers;
+export type Change = SecretsChanges | PlacesChanges | AccessChanges | SigninChanges | WorkloadChanges;
+export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers & SigninAnswers & WorkloadAnswers;
 
 export type * from './changes/access.ts';
 export type * from './changes/places.ts';
 export type * from './changes/secrets.ts';
 export type * from './changes/signin.ts';
+export type * from './changes/workloads.ts';
 
 // 0.14's contract, from here on: each type goes with the last of the server's code that names it.
 
