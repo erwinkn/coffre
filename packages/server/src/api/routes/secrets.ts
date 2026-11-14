@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 import { changed } from '../change.ts';
 import type { ApiContext } from '../context.ts';
-import { ApiError, badRequest, refusal } from '../errors.ts';
+import { badRequest, refusal } from '../errors.ts';
 import { parsePath } from '../paths.ts';
 import { route } from '../route.ts';
 
@@ -171,7 +171,11 @@ export const secretRoutes = {
    * the key and what was asked of it, which is what it now is; 0.14 also
    * answered a reset with the parent it reads and the key's folder.
    *
-   * Not served yet, 501: a rename (`key`).
+   * Or, alone, rename it (`key`), with its history, as `secret.write`
+   * takes: one change of the vault's (`secret.rename`), which carries the
+   * name down to every fork below. 0.14 took a rename beside an archiving
+   * or a folder, in one transaction; asked together here, it is a 400. Its
+   * own name beside the rest is no rename, as in 0.14.
    */
   ...route('PATCH /secrets/:project/:environment/:key', {
     input: z.object({ key: secretKey, archived: z.boolean(), folder: folderName.nullable(), inherit: z.boolean() }).partial().strict()
@@ -180,8 +184,12 @@ export const secretRoutes = {
     run: async (ctx, { params, input }) => {
       const at = `${params.project}/${params.environment}/${params.key}`;
       const { archived, folder, inherit } = input;
-      // Its own name beside what else is asked is no rename, as in 0.14; alone, it is asked as one.
-      if (input.key !== undefined && (input.key !== params.key || (archived === undefined && folder === undefined))) throw new ApiError('not_implemented', `renaming ${at} is not served yet`);
+      // Alone, a name is a rename, onto its own name included, which the vault logs as asked; beside the rest, its own is none.
+      if (input.key !== undefined && archived === undefined && folder === undefined) {
+        await changed(ctx, { op: 'secret.rename', project: params.project, ...environmentOf(params.environment), key: params.key, to: input.key }, at);
+        return { operationId: ctx.shown.request, key: input.key };
+      }
+      if (input.key !== undefined && input.key !== params.key) throw badRequest('rename a key on its own, not with an archiving or a folder');
       const write: KeyWrite = inherit === undefined ? { key: params.key, archived, folder } : { key: params.key, inherit };
       await changed(ctx, { op: 'secret.write', project: params.project, ...environmentOf(params.environment), keys: [write] }, at);
       return { operationId: ctx.shown.request, key: params.key, ...(archived === undefined ? {} : { archived }), ...(folder === undefined ? {} : { folder }), ...(inherit === undefined ? {} : { inherit }) };
