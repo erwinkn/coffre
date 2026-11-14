@@ -4,7 +4,7 @@
     // For the tests of the repo's own scripts, which are plain JavaScript.
     "allowJs": true
   },
-  // The vault's declaration of `cloudflare:workers`, for test/workers/coffre-worker.ts, which runs the vault's Worker beside coffre's.
+  // The vault's declaration of `cloudflare:workers`, for test/workers/app-worker.ts, which runs the vault's Worker beside coffre's.
   "include": ["src/**/*.ts", "test/**/*.ts", "../vault/src/cloudflare-workers.d.ts"],
   // 0.14's files that do not build on 0.16 yet (docs/design/0.16.md, "Build order"), kept as the source of what is
   // still to port: neither `pnpm typecheck` nor the test suite (scripts/test-files.mjs) reads them, and the 0.14
