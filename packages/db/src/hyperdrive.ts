@@ -70,7 +70,10 @@ export class HyperdrivePool implements Client {
     const asked = () =>
       (answer ??= this.#turn(() => {
         const query = this.#connected().unsafe(...args);
-        return values ? query.values() : query;
+        const sent = values ? query.values() : query;
+        // BENCH ONLY (W424, overload-bound measurement): a deadline on the wait for the connection and the answer.
+        const ms = Number((globalThis as { COFFRE_BENCH_DEADLINE_MS?: unknown }).COFFRE_BENCH_DEADLINE_MS ?? 0);
+        return ms > 0 ? this.#within(sent, ms) : sent;
       }));
     const statement = {
       values: () => {
@@ -102,6 +105,22 @@ export class HyperdrivePool implements Client {
     const client = this.#client;
     this.#client = null;
     await client?.end().catch(() => {});
+  }
+
+  /** BENCH ONLY: `sent`'s answer, or after `ms` the connection closed (leaving the pooler's queue) and 57014. */
+  #within<T>(sent: PromiseLike<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        const client = this.#client;
+        this.#client = null;
+        void client?.end({ timeout: 0 }).catch(() => {});
+        reject(Object.assign(new Error(`the database gave no answer within ${ms} ms`), { code: '57014' }));
+      }, ms);
+    });
+    const answer = Promise.resolve(sent);
+    answer.catch(() => {});
+    return Promise.race([answer, expired]).finally(() => clearTimeout(timer));
   }
 
   /** `go` once every turn asked before it is done. */

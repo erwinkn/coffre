@@ -11,9 +11,12 @@ export { CoffreSigner } from '@coffre/vault/cloudflare';
 /** The signer's binding, as the vault calls it: always the object named `signer` (cloudflare-signer.ts). */
 type SignerNamespace = { idFromName(name: string): unknown; get(id: unknown): { wake(hash: Uint8Array): Promise<void>; status(): Promise<unknown> } };
 
-type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY: string; MEMORY_SECONDS: string; OUTAGE_SECONDS?: string; WORKLOADS?: string; SIGNER: SignerNamespace };
+type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY: string; MEMORY_SECONDS: string; OUTAGE_SECONDS?: string; WORKLOADS?: string; DEADLINE_MS?: string; SIGNER: SignerNamespace };
 
-export default vault((env: Env) => ({
+export default vault((env: Env) => {
+  // The overload-bound measurement's deadline (hyperdrive.ts, bench only): none unless set.
+  (globalThis as { COFFRE_BENCH_DEADLINE_MS?: number }).COFFRE_BENCH_DEADLINE_MS = Number(env.DEADLINE_MS ?? 0);
+  return {
   database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: 'bench', key: env.VAULT_KEY },
   owners: ['root@acme.example'],
@@ -21,7 +24,8 @@ export default vault((env: Env) => ({
   // The proxy run's: workload sessions, and how long a proxied use is answered through an outage of the database.
   ...(env.WORKLOADS === '1' ? { workloads: {} } : {}),
   ...(env.OUTAGE_SECONDS === undefined ? {} : { outageSeconds: Number(env.OUTAGE_SECONDS) }),
-}));
+  };
+});
 
 export class Control extends WorkerEntrypoint<Env> {
   async fetch(request: Request): Promise<Response> {

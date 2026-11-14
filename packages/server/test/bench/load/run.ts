@@ -50,6 +50,8 @@ const { values } = parseArgs({
     outage: { type: 'string', default: '' },
     // 0.14.7's credential proxy: its cacheSeconds (the bench build's PROXY_CACHE_SECONDS; its own default, 60, unless set).
     'proxy-cache': { type: 'string' },
+    // The vault's deadline on each statement's wait and answer, in ms (hyperdrive.ts's bench-only COFFRE_BENCH_DEADLINE_MS).
+    deadline: { type: 'string' },
     label: { type: 'string', default: '' },
     // After each size's growth: plan-check.ts, <n> of each read, under auto_explain; its stats and the plans Postgres logged, in <dir>/plans.
     plans: { type: 'string', default: '0' },
@@ -169,7 +171,7 @@ async function boot(memory: number): Promise<void> {
       },
       {
         ...common, name: 'bench-vault', scriptPath: scripts.vault, modulesRoot: dirname(scripts.vault),
-        bindings: { VAULT_KEY, MEMORY_SECONDS: String(memory), ...(values.app === 'proxy' ? { WORKLOADS: '1' } : {}), ...(values['outage-seconds'] === undefined ? {} : { OUTAGE_SECONDS: values['outage-seconds'] }) }, hyperdrives: { VAULT_HYPERDRIVE: `${proxies.vault.url}?sslmode=disable` },
+        bindings: { VAULT_KEY, MEMORY_SECONDS: String(memory), ...(values.app === 'proxy' ? { WORKLOADS: '1' } : {}), ...(values['outage-seconds'] === undefined ? {} : { OUTAGE_SECONDS: values['outage-seconds'] }), ...(values.deadline === undefined ? {} : { DEADLINE_MS: values.deadline }) }, hyperdrives: { VAULT_HYPERDRIVE: `${proxies.vault.url}?sslmode=disable` },
         durableObjects: { SIGNER: { className: 'CoffreSigner', useSQLite: true } }, unsafeDirectSockets: [{ host: '127.0.0.1', port: controlPort, entrypoint: 'Control' }],
       },
       { ...common, name: 'bench-probe', scriptPath: scripts.probe, modulesRoot: dirname(scripts.probe), serviceBindings: { VAULT: 'bench-vault' }, unsafeDirectSockets: [{ host: '127.0.0.1', port: probePort }] },
@@ -206,9 +208,26 @@ const pg = {
 };
 const containerCpu = (name: string) => {
   const id = execFileSync('docker', ['inspect', '-f', '{{.Id}}', name], { encoding: 'utf8' }).trim();
-  return () => Number(/usage_usec (\d+)/.exec(readFileSync(`/sys/fs/cgroup/system.slice/docker-${id}.scope/cpu.stat`, 'utf8'))![1]) / 1000;
+  // A stopped container has no cgroup, and a started one counts from zero again: carry what it had used.
+  let base = 0;
+  let last = 0;
+  return () => {
+    let now: number;
+    try {
+      now = Number(/usage_usec (\d+)/.exec(readFileSync(`/sys/fs/cgroup/system.slice/docker-${id}.scope/cpu.stat`, 'utf8'))![1]) / 1000;
+    } catch {
+      return base + last;
+    }
+    if (now < last) base += last;
+    last = now;
+    return base + now;
+  };
 };
 const project = process.env.COMPOSE_PROJECT_NAME!;
+{
+  const [stop = 0, down = 0] = values.outage!.split(',').filter(Boolean).map(Number);
+  if (stop + down >= Number(values.duration)) throw new Error(`the outage (${values.outage}) must end within the measured ${values.duration} s`);
+}
 const postgresCpu = containerCpu(`${project}-postgres-1`);
 const poolCpu = containerCpu(`${project}-pgbouncer`);
 function workerdCpu(): number {
