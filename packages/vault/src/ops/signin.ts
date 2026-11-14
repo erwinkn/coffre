@@ -579,8 +579,13 @@ const definitionsOf = (rows: readonly Row<typeof roles>[]) =>
  * Rows hidden from the read: one with a MAC that is not the vault's
  * refuses, `tampered`, wherever it is. One taken away for the decision,
  * and put back after: the caller's grant, a role, a place or a parent,
- * and the token reaches less, or is refused; a protected environment's
- * row cannot go, a deletion leaves its tombstone. A service's grant is
+ * and the token reaches less, or is refused. A protected environment's
+ * row: a service's grant on its project takes holding the role in the
+ * maker's protected column whatever is protected (`givesService`, D241),
+ * so the row decides nothing there; a personal token made without it, which
+ * would have been refused, keeps what its person holds in that column on
+ * the whole project (`heldColumns`), and so uses, and never reads, where
+ * they only use. A service's grant is
  * the one that would let a caller manage the service when they would not
  * (the "Not caught within the minute" item of docs/design/0.16.md): the
  * service holds dev and prod, the caller is a Developer of dev, and the

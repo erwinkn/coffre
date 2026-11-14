@@ -215,6 +215,11 @@ test("a person's personal token holds their places within its scope, and nothing
   const developer: Holdings = { role: 'developer', scope: everywhere, grants: [] };
   assert.equal(givesService(developer, everywhere, 'viewer', dev), true);
   assert.equal(givesService({ ...developer, credentialScope: [issuedGrant({ projectId: 'market', environmentId: 'market/dev', role: 'developer' })] }, everywhere, 'viewer', dev), false);
+  // On a whole project, protected or not today, only what they hold where it protects (D241): use and write, not read.
+  assert.equal(givesService(developer, everywhere, 'viewer', { projectId: 'market' }), false);
+  assert.equal(givesService(developer, everywhere, 'contributor', { projectId: 'market' }), true);
+  // Whoever manages access there gives anything.
+  assert.equal(givesService({ ...developer, grants: [{ projectId: 'market', environmentId: null, role: 'access-manager' }] }, everywhere, 'developer', { projectId: 'market' }), true);
   // No role it may name manages access, so it gives and takes no grant anywhere.
   assert.deepEqual(DELEGABLE_ROLES, ['viewer', 'contributor', 'developer', 'maintainer', 'auditor']);
   assert.ok(DELEGABLE_ROLES.every((role) => !roleGrants(role, 'grant.manage')));

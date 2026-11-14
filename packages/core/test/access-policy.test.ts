@@ -29,6 +29,8 @@ test('a name a plain object holds already names no role and no project of the po
     assert.equal(readsWholeLog(odd), false);
     assert.deepEqual(protectedWithin(DEFAULT_POLICY, { projectId: name }), []);
     const developer: Holdings = { role: 'developer', scope: EVERYWHERE, grants: [], policy: DEFAULT_POLICY };
-    assert.equal(givesService(developer, EVERYWHERE, 'viewer', { projectId: name }), true);
+    // On a whole project, what they hold in its protected environments, whichever those are: use and write, not read.
+    assert.equal(givesService(developer, EVERYWHERE, 'contributor', { projectId: name }), true);
+    assert.equal(givesService(developer, EVERYWHERE, 'viewer', { projectId: name }), false);
   }
 });

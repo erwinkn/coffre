@@ -370,6 +370,57 @@ test("a service's grant taken away while a token is made widens nothing: the tok
   assert.deepEqual([entry.kept, entry.actor, entry.detail.principal], [true, bo, ci]);
 });
 
+test("a protected environment's row taken away while a token is made widens nothing (D241): a service's token on a whole project takes holding it where the project protects, whichever environments those are", async () => {
+  // shop has dev and a protected safe; Dee is a Developer of shop, who only uses and writes safe; wide holds Developer on shop.
+  const shop = project('shop');
+  const [shopDev, safe] = [environment(shop, 'dev'), environment(shop, 'safe', { protected: true })];
+  const wide = 'token:wide';
+  await write(world, ...rows('projects', shop), ...rows('environments', shopDev, safe), ...rows('principals', principal(wide)),
+    ...rows('grants', grant(dee, 'developer', { project: shop }), grant(wide, 'developer', { project: shop })));
+  assert.deepEqual(await vault.change(serviceToken('dee-cli', wide)), { refused: 'no_access' });
+  // safe's row deleted for the decision, then put back: the service's token is refused as before.
+  let putBack = await hidden('environments', sql`id = ${safe.id}::uuid`);
+  assert.deepEqual(await vault.change(serviceToken('dee-cli', wide)), { refused: 'no_access' });
+  assert.deepEqual(await vault.change(serviceToken('dee-cli', wide, { shop: 'developer' })), { refused: 'no_access' });
+  await putBack();
+  assert.equal((await minted()).row, undefined);
+  // A personal token made then is no refusal, but its grant keeps the protected column Dee holds on all of shop: safe
+  // back, it uses and never reads there, as Dee.
+  putBack = await hidden('environments', sql`id = ${safe.id}::uuid`);
+  assert.ok(!('refused' in await vault.change(personal('dee-cli', { shop: 'developer' }))));
+  await putBack();
+  assert.deepEqual((await minted()).scope, [{ projectId: shop.id, environmentId: null, role: 'developer', permissions: DEVELOPER }]);
+  await write(world, ...rows('secrets', value(world, secret(safe, 'DATABASE_URL'), 'postgres://safe')));
+  const at = async (label: string, purpose: 'reveal' | 'use') => {
+    const answer = await vault.use({ ...shown(label), project: 'shop', environment: 'safe', mine: false, keys: ['DATABASE_URL'], purpose, upstream: null });
+    return 'refused' in answer ? answer.refused : answer.values.map((item) => ('refused' in item ? item.refused : item.value))[0];
+  };
+  assert.deepEqual([await at('minted', 'reveal'), await at('minted', 'use'), await at('dee-cli', 'reveal')], ['no_access', 'postgres://safe', 'no_access']);
+});
+
+test("a Developer of a project with nothing protected gives a service no whole-project role, only environment by environment; whoever manages access there does (D241)", async () => {
+  const shop = project('shop');
+  const [shopDev, shopStaging] = [environment(shop, 'dev'), environment(shop, 'staging')];
+  const [wide, split, ed] = ['token:wide', 'token:split', user('ed')];
+  const edCli = credential('ed-cli', ed);
+  await write(world, ...rows('projects', shop), ...rows('environments', shopDev, shopStaging), ...rows('principals', principal(wide), principal(split), principal(ed)),
+    ...rows('grants', grant(dee, 'developer', { project: shop }), grant(ed, 'admin', { project: shop }), grant(wide, 'developer', { project: shop }),
+      grant(split, 'developer', { environment: shopDev }), grant(split, 'developer', { environment: shopStaging })),
+    ...rows('credentials', edCli));
+  // Dee holds all of shop today; protected later, an environment of it would be one she only uses.
+  assert.deepEqual(await vault.change(serviceToken('dee-cli', wide)), { refused: 'no_access' });
+  assert.deepEqual(await vault.change(serviceToken('dee-cli', wide, { 'shop/dev': 'developer' })), { refused: 'no_access' });
+  const each = await vault.change(serviceToken('dee-cli', split));
+  assert.ok(!('refused' in each), JSON.stringify(each));
+  assert.deepEqual(each.answer.scope, { 'shop/dev': 'developer', 'shop/staging': 'developer' });
+  await dropped('credentials', sql`token_hash = ${tokenOf('minted')}`);
+  // Ed, an Admin of shop, manages access there, and gives anything.
+  const whole = await vault.change(serviceToken('ed-cli', wide));
+  assert.ok(!('refused' in whole), JSON.stringify(whole));
+  assert.deepEqual(whole.answer.scope, { shop: 'developer' });
+  assert.deepEqual(await checked(), []);
+});
+
 test('a row the decision reads that is not the vault\'s refuses it, tampered: a grant, an environment, a role, the policy', async () => {
   const cases: [string, SQL, Asked<'token.create'>][] = [
     ['grants', sql`principal = ${ci} AND environment_id = ${ids.prod}::uuid`, serviceToken('bo-cli', ci)],
