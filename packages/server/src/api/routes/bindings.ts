@@ -78,7 +78,8 @@ export type BindingPlan = {
   policy: PolicyView | null;
   /** 0.14.7's places whose sensitive values it would not read (R32): never answered yet, as the weighing does not say them. */
   withheld?: string[];
-  replaces: { id: string; why: 'asked' }[];
+  /** `asked`: named in `replaces`. `keys_moved`: one of the service's on the issuer, under other keys. */
+  replaces: { id: string; why: 'asked' | 'keys_moved' }[];
 };
 
 /** A binding made or re-keyed: its id, and what it reaches, by path and role, as the vault sealed it. */
@@ -337,6 +338,10 @@ export const bindingRoutes = {
         // is asked only once the weighing said the caller may bind, so no one else makes coffre fetch a host they name.
         const plan = await bindingChange<'token.bind'>(ctx, { op: 'token.bind', member, binding: binding(uploaded ? { jwks: input.jwks } : { uri: issuer }) }, member, 'weigh');
         const jwksUri = carried !== null ? `${CARRIED}${carried.digest}` : urn ? issuer : await discovered(ctx, issuer, workloads);
+        // What it replaces turns on where its keys are, the bindings on its issuer under others going: weighed again
+        // with the keys discovery found, when they are not where the issuer stood in for them.
+        const { replaced } = uploaded || jwksUri === issuer ? plan : await bindingChange<'token.bind'>(ctx, { op: 'token.bind', member, binding: binding({ uri: jwksUri }) }, member, 'weigh');
+        const asked = new Set(input.replaces ?? []);
         return {
           profile: checked.profile,
           issuer,
@@ -345,7 +350,7 @@ export const bindingRoutes = {
           claims: checked.claims,
           scope: plan.bindings[0]!.scope,
           policy: (input.policy as PolicyView | undefined) ?? null,
-          replaces: plan.replaced.map((id) => ({ id, why: 'asked' as const })),
+          replaces: replaced.map((id) => ({ id, why: asked.has(id) ? ('asked' as const) : ('keys_moved' as const) })),
         };
       }
       let keys: { uri: string } | { jwks: unknown };

@@ -351,7 +351,7 @@ export type Api = {
       withheld?: string[];
       replaces: {
         id: string;
-        why: "asked";
+        why: "asked" | "keys_moved";
       }[];
     };
   };
@@ -1771,7 +1771,7 @@ export type BindingPlan = {
   withheld?: string[];
   replaces: {
     id: string;
-    why: "asked";
+    why: "asked" | "keys_moved";
   }[];
 };
 

@@ -506,10 +506,11 @@ const requests: Record<string, Entry> = {
     calls: ['caller', 'change'], statements: 1,
   },
   // A binding weighed and not made: one `weigh`, which says whether the caller may bind before its issuer is asked
-  // where its keys are, so no `caller` and no statement first.
+  // where its keys are, so no `caller` and no statement first; then, its keys found elsewhere than its issuer's own
+  // URL, a second, as what it replaces turns on them.
   'POST /members/:member/bindings?dryRun=1': {
     request: () => api('bo-cli', 'POST', `/members/${ci}/bindings?dryRun=1`, { profile: 'custom', issuer: KUBE, claims: POD, scope: { 'market/dev': 'viewer' } }),
-    calls: ['weigh'], statements: 0,
+    calls: ['weigh', 'weigh'], statements: 0,
   },
   'GET /members/:member/bindings': { request: () => api('bo-cli', 'GET', `/members/${ci}/bindings`), calls: ['caller'], statements: 1 },
   'GET /members/:member/bindings, by the service itself': { request: () => api('ci-token', 'GET', `/members/${ci}/bindings`), calls: ['caller'], statements: 1 },

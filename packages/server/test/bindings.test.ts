@@ -195,7 +195,8 @@ test("a preview (`?dryRun=1`) is the binding weighed and not made: one weigh, it
   const [[status, body], calls, statements] = await bind('ada-cli', { label: 'pods', scope: { 'market/dev': 'developer' } }, '?dryRun=1');
   assert.equal(status, 200, JSON.stringify(body));
   assert.deepEqual(body, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, keys: null, claims: POD, scope: { 'market/dev': 'developer' }, policy: null, replaces: [] });
-  assert.deepEqual([calls, statements, fetched], [['weigh'], 0, [`${KUBE}/.well-known/openid-configuration`]]);
+  // Weighed again with the keys discovery found, which are not at the issuer's own URL: what it replaces turns on them.
+  assert.deepEqual([calls, statements, fetched], [['weigh', 'weigh'], 0, [`${KUBE}/.well-known/openid-configuration`]]);
   assert.deepEqual(((await list('ada-cli'))[0][1] as { bindings: unknown[] }).bindings, [], 'nothing made');
   assert.deepEqual(await pending(), [], 'nothing logged');
 
@@ -207,6 +208,24 @@ test("a preview (`?dryRun=1`) is the binding weighed and not made: one weigh, it
   // The keys' preview is not served yet.
   const [keysAnswer] = await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys?dryRun=1`, { issuer: KUBE, jwks: { keys: [] } }));
   assert.equal(keysAnswer[0], 501);
+});
+
+test("a preview says what the binding replaces: those asked, and those on its issuer under keys other than discovery found, not those under the same", async () => {
+  const scope = JSON.stringify([{ projectId: ids.market, environmentId: ids.dev, role: 'developer' }]);
+  const [same, moved, named] = [
+    binding(ci, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, claims: JSON.stringify({ sub: 'system:serviceaccount:ci:same' }), scope }),
+    binding(ci, { profile: 'custom', issuer: KUBE, jwksUri: `${KUBE}/old/jwks`, claims: JSON.stringify({ sub: 'system:serviceaccount:ci:moved' }), scope }),
+    binding(ci, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, claims: JSON.stringify({ sub: 'system:serviceaccount:ci:named' }), scope }),
+  ];
+  await write(world, ...rows('bindings', same, moved, named));
+  const [[status, body]] = await bind('ada-cli', { scope: { 'market/dev': 'developer' }, replaces: [named.id] }, '?dryRun=1');
+  assert.equal(status, 200, JSON.stringify(body));
+  const sorted = (list: { id: string; why: string }[]) => [...list].sort((a, b) => a.id.localeCompare(b.id));
+  assert.deepEqual(sorted((body as { replaces: { id: string; why: string }[] }).replaces), sorted([{ id: moved.id, why: 'keys_moved' }, { id: named.id, why: 'asked' }]));
+  // And the binding made replaces just those.
+  const [[made, answer]] = await bind('ada-cli', { scope: { 'market/dev': 'developer' }, replaces: [named.id] });
+  assert.equal(made, 200, JSON.stringify(answer));
+  assert.deepEqual([...(answer as { replaced: string[] }).replaced].sort(), [moved.id, named.id].sort());
 });
 
 test("the vault's refusals, in words: who does not manage the service, a role the instance lacks, a service that is not there", async () => {
