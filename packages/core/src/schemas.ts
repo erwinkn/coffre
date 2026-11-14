@@ -41,6 +41,9 @@ export function tombstoneOf(slug: string, day: Date, n = 1): string {
   const base = `${slug}${TOMBSTONE}deleted-${day.toISOString().slice(0, 10)}`;
   return n === 1 ? base : `${base}-${n}`;
 }
+
+/** A tombstone's slug, as `tombstoneOf` writes it: the name a deleted place's log is still read by. */
+export const tombstoneSlug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}~deleted-\d{4}-\d{2}-\d{2}(?:-[1-9]\d*)?$/);
 export const displayName = z.string().trim().min(1).max(120);
 /** A folder: 1 to 64 characters of well-formed Unicode, no `/`, no control character, no space at either end (the tables and the vault check it too). */
 export const folderName = z.string().min(1).max(64)

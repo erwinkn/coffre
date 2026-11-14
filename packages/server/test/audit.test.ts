@@ -403,6 +403,33 @@ test("a path's entry that names another project too is the caller's if they read
   for (const query of ['', '?path=market']) assert.deepEqual(await refiles('al-cli', query), [], query);
 });
 
+test("a read through a reference is in its holder's log and its source's, each read by whoever reads that place's log alone", async () => {
+  // Ada leads billing, whose log Bo does not read; Ed reads market/dev's LINK, billing/prod's X.
+  const [billing] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id::text AS id FROM projects WHERE slug = 'billing'`);
+  await write(world, ...rows('grants', grant(ada, 'lead', { project: billing! })));
+  assert.equal((await call('cy-cli', 'PATCH', '/secrets/market/dev', { LINK: { ref: 'billing/prod/X' } }))[0], 200);
+  assert.equal((await call('ed-cli', 'POST', '/reveals', { path: 'market/dev/LINK' }))[0], 200);
+  await sign();
+  const reads = async (label: string, query: string) => brief({ entries: (await page(label, query))[0].entries.filter((entry) => entry.action === 'secret.read' && entry.actorId === ed.slice('user:'.length)) } as Page);
+  for (const query of ['?path=market/dev', '?path=market/dev/LINK', '']) assert.deepEqual(await reads('bo-cli', query), ['secret.read market/dev/LINK proven'], query);
+  for (const query of ['?path=billing/prod', '?path=billing/prod/X', '?path=billing', '']) assert.deepEqual(await reads('ada-cli', query), ['secret.read billing/prod/X proven'], query);
+  // Whoever reads both logs reads both entries, one read.
+  assert.deepEqual(await reads('aud-cli', ''), ['secret.read billing/prod/X proven', 'secret.read market/dev/LINK proven']);
+});
+
+test("a deleted project's log is read by its tombstone's slug, under the same rule as any path", async () => {
+  const day = new Date().toISOString().slice(0, 10);
+  for (const [method, path, body] of [['PATCH', '/projects/shop', { archived: true }], ['DELETE', '/projects/shop', undefined]] as const) {
+    const [status, answer] = await call('cy-cli', method, path, body);
+    assert.equal(status, 200, `${method} ${path}: ${JSON.stringify(answer)}`);
+  }
+  await sign();
+  assert.deepEqual(brief((await page('aud-cli', `?path=shop~deleted-${day}`))[0]).slice(0, 1), [`project.delete shop~deleted-${day} proven`]);
+  assert.deepEqual((await call('bo-cli', 'GET', `/audit?path=shop~deleted-${day}`))[0], 403);
+  assert.deepEqual((await call('aud-cli', 'GET', `/audit?path=shop~deleted-${day}-2`))[0], 404);
+  for (const path of ['shop~', 'shop~deleted-x', `shop~deleted-${day}-0`, `~deleted-${day}`]) assert.equal((await call('aud-cli', 'GET', `/audit?path=${path}`))[0], 400, path);
+});
+
 test('an actor, in full or bare, reads what they did, by the index and held to the body', async () => {
   for (const actor of ['user:bo@acme.example', 'BO@acme.example', 'bo@acme.example']) {
     assert.deepEqual(brief((await page('aud-cli', `?actor=${encodeURIComponent(actor)}`))[0]), ['secret.read market/dev/API_KEY proven'], actor);

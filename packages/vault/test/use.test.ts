@@ -258,9 +258,11 @@ test('a personal config is its owner\'s alone, over the environment it is a conf
 test('a reference is read where it lives and counted where its value is held; one whose source is gone is not read', async () => {
   assert.deepEqual(await got(ask('ada', 'market/prod', ['LINK'])), { LINK: 'billing-token' });
   assert.deepEqual(await exposed(), [{ principal: ada, secret_id: w.token.id }]);
-  const [entry] = await logged();
+  const [entry, source, ...more] = await logged();
   assert.deepEqual(entry!.detail.keys, [{ key: 'LINK', secret: w.token.id, version: 1, through: w.link.id }]);
   assert.ok(entry!.objects.includes(`secret:${w.link.id}`) && entry!.objects.includes(`secret:${w.token.id}`));
+  // And in the source's log, by the source's own places and key, with nothing of the holder's place: one statement still.
+  assert.deepEqual([source!.objects.filter((object) => !object.startsWith('credential:')), source!.detail.keys, source!.request, more], [[`project:${w.billing.id}`, `environment:${w.billed.id}`, `principal:${ada}`, `secret:${w.token.id}`], [{ key: 'API_TOKEN', secret: w.token.id, version: 1, through: w.link.id }], entry!.request, []]);
 
   const archived = await value(vault, secret(w.billed, 'RETIRED', { archivedAt: new Date(0) }), 'x');
   const chained = secret(w.billed, 'CHAINED', { sourceId: w.token.id });

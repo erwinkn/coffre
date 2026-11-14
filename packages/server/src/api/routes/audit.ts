@@ -1,5 +1,5 @@
 import { runsInstance } from '@coffre/core/access';
-import { environmentPath, secretKey, slug } from '@coffre/core/schemas';
+import { environmentPath, secretKey, slug, tombstoneSlug } from '@coffre/core/schemas';
 import type { About } from '@coffre/core/vault';
 import { z } from 'zod';
 
@@ -45,11 +45,16 @@ export const auditRoutes = {
   }),
 };
 
-/** A path whose every part is one a place or a key may be called: no other names one, and none reaches a statement. */
+/**
+ * A path whose every part is one a place or a key may be called, a deleted
+ * place's tombstone included, whose log stays: no other names one, and none
+ * reaches a statement.
+ */
 function placeNamed(text: string): Path {
   const path = parsePath(text);
-  const named = slug.safeParse(path.project).success
-    && (path.environment === undefined || environmentPath.safeParse(path.environment).success)
+  const place = (part: string, live: typeof slug) => live.safeParse(part).success || tombstoneSlug.safeParse(part).success;
+  const named = place(path.project, slug)
+    && (path.environment === undefined || place(path.environment, environmentPath))
     && (path.key === undefined || secretKey.safeParse(path.key).success);
   if (!named) throw badRequest('name a project, an environment or a key by its name: market, market/prod, market/prod/DATABASE_URL');
   return path;
