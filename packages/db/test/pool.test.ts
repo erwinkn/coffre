@@ -948,6 +948,27 @@ test('a statement sent prepared is parsed once on its connection, by a name ever
   }
 });
 
+test('a name goes without its Parse only for the statement parsed under it, once Postgres has said so: one sent meanwhile, or whose hash another holds, goes unnamed', async () => {
+  const client = postgresClient(DATABASE, { max: 1 });
+  const held = async () => (await client.unsafe(`select name, statement from pg_prepared_statements where name like 'coffre_%' order by statement`)) as { name: string; statement: string }[];
+  try {
+    // These two hash alike (coffre_25588cb2): the second must run as itself, pipelined behind a Parse of its own that
+    // Postgres would refuse (42P05) had it gone named, and never as the first, which holds the name.
+    const [first, second] = ['select 939224607::bigint as n', 'select 76824201::bigint as n'];
+    assert.deepEqual([...(await client.unsafe(first, [], { prepare: true }))], [{ n: '939224607' }]);
+    const answers = await Promise.all([client.unsafe(second, [], { prepare: true }), client.unsafe(second, [], { prepare: true })]);
+    assert.deepEqual(answers.map((rows) => [...rows]), [[{ n: '76824201' }], [{ n: '76824201' }]]);
+    assert.deepEqual((await held()).map(({ name, statement }) => [name, statement]), [['coffre_25588cb2', first]]);
+    // A statement sent again while its first Parse is unanswered goes unnamed, then by name once it is answered.
+    const third = (value: number) => client.unsafe('select $1::int * 2 as w424_p', [value], { prepare: true });
+    assert.deepEqual((await Promise.all([third(1), third(2), third(3)])).map((rows) => [...rows]), [[{ w424_p: 2 }], [{ w424_p: 4 }], [{ w424_p: 6 }]]);
+    assert.deepEqual([...(await third(4))], [{ w424_p: 8 }]);
+    assert.equal((await held()).filter(({ statement }) => statement.includes('w424_p')).length, 1);
+  } finally {
+    await client.end();
+  }
+});
+
 test('rowsOf asked to prepare sends its statement named, through the database\'s execute; in a transaction, unnamed', async () => {
   const client = postgresClient(DATABASE, { max: 1 });
   const db = createDatabase(client);

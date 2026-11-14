@@ -240,7 +240,11 @@ Each is marked `Coffre:` in the code:
   messages each time. The socket knows it as parsed once Postgres says so
   (ParseComplete); one whose Parse failed is parsed again on its next send,
   one that failed as it ran is not (Postgres would refuse a second Parse of
-  the name, 42P05). A transaction's first statement, which carries its
+  the name, 42P05). A name goes without its Parse only for the statement it
+  was parsed for, and only once that Parse is answered: a statement sent
+  while its Parse is unanswered, or whose name another statement's hash
+  already holds on the socket, goes unnamed, so a Parse that fails never
+  has what follows it run another statement. A transaction's first statement, which carries its
   BEGIN, and one described first go unnamed. `rowsOf(…, { prepare: true })`
   (`../dialect.ts`) is coffre's one way to ask for it.
 - **An idle connection holds no Node process open** (`idleTimer`, in

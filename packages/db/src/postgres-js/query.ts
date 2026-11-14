@@ -59,7 +59,7 @@ export class Query<T = unknown> extends Promise<T> {
   // What the connection works out as it sends it.
   parameters: unknown[] = [];
   statement: Statement | null = null;
-  /** Coffre: sent `prepare`d, what its connection knows it by, until Postgres has parsed it (`ParseComplete`, connection.ts). */
+  /** Coffre: sent `prepare`d, the name its connection parses it by, until Postgres has parsed it (`ParseComplete`, connection.ts). */
   parsing: string | null = null;
   /** Whether its parameters' types are asked of the server before its values go (`typedByServer`, connection.ts). */
   describeFirst = false;

@@ -80,8 +80,8 @@ const DescribeUnnamed = b.typed('D').str('S').str(N).end();
 /**
  * Coffre: the name of a statement sent `prepare`d: a hash of its parameters' types and its text (`key`), the same on
  * every connection, so that a pooler that keeps statements prepared on its server connections (Hyperdrive,
- * PgBouncer's `max_prepared_statements`) knows it again from its next client. A connection keeps its statements by
- * that key, not by the name: two that hashed alike would fail the second's Parse (42P05), never run the first's.
+ * PgBouncer's `max_prepared_statements`) knows it again from its next client. Two statements can hash alike: a
+ * connection keeps, by name, the key it parsed there, and sends by that name only the statement of that key (`toBuffer`).
  */
 function statementName(key: string): string {
   let hash = 0x811c9dc5;
@@ -95,9 +95,9 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   const { sslnegotiation, ssl, max, user, database, parsers, serializers, onnotice, max_pipeline, keep_alive, backoff } = options;
 
   const sent = new Queue<Query>();
-  // Coffre: the statements sent `prepare`d on this socket, by `statementKey`, and whether Postgres has parsed each yet.
-  // A socket's own: a new one is a new server session, and has none.
-  const named = new Map<string, boolean>();
+  // Coffre: the statements sent `prepare`d on this socket, by `statementName`: the key each name was parsed for, and
+  // whether Postgres has said it parsed it. A socket's own: a new one is a new server session, and has none.
+  const named = new Map<string, { key: string; parsed: boolean }>();
   const id = uid++;
   const backend: Backend = { pid: null, secret: null };
   const idleTimeout = timer(end, options.idle_timeout);
@@ -228,17 +228,23 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       return Buffer.concat([...(q.begin === null ? [] : [b.typed('P').str(N).str(q.begin + N).i16(0).end(), BindNothing, ExecuteOnly]), ...members, Sync]);
     }
     // Coffre: a statement asked `prepare`d goes by its name: parsed on its first send on this socket, then only
-    // described, bound and executed, under one Sync as an unnamed one goes, so with no round trip more. Unnamed still,
-    // one described first or carrying its transaction's BEGIN: their answers are read as they always were.
+    // described, bound and executed, under one Sync as an unnamed one goes, so with no round trip more. A name is sent
+    // without its Parse only once Postgres has said it parsed this statement under it: while that Parse is unanswered
+    // (it could fail, and what follows run under the name whatever holds it), or while another statement whose key
+    // hashed alike holds the name, the statement goes unnamed, parsed as any. Unnamed still, one described first or
+    // carrying its transaction's BEGIN: their answers are read as they always were.
     if (q.options.prepare === true && !q.describeFirst && q.begin === null) {
       const key = statementKey(q.statement!);
       const name = statementName(key);
-      const parse = named.has(key) ? [] : [Parse(q, name)];
-      if (parse.length > 0) {
-        named.set(key, false);
-        q.parsing = key;
+      const held = named.get(name);
+      if (held === undefined || (held.parsed && held.key === key)) {
+        if (held === undefined) {
+          named.set(name, { key, parsed: false });
+          q.parsing = name;
+        }
+        const parse = held === undefined ? [Parse(q, name)] : [];
+        return Buffer.concat([...parse, b.typed('D').str('S').str(name + N).end(), Bind(q.parameters, q.statement!.types, name), ExecuteUnnamed]);
       }
-      return Buffer.concat([...parse, b.typed('D').str('S').str(name + N).end(), Bind(q.parameters, q.statement!.types, name), ExecuteUnnamed]);
     }
     const statement = q.describeFirst ? [Parse(q), DescribeUnnamed, Flush] : [Parse(q), DescribeUnnamed, bound(q)];
     return Buffer.concat(q.begin === null ? statement : [b.typed('P').str(N).str(q.begin + N).i16(0).end(), BindNothing, ExecuteOnly, ...statement]);
@@ -696,7 +702,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   /** Coffre: a statement sent `prepare`d, parsed: the socket's from now (`named`). An unnamed one's Parse says nothing. */
   function ParseComplete(): void {
     if (query?.parsing == null) return;
-    named.set(query.parsing, true);
+    const held = named.get(query.parsing);
+    if (held !== undefined) held.parsed = true;
     query.parsing = null;
   }
 
