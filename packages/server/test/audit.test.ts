@@ -153,6 +153,11 @@ test('an entry edited within the head fails its proof, and so does one whose til
   await world.owner.execute(sql`UPDATE log SET body = replace(body, '"slug":"shop"', '"slug":"shoq"') WHERE body LIKE '%"action":"project.create"%' AND kept`);
   const [edited] = await page('aud-cli');
   assert.deepEqual(brief(edited), [...ALL.slice(0, -2), 'project.create shop failed', ALL.at(-1)]);
+  // A time no date holds does not take the page down: the entry shows, with none, and fails.
+  await world.owner.execute(sql`UPDATE log SET body = regexp_replace(body, '"at":[0-9.e+]+', '"at":100000000000000000000') WHERE body LIKE '%"action":"project.create"%' AND kept`);
+  const [timeless] = await page('aud-cli');
+  const created = timeless.entries.find((entry) => entry.action === 'project.create' && entry.decision === 'allow')!;
+  assert.deepEqual([(created as Entry & { occurredAt: string }).occurredAt, created.proof], ['', 'failed']);
   await world.owner.execute(sql`DELETE FROM log_tiles WHERE NOT kept`);
   // The aging tree holds two entries, which prove from one another's leaf in the lowest tile: gone, neither proves.
   assert.deepEqual((await page('aud-cli'))[0].entries.slice(0, 2).map((entry) => entry.proof), ['failed', 'failed']);
@@ -278,6 +283,21 @@ test('a path reads that place, an environment or a key of it; one the caller may
   for (const path of ['market/nowhere', 'gone', 'market/dev/NOPE']) assert.equal((await call('aud-cli', 'GET', `/audit?path=${path}`))[0], 404, path);
   // What names no place reaches no statement.
   for (const path of ['market/de%00v', 'Market', 'market/dev/a-b', 'market/dev/%ED%A0%80']) assert.equal((await call('aud-cli', 'GET', `/audit?path=${path}`))[0], 400, path);
+});
+
+test("a path's entry that names another project too is the caller's if they read that one's log as well, and no one else's", async () => {
+  const [billing] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id::text AS id FROM projects WHERE slug = 'billing'`);
+  await write(world, ...rows('grants', grant(bo, 'lead', { project: billing! })));
+  for (const [method, path, body] of [['PATCH', '/projects/billing', { folder: 'apps' }], ['PATCH', '/folders/apps', { name: 'tools' }]] as const) {
+    const [status, answer] = await call('cy-cli', method, path, body);
+    assert.equal(status, 200, `${method} ${path}: ${JSON.stringify(answer)}`);
+  }
+  await sign();
+  const refiles = async (label: string, query: string) => (await page(label, query))[0].entries.filter((entry) => entry.action === 'folder.refile').map((entry) => entry.proof);
+  // Apps held market and billing: its renaming names both, and Bo reads both, whichever the path.
+  for (const query of ['', '?path=market', '?path=billing']) assert.deepEqual(await refiles('bo-cli', query), ['proven'], query);
+  // Al reads market's log alone: billing's mention keeps it from Al, by a path or not.
+  for (const query of ['', '?path=market']) assert.deepEqual(await refiles('al-cli', query), [], query);
 });
 
 test('an actor, in full or bare, reads what they did, by the index and held to the body', async () => {

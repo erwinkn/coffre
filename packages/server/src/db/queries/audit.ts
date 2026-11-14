@@ -21,13 +21,15 @@ export type LogPlaces = { projects: Map<string, string>; environments: Map<strin
 
 /**
  * The places a page is about, in one statement: the project `slug` names,
- * or those `within` names by id (every one for null), each with every
+ * and those `within` names by id (every one for null), each with every
  * environment. With `key`,
  * the ids of every secret of that key in the named project, archived and
  * deleted ones too, by environment: a path to a key reads the log of each.
  */
-export async function logPlaces(db: Queryable, at: { slug: string; key?: string } | { within: readonly string[] | null }): Promise<LogPlaces & { secrets: { id: string; environmentId: string }[] }> {
-  const where = 'slug' in at ? sql`p.slug = ${at.slug}` : at.within === null ? sql`true` : sql`p.id = ANY(${sql.param([...at.within])}::uuid[])`;
+export async function logPlaces(db: Queryable, at: { slug: string; key?: string; within?: readonly string[] | null } | { within: readonly string[] | null }): Promise<LogPlaces & { secrets: { id: string; environmentId: string }[] }> {
+  const within = at.within === undefined ? null : at.within === null ? sql`true` : sql`p.id = ANY(${sql.param([...at.within])}::uuid[])`;
+  const named = 'slug' in at ? sql`p.slug = ${at.slug}` : null;
+  const where = named === null ? within! : within === null ? named : sql`(${named} OR ${within})`;
   const keyed = 'slug' in at && at.key !== undefined
     ? sql`UNION ALL SELECT s.project_id::text, NULL, s.environment_id::text, NULL, NULL, NULL, NULL, NULL, NULL, s.id::text FROM secrets s WHERE s.project_id IN (SELECT id FROM projects WHERE slug = ${at.slug}) AND s.key = ${at.key}`
     : sql``;

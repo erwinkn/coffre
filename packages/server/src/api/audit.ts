@@ -260,10 +260,12 @@ function actorsNamed(actor: string): string[] {
  * The path's place, and the objects its entries mention: a project's, an
  * environment's, or each secret's of that key there. To whoever does not
  * read the whole log, a place they may not read the log of is refused as
- * one that is not there: neither says whether it is.
+ * one that is not there: neither says whether it is. Their places come with
+ * it, in the same statement: an entry of the path's that names another
+ * project too is theirs if they read that one's log as well.
  */
 async function placeAt(ctx: ApiContext, who: Called, whole: boolean, path: Path): Promise<{ places: LogPlaces; objects: string[] }> {
-  const places = await logPlaces(ctx.db, { slug: path.project, ...(path.key === undefined ? {} : { key: path.key }) });
+  const places = await logPlaces(ctx.db, { slug: path.project, ...(path.key === undefined ? {} : { key: path.key }), ...(whole ? {} : { within: projectsReached(who) }) });
   const hidden = (what: string) => (whole ? notFound(`no such ${what}`) : forbidden(`you do not hold audit.read at ${[path.project, path.environment].filter(Boolean).join('/')}`));
   const projectId = [...places.projects].find(([, slug]) => slug === path.project)?.[0];
   if (projectId === undefined) throw hidden('project');
@@ -324,6 +326,11 @@ const mentionsOf = (body: Body): string[] => (Array.isArray(body.objects) ? body
 const detailOf = (body: Body): Record<string, unknown> => (typeof body.detail === 'object' && body.detail !== null && !Array.isArray(body.detail) ? (body.detail as Record<string, unknown>) : {});
 /** A refused change's entry says why (D236): what tells it from one that went through. */
 const decisionOf = (body: Body): 'allow' | 'deny' => (typeof detailOf(body).refused === 'string' ? 'deny' : 'allow');
+/** An entry's time, or none: an edited body may hold any number, and `Date` takes only some. */
+const timeOf = (at: unknown): string => {
+  const date = new Date(typeof at === 'number' ? at : Number.NaN);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+};
 const sizeOf = (head: SignedHead, kept: boolean) => (kept ? head.keptSize : head.agingSize);
 
 /**
@@ -444,7 +451,7 @@ function viewOf(row: LogRow, body: Body, names: Awaited<ReturnType<typeof logPro
   return {
     seq: row.seq,
     author: 'vault',
-    occurredAt: typeof body.at === 'number' && Number.isFinite(body.at) ? new Date(body.at).toISOString() : '',
+    occurredAt: timeOf(body.at),
     ...actorParts(actor),
     action: typeof body.action === 'string' ? body.action : '',
     decision: decisionOf(body),
