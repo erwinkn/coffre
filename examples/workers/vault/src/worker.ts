@@ -27,4 +27,6 @@ export default vault((env: Env) => ({
   workloads: {},
   // The vault derives its signing key from the vault key. With a key a key
   // service holds, such as awsKms(…), it needs one of its own: signingKey: env.SIGNING_KEY.
+  // After restoring a backup, a new name for the signer's object, which goes
+  // on from the restored log (docs/restore.md): signerName: 'signer-2026-11-14',
 }));

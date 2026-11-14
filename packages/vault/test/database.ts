@@ -5,6 +5,7 @@ import { KekRegistry, keyCheckOf, LocalKekProvider } from '@coffre/core/kek';
 import type { About } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
+import { rowsOf } from '@coffre/db/dialect';
 import * as schema from '@coffre/db/schema';
 import { getTableName, is, sql } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
@@ -136,6 +137,39 @@ const TABLES = (Object.values(schema) as unknown[]).filter((value): value is PgT
 /** Every table emptied. */
 export async function emptyDatabase(owner: Database): Promise<void> {
   await owner.execute(sql`TRUNCATE ${sql.join(TABLES.map((table) => sql.identifier(getTableName(table))), sql`, `)} RESTART IDENTITY CASCADE`);
+}
+
+/**
+ * Every table as it stands, copied aside, as a backup taken now: what it
+ * gives back puts the copy in place of the database, as `pg_restore` does
+ * into one emptied, its sequences after the rows it holds. Under the schema
+ * `backup`, which it makes again each time.
+ */
+export async function backupOf(owner: Database): Promise<() => Promise<void>> {
+  const names = TABLES.map((table) => getTableName(table));
+  const tables = await rowsOf<{ name: string; columns: string; counted: string | null }>(owner, sql`
+    SELECT table_name AS name, string_agg(quote_ident(column_name), ', ') FILTER (WHERE is_generated = 'NEVER') AS columns,
+      max(column_name) FILTER (WHERE is_identity = 'YES' OR column_default LIKE 'nextval(%') AS counted
+    FROM information_schema.columns WHERE table_schema = current_schema() AND table_name IN (${sql.join(names.map((name) => sql`${name}`), sql`, `)}) GROUP BY 1`);
+  await owner.execute(sql`DROP SCHEMA IF EXISTS backup CASCADE`);
+  await owner.execute(sql`CREATE SCHEMA backup`);
+  for (const { name } of tables) await owner.execute(sql`CREATE TABLE backup.${sql.identifier(name)} AS TABLE ${sql.identifier(name)}`);
+  return async () => {
+    await emptyDatabase(owner);
+    // In an order the foreign keys allow: a table whose rows name one not back yet waits for the next round.
+    for (let left = tables; left.length > 0; ) {
+      const failed: typeof tables = [];
+      for (const table of left) {
+        const columns = sql.raw(table.columns);
+        await owner.execute(sql`INSERT INTO ${sql.identifier(table.name)} (${columns}) OVERRIDING SYSTEM VALUE SELECT ${columns} FROM backup.${sql.identifier(table.name)}`).catch(() => failed.push(table));
+      }
+      if (failed.length === left.length) throw new Error(`the backup could not be put back: ${failed.map(({ name }) => name).join(', ')}`);
+      left = failed;
+    }
+    for (const { name, counted } of tables) {
+      if (counted !== null) await owner.execute(sql`SELECT setval(pg_get_serial_sequence(${name}, ${counted}), coalesce(max(${sql.identifier(counted)}), 0) + 1, false) FROM ${sql.identifier(name)}`);
+    }
+  };
 }
 
 /**

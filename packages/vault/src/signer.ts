@@ -1,4 +1,4 @@
-import { Edge, HASH_SIZE, leafHash, tileMap, WIDTH } from '@coffre/core/log';
+import { Edge, edgeOf, HASH_SIZE, leafHash, tileKey, tileMap, WIDTH } from '@coffre/core/log';
 import type { LogAction } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import * as schema from '@coffre/db/schema';
@@ -7,7 +7,7 @@ import { PgTable } from 'drizzle-orm/pg-core';
 
 import { bounded } from './change.ts';
 import { entryOf, type Entry } from './entry.ts';
-import { macOf, shapeOf, type Key, type Sealed } from './rows.ts';
+import { checked, macOf, shapeOf, type Key, type Sealed } from './rows.ts';
 import { expire, pruned, recheck, type Walk } from './upkeep.ts';
 
 /**
@@ -104,7 +104,9 @@ const leafOf = (body: string) => sql.raw(`sha256('\\x00'::bytea || convert_to(${
 
 // By id, which for changes is the order they committed in: each takes its id under the change lock, held until its
 // commit shows (`commit` in change.ts), and the sequence hands ids out one at a time. Uses commit in any order, and write no row.
-const WAITING = sql`SELECT 'pending' AS part, id::text AS name, NULL::jsonb AS key, kept, body, mac FROM (SELECT * FROM log_pending ORDER BY id LIMIT ${MOST + 1}) waiting`;
+// `most` of them, and one more to tell whether that is all; null for all.
+const WAITING = (most: number | null) =>
+  sql`SELECT 'pending' AS part, id::text AS name, NULL::jsonb AS key, kept, body, mac FROM (SELECT * FROM log_pending ORDER BY id LIMIT ${most === null ? sql`ALL` : most + 1}) waiting`;
 const ROWS = sql.join(
   MIRRORED.map((table) => {
     const { name, key } = shapeOf(table);
@@ -363,21 +365,21 @@ export class Signer {
    * runs can be replayed one step at a time (test/replay-log.ts). Anything
    * else calls `run`.
    */
-  async read(full: boolean): Promise<Snapshot> {
+  async read(full: boolean, most: number | null = MOST): Promise<Snapshot> {
     this.#alive();
     if (this.#moving !== null) throw new Error('the last run is not moved yet');
     const expected = new Set(this.#expected);
     const at = this.#on.now();
     const found = await this.#ask<{ part: 'pending' | 'row' | 'end' | 'head'; name: string | null; key: unknown; kept: boolean; body: string; mac: Uint8Array }>(
-      sql`SELECT parts.*, clock_timestamp() AS read_at FROM (${full ? sql`${WAITING} UNION ALL ${ROWS} UNION ALL ${ENDS} UNION ALL ${HEAD}` : WAITING}) parts`,
+      sql`SELECT parts.*, clock_timestamp() AS read_at FROM (${full ? sql`${WAITING(most)} UNION ALL ${ROWS} UNION ALL ${ENDS} UNION ALL ${HEAD}` : WAITING(most)}) parts`,
     );
     const waiting = found.filter((row) => row.part === 'pending').map(({ name, kept, body, mac }) => ({ id: name!, kept, body, mac }));
     waiting.sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
     return {
       at,
       expected,
-      pending: waiting.slice(0, MOST),
-      drained: waiting.length <= MOST,
+      pending: most === null ? waiting : waiting.slice(0, most),
+      drained: most === null || waiting.length <= most,
       rows: full ? new Map(found.filter((row) => row.part === 'row').map((row) => [JSON.stringify([row.name, ...(row.key as unknown[])]), Buffer.from(row.mac).toString('hex')])) : null,
       ends: full ? (Object.fromEntries(found.filter((row) => row.part === 'end').map((row) => [treeOf(row.kept), { size: row.key, last: row.name }])) as Record<Tree, End>) : null,
       head: found.filter((row) => row.part === 'head').map((row) => JSON.stringify([...(row.key as unknown[]), Buffer.from(row.mac).toString('hex')]))[0] ?? null,
@@ -467,9 +469,83 @@ export class Signer {
       if (taken.length > 0 || refused.length > 0) this.#move(changes, { taken, refused, tiles, pruning: this.#agingFrom, pruned: [] });
       // With an entry or a finding, never alone: an idle run writes nothing here, and its storage's window is only wider for it.
       if (changes.size === 0) return;
-      const trees = Object.fromEntries(TREES.map((tree) => [tree, { size: this.#trees[tree].size, last: this.#last[tree], tiles: this.#trees[tree].edgeTiles().map(({ level, index, hashes: tile }) => ({ level, index, hashes: tile.toString('hex') })) }])) as Kept['trees'];
-      changes.set('state', { drained: this.#drained, trees } satisfies Kept);
+      this.#state(changes);
     });
+  }
+
+  /** When it last drained, and each tree's edge and end, as its storage keeps them. */
+  #state(changes: Map<string, unknown>): void {
+    const trees = Object.fromEntries(TREES.map((tree) => [tree, { size: this.#trees[tree].size, last: this.#last[tree], tiles: this.#trees[tree].edgeTiles().map(({ level, index, hashes: tile }) => ({ level, index, hashes: tile.toString('hex') })) }])) as Kept['trees'];
+    changes.set('state', { drained: this.#drained, trees } satisfies Kept);
+  }
+
+  /**
+   * A signer whose storage is empty, over a log begun (a database restored,
+   * or the storage lost): it goes on from the head the database holds
+   * (docs/design/0.16.md, "Losing the signer's storage"). The head carries
+   * the vault's MAC, and each tree, rebuilt from the log, reaches the head's
+   * root: then it is this signer's trees, the next entry numbered after
+   * the head's last, and its mirror the rows as they stand, before what
+   * waits, which its next run signs. Its answer: whether the database holds
+   * a head to go on from. Throws, keeping nothing, on a head or a log the
+   * vault did not sign.
+   */
+  async resume(): Promise<boolean> {
+    if (!this.blank) throw new Error('only a signer whose storage is empty goes on from the database');
+    // Every entry that waits, however many: the rows read with them are past them all.
+    const snapshot = await this.read(true, null);
+    if (snapshot.head === null) return false;
+    const [size, keptSize, keptRoot, agingSize, agingRoot, agingFrom, signedAt, mac] = JSON.parse(snapshot.head) as [number, number, string, number, string, number, number | null, string];
+    // A head of no entry is a refusal of what waited before anything was adopted: nothing to go on from.
+    if (keptSize === 0) return false;
+    const refused = (why: string) => new Error(`the database's log is begun, and its signer has signed none of it: ${why}`);
+    if (checked(this.#on.keys, (key) => key.entries, `head\n${JSON.stringify([size, keptSize, keptRoot, agingSize, agingRoot, agingFrom, signedAt])}`, Buffer.from(mac, 'hex')) === undefined) throw refused('its head is not the vault\'s');
+    // Each tree from its tiles as they stood at its last block's start (the aging tree's no lower than its first use kept), then that block's entries
+    // by their hashes, as the database works them out: a log of any length in one bounded read, its tiles proven by the root they reach.
+    const from = { kept: Math.max(0, Math.floor((keptSize - 1) / WIDTH) * WIDTH), aging: Math.max(agingFrom, Math.floor((agingSize - 1) / WIDTH) * WIDTH) };
+    const edges = TREES.flatMap((tree) => edgeOf(from[tree]).filter(({ width }) => width > 0).map(({ level, index }) => sql`(${tree === 'kept'}, ${level}, ${index})`));
+    const found = await this.#ask<{ kept: boolean; level: number | null; place: number; hash: Buffer }>(sql`
+      SELECT kept, NULL::int AS level, leaf::float8 AS place, ${leafOf('body')} AS hash FROM log
+        WHERE (kept AND leaf >= ${from.kept} AND leaf < ${keptSize}) OR (NOT kept AND leaf >= ${from.aging} AND leaf < ${agingSize})
+      ${edges.length === 0 ? sql`` : sql`UNION ALL SELECT kept, level, number::float8, hashes FROM log_tiles WHERE (kept, level, number) IN (${sql.join(edges, sql`, `)})`}
+      ORDER BY 1, 2 NULLS FIRST, 3`);
+    const trees = { kept: Edge.empty(), aging: Edge.empty() };
+    const last: Record<Tree, string | null> = { kept: null, aging: null };
+    for (const tree of TREES) {
+      const mine = found.filter((row) => treeOf(row.kept) === tree);
+      try {
+        trees[tree] = Edge.load(from[tree], new Map(mine.filter((row) => row.level !== null).map((row) => [tileKey(row.level!, row.place), Buffer.from(row.hash)])));
+      } catch {
+        throw refused(`the tiles of its ${tree} tree are not there`);
+      }
+      const leaves = mine.filter((row) => row.level === null).map((row) => Buffer.from(row.hash));
+      trees[tree].append(leaves);
+      last[tree] = leaves.at(-1)?.toString('hex') ?? null;
+    }
+    if (trees.kept.size !== keptSize || trees.aging.size !== agingSize || trees.kept.root().toString('hex') !== keptRoot || trees.aging.root().toString('hex') !== agingRoot) throw refused('its log does not reach its head');
+    // The rows as they were at the head: each entry that waits moved them on from what it says they were, and is signed from there.
+    const mirror = new Map(snapshot.rows);
+    for (const entry of snapshot.pending.map((row) => entryOf(this.#on.keys, row)).reverse()) {
+      for (const { row, was, now } of [...(entry?.rows ?? [])].reverse()) {
+        if (now === was) continue;
+        if (was === null) mirror.delete(row);
+        else mirror.set(row, was);
+      }
+    }
+    await this.#step((changes) => {
+      for (const [name, row] of mirror) {
+        this.#mirror.set(name, row);
+        changes.set(`row ${name}`, row);
+      }
+      this.#trees = trees;
+      this.#last = last;
+      this.#agingFrom = agingFrom;
+      changes.set('agingFrom', agingFrom);
+      this.#head = snapshot.head;
+      changes.set('head', snapshot.head);
+      this.#state(changes);
+    });
+    return true;
   }
 
   /** What is to move, with the head it signs: in its storage before anything moves. */

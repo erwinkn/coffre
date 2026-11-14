@@ -17,21 +17,26 @@ type SignerStatus = { checked: number; standing: unknown[]; adopted: boolean; ad
 /** The vault's keys, as its configuration names them: a local KEK, and the signing key, derived from it unless given. */
 export type WorkerKeys = { id: string; key: string; signingKey?: string };
 
+/** `signerName`: the vault's, as its configuration names it. `state`: where the objects' storage is kept, from one boot to the next; new otherwise. */
+type Booted = { signer?: boolean; signerName?: string; state?: string };
+
 export type VaultWorker = {
   reveal(bearer: string, path: string, keys: string[] | null): Promise<Answer>;
   peek(bearer: string, path: string, keys: string[] | null): Promise<{ status: number; body: Peeked }>;
   write(bearer: string, path: string, values: Record<string, string>): Promise<Written>;
   /** A sign-in, as the app makes one once it has verified the account: a browser session whose token is `bearer`. */
   signin(account: Account, bearer: string): Promise<{ status: number; body: { answer?: { principal: string }; refused?: string; error?: string } }>;
-  /** What the signer's object says of itself (`status`). */
-  status(): Promise<SignerStatus>;
+  /** What the signer's object says of itself (`status`): the vault's, or the one named. */
+  status(name?: string): Promise<SignerStatus>;
+  /** The object named, past its own calls: what its storage holds and when its alarm is set (`kept`), or its alarm fired (`ring`). */
+  object(name: string, ask: 'kept' | 'ring'): Promise<unknown>;
   post(path: string): Promise<{ error?: string }>;
   get(path: string): Promise<unknown>;
   stop(): Promise<void>;
 };
 
-/** A fresh isolate of the vault Worker and its signer, whose storage is new, over `database` through the vault's login. */
-export async function vaultWorker(database: string, keys: WorkerKeys, { signer = true } = {}): Promise<VaultWorker> {
+/** A fresh isolate of the vault Worker and its signer, whose storage is new unless `state` keeps it, over `database` through the vault's login. */
+export async function vaultWorker(database: string, keys: WorkerKeys, { signer = true, signerName, state }: Booted = {}): Promise<VaultWorker> {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-worker-'));
   const name = 'coffre-vault-workers-test';
   writeFileSync(
@@ -40,7 +45,7 @@ export async function vaultWorker(database: string, keys: WorkerKeys, { signer =
       name,
       compatibility_date: '2026-08-06',
       compatibility_flags: ['nodejs_compat'],
-      vars: { VAULT_KEY_ID: keys.id, VAULT_KEY: keys.key, ...(keys.signingKey === undefined ? {} : { SIGNING_KEY: keys.signingKey }) },
+      vars: { VAULT_KEY_ID: keys.id, VAULT_KEY: keys.key, ...(keys.signingKey === undefined ? {} : { SIGNING_KEY: keys.signingKey }), ...(signerName === undefined ? {} : { SIGNER_NAME: signerName }) },
       hyperdrive: [{ binding: 'VAULT_HYPERDRIVE', id: 'vault-workers-test', localConnectionString: database }],
       services: [{ binding: 'VAULT', service: name, entrypoint: 'Vault' }],
       // As a deployment's vault/wrangler.jsonc.
@@ -54,7 +59,7 @@ export async function vaultWorker(database: string, keys: WorkerKeys, { signer =
   try {
     worker = await unstable_dev(fileURLToPath(new URL('./vault-worker.ts', import.meta.url)), {
       config: join(dir, 'wrangler.json'),
-      local: true, ip: '127.0.0.1', port: 0, inspectorPort: 0, persist: false, logLevel: 'error',
+      local: true, ip: '127.0.0.1', port: 0, inspectorPort: 0, ...(state === undefined ? { persist: false } : { persistTo: state }), logLevel: 'error',
       experimental: { disableExperimentalWarning: true, disableDevRegistry: true },
     });
   } catch (error) {
@@ -70,7 +75,8 @@ export async function vaultWorker(database: string, keys: WorkerKeys, { signer =
     peek: (bearer, path, keys) => call('/reveals', 'PUT', { path, keys }, bearer),
     write: (bearer, path, values) => call('/secrets', 'PATCH', { path, values }, bearer),
     signin: (account, bearer) => call('/signin', 'POST', { account }, bearer),
-    status: async () => (await call<SignerStatus>('/signer', 'POST', {})).body,
+    status: async (name) => (await call<SignerStatus>('/signer', 'POST', { name })).body,
+    object: async (name, ask) => (await call('/signer', 'POST', { name, ask })).body,
     post: async (path) => (await call<{ error?: string }>(path, 'POST', {})).body,
     get: async (path) => (await worker.fetch(path, { signal: AbortSignal.timeout(20_000) })).json(),
     async stop() {
