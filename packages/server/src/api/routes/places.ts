@@ -169,11 +169,13 @@ export const placeRoutes = {
    * A project's personal configs, for whoever manages its environments:
    * whose, of what, and their keys' names, never a value. One call to the
    * vault and one statement. A project the caller may not list them in is
-   * answered as one that is not there.
+   * answered as one that is not there. Whose they are names people: theirs
+   * to look up signed in as themselves, never on a personal token (0.14.7).
    */
   ...route('GET /personal/:project', {
     run: async (ctx, { params }) => {
       const who = await ctx.caller();
+      if (who.credential.kind === 'personal') throw refusal('no_access', params.project);
       const project = await personalConfigs(ctx.db, params.project, projectsReached(who));
       if (project === null || !can(who, 'environment.manage', { projectId: project.id })) throw refusal('no_access', params.project);
       return { configs: project.configs.map(({ of, ...config }) => ({ ...config, of: of ?? '?' })) };
