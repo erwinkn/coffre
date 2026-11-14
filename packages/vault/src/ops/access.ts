@@ -3,7 +3,7 @@ import type { AccessAnswers, AccessChanges, MemberAdd, MemberRemove, MemberResto
 import { grants, principals, projects } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
 
-import { callerFrom, callerParts, type Asking, type Shown } from '../caller.ts';
+import { callerFrom, callerParts, refusedTo, type Asking, type Shown } from '../caller.ts';
 import { drop, part, put, type Operation, type Parts, type Refusal, type Seen } from '../change.ts';
 import type { Said } from '../entry.ts';
 import type { Fresh, Row } from '../rows.ts';
@@ -80,6 +80,17 @@ function asking(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, vault:
   return caller;
 }
 
+/**
+ * What the log says of one of these changes refused (D236): the member it was
+ * about, by their row only when the read found one, and the scope's projects
+ * found. No place: these changes name none, and a member's name as typed is
+ * free text the log does not take.
+ */
+const deniedTo = <S extends Seen<ReturnType<typeof callerParts>> & { member: Row<typeof principals>[]; scoped?: Row<typeof projects>[] }>(action: string, shown: Shown & { request: string | null }, vault: Deciding) =>
+  refusedTo<S>(action, shown, vault.workloads, {
+    objects: (seen) => [...seen.member.map((row) => `principal:${row.id}`), ...(seen.scoped ?? []).map((project) => `project:${project.id}`)],
+  });
+
 /** An entry of these changes: who asked, on what, and what it mentions. */
 function said(action: string, caller: Asking, shown: { request: string | null; ip: string | null }, objects: string[], detail: Record<string, unknown>): Said {
   return {
@@ -151,6 +162,7 @@ const admit = (action: 'member.add' | 'member.restore') =>
     };
     return {
       read,
+      denied: deniedTo(action, shown, vault),
       decide(seen: Seen<typeof read>, at: number) {
         const caller = asking(seen, shown, vault, at);
         if ('refused' in caller) return caller;
@@ -199,6 +211,7 @@ function memberRole(input: Presented & MemberRole, vault: Deciding): Operation<P
   };
   return {
     read,
+    denied: deniedTo('member.role', shown, vault),
     decide(seen: Seen<typeof read>, at: number) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
@@ -238,6 +251,7 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
   };
   return {
     read,
+    denied: deniedTo('member.remove', shown, vault),
     decide(seen: Seen<typeof read>, at: number) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;

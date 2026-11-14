@@ -30,6 +30,7 @@ beforeEach(async () => {
   await emptyDatabase(world.owner);
   world.memory.reads.clear();
   world.memory.logged.clear();
+  world.refused.clear();
   market = project('market');
   billing = project('billing');
   const prod = environment(market, 'prod');
@@ -63,6 +64,11 @@ const uses = async (label: string) => {
   return 'refused' in answer ? answer.refused : answer.values.map((item) => ('refused' in item ? item.refused : item.value))[0];
 };
 const count = async (table: 'log_pending' | 'grants') => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM ${sql.identifier(table)}`))[0]!.n;
+/** The entries kept: a change's, never a refusal's (D236), which `refusals` reads. */
+const kept = async () => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM log_pending WHERE kept`))[0]!.n;
+/** The refusals logged, oldest first. */
+const refusals = async () =>
+  (await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(world.owner, sql`SELECT kept, body, mac FROM log_pending WHERE NOT kept ORDER BY id`)).map((found) => entryOf(world.keys, found)!);
 const members = async () => rowsOf<{ id: string; status: string; role: string; scope: string | null; generation: number }>(world.owner, sql`SELECT id, status, role, scope, generation FROM principals ORDER BY id`);
 const row = async (id: string) => (await members()).find((member) => member.id === id);
 /** The newest change's entry, as the signer will read it. */
@@ -73,11 +79,11 @@ const written = async () => {
 /** The rows an entry names, by table, as made, replaced, dropped or only read. */
 const named = (entry: Awaited<ReturnType<typeof written>>) =>
   entry.rows.map(({ row: name, was, now }) => `${(JSON.parse(name) as string[])[0]} ${was === null ? 'made' : now === null ? 'dropped' : was === now ? 'read' : 'replaced'}`).sort();
-/** Nothing written by `run`: no entry, no member's row moved, nobody woken. */
+/** Nothing written by `run`: no change's entry, no grant, no member's row moved. Its refusal may be logged, as `refusals` reads. */
 async function nothingWritten(run: () => Promise<void>) {
-  const before = [await count('log_pending'), await count('grants'), JSON.stringify(await members()), world.woken.length];
+  const before = [await kept(), await count('grants'), JSON.stringify(await members())];
   await run();
-  assert.deepEqual([await count('log_pending'), await count('grants'), JSON.stringify(await members()), world.woken.length], before);
+  assert.deepEqual([await kept(), await count('grants'), JSON.stringify(await members())], before);
 }
 
 test('whoever runs the instance admits a member, and only an Owner of the whole instance with a role, its scope kept by project id', async () => {
@@ -318,4 +324,26 @@ test('a member change that is not what the contract says is a fault, before any 
   ];
   for (const change of bad) await assert.rejects(vault.change({ ...shown('ada-cli'), ...(change as object) } as never), TypeError, JSON.stringify(change).slice(0, 80));
   assert.equal(world.woken.length, 0);
+});
+
+test('a refusal is logged once a minute for who asked and what, naming the member only by a row the read found', async () => {
+  const fresh = user('new');
+  const onMarket = { projects: { only: ['market'] }, environments: 'all' };
+  assert.deepEqual(await add('bo-cli', fresh), { refused: 'no_access' }, 'a member admits nobody');
+  assert.deepEqual(await add('bo-cli', user('other')), { refused: 'no_access' }, 'again in the minute');
+  assert.deepEqual(await remove('bo-cli', eve), { refused: 'no_access' });
+  assert.deepEqual(await add('fay-cli', fresh, 'admin', onMarket), { refused: 'no_access' }, 'an Admin gives no instance role');
+  assert.deepEqual(await setRole('fay-cli', bo, 'developer'), { refused: 'no_access' });
+  assert.deepEqual(await restore('ada-cli', 'user:rotate-now@evil.example'), { refused: 'not_a_member' }, 'someone the instance never had');
+  assert.deepEqual(await remove('nobody', bo), { refused: 'unauthenticated' });
+  const denied = await refusals();
+  assert.deepEqual(denied.map((entry) => [entry.action, entry.actor, entry.detail, entry.objects.slice(2)]), [
+    ['member.add', bo, { refused: 'no_access' }, []],
+    ['member.remove', bo, { refused: 'no_access' }, [`principal:${eve}`]],
+    ['member.add', fay, { refused: 'no_access' }, [`project:${market.id}`]],
+    ['member.role', fay, { refused: 'no_access' }, [`principal:${bo}`]],
+    ['member.restore', ada, { refused: 'not_a_member' }, []],
+  ]);
+  assert.deepEqual(denied.map((entry) => entry.objects.slice(0, 2)), denied.map((entry) => [`principal:${entry.actor}`, `credential:${entry.credential}`]));
+  assert.ok(denied.every((entry) => entry.rows.length === 0 && !JSON.stringify(entry).includes('evil')));
 });
