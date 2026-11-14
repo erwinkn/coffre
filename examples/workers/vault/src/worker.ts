@@ -21,6 +21,10 @@ export default vault((env: Env) => ({
   // previousKeks: [{ id: 'vault-2026-04-01-k7q2xm', key: env.OLD_VAULT_KEY }],
   // The Owners of the whole instance, whatever its database says: nobody demotes them while listed.
   owners: env.OWNERS.split(',').map((email) => email.trim()),
+  // CI runs and apps signing in as services, which app/src/coffre.ts's
+  // signin({ workloads }) lets in: the vault decides on them, and left out
+  // here it refuses every one. Say useOnly or noReads here as the app does.
+  workloads: {},
   // The vault derives its signing key from the vault key. With a key a key
   // service holds, such as awsKms(…), it needs one of its own: signingKey: env.SIGNING_KEY.
 }));

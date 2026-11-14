@@ -27,6 +27,16 @@
   depends on `pg` or `pg-connection-string` any more, and a deployment
   installs no driver. Database URLs are read as before, TLS included.
 
+- **The vault is told of workloads too.** It decides each CI run's
+  sign-in now, on its own configuration: a deployment that trusts
+  workloads adds `workloads: {}` to `vault(env => …)` in
+  `vault/src/worker.ts`, with `useOnly` or `noReads` as the app's
+  `signin({ workloads })` says them. Left out, the vault refuses every run
+  as `no_match` (401), whatever bindings the owners made
+  ([deploy.md](docs/deploy.md#ci-runs-without-a-stored-token)).
+  `/api/me`'s `features.workloads` says whether sign-in trusts workloads,
+  where it always said `false`.
+
 - **A key marked in place, as one change.** `coffre mark` (`{ "KEY": {
   "sensitivity" } }` alone in a write) is served again: the value is kept
   as the key's next version, with its first date, recipe and pair. A
