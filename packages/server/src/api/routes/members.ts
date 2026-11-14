@@ -13,7 +13,7 @@ import { ApiError, badRequest, refusal } from '../errors.ts';
 import { formatPath, parsePath, type Path } from '../paths.ts';
 import { route } from '../route.ts';
 import type { ReferenceView } from './keys.ts';
-import type { TokenView } from './tokens.ts';
+import { tokenScope, tokenView, type TokenView } from './tokens.ts';
 
 /**
  * Members and what they hold (docs/design/0.16.md, "The server"): the
@@ -132,7 +132,7 @@ export type IssuedServiceToken = {
   hint: string;
   expiresAt: string;
   lastUsedAt: string | null;
-  /** What it reaches, each place by path and its role there; null for one that reaches all its account holds. */
+  /** What it reaches, each place by path and its role there, as its account's tokens list it: null for a row that keeps none. */
   scope: Record<string, string> | null;
 };
 
@@ -429,10 +429,12 @@ export const memberRoutes = {
    * member report, for whoever runs the instance, removed members
    * included. A key is to rotate when they saw it on or after its value was
    * first written, or wrote that value themselves (`seenBy`). One call to
-   * the vault and one statement, from their own rows. The tokens they
-   * issued, their personal tokens and connected apps are not read here yet,
-   * and the references they made need who made a reference, which 0.16
-   * keeps nowhere: each null, "not listed", which the client's type allows.
+   * the vault and one statement, from their own rows, which also lists the
+   * service tokens they issued that still work and a person's own tokens,
+   * as their accounts' token lists show them. Their connected apps are not
+   * read here yet, and the references they made need who made a reference,
+   * which 0.16 keeps nowhere: each null, "not listed", which the client's
+   * type allows.
    */
   ...route('GET /members/:member', {
     run: async (ctx, { params }): Promise<OffboardingReport> => {
@@ -457,9 +459,18 @@ export const memberRoutes = {
         live: row.live,
         exposed,
         rotated: row.keys.length - exposed.length,
-        issuedTokens: null,
+        issuedTokens: row.issued.map((token) => ({
+          id: token.id,
+          service: idOf(token.service),
+          label: token.label,
+          hint: token.hint ?? '',
+          expiresAt: token.expiresAt,
+          lastUsedAt: token.lastUsedAt,
+          scope: tokenScope(token.scope, row.slugs),
+        })),
         apps: null,
-        personalTokens: null,
+        // A service account's tokens are on its own page.
+        personalTokens: typeOf(principal) === 'user' ? row.tokens.map((token) => tokenView(token, row.slugs)) : [],
         references: null,
         personal: row.personal,
       };

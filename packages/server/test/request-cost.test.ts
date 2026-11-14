@@ -229,8 +229,11 @@ const requests: Record<string, Entry> = {
   'GET /members, by a project manager': { request: () => api('bo-cli', 'GET', '/members'), calls: ['caller'], statements: 1 },
   'GET /members?path=': { request: () => api('bo-cli', 'GET', '/members?path=market'), calls: ['caller'], statements: 2 },
   'GET /members/:member/access': { request: () => api('cy-cli', 'GET', `/members/${ada}/access`), calls: ['caller'], statements: 1, fixed: true },
-  // Someone's report, for offboarding them: what they hold and every key they know, in one statement.
+  // A member's report, in one statement: what lets them in, what they know, the tokens they issued and their own.
   'GET /members/:member': { request: () => api('cy-cli', 'GET', `/members/${ada}`), calls: ['caller'], statements: 1, fixed: true },
+  // Cy's, whose personal tokens and ci's tokens of his grow with the instance below: still one statement and one row.
+  'GET /members/:member, of who issued tokens': { request: () => api('cy-cli', 'GET', `/members/${cy}`), calls: ['caller'], statements: 1, fixed: true },
+  'GET /members/:member, a service account': { request: () => api('cy-cli', 'GET', `/members/${ci}`), calls: ['caller'], statements: 1, fixed: true },
   'GET /roles': { request: () => api('cy-cli', 'GET', '/roles'), calls: ['caller'], statements: 1 },
   // The roles, the members the role reaches, and the places they reach it in (`WEIGHED_MOST`).
   'PUT /roles/:role?dryRun=1': { request: () => api('cy-cli', 'PUT', '/roles/viewer?dryRun=1', { name: 'Viewer', description: '', permissions: [], protected: [] }), calls: ['caller'], statements: 3 },

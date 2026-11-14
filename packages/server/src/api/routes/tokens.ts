@@ -104,7 +104,7 @@ async function made(ctx: ApiContext, change: TokenCreate, token: string, what: s
 }
 
 /** A token's scope, by path, from its row: each place by id, those still there; none for a row whose scope does not read as one. */
-function scopeView(stored: string | null, slugs: Record<string, string>): Record<string, string> | null {
+export function tokenScope(stored: string | null, slugs: Record<string, string>): Record<string, string> | null {
   if (stored === null) return null;
   let grants: unknown;
   try {
@@ -127,7 +127,7 @@ function scopeView(stored: string | null, slugs: Record<string, string>): Record
 /** The binding a workload's session came through, by its `created_by`. */
 const bindingOf = (createdBy: string) => (createdBy.startsWith('binding:') ? createdBy.slice('binding:'.length) : null);
 
-function tokenView(row: TokenRow, slugs: Record<string, string>): TokenView {
+export function tokenView(row: TokenRow, slugs: Record<string, string>): TokenView {
   return {
     id: row.id,
     label: row.label,
@@ -137,7 +137,7 @@ function tokenView(row: TokenRow, slugs: Record<string, string>): TokenView {
     expiresAt: row.expiresAt,
     lastUsedAt: row.lastUsedAt,
     lastUsedIp: row.lastUsedIp,
-    scope: scopeView(row.scope, slugs),
+    scope: tokenScope(row.scope, slugs),
     ...(row.kind === 'workload' ? { session: { bindingId: bindingOf(row.createdBy) } } : {}),
   };
 }

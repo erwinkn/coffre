@@ -412,7 +412,7 @@ test("a member's report: the keys whose current value they read or wrote, a rest
   assert.deepEqual(rest, {
     principalType: 'user', principalId: 'ada@acme.example', status: 'active', instanceRole: 'member', scope: { projects: 'all', environments: 'all' }, declared: false,
     removedAt: null, removedBy: null, live: { grants: 2, sessions: 1, tokens: 0, identities: 0, apps: 0 }, rotated: 0,
-    issuedTokens: null, apps: null, personalTokens: null, references: null, personal: [{ project: 'market', of: 'prod', slug: 'prod-ada' }],
+    issuedTokens: [], apps: null, personalTokens: [], references: null, personal: [{ project: 'market', of: 'prod', slug: 'prod-ada' }],
   });
   // Al's scope, by slug. Cy's token is a token, an app connected through MCP an app; he has no personal config.
   assert.deepEqual((await report(al))[0].scope, { projects: { only: ['market'] }, environments: 'all' });
@@ -463,6 +463,51 @@ test("a member's report holds a read to the date the value was first written, to
   await ok(call('al-cli', 'PATCH', '/secrets/market/prod', { B: 'b2' }));
   await ok(call('dee-cli', 'POST', '/reveals', { path: 'market/prod/B' }));
   assert.deepEqual(await toRotate(dee), [['market/prod/A v2 wrote', 'market/prod/B v2 read'], 0]);
+});
+
+test("a member's report lists the service tokens they issued that still work, and a person's own tokens, in its one statement", async () => {
+  const scoped = (...places: [string, string | null, string][]) => JSON.stringify(places.map(([projectId, environmentId, role]) => ({ projectId, environmentId, role })));
+  const [old, gone] = ['token:old', (await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM projects WHERE slug = 'gone~1'`))[0]!.id];
+  const day = (n: number) => new Date(Date.UTC(2026, 0, n));
+  await write(
+    world,
+    ...rows('principals', principal(old, { status: 'removed', generation: 1 })),
+    ...rows('credentials',
+      // Ada made two of ci's tokens that still work: one reaching market/dev and a place since deleted, one reaching market.
+      credential('ci-1', ci, { createdBy: ada, createdAt: day(2), tokenHint: 'cof_…a1', scope: scoped([ids.market, ids.dev, 'viewer'], [gone, null, 'viewer']), lastUsedAt: day(3) }),
+      credential('ci-2', ci, { createdBy: ada, createdAt: day(1), tokenHint: 'cof_…a2', label: null, scope: scoped([ids.market, null, 'maintainer']) }),
+      // Not hers to list: revoked, expired, of an earlier generation of ci, of an account since removed, or Cy's.
+      credential('ci-3', ci, { createdBy: ada, revokedAt: day(4), revokedBy: cy }),
+      credential('ci-4', ci, { createdBy: ada, expiresAt: day(5) }),
+      credential('ci-5', ci, { createdBy: ada, generation: 1 }),
+      credential('old-1', old, { createdBy: ada, generation: 1 }),
+      credential('ci-6', ci, { createdBy: cy }),
+      // Her own: a personal token and a handle, newest first; not one revoked, nor her session.
+      credential('ada-token', ada, { kind: 'personal', createdAt: day(6), tokenHint: 'cof_…p1', scope: scoped([ids.market, ids.prod, 'viewer']) }),
+      credential('ada-handle', ada, { kind: 'handle', createdAt: day(7), tokenHint: 'cof_…h1', scope: scoped([ids.billing, null, 'viewer']) }),
+      credential('ada-gone', ada, { kind: 'personal', revokedAt: day(8), revokedBy: ada })),
+  );
+  const [adas, calls, statements] = await report(ada);
+  assert.deepEqual([calls, statements], [['caller'], 1]);
+  // By account, oldest first; each scope by path, the deleted place left out.
+  const issued = adas.issuedTokens as { id: string }[];
+  assert.deepEqual(issued.map(({ id: _, ...token }) => token), [
+    { service: 'ci', label: null, hint: 'cof_…a2', expiresAt: '2027-01-01T00:00:00.000Z', lastUsedAt: null, scope: { market: 'maintainer' } },
+    { service: 'ci', label: 'ci-1', hint: 'cof_…a1', expiresAt: '2027-01-01T00:00:00.000Z', lastUsedAt: '2026-01-03T00:00:00.000Z', scope: { 'market/dev': 'viewer' } },
+  ]);
+  const own = adas.personalTokens as { label: string; hint: string; createdBy: string; scope: Record<string, string> }[];
+  assert.deepEqual(own.map(({ label, hint, createdBy, scope }) => [label, hint, createdBy, scope]), [
+    ['ada-handle', 'cof_…h1', ada, { billing: 'viewer' }],
+    ['ada-token', 'cof_…p1', ada, { 'market/prod': 'viewer' }],
+  ]);
+  assert.equal((adas.live as { tokens: number }).tokens, own.length);
+  // ci's report: none it issued, and its own tokens are on its page.
+  const [cis] = await report(ci);
+  assert.deepEqual([cis.issuedTokens, cis.personalTokens], [[], []]);
+  // Ada leaves: her own tokens end with her; those she issued still work, and are listed.
+  await ok(call('cy-cli', 'DELETE', `/members/${ada}`));
+  const [left] = await report(ada);
+  assert.deepEqual([(left.issuedTokens as unknown[]).length, left.personalTokens], [2, []]);
 });
 
 test("a member's report is for whoever runs the instance: anyone else is refused before any statement", async () => {
