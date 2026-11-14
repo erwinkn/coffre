@@ -317,9 +317,9 @@ export type RefusalCode =
   /** The wrapped key does not belong to the secret it was presented as, or a reference is not the vault's. */
   | 'bad_claim'
   /**
-   * A person asked for a sensitive value to be handed back (`handsBack`):
-   * nobody sees one, Owners included. Their apps use it through the
-   * credential proxy, and service accounts read it.
+   * A person asked for a sensitive value to be handed back: nobody sees
+   * one, Owners included. Their apps use it through the credential proxy,
+   * and service accounts read it.
    */
   | 'sensitive'
   /**
@@ -426,18 +426,6 @@ export type WrappedKey = { kekProvider: string; kekId: string; kekVersion: strin
  * key has a check at all.
  */
 export type About = { kek: { provider: string; id: string }; previous: { provider: string; id: string }[]; checks: string[] };
-
-/**
- * Whether a read hands values back to whoever asked, which a person never
- * gets of a sensitive value: every purpose but the proxy's `use` and a
- * fork's `copy` that keeps them sensitive (`keepsSensitive`), a dry run's
- * `compare` included, which tells them whether a guess was right, and any
- * purpose a later app may name.
- */
-export function handsBack(read: { purpose: string; keepsSensitive?: boolean }): boolean {
-  if (read.purpose === 'use') return false;
-  return !(read.purpose === 'copy' && read.keepsSensitive === true);
-}
 
 /** Ties the vault's entries to the app's request and audit rows. */
 type Correlation = {

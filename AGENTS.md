@@ -262,9 +262,9 @@ unsupported diff select full validation.
   otherwise runs it as two shards (`scripts/formal.sh --shard`;
   `docs/formal.md`, "In CI").
 - `pnpm formal:lean` checks the Lean proofs in `formal/lean` (`docs/formal.md`,
-  "Proofs in Lean") and holds their model to `@coffre/core/access`, the
-  vault's per-key decision (`packages/vault/src/decide.ts`), the AAD and the
-  chain verifier on about 120,000 generated cases (`--long`, `--seed=<n>`).
+  "Proofs in Lean") and holds their model to `@coffre/core/access`, the AAD
+  and 0.14's chain verifier on about 100,000 generated cases (`--long`,
+  `--seed=<n>`).
   It uses elan's Lean if it is the pinned release, or downloads that release
   once, checked against its SHA-256. A change to any of those rules changes
   `formal/lean` in the same pull request, or the cases disagree.

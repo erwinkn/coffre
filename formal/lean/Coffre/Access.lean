@@ -327,8 +327,4 @@ def makesProjects (h : Holdings) : Bool :=
     | .all | .except _ => true
     | .only _ => false
 
-/-- `handsBack` (`@coffre/core/vault`): every purpose but the proxy's use and a copy that keeps values sensitive. -/
-def handsBack (purpose : String) (keepsSensitive : Bool) : Bool :=
-  purpose != "use" && !(purpose == "copy" && keepsSensitive)
-
 end Coffre
