@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 
-import { environmentPath, folderName, personalOf, secretKey, slug } from '@coffre/core/schemas';
+import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coffre/core/recipe';
+import { environmentPath, folderName, personalOf, rowId, secretKey, slug } from '@coffre/core/schemas';
 import type { KeyWrite, SecretWrite } from '@coffre/core/vault';
 import { z } from 'zod';
 
@@ -66,6 +67,45 @@ const readPath = z.string().max(400).transform((text, issue) => {
 
 /** A reference's source, `market/prod/KEY`: a key of an environment, never of a personal config. */
 const sourcePath = readPath.refine((path) => path.key !== undefined && personalOf(path.environment) === null, 'a reference names its source as <project>/<environment>/<KEY>, never in a personal config');
+
+/** How a client made a value (`@coffre/core/recipe`): its recipe, and for a key pair the two keys it writes. */
+const generation = z.object({ recipe: z.string().max(64), pair: z.object({ private: secretKey, public: secretKey }).strict().optional() }).strict();
+
+/**
+ * What is wrong with a patch's generated values, or null, as 0.14.7 said
+ * it. A key pair's recipe writes its two keys at once, each naming both,
+ * `{ private, public }`, the same on both, with the same recipe. Any other
+ * recipe names no pair.
+ */
+function generationProblem(patch: Readonly<Record<string, unknown>>): string | null {
+  const generationOf = (value: unknown): Generation | null =>
+    value !== null && typeof value === 'object' && 'generated' in value ? (value as { generated: Generation }).generated : null;
+  for (const [key, value] of Object.entries(patch)) {
+    const generated = generationOf(value);
+    if (generated === null) continue;
+    const problem = recipeProblem(generated.recipe);
+    if (problem !== null) return `${key}: ${problem}`;
+    const recipe = formatRecipe(parseRecipe(generated.recipe));
+    const { pair } = generated;
+    if (parseRecipe(recipe).kind !== 'pair') {
+      if (pair !== undefined) return `${key}: ${recipe} makes one value, not a key pair`;
+      continue;
+    }
+    if (pair === undefined) return `${key}: ${recipe} makes a key pair: name its private and public keys`;
+    if (pair.private === pair.public) return `${key}: a key pair's two keys need different names`;
+    if (key !== pair.private && key !== pair.public) return `${key}: it is neither key of the pair it names, ${pair.private} and ${pair.public}`;
+    const other = key === pair.private ? pair.public : pair.private;
+    const theirs = Object.hasOwn(patch, other) ? generationOf(patch[other]) : null;
+    if (theirs === null || recipeProblem(theirs.recipe) !== null || formatRecipe(parseRecipe(theirs.recipe)) !== recipe
+      || theirs.pair?.private !== pair.private || theirs.pair.public !== pair.public) {
+      return `${key}: a key pair is written whole: ${other} needs the same recipe and pair in the same patch`;
+    }
+  }
+  return null;
+}
+
+/** A recipe as the vault keeps it, `bytes:32:base62` for `BYTES:32`: what Regenerate reads back. */
+const canonical = ({ recipe, pair }: Generation): Generation => ({ recipe: formatRecipe(parseRecipe(recipe)), ...(pair === undefined ? {} : { pair: { private: pair.private, public: pair.public } }) });
 
 /** What a merge patch would do to a key: the answer to `?dryRun=1`, as 0.14's. */
 export type DryRunOutcome = 'added' | 'changed' | 'unchanged' | 'archived';
@@ -168,7 +208,13 @@ export const secretRoutes = {
   /**
    * Write values in one environment: `{ "KEY": "value" }`, or
    * `{ "KEY": { "value", "sensitivity": "sensitive" } }` to say who sees
-   * it; `{ "KEY": { "ref": "billing/prod/STRIPE_KEY" } }` makes the key a
+   * it; `{ "KEY": { "value", "generated": { "recipe": "bytes:32:hex" } } }`
+   * for a value a client made by a recipe, which Regenerate makes the next
+   * one by, never plain, and for a key pair both keys at once, each naming
+   * the pair, `"pair": { "private", "public" }` (a 400 otherwise); with
+   * `"replaces"`, the version id a listing gave (`versionId`), a value is
+   * written only over that version, and is a 409 `stale` if the key holds
+   * another now (a regenerate's); `{ "KEY": { "ref": "billing/prod/STRIPE_KEY" } }` makes the key a
    * reference to that one, which whoever reads here reads through it;
    * `{ "KEY": null }` archives the key, which takes `secret.archive`. One
    * call to the vault, which decides and writes all of them or none, and
@@ -183,11 +229,16 @@ export const secretRoutes = {
    * With `?dryRun=1`, what the write would do to each key, and nothing
    * written (`dryRun`): `added`, `changed`, `unchanged` or `archived`.
    *
-   * Not served yet, each refused as a 400 by the input's shape: a generated
-   * value, and a nature changed in place.
+   * Not served yet, refused as a 400 by the input's shape: a nature
+   * changed in place, `{ "sensitivity" }` alone.
    */
   ...route('PATCH /secrets/:project/:environment', {
-    input: z.record(secretKey, z.union([secretValue, z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']) }).strict(), z.object({ ref: sourcePath }).strict()]).nullable())
+    input: z.record(secretKey, z.union([
+      secretValue,
+      z.object({ value: secretValue, generated: generation, replaces: rowId.optional(), sensitivity: z.enum(['secret', 'sensitive']).optional() }).strict(),
+      z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']), replaces: rowId.optional() }).strict(),
+      z.object({ ref: sourcePath }).strict(),
+    ]).nullable())
       .refine((patch) => Object.keys(patch).length > 0, 'name at least one key'),
     // `?dryRun=1` weighs the write and makes none. Any other query is refused, not ignored: a mistyped flag must not write.
     query: z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict(),
@@ -196,9 +247,11 @@ export const secretRoutes = {
       if (mine && Object.values(input).some((written) => typeof written === 'object' && written !== null && 'ref' in written)) {
         throw badRequest(`${params.project}/${params.environment} is your personal config, which holds values only: make the reference in ${params.project}/${environment}`);
       }
+      const problem = generationProblem(input);
+      if (problem !== null) throw badRequest(problem);
       const keys = Object.entries(input).map(([key, written]): KeyWrite => (written === null ? { key, archived: true } : typeof written === 'string' ? { key, value: written }
         : 'ref' in written ? { key, ref: { project: written.ref.project, environment: written.ref.environment, key: written.ref.key! } }
-          : { key, value: written.value, nature: written.sensitivity }));
+          : { key, value: written.value, nature: written.sensitivity, replaces: written.replaces, ...('generated' in written ? { generated: canonical(written.generated) } : {}) }));
       const change = { op: 'secret.write', project: params.project, environment, mine, keys } as const;
       const at = `${params.project}/${params.environment}`;
       if (query.dryRun !== undefined) return dryRun(ctx, change, new Map(keys.flatMap((item) => (item.value === undefined ? [] : [[item.key, item.value]]))), at);
