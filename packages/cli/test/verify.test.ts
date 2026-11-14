@@ -193,8 +193,10 @@ test('coffre verify keys is refused before any key is asked for, for someone who
 for (const role of ['user', 'owner'] as const) {
   test(`coffre verify instance, as a ${role}, uses the session coffre login made, and leaves it signed in`, async (t) => {
     const me = { principal: { type: 'user', id: 'root@acme.example' }, registered: true, tampered: false, instanceRole: role === 'user' ? 'member' : role, runsInstance: role !== 'user', canReadAudit: true, environments: [] };
+    // The newest page of the log: an entry signed since the head, and one it numbers, proven.
+    const audit = { entries: [{ seq: 1, proof: 'unproven' }, { seq: 0, proof: 'proven' }], more: false, next: null, head: { size: 1, signedAt: '2026-11-14T00:00:00Z' }, holes: [] };
     const instance = await fakeInstance(t, (method, path) =>
-      method === 'GET' && path === '/api/me' ? me : undefined,
+      method === 'GET' && path === '/api/me' ? me : method === 'GET' && path === '/api/audit' ? audit : undefined,
     );
     const { home, store } = signedInHome(t, instance.origin);
     const before = store();
@@ -206,8 +208,10 @@ for (const role of ['user', 'owner'] as const) {
       assert.doesNotMatch(run.stdout, /setup|clean-up/);
     } else {
       assert.match(run.stdout, /✓ owner +root@acme\.example, an owner, with this CLI's session/);
-      // 0.16.0 walks no whole log, as the owner or the token.
+      // 0.16.0 walks no whole log, as the owner or the token: one page of it, held to the head the vault signed.
       assert.doesNotMatch(run.stdout, /verification/);
+      assert.match(run.stdout, /✓ owner log proofs +the newest 1 entries proven against the vault's head of 1, signed at 2026-11-14T00:00:00Z; none missing/);
+      assert.deepEqual(instance.seen.filter(({ url }) => url.startsWith('/api/audit')).map(({ url }) => url), ['/api/audit?detail=1&limit=200']);
       assert.match(run.stdout, /✓ clean-up +nothing issued; your session stays/);
     }
     const signed = instance.seen.filter(({ headers }) => headers.authorization !== undefined);
