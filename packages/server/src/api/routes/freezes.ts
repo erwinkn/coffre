@@ -7,7 +7,7 @@ import { freezes } from '../../db/queries/freezes.ts';
 import { changed } from '../change.ts';
 import { ApiError, badRequest } from '../errors.ts';
 import { route } from '../route.ts';
-import { manages } from './bindings.ts';
+import { manages, managesAny } from './bindings.ts';
 import { wellFormed } from './members.ts';
 
 /**
@@ -21,7 +21,7 @@ import { wellFormed } from './members.ts';
  * freezes standing is `caller` and one statement.
  */
 
-/** The most freezes a listing answers: past it, it is refused 409 `too_many_to_list`, never cut short. */
+/** The most freezes a listing answers, and the most grants it weighs them by: past either, it is refused 409 `too_many_to_list`, never cut short. */
 export const LISTED_MOST = 1000;
 
 /** A freeze standing: its target in its one spelling, the service account it is of (null for the instance's), and since when. */
@@ -51,9 +51,11 @@ export const freezeRoutes = {
     run: async (ctx): Promise<{ freezes: FreezeView[] }> => {
       const who = await ctx.caller();
       const runs = runsInstance(who.holds);
-      const found = await freezes(ctx.db, { weighed: !runs, most: LISTED_MOST, now: new Date() });
-      if (found.freezes.length > LISTED_MOST) {
-        throw new ApiError('conflict', `more than ${LISTED_MOST.toLocaleString('en-US')} freezes stand: lift some to list them`, 'too_many_to_list');
+      // Whoever runs the instance sees every one, unweighed; whoever may manage no service account, the instance's alone.
+      const found = await freezes(ctx.db, { weighed: !runs && managesAny(who), most: LISTED_MOST, now: new Date() });
+      if (found.freezes.length > LISTED_MOST || found.held > LISTED_MOST) {
+        const what = found.held > LISTED_MOST ? 'grants of the service accounts frozen to weigh' : 'freezes stand';
+        throw new ApiError('conflict', `more than ${LISTED_MOST.toLocaleString('en-US')} ${what}: lift some freezes to list them`, 'too_many_to_list');
       }
       const seen = (service: string | null) => {
         if (service === null || runs) return true;

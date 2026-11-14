@@ -39,7 +39,9 @@ beforeEach(async () => {
     ...rows('policy', instance()),
     ...rows('grants', grant(bo, 'manager', { project: market }), grant(eve, 'viewer', { project: market }), grant(ci, 'maintainer', { project: market })),
     ...rows('bindings', bound),
-    ...rows('credentials', ...[cy, bo, eve].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who)), pod),
+    ...rows('credentials', ...[cy, bo, eve].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who)), pod,
+      // Bo's personal token, scoped to market: a scoped credential manages no service account.
+      credential('bo-market', bo, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'manager' }]) })),
   );
   await app.request('/livez');
   await app.request('/api/me', { headers: { authorization: 'Bearer nobody' } });
@@ -127,10 +129,18 @@ test("the freezes standing: every workload's for anyone, a service account's for
   assert.deepEqual(await listed('cy-cli'), all);
   assert.deepEqual(await listed('bo-cli'), all);
   assert.deepEqual(await listed('eve-cli'), [all[0]]);
+  assert.deepEqual(await listed('bo-market'), [all[0]]);
   // Each as its row keeps the time it was frozen at.
   const [, body] = await call('bo-cli', 'GET', '/freezes');
   assert.deepEqual((body.freezes as { frozenAt: string }[])[3]!.frozenAt, new Date((await frozenAt('principals', ci))!).toISOString());
 
+  // A frozen credential that is no workload's session, which the vault never freezes, is no freeze standing.
+  await write(world, ...rows('credentials', credential('ci-token', ci, { kind: 'service', frozenAt: new Date(), notAfter: new Date(Date.UTC(2027, 0, 1)) })));
+  assert.deepEqual(await listed('cy-cli'), all);
+  // Of ci's generation before it was let back in: none of its bindings or sessions stands.
+  await world.owner.execute(sql`UPDATE principals SET generation = 1 WHERE id = ${ci}`);
+  assert.deepEqual(await listed('cy-cli'), [all[0], all[3]]);
+  await world.owner.execute(sql`UPDATE principals SET generation = 0 WHERE id = ${ci}`);
   // A revoked binding, an ended session: no longer there to stop, no longer listed. Then ci removed: none of its.
   await world.owner.execute(sql`UPDATE bindings SET revoked_at = now() WHERE id = ${bound.id}`);
   await world.owner.execute(sql`UPDATE credentials SET not_after = now() - interval '1 second' WHERE id = ${pod.id}`);
@@ -146,4 +156,17 @@ test('past 1,000 freezes standing, the listing is refused, never cut short', asy
   assert.equal((await listed('cy-cli')).length, 1000);
   await freeze('cy-cli', 'instance');
   assert.deepEqual(refused(await call('cy-cli', 'GET', '/freezes')), [409, 'conflict', 'too_many_to_list']);
+});
+
+test("past 1,000 grants of the service accounts frozen to weigh, a manager's listing is refused; whoever runs the instance weighs none", async () => {
+  const market = (await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM projects WHERE slug = 'market'`))[0]!;
+  const places = Array.from({ length: 1000 }, (_, i) => environment(market, `e${i}`));
+  await write(world, ...rows('environments', ...places), ...rows('grants', ...places.map((place) => grant(ci, 'viewer', { environment: place }))));
+  await freeze('bo-cli', ci);
+  // ci holds its project's grant and 1,000 more: 1,001 to weigh.
+  assert.deepEqual(refused(await call('bo-cli', 'GET', '/freezes')), [409, 'conflict', 'too_many_to_list']);
+  assert.deepEqual(await listed('cy-cli'), [[ci, ci, 'string']]);
+  // Eve may manage some service account, and is weighed as Bo is; on a scoped token Bo may manage none, and reads no grant.
+  assert.deepEqual(refused(await call('eve-cli', 'GET', '/freezes')), [409, 'conflict', 'too_many_to_list']);
+  assert.deepEqual(await listed('bo-market'), []);
 });

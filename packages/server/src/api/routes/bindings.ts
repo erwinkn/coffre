@@ -94,6 +94,9 @@ function lists(who: Called, member: string, found: ServiceBindings | null): bool
   return who.principal === member || manages(who, found);
 }
 
+/** Whether the caller may manage some service account, by who they are alone: whoever runs the instance, or a person on a session. */
+export const managesAny = (who: Called): boolean => runsInstance(who.holds) || (who.principal.startsWith('user:') && who.holds.credentialScope == null);
+
 /**
  * Whether the caller manages the service, and so may bind it: whoever runs
  * the instance, or a person on a session who manages it (`managesService`),
@@ -102,7 +105,7 @@ function lists(who: Called, member: string, found: ServiceBindings | null): bool
  */
 export function manages(who: Called, found: Pick<ServiceBindings, 'status' | 'admittedBy' | 'setting' | 'grants'> | null): boolean {
   if (runsInstance(who.holds)) return true;
-  if (!who.principal.startsWith('user:') || who.holds.credentialScope != null || found === null || found.status !== 'active') return false;
+  if (!managesAny(who) || found === null || found.status !== 'active') return false;
   let setting: unknown = null;
   try {
     setting = found.setting === null ? null : JSON.parse(found.setting);

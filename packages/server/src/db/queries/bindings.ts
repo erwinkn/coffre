@@ -63,25 +63,27 @@ type Raw = {
   keys: Record<string, string>;
 };
 
-/** A grant as `liveGrants` reads it. */
+/** A grant as `GRANT_JSON` builds it. */
 export type RawGrant = { project_id: string; environment_id: string | null; project: string | null; environment: string | null; role: string; name: string | null; permissions: string[] | null; protected: string[] | null };
 
-/**
- * The live grants of the principal row aliased `m`, of its generation, with
- * their places' slugs and their project roles' rows, as JSON: what
- * `managesService` weighs a service account by.
- */
-export const liveGrants = (now: Date) => sql`(SELECT coalesce(json_agg(json_build_object(
+/** A grant `g`, with its place's slugs and its project role's row, as JSON: what `managesService` weighs a service account by. Its tables are `GRANT_PLACES`'. */
+export const GRANT_JSON = sql`json_build_object(
     'project_id', coalesce(g.project_id, e.project_id), 'environment_id', g.environment_id,
     'project', pr.slug, 'environment', e.slug, 'role', g.role,
-    'name', r.name, 'permissions', r.permissions, 'protected', r.protected)), '[]')
-  FROM grants g
-  LEFT JOIN environments e ON e.id = g.environment_id
-  LEFT JOIN projects pr ON pr.id = coalesce(g.project_id, e.project_id)
-  LEFT JOIN roles r ON r.id = g.role AND NOT r.instance
-  WHERE g.principal = m.id AND g.generation = m.generation AND (g.expires_at IS NULL OR g.expires_at > ${now}))`;
+    'name', r.name, 'permissions', r.permissions, 'protected', r.protected)`;
 
-/** A grant `liveGrants` read, as the app weighs it. */
+/** What `GRANT_JSON` reads beside a grant `g`: its environment, its project and its role, each when there is one. */
+export const GRANT_PLACES = sql`LEFT JOIN environments e ON e.id = g.environment_id
+  LEFT JOIN projects pr ON pr.id = coalesce(g.project_id, e.project_id)
+  LEFT JOIN roles r ON r.id = g.role AND NOT r.instance`;
+
+/** Whether a grant `g` is live for the principal row aliased `m`: of its generation, and not lapsed. */
+export const liveFor = (now: Date) => sql`g.principal = m.id AND g.generation = m.generation AND (g.expires_at IS NULL OR g.expires_at > ${now})`;
+
+/** The live grants of the principal row aliased `m`, as JSON. */
+const liveGrants = (now: Date) => sql`(SELECT coalesce(json_agg(${GRANT_JSON}), '[]') FROM grants g ${GRANT_PLACES} WHERE ${liveFor(now)})`;
+
+/** A grant `GRANT_JSON` built, as the app weighs it. */
 export const grantRow = (grant: RawGrant): ServiceGrantRow => ({
   projectId: grant.project_id,
   environmentId: grant.environment_id,
