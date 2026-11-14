@@ -1,4 +1,4 @@
-import { allows, instanceRoleGrants, PERMISSIONS, roleGrants, runsInstance, scopeDefinition, withinCredential, type Holdings, type Permission, type Place as CorePlace, type Policy } from '@coffre/core/access';
+import { allows, grantDefinition, instanceRoleGrants, PERMISSIONS, runsInstance, scopeDefinition, withinCredential, type Holdings, type Permission, type Place as CorePlace, type Policy } from '@coffre/core/access';
 import type { Called } from '@coffre/core/vault';
 
 /**
@@ -89,5 +89,5 @@ export function projectsReached({ holds }: Called): string[] | null {
 /** Whether the caller holds `permission` anywhere at all: by a grant, or by their instance role; within their credential's scope. */
 export function canAnywhere({ holds }: Called, permission: Permission): boolean {
   if (holds.credentialScope != null && !holds.credentialScope.some((grant) => scopeDefinition(grant).permissions.includes(permission))) return false;
-  return instanceRoleGrants(holds.role, permission, holds.policy) || holds.grants.some((grant) => roleGrants(grant.role, permission, holds.policy));
+  return instanceRoleGrants(holds.role, permission, holds.policy) || holds.grants.some((grant) => grantDefinition(holds.policy, grant)?.permissions.includes(permission) ?? false);
 }

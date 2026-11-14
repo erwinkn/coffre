@@ -40,6 +40,16 @@ theorem Table.get?_some {α} {t : Table α} {k : String} {a : α} :
     subst h; subst hk
     exact this
 
+/-- What a grant's role gives at its place is the policy's definition of it, or nothing. -/
+theorem grantDef_some {pol : Policy} {g : GrantPlace} {r : String} {d : RoleDef} :
+    grantDef pol g r = some d → pol.roles.get? r = some d := by
+  unfold grantDef
+  split <;> simp_all
+
+/-- Nor does it look at what the policy protects. -/
+@[simp] theorem grantDef_protected {pol : Policy} {ps g r} :
+    grantDef { pol with protectedEnvs := ps } g r = grantDef pol g r := rfl
+
 /-- `holds` reads its holder only through `guarded`. -/
 theorem holds_congr {d p x h h'} (hg : guarded h x = guarded h' x) :
     holds d p x h = holds d p x h' := by
@@ -82,7 +92,7 @@ theorem holds_projectOnly {d p x h h'} (hp : p.projectOnly = true) :
 theorem allows_withProtected_projectOnly {h : Holdings} {ps p x} (hp : p.projectOnly = true) :
     allows (h.withProtected ps) p x = allows h p x := by
   unfold allows held scopeHolds
-  simp only [Holdings.withProtected]
+  simp only [Holdings.withProtected, grantDef_protected]
   congr 2
   · congr 1; funext g; rw [holds_projectOnly hp]
   · rw [holds_projectOnly hp]
@@ -304,8 +314,8 @@ theorem personal_token_within_issuer {h₀ h₁ : Holdings} {slugOf : String →
   simp only [hcred, Option.getD_some, List.any_eq_true, Bool.and_eq_true] at hs
   obtain ⟨g, hgs, hcov, hhold⟩ := hs
   obtain ⟨x₀, pol, hloc₀, hproj, henv, hcols⟩ := hissued g hgs
-  have hdef : scopeDef g = ⟨within (((pol.roles.get? g.role).map (·.normal)).getD []) (some (heldColumns h₀ x₀).normal),
-      within (((pol.roles.get? g.role).map (·.prot)).getD []) (some (heldColumns h₀ x₀).prot)⟩ := by
+  have hdef : scopeDef g = ⟨within (((grantDef pol ⟨g.project, g.env⟩ g.role).map (·.normal)).getD []) (some (heldColumns h₀ x₀).normal),
+      within (((grantDef pol ⟨g.project, g.env⟩ g.role).map (·.prot)).getD []) (some (heldColumns h₀ x₀).prot)⟩ := by
     simp [scopeDef, hcols, issuedGrant]
   have hg' : guarded (h₀.withProtected h₁.policy.protectedEnvs) (x.named slugOf) = guarded h₁ x := by
     rw [guarded_named]; simp [guarded, Holdings.withProtected, hservice, protects]
@@ -427,7 +437,7 @@ theorem protected_never_widens {h : Holdings} {ps qs p x}
       | some s => simp [hcr] at hgs; cases hd; exact hcred s hcr g hgs
   · rcases hh with ⟨hin, hhold⟩ | ⟨g, hgs, hcov, hhold⟩
     · exact Or.inl ⟨hin, holds_unguarded (vi _) hg hhold⟩
-    · exact Or.inr ⟨g, hgs, hcov, holds_unguarded (vr _) hg hhold⟩
+    · exact Or.inr ⟨g, hgs, hcov, holds_unguarded (fun d hd => vr _ d (grantDef_some hd)) hg hhold⟩
 
 /-! ## Only an Owner of the project gives a service its sensitive values (R32)
 
