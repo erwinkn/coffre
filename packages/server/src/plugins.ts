@@ -1,56 +1,33 @@
 // Plugins (docs/design/plugins.md): what a deployment adds to coffre in its
-// configuration, `plugins: [vaultKv({ mount: 'secret' })]`. A plugin holds no
-// authority of its own. It answers paths of its own, and reaches coffre only
-// as whoever a request's credential names, through the API: the same route
-// table, checks, vault and audit log as the CLI.
-import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
-import type { CredentialScope } from '@coffre/core/access';
-import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, type BindingPolicy, type Constraints, type WorkloadCaller } from '@coffre/core/identity';
+// configuration, `plugins: [credentialProxy({ … })]`. A plugin holds no
+// authority of its own. It answers paths of its own, and reaches values only
+// as whoever a request's credential is, through the vault's `use`: the app
+// reads the credential's row to find the place it uses and, for a workload's
+// session, its gate (docs/design/0.16.md, "What the app reads of a workload,
+// and decides nothing on"), and the vault decides on its own rows.
+import { CoffreError } from '@coffre/client';
+import { hashToken, type BindingPolicy, type Constraints, type GateCount } from '@coffre/core/identity';
+import type { Presented, Used as VaultUsed } from '@coffre/core/vault';
+import { isUnreachable } from '@coffre/db/dialect';
 
-import { AccessChanged, accessFor, type Recalled } from './accesses.ts';
-import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
-import { exchangeWorkloadToken, logout } from './auth-routes.ts';
-import { callerFrom, withRecalled } from './api/caller.ts';
-import { ApiError } from './api/errors.ts';
-import { parsePath } from './api/paths.ts';
-import { readScope } from './api/services.ts';
-import { environmentsOf } from './api/workloads.ts';
-import { checkAuthRow } from './auth-rows.ts';
-import { environmentPaths, places as placeRows, type BindingRow } from './db/queries.ts';
-import { callBindings, frozenTargets } from './db/workloads.ts';
-import { reveal, type PickKeys } from './api/secrets.ts';
-import { fetchApi } from './fetch-api.ts';
-import { errorResponse } from './http.ts';
-import { limitAlert, raiseAlert } from './alerts.ts';
-import { logged } from './logged.ts';
-import { apiContext, type CoffreRuntime } from './runtime.ts';
-import { dpopToken, gateOf, namedPlace, SessionRefused, sessionScope, sessionStands, standingSession, type GateCounts, type StandingSession } from './workload-sessions.ts';
+import { ApiError, refusal, toErrorBody } from './api/errors.ts';
+import { stopOf } from './api/routes/secrets.ts';
+import { routedCredential, type RoutedCredential } from './db/queries/sessions.ts';
+import type { CoffreRuntime } from './runtime.ts';
+import { dpopToken, gated, SessionRefused, sessionProof, sessionStopped, unknown } from './sessions.ts';
 
-export type { PickKeys };
-
-/** One plugin, as its constructor returns it: `vaultKv({ mount: 'secret' })`. */
+/** One plugin, as its constructor returns it: `credentialProxy({ … })`. */
 export type CoffrePlugin = {
-  /** What names it in errors: lowercase, `vault-kv`. Unique among a deployment's plugins. */
+  /** What names it in errors: lowercase, `credential-proxy`. Unique among a deployment's plugins. */
   name: string;
   /**
-   * The paths it answers: `prefix`, `/v1`, and every path under it, whatever
+   * The paths it answers: `prefix`, `/use`, and every path under it, whatever
    * the method. The deployment's app routes them to coffre with a file
-   * route of their own, `routes/v1.$.ts` (`plugin`, in `@coffre/server/routes`).
+   * route of their own, `routes/use.$.ts` (`plugin`, in `@coffre/server/routes`).
    */
   routes?: {
     prefix: string;
     fetch: (request: Request, coffre: PluginContext) => Promise<Response>;
-    /**
-     * A WebSocket asked for under `prefix`: a refusal, or what carries the
-     * connection's bytes once it is open (`SocketSession`). On Node, the
-     * server's `upgrade` events reach it (`createCoffre(…).upgrade`); on
-     * Workers, a Durable Object per bearer and path hosts it, and its
-     * client paces the bytes by credit, as `coffre run`'s listener does
-     * (`cloudflare-sockets.ts`): a socket's client is coffre's own. A
-     * browser's WebSocket can neither ask for that nor count, and is
-     * refused there.
-     */
-    socket?: (request: Request, coffre: PluginContext) => Promise<Response | SocketSession>;
   };
 };
 
@@ -63,155 +40,92 @@ export type Socket = Pipe & { startTls(servername: string): Promise<Pipe> };
 /** TCP out, as the platform opens it; `signal` gives up a dial still under way. */
 export type Connect = (host: string, port: number, signal?: AbortSignal) => Promise<Socket>;
 
-/** What runs a plugin's WebSocket once it is open: its bytes, and TCP out. Ends when the connection does. */
-export type SocketSession = (client: Pipe, connect: Connect) => Promise<void>;
-
-/** What a plugin's route answers with: where coffre is, and its API as a credential's holder. */
+/** What a plugin's route answers with: where coffre is, and the values a request's credential may use. */
 export type PluginContext = {
   publicUrl: string;
   /**
-   * The API as whoever `token` names, which the plugin read from its
-   * request: a service, personal or CLI token with coffre's sign-in, Access's
-   * assertion behind Cloudflare Access; never a cookie, which coffre alone
-   * reads. The token is checked at the first call, once for all of them; a
-   * refusal, the token's included, throws a `CoffreError`.
+   * Values of the environment `path` names, `market/dev` or `market/dev@me`,
+   * for whoever `caller` is: a handle (`coffre_use_…`) the plugin read from
+   * its request, or the workload `workload` returned for this request. One
+   * call to the vault (`use`), which decides on its own rows and logs the
+   * use, naming `upstream`; nothing is kept here, so a revocation stops the
+   * next request. Every key asked for, or a `CoffreError`: a refusal of the
+   * whole use or of one key, or a key the environment does not hold (409).
    */
-  api(token: string): CoffreClient;
+  use(caller: string | WorkloadUse, asked: UseAsked): Promise<Used>;
   /**
-   * The request as a workload's sign-in: its body, a workload's ID token,
-   * for a credential of the service account it names that lasts five
-   * minutes, through that account's trust bindings. This is `POST
-   * /api/auth/oidc` on the plugin's own request, in process: its limits
-   * first, then the body, read only to its limit, then the token spent so
-   * that it signs in once, and its audit. `asked` says what the body asks
-   * for, `{ service, token }`, in the plugin's words. A refusal throws a
-   * `CoffreError`, a body that does not say 400.
+   * The environments a handle was made for, by path as they are named now
+   * (`market/dev@me`), or null where one was deleted, and when it ends: the
+   * app's read of its row, unchecked, which only says where a request with
+   * no environment in its URL goes. Whether the handle stands is the
+   * vault's answer to the use. A `CoffreError` 401 for a token that is no
+   * handle's.
    */
-  exchange(asked: (body: unknown) => { service: unknown; token: unknown }): Promise<{ token: string; expiresAt: string }>;
-  /** End the credential `token` is, as `POST /api/auth/logout` with it does. A refusal throws a `CoffreError`. */
-  signOut(token: string): Promise<void>;
+  handle(handle: string): Promise<{ expiresAt: string; paths: readonly (string | null)[] }>;
   /**
-   * Values of the environment `path` names, `market/dev`, for whoever
-   * `handle` (`coffre_use_…`) stands in for: opened to `use` them for its
-   * person, in a request the plugin sends for them, or to `expose` them,
-   * handed to their app (docs/design/credential-proxy.md). The API's read,
-   * in process and nowhere else: the same checks, its person's grants and
-   * the handle's scope, one vault entry naming the keys, and one
-   * `credential.use` entry, with `logged` in it, which the vault appends
-   * beside it (an older vault: the app, under the head). Only the keys
-   * asked for, or chosen, those the environment holds; `environment` is the
-   * one the read resolved to (`market/dev@me` may be a personal config). A
-   * refusal throws a `CoffreError`. In place of a handle, the workload
-   * `workload` returned for this request: its service's grants within its
-   * scope, which reads only plain keys and those its binding lists
-   * (docs/design/workload-access.md, section 6.1).
-   */
-  use(handle: string | WorkloadUse, asked: UseAsked): Promise<Used>;
-  /**
-   * Whether `handle` still stands, opening nothing and logging nothing:
-   * when it ends, and the environments it was made for, each by path as it
-   * is named now (`market/dev@me`), or null where it was deleted; null for
-   * a handle of 0.8, which kept none. A refusal throws a `CoffreError`.
-   */
-  handle(handle: string): Promise<{ expiresAt: string; paths: readonly (string | null)[] | null }>;
-  /**
-   * The request as a workload's (docs/design/workload-access.md, section
-   * 5.3), never answered from a cache: its key-bound session, `Authorization:
-   * DPoP coffre_wl_…`, in one statement with its binding, its ancestors and
-   * every freeze that names it, the credential it uses at `place` among
-   * them; its proof, for this request and, with `body`, the content coffre
-   * forwards; then its gate, the proof once and `counts` in the same call.
-   * No vault call. A `narrow` child is a workload too, with its
-   * `constraints`. Through a Cloudflare service binding (`bindingRoute`),
-   * the caller its binding's `props` name, with no proof and no session.
+   * The request as a workload's session (`Authorization: DPoP coffre_wl_…`),
+   * held to its proof before the vault is asked, cheapest first: the
+   * proof's shape; the session's row, by its token's hash, for its service,
+   * its key and its places; the proof, for this request and, with `body`,
+   * its headers and content (`hdr`, `req`); then its service's gate, the
+   * proof once and `counts` in the same call. No vault call. A refusal
+   * throws a `WorkloadRefused`, whose `response` is the answer to forward as
+   * it is. Null for a request that carries no session.
    *
-   * `place` is an environment's ID or path (`market/prod`); null with a
-   * `credential` means the one environment the session reaches
-   * (`/use/<credential>`). A refusal throws a `WorkloadRefused`, whose
-   * `response` is the answer to forward as it is; a count's first refusal
-   * in its window has written its `workload.alert` already. What it returns
-   * is what `use` takes in place of a handle. Null for a request that is no
-   * workload's, which carries no `Authorization: DPoP`: a handle's, say.
+   * `place` is an environment's path (`market/prod`); null means the one
+   * environment the session was made for (`/use/<credential>`), and the
+   * caller's `path` is null when it reaches none or several.
    */
   workload(request: Request, at: WorkloadAt): Promise<WorkloadUse | null>;
-  /**
-   * Whether a workload this context's `workload` returned still stands, as
-   * section 5.3's statement says now, freezes and the credential it used
-   * included, without its proof or its gate: what an open tunnel's rechecks
-   * ask, its socket authenticated already (section 7.1). No vault call.
-   * False for a caller this context did not make.
-   */
-  recheck(caller: WorkloadUse): Promise<boolean>;
 };
 
-/** What a workload's request uses (`PluginContext.workload`): where and which credential, the body line `req` signs, and the counts its limits take. */
+/** What a workload's request uses (`PluginContext.workload`): where, the body line `req` signs, and the counts its limits take. */
 export type WorkloadAt = {
-  /** An environment's ID or its path, `market/prod`. */
+  /** An environment's path, `market/prod`, or null for the one its session was made for. */
   place: string | null;
-  credential: string | null;
   /**
    * `bodyDigest(bytes)` of a buffered body, a sigv4 upload's declared
-   * digest, or `UNSIGNED_BODY`, which only a binding that says
-   * `unsignedUploads` takes: for a request whose proof signs its content.
-   * Left out for one that signs none.
+   * digest, or `UNSIGNED_BODY`: for a request whose proof signs its
+   * content. Left out for one that signs none.
    */
   body?: string;
-  /** The counts, or how to make them for the service, `token:<name>`, which only authentication tells (a limit per workload). */
-  counts?: GateCounts;
+  /** The counts, or how to make them for the service, `token:<name>`, which only its row tells (a limit per workload). */
+  counts?: readonly GateCount[] | ((service: string) => readonly GateCount[]);
 };
 
 /**
- * A workload, authenticated for one request: the caller the proxy sees, the
- * gate's nonce to send back (`DPoP-Nonce`; null for a Cloudflare call), the
- * environments it reaches by ID, and the one this request uses, by ID and
- * by its path as named now (what `use` and `constraintsAllow` take).
+ * A workload's session, held to its proof for one request: its service, the
+ * headers its proof signs (which alone go on), the gate's nonce to send back
+ * (`DPoP-Nonce`), and the environment this request uses, by path, null when
+ * the session reaches none or several and the URL named none.
  */
-export type WorkloadUse = WorkloadCaller & { readonly nonce: string | null; readonly places: readonly string[]; readonly place: string | null; readonly path: string | null };
+export type WorkloadUse = { readonly principal: string; readonly hdr: readonly string[] | null; readonly nonce: string; readonly path: string | null };
 
-/** A workload's request refused: `response` is its answer, the headers RFC 9449 asks for included; `limit`, a count the gate refused. */
+/** A workload's request refused: `response` is its answer, the headers RFC 9449 asks for included. */
 export class WorkloadRefused extends CoffreError {
   readonly response: Response;
-  readonly limit: { key: string; retryAfterMs: number; first: boolean } | null;
-  constructor(status: number, code: string, message: string, reason: string | undefined, response: Response, limit: WorkloadRefused['limit'] = null) {
+  constructor(status: number, code: string, message: string, reason: string | undefined, response: Response) {
     super(status, code, message, reason);
     this.name = 'WorkloadRefused';
     this.response = response;
-    this.limit = limit;
   }
 }
 
-/**
- * What a workload caller stands on, kept beside it by the context of the
- * request it was made for: `use` takes back only those, so one kept from
- * an earlier request, checked before a revocation or a freeze, is no one.
- */
-type Standing = { kind: 'session'; session: StandingSession; credential: string | null } | { kind: 'binding'; binding: BindingRow; policy: BindingPolicy; policySeq: bigint | null; credential: string | null };
-type Standings = WeakMap<WorkloadUse, Standing>;
+/** What a plugin opens values for (`PluginContext.use`): the keys by name, why, and the name of what they are used for, which the log says. */
+export type UseAsked = { path: string; keys: readonly string[]; purpose: 'use' | 'expose'; upstream: string };
 
 /**
- * What a plugin opens values for (`PluginContext.use`): `keys` by name, or
- * chosen from what the read resolved (`PickKeys`), so that a choice about
- * an environment's rows is made on the rows that are opened.
+ * Values a plugin opened, by key; those that are plain, no secret, which an
+ * upstream may echo; the environment they came from; and, for a workload's
+ * session, what only the app can hold its request to: its binding's policy
+ * (`unsignedUploads`) and a narrowed session's constraints.
  */
-export type UseAsked = { path: string; keys: readonly string[] | PickKeys; purpose: 'use' | 'expose'; logged: Record<string, unknown> };
-
-/** A refusal as a plugin throws it, its response kept to forward. */
-async function workloadRefused(response: Response, limit: WorkloadRefused['limit'] = null): Promise<WorkloadRefused> {
-  const body = (await response.clone().json()) as { error?: string; message?: string; reason?: string };
-  return new WorkloadRefused(response.status, body.error ?? 'error', body.message ?? response.statusText, body.reason, response, limit);
-}
-
-/** Why a workload's request is refused, as `refuse` makes it: an `ApiError`'s answer. */
-async function refusedWith(error: ApiError, headers: HeadersInit = {}): Promise<WorkloadRefused> {
-  return workloadRefused(errorResponse(error, headers));
-}
-
-/**
- * Values a plugin opened, and which of them are plain, no secret; every key
- * the environment holds, the environment they came from, and when the
- * handle that opened them ends.
- */
-export type Used = { values: Record<string, string>; plain: string[]; keys: string[]; environment: { path: string; personal: boolean }; expiresAt: string };
+export type Used = {
+  values: Record<string, string>;
+  plain: string[];
+  environment: { path: string; personal: boolean };
+  workload: { policy: BindingPolicy; constraints: Constraints | null } | null;
+};
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const PREFIX = /^(\/[a-z0-9][a-z0-9._-]*)+$/;
@@ -223,6 +137,7 @@ const under = (pathname: string, prefix: string) => pathname === prefix || pathn
 
 /** Check a deployment's plugins, failing on the first problem: a bad name, or paths two would answer. */
 export function checkPlugins(plugins: readonly CoffrePlugin[]): readonly CoffrePlugin[] {
+  if (!Array.isArray(plugins)) throw new Error('plugins is a list, `plugins: [credentialProxy({ … })]`');
   const names = new Set<string>();
   const prefixes: string[] = [...COFFRE_PATHS];
   for (const plugin of plugins) {
@@ -241,313 +156,162 @@ export function checkPlugins(plugins: readonly CoffrePlugin[]): readonly CoffreP
 
 /** The plugin's answer to a request under its prefix; null when no plugin takes the path. */
 export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response> | null {
-  const routes = routesFor(request, runtime);
+  const { pathname } = new URL(request.url);
+  const routes = runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
   return routes === undefined ? null : routes.fetch(request, pluginContext(request, runtime, sourceIp));
 }
 
-/**
- * A plugin's answer to a call another Worker of the account made through a
- * Cloudflare service binding (docs/design/workload-access.md, section 9.2),
- * as the service `principal` its binding's `props` name, `token:<name>`;
- * null when no plugin takes the path. Its context's `workload` answers from
- * the service's `cloudflare` binding (`workloadFromBinding`), and takes no
- * session or handle: nothing but coffre's own entrypoint names the
- * principal, and no plugin can ask for one.
- */
-export function bindingRoute(request: Request, runtime: CoffreRuntime, principal: string): Promise<Response> | null {
-  const routes = routesFor(request, runtime);
-  return routes === undefined ? null : routes.fetch(request, pluginContext(request, runtime, null, principal));
+/** A refusal as a plugin throws it: the API's error, its status and words. */
+function thrown(error: ApiError): CoffreError {
+  return new CoffreError(toErrorBody(error).status, error.code, error.message, error.reason);
+}
+
+/** A session's refusal before the vault, as a plugin throws it: its response kept to forward. */
+async function workloadRefused(response: Response): Promise<WorkloadRefused> {
+  const body = (await response.clone().json()) as { error?: string; message?: string; reason?: string };
+  return new WorkloadRefused(response.status, body.error ?? 'error', body.message ?? response.statusText, body.reason, response);
 }
 
 /**
- * A Cloudflare call's caller (section 9.2): the service's oldest live
- * binding of profile `cloudflare`, its MAC, revocation and tombstone, its
- * member's generation, and the freezes of the instance, the service, the
- * binding and the credential it uses, in one statement; then the gate's
- * counts, with no proof. The same `WorkloadUse` a session's request makes,
- * `credentialId` `binding:<id>`, so the proxy sees one kind of caller.
- * Throws `WorkloadRefused`.
+ * What the proxy last routed each credential by, kept for an outage of the
+ * database alone (D238): when the routing read cannot reach it, the row read
+ * last for that token still says where the request goes, and the vault,
+ * which answers a proxied use from the rows it last read for the same ask
+ * (`outageSeconds`), decides as ever. The rows say only where to ask; none
+ * decides anything, so one kept past a revocation gives nothing the vault
+ * does not. Kept until the credential ends, an hour at most, a thousand at
+ * most; a failure is remembered for two seconds, as the vault remembers
+ * one, so the requests in them do not each wait for the database to fail.
  */
-export function workloadFromBinding(runtime: CoffreRuntime, principal: string, at: WorkloadAt): Promise<WorkloadUse> {
-  return bindingWorkload(runtime, principal, at, new WeakMap());
+type Routes = { rows: Map<string, { row: RoutedCredential; until: number }>; downUntil: number };
+
+const ROUTES_KEPT = 1000;
+const ROUTE_MS = 3_600_000;
+const DOWN_MS = 2000;
+
+/** By the deployment's plugins, the configuration's own list: an isolate's or a process's, settled values only (AGENTS.md, "What an isolate keeps"). */
+const routing = new WeakMap<readonly CoffrePlugin[], Routes>();
+
+function routesOf(runtime: CoffreRuntime): Routes {
+  let routes = routing.get(runtime.plugins);
+  if (routes === undefined) routing.set(runtime.plugins, (routes = { rows: new Map(), downUntil: -Infinity }));
+  return routes;
 }
 
-async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: WorkloadAt, standings: Standings): Promise<WorkloadUse> {
-  const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
-  const unbound = () => refusedWith(new ApiError('unauthenticated', `no live cloudflare binding of ${principal} takes this call`));
-  if (workloads === null || !/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(principal)) throw await unbound();
-  const named = at.place === null ? null : namedPlace(at.place);
-  if ((at.place !== null && named === null) || (at.credential !== null && !CREDENTIAL_NAME.test(at.credential))) {
-    throw await refusedWith(new ApiError('bad_request', 'an environment is named by its ID or its path, and a credential by its name in the configuration'));
+/** The credential `token` hashes to, as the app routes it (`routedCredential`): read, or through an outage, the row read last. */
+export async function routed(runtime: CoffreRuntime, tokenHash: Buffer): Promise<RoutedCredential | null> {
+  const routes = routesOf(runtime);
+  const key = tokenHash.toString('hex');
+  const kept = () => {
+    const held = routes.rows.get(key);
+    return held !== undefined && held.until > Date.now() ? held.row : undefined;
+  };
+  if (Date.now() < routes.downUntil) {
+    const row = kept();
+    if (row !== undefined) return row;
   }
-  let rows: Awaited<ReturnType<typeof callBindings>>;
+  let row: RoutedCredential | null;
   try {
-    rows = await callBindings(runtime.db, principal, { place: named, credential: at.credential });
+    row = await routedCredential(runtime.db, tokenHash);
   } catch (error) {
-    console.error('checking a cloudflare binding failed', logged(error));
-    throw await refusedWith(new ApiError('unavailable', 'coffre cannot check who you are right now'));
+    if (!isUnreachable(error)) throw error;
+    routes.downUntil = Date.now() + DOWN_MS;
+    const held = kept();
+    if (held === undefined) throw error;
+    return held;
   }
-  const found = rows.find((row) => !row.tombstoned && row.binding.policy !== null && row.memberStatus === 'active'
-    && row.memberGeneration === row.binding.generation && checkAuthRow(runtime.chainKey, 'service_bindings', row.binding));
-  if (found === undefined) throw await unbound();
-  const { binding } = found;
-  const policy = JSON.parse(binding.policy!) as BindingPolicy;
-  if (workloads.noReads && policy.reads !== undefined) {
-    throw await refusedWith(new ApiError('forbidden', 'this instance lets no binding list reads (noReads): bind the workload again without them', 'no_reads'));
+  routes.rows.delete(key);
+  if (row !== null) {
+    if (routes.rows.size >= ROUTES_KEPT) routes.rows.delete(routes.rows.keys().next().value!);
+    routes.rows.set(key, { row, until: Math.min(Date.now() + ROUTE_MS, row.expiresAt.getTime()) });
   }
-  // The place it names, as the statement found it.
-  const asked = at.place === null ? null : found.place;
-  if (at.place !== null && asked === null) throw await refusedWith(new ApiError('not_found', `${at.place} names no environment`));
-  // Where it reaches, by ID: its scope's environments, or a project's, read only when it names one.
-  const scope = readScope(binding.scope) ?? [];
-  const reached = scope.every((grant) => grant.environmentId !== null)
-    ? [...new Set(scope.map((grant) => grant.environmentId!))]
-    : environmentsOf(scope, await placeRows(runtime.db)).map((environment) => environment.id);
-  const place = asked ?? (reached.length === 1 ? reached[0]! : null);
-  // Its path: the statement's for a place named, else the one it reaches, read by its ID.
-  const path = asked !== null ? found.placePath : place === null ? null : ((await environmentPaths(runtime.db, [place])).get(place) ?? null);
-  if (at.credential !== null && place === null) {
-    throw await refusedWith(new ApiError('bad_request', 'name the environment it uses, /use/<project>/<environment>/<credential>: this service reaches none, or several'));
-  }
-  // The credential's freeze, when the call named no environment and the statement could not know which.
-  const frozen = found.frozen.instance || found.frozen.service || found.frozen.binding || found.frozen.credential
-    || (asked === null && place !== null && at.credential !== null && (await frozenTargets(runtime.db, [`credential:${place}/${at.credential}`])).length > 0);
-  if (frozen) throw await refusedWith(new ApiError('forbidden', 'frozen: a manager stopped this use; nothing passes until they lift it', 'frozen'));
-  const counts = typeof at.counts === 'function' ? at.counts(principal) : at.counts;
-  if (counts !== undefined && counts.length > 0) {
-    let admitted;
-    try {
-      admitted = await gateOf(runtime, principal).admit({ counts });
-    } catch (error) {
-      if (error instanceof SessionRefused) throw await workloadRefused(error.response);
-      console.error('the workload gate failed', logged(error));
-      throw await refusedWith(new ApiError('unavailable', 'coffre cannot count this call right now'));
-    }
-    if (!admitted.ok) {
-      if (admitted.reason === 'limit') {
-        const limit = { key: admitted.key, retryAfterMs: admitted.retryAfterMs, first: admitted.first };
-        if (admitted.first) await raiseAlert(runtime, limitAlert({ principal, bindingId: binding.id, session: null, sourceIp: null }, admitted), { credential: at.credential, count: admitted.key, retryAfterMs: admitted.retryAfterMs }, place);
-        throw await workloadRefused(errorResponse(new ApiError('too_many_requests', `past this workload's limit for ${admitted.key}`, 'limit'), { 'retry-after': String(Math.ceil(admitted.retryAfterMs / 1000)) }), limit);
-      }
-      throw await refusedWith(new ApiError('too_many_requests', 'this workload sends more calls than its gate takes: try again shortly', 'overloaded'), { 'retry-after': '1' });
-    }
-  }
-  const caller: WorkloadUse = {
-    kind: 'workload',
-    principal,
-    credentialId: `binding:${binding.id}`,
-    bindingId: binding.id,
-    profile: 'cloudflare',
-    constraints: null,
-    hdr: null,
-    sourceIp: null,
-    nonce: null,
-    places: reached,
-    place,
-    path,
-  };
-  standings.set(caller, { kind: 'binding', binding, policy, policySeq: found.policySeq === null ? null : BigInt(found.policySeq), credential: at.credential });
-  return caller;
+  return row;
 }
 
-/** A workload's session for a plugin's request (`PluginContext.workload`), as `standingSession` checks it. */
-async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceIp: string | null, at: WorkloadAt, standings: Standings): Promise<WorkloadUse | null> {
-  const token = dpopToken(request);
-  if (token === null) return null;
-  let session: StandingSession;
-  try {
-    // The fields a plugin may ask, each by name: nothing it adds reaches the checks (a `freezes`, say).
-    session = await standingSession(request, runtime, token, sourceIp, {
-      place: at.place,
-      credential: at.credential,
-      ...(at.body === undefined ? {} : { body: at.body }),
-      ...(at.counts === undefined ? {} : { counts: at.counts }),
-      children: true,
-    });
-  } catch (error) {
-    if (error instanceof SessionRefused) throw await workloadRefused(error.response, error.limit);
-    throw error;
-  }
-  const caller: WorkloadUse = { ...session.caller, nonce: session.nonce, places: session.places, place: session.place, path: session.path };
-  standings.set(caller, { kind: 'session', session, credential: at.credential });
-  return caller;
+/** Where a path names: `market/dev@me` is `market`, `dev`, its person's own. Null for anything else. */
+function placeOf(path: string): { project: string; environment: string; mine: boolean } | null {
+  const match = /^([^/@]+)\/([^/@]+)(@me)?$/.exec(path);
+  return match === null ? null : { project: match[1]!, environment: match[2]!, mine: match[3] !== undefined };
 }
 
-/**
- * Whether a caller `workload` made still stands (`PluginContext.recheck`):
- * a session's statement again, every clause but the proof and the gate; a
- * Cloudflare call's binding, as `workloadFromBinding` holds it.
- */
-async function rechecked(runtime: CoffreRuntime, caller: WorkloadUse, standings: Standings): Promise<boolean> {
-  const standing = standings.get(caller);
-  if (standing === undefined) return false;
-  if (standing.kind === 'session') return sessionStands(runtime, standing.session, { place: caller.place, credential: standing.credential, children: true });
-  return bindingWorkload(runtime, caller.principal, { place: caller.place, credential: standing.credential }, new WeakMap()).then(
-    (again) => again.bindingId === caller.bindingId,
-    (error: unknown) => {
-      if (error instanceof WorkloadRefused) return false;
-      throw error;
-    },
-  );
-}
+/** What a workload caller stands on, kept by the context of the request it was made for: `use` takes back only those. */
+type Standing = { token: string; proof: string; sourceIp: string | null };
 
-/**
- * The identity a workload caller reads as, through the API's read: the
- * vault's answer about its service, once, and the scope it holds, each
- * grant with its binding's `reads` (`sessionScope`). Null for a caller
- * coffre did not make.
- */
-async function workloadIdentity(
-  runtime: CoffreRuntime,
-  caller: WorkloadUse,
-  sourceIp: string | null,
-  standings: Standings,
-  /** Its read may decide on the vault's answer kept from an earlier request, which the vault checks (`accessFor`). */
-  recall = false,
-): Promise<{ identity: AuthenticatedIdentity; expiresAt: string; constraints: Constraints | null } | null> {
-  const standing = standings.get(caller);
-  if (standing === undefined) return null;
-  const { row, binding, policy, policySeq } = standing.kind === 'session' ? standing.session : { ...standing, row: null };
-  const scope: CredentialScope = sessionScope(row ?? { scope: null }, binding, policy);
-  const generation = row?.generation ?? binding.generation;
-  const { access, recalled } = await accessFor(runtime, caller.principal, recall && { generation });
-  const id = caller.principal.slice('token:'.length);
-  const callerOf = withRecalled(callerFrom({ type: 'service', id }, access, policySeq, scope, 'workload'), recalled);
-  if (callerOf.generation !== generation) return null;
-  return {
-    constraints: standing.kind === 'session' ? standing.session.caller.constraints : null,
-    expiresAt: (row?.expiresAt ?? new Date(Date.now() + 60_000)).toISOString(),
-    identity: {
-      principal: { type: 'service', id, commonName: id },
-      registered: callerOf.registered,
-      caller: callerOf,
-      requestId: crypto.randomUUID(),
-      sourceIp,
-      // A binding's call has no credentials row: its entries name the binding, `binding:<id>`, and its fence checks the binding.
-      credentialId: standing.kind === 'session' ? caller.credentialId : null,
-      bindingId: standing.kind === 'binding' ? binding.id : null,
-      credentialExpiresAt: row?.expiresAt.toISOString() ?? null,
-      provenance: caller.credentialId,
-      personalToken: null,
-      handlePlaces: null,
-      via: null,
-      workload: standing.kind === 'session' ? standing.session : null,
-    },
-  };
-}
-
-/** A plugin's answer to a WebSocket asked for under its prefix; null when no plugin takes it. */
-export function pluginSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | SocketSession> | null {
-  const routes = routesFor(request, runtime);
-  return routes?.socket === undefined ? null : routes.socket(request, pluginContext(request, runtime, sourceIp));
-}
-
-/** Whether a plugin takes WebSockets at `request`'s path, deciding nothing about the request itself. */
-export function takesSocket(request: Request, plugins: readonly CoffrePlugin[]): boolean {
-  return routesFor(request, { plugins })?.socket !== undefined;
-}
-
-function routesFor(request: Request, runtime: Pick<CoffreRuntime, 'plugins'>) {
-  const { pathname } = new URL(request.url);
-  return runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
-}
-
-function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: string | null, binding: string | null = null): PluginContext {
-  // The token where the API looks for it in this instance's mode: a header either way, so never ambient.
-  const carrying = (token: string): Record<string, string> => (runtime.auth.mode === 'cloudflare' ? { [ACCESS_JWT_HEADER]: token } : { authorization: `Bearer ${token}` });
-  // One of coffre's own routes outside the API's, in process: its answer, or its refusal as the client throws one.
-  const answer = async (response: Response): Promise<unknown> => {
-    const body = (await response.json()) as { error?: string; message?: string; reason?: string };
-    if (!response.ok) throw new CoffreError(response.status, body.error ?? 'error', body.message ?? response.statusText, body.reason);
-    return body;
-  };
-  const proxyHandle = async (handle: string, recall = false): Promise<AuthenticatedIdentity> => {
-    // A call through a service binding is its service's alone: it carries no handle, token or session.
-    if (binding !== null) throw new CoffreError(403, 'forbidden', 'a call through a service binding is its service\'s, and takes no other credential', 'binding');
-    const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), handle, sourceIp, { handle: true, recall });
-    if (identity instanceof Response) await answer(identity);
-    return identity as AuthenticatedIdentity;
-  };
-  const noCredential = () => new CoffreError(403, 'forbidden', 'a call through a service binding is its service\'s, and takes no other credential', 'binding');
+function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: string | null): PluginContext {
   // The workload callers this request's context made: the only ones its `use` takes.
-  const standings: Standings = new WeakMap();
-  // One read for the proxy, as `use` asks it, on the caller's access recalled or asked for (`accessFor`).
-  const use = async (handle: Parameters<PluginContext['use']>[0], asked: Parameters<PluginContext['use']>[1], recall: boolean) => {
-    let recalled: Recalled | undefined;
-    try {
-      let caller: AuthenticatedIdentity;
-      let expiresAt: string;
-      if (typeof handle === 'string') {
-        caller = await proxyHandle(handle, recall);
-        if (!caller.registered) throw new ApiError('registration_required', 'the person this handle stands in for is no member here');
-        expiresAt = caller.credentialExpiresAt!;
-      } else {
-        // A workload caller `workload` made for this request, and no other: one a plugin built itself is no one.
-        const made = await workloadIdentity(runtime, handle, sourceIp, standings, recall);
-        if (made === null || !made.identity.registered) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
-        // A `narrow` child never reads (section 8.4): it uses, and is handed nothing back. Decided on what coffre kept, not on what the plugin holds.
-        if (made.constraints !== null && asked.purpose !== 'use') throw new ApiError('forbidden', 'a narrowed session uses values, and reads none', 'narrowed');
-        ({ identity: caller, expiresAt } = made);
-      }
-      recalled = caller.caller.recalled;
-      // A workload uses the environment its statement checked, freezes and all: a path renamed onto another since reads nothing.
-      const checked = typeof handle !== 'string' && handle.place !== null ? { environmentId: handle.place } : {};
-      const read = await reveal(apiContext(runtime, caller), parsePath(asked.path, [2]), { purpose: asked.purpose, keys: asked.keys, logged: asked.logged, ...checked });
-      return { values: read.values, plain: read.plain, keys: read.keys, environment: { path: read.environment.path, personal: read.environment.personal }, expiresAt };
-    } catch (error) {
-      if (!(error instanceof ApiError)) throw error;
-      // Nothing goes back on a kept answer the vault has not vouched for this request, a refusal included (`fetchApi`).
-      await recalled?.confirm();
-      throw new CoffreError(error.status, error.code, error.message, error.reason);
-    }
-  };
+  const standings = new WeakMap<WorkloadUse, Standing>();
   return {
     publicUrl: runtime.publicUrl,
-    workload: (asked, at) => (binding === null ? sessionWorkload(asked, runtime, sourceIp, at, standings) : bindingWorkload(runtime, binding, at, standings)),
-    recheck: (caller) => rechecked(runtime, caller, standings),
     handle: async (handle) => {
-      const { credentialExpiresAt, handlePlaces: places } = await proxyHandle(handle);
-      if (places === null) return { expiresAt: credentialExpiresAt!, paths: null };
-      const named = await environmentPaths(runtime.db, places.map((place) => place.environmentId));
-      const paths = places.map(({ environmentId, personal }) => (named.has(environmentId) ? `${named.get(environmentId)}${personal ? '@me' : ''}` : null));
-      return { expiresAt: credentialExpiresAt!, paths };
+      const row = await routed(runtime, hashToken(handle));
+      if (row === null || row.kind !== 'handle') throw thrown(new ApiError('unauthenticated', 'that handle is unknown, expired or revoked'));
+      return { expiresAt: row.expiresAt.toISOString(), paths: (row.places ?? []).map((place) => (place === null ? null : `${place.path}${place.personal ? '@me' : ''}`)) };
     },
-    exchange: async (asked) => {
-      if (binding !== null) throw noCredential();
-      return (await answer(await exchangeWorkloadToken(request, runtime, sourceIp, asked))) as { token: string; expiresAt: string };
-    },
-    signOut: async (token) => {
-      if (binding !== null) throw noCredential();
-      await answer(await logout(new Request(`${runtime.publicUrl}/api/auth/logout`, { method: 'POST', headers: carrying(token) }), runtime, sourceIp));
-    },
-    use: async (handle, asked) => {
-      // On the vault's answer about the caller kept from an earlier request, which the vault checks as it opens the
-      // values: one call. One that is not the vault's now read and logged nothing, and the read goes again, asking.
+    workload: async (asked, at) => {
+      const token = dpopToken(asked);
+      if (token === null) return null;
       try {
-        return await use(handle, asked, true);
+        const parsed = sessionProof(asked, runtime, token);
+        const row = await routed(runtime, hashToken(token));
+        if (row === null || row.kind !== 'workload' || row.jkt === null) throw unknown();
+        const counts = typeof at.counts === 'function' ? at.counts(row.principal) : at.counts;
+        const { proven, hdr } = await gated(asked, runtime, token, parsed, { id: row.id, principal: row.principal, jkt: row.jkt }, {
+          ...(at.body === undefined ? {} : { content: { headers: asked.headers, body: at.body } }),
+          ...(counts === undefined ? {} : { counts }),
+        });
+        const live = (row.places ?? []).filter((place) => place !== null);
+        const path = at.place ?? (live.length === 1 && (row.places ?? []).length === 1 ? live[0]!.path : null);
+        const caller: WorkloadUse = { principal: row.principal, hdr, nonce: proven.nonce, path };
+        standings.set(caller, { token, proof: proven.proof, sourceIp });
+        return caller;
       } catch (error) {
-        if (!(error instanceof AccessChanged)) throw error;
+        if (error instanceof SessionRefused) throw await workloadRefused(error.response);
+        throw error;
       }
-      return use(handle, asked, false);
     },
-    api: (token) => {
-      if (binding !== null) throw noCredential();
-      let checked: Promise<AuthenticatedIdentity | Response> | undefined;
-      return createClient({
-        url: runtime.publicUrl,
-        headers: () => carrying(token),
-        // In process, as a page's render calls it (`pageClient`): one check of the token for every call.
-        transport: (inner) =>
-          fetchApi(inner, runtime, {
-            sourceIp,
-            authenticate: async () => {
-              checked ??= authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp);
-              const identity = await checked;
-              // A refusal's body is read once: each call answers with its own copy.
-              return identity instanceof Response ? identity.clone() : identity;
-            },
-          }),
-      });
+    use: async (caller, asked) => {
+      const place = placeOf(asked.path);
+      if (place === null) throw thrown(new ApiError('bad_request', 'an environment is named by its path, project/environment'));
+      let shown: Presented;
+      if (typeof caller === 'string') {
+        shown = { token: hashToken(caller).toString('hex'), proof: null, request: crypto.randomUUID(), ip: sourceIp };
+      } else {
+        // A workload caller `workload` made for this request, and no other: one a plugin built itself is no one.
+        const standing = standings.get(caller);
+        if (standing === undefined) throw thrown(new ApiError('unauthenticated', 'that workload is no caller coffre authenticated'));
+        shown = { token: hashToken(standing.token).toString('hex'), proof: standing.proof, request: crypto.randomUUID(), ip: standing.sourceIp };
+      }
+      const answer = await runtime.vault.use({ ...shown, ...place, keys: [...asked.keys], purpose: asked.purpose, upstream: asked.upstream });
+      // A workload's stop worded as 0.14.7 did (`sessionStopped`); any other refusal as the API words it.
+      const word = (error: ApiError) => thrown((typeof caller === 'string' ? error : sessionStopped(error, sourceIp)) as ApiError);
+      if ('refused' in answer) throw word(refusal(answer.refused, asked.path));
+      return usedOf(answer, asked, place.mine, word);
     },
+  };
+}
+
+/** The vault's answer as a plugin takes it: every key asked for, or why not. */
+function usedOf(answer: VaultUsed, asked: UseAsked, mine: boolean, word: (error: ApiError) => CoffreError): Used {
+  const stop = stopOf(answer.values);
+  if (stop !== undefined) throw word(refusal(stop.refused, `${asked.path}/${stop.key}`));
+  const values: Record<string, string> = Object.create(null);
+  const plain: string[] = [];
+  const missing: string[] = [];
+  for (const item of answer.values) {
+    if ('refused' in item) {
+      // What a person's read leaves out, a sensitive value handed back included, refuses this one use.
+      if (item.refused === 'unknown_key' || item.refused === 'no_value') missing.push(item.key);
+      else throw word(refusal(item.refused, `${asked.path}/${item.key}`));
+      continue;
+    }
+    values[item.key] = item.value;
+    if (item.nature === 'plain') plain.push(item.key);
+  }
+  if (missing.length > 0) throw thrown(new ApiError('conflict', `${asked.path} holds no ${missing.join(', ')}, which ${asked.upstream} needs`));
+  return {
+    values,
+    plain,
+    environment: { path: asked.path.replace(/@me$/, ''), personal: mine },
+    workload: answer.workload === null ? null : { policy: answer.workload.policy, constraints: answer.workload.constraints },
   };
 }

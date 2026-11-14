@@ -4,6 +4,7 @@ import type { Database } from '@coffre/db';
 
 import type { ResolvedConfig } from './config.ts';
 import type { Gates } from './gate.ts';
+import type { CoffrePlugin } from './plugins.ts';
 import type { WorkloadTransport } from './workloads/transport.ts';
 
 /**
@@ -46,6 +47,8 @@ export type CoffreRuntime = {
    * runs none, which takes no workload session.
    */
   gates: Gates | null;
+  /** The deployment's plugins, as its configuration lists them: the same list for as long as the configuration lives. */
+  plugins: readonly CoffrePlugin[];
 };
 
 /**
@@ -66,5 +69,5 @@ export function createRuntime(config: ResolvedConfig, db: Database, vault: Vault
     const access = auth.mode === 'cloudflare' ? { verifier: new AccessIdentityVerifier(auth.access, { json: (url) => platform.transport.json(url) }), key: deriveKey(config.auditChainKey, 'access-session/v1') } : null;
     known.set(config, (kept = { schema: { migrated: false }, signinKey: deriveKey(config.auditChainKey, 'signin-state/v1'), access }));
   }
-  return { db, vault, auth: config.auth, publicUrl: config.publicUrl, rotateAfterDays: config.rotateAfterDays, transport: platform.transport, gates: platform.gates, ...kept };
+  return { db, vault, auth: config.auth, publicUrl: config.publicUrl, rotateAfterDays: config.rotateAfterDays, transport: platform.transport, gates: platform.gates, plugins: config.plugins, ...kept };
 }

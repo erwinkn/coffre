@@ -6,7 +6,7 @@ import type { AccessAnswers, AccessChanges } from './changes/access.ts';
 import type { FreezeAnswers, FreezeChanges } from './changes/freezes.ts';
 import type { McpAnswers, McpChanges, McpUnasked } from './changes/mcp.ts';
 import type { PlacesAnswers, PlacesChanges } from './changes/places.ts';
-import type { SecretsAnswers, SecretsChanges } from './changes/secrets.ts';
+import type { Nature, SecretsAnswers, SecretsChanges } from './changes/secrets.ts';
 import type { SigninAnswers, SigninChanges, Unasked } from './changes/signin.ts';
 import type { WorkloadAnswers, WorkloadChanges, WorkloadsUnasked } from './changes/workloads.ts';
 import type { BindingPolicy, Constraints } from './identity/index.ts';
@@ -124,8 +124,14 @@ export type UseInput = Presented & {
 export const PURPOSES = ['reveal', 'run', 'compare', 'expose', 'use'] as const;
 export type Purpose = (typeof PURPOSES)[number];
 
-/** One key's value, or why this caller is not given it. `secret` is where the value is held: a reference's source. */
-export type UsedValue = { key: string; secret: string; version: number; sensitive: boolean; value: string } | { key: string; refused: string };
+/**
+ * One key's value, or why this caller is not given it. `secret` is where the
+ * value is held: a reference's source. `nature` is the one the value opened
+ * under, which its encryption names (`contextOf`), so a row relabelled behind
+ * the vault cannot turn a secret into a plain value: what the proxy leaves
+ * unredacted when an upstream echoes it.
+ */
+export type UsedValue = { key: string; secret: string; version: number; nature: Nature; value: string } | { key: string; refused: string };
 
 export type Used = {
   principal: string;

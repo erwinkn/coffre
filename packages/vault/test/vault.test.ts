@@ -46,8 +46,8 @@ test('a reveal answers who asked and each key, its value as text or why not, and
   assert.ok(!('refused' in answer), JSON.stringify(answer));
   assert.equal(answer.principal, ada);
   assert.equal(answer.workload, null);
-  assert.deepEqual(answer.values.map((item) => ('refused' in item ? item : { key: item.key, version: item.version, sensitive: item.sensitive, value: item.value })), [
-    { key: 'DATABASE_URL', version: 1, sensitive: false, value: 'postgres://märkt:p€ss@db' },
+  assert.deepEqual(answer.values.map((item) => ('refused' in item ? item : { key: item.key, version: item.version, nature: item.nature, value: item.value })), [
+    { key: 'DATABASE_URL', version: 1, nature: 'secret', value: 'postgres://märkt:p€ss@db' },
     { key: 'EMPTY', refused: 'no_value' },
     { key: 'NOPE', refused: 'unknown_key' },
   ]);

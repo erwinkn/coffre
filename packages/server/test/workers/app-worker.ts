@@ -4,11 +4,16 @@
 // Hyperdrive binding of its own to the suite's database. Its fetch answers
 // as a deployment's Start app does: coffre's middleware around every
 // request, coffre's routes for coffre's paths, and a page for `/page`. Each
-// service's workload gate is its Durable Object, `GATES`.
+// service's workload gate is its Durable Object, `GATES`. Its credential
+// proxy has one credential, `echo`, whose upstream is a fake inside the
+// Worker (its `egress`): it answers what it was sent, the key reversed so
+// that the proxy's redaction leaves it, so a request through the proxy goes
+// all the way but for the network.
 import { github, signin } from '@coffre/core/identity';
 import { postgres as vaultDatabase, vault } from '@coffre/vault/cloudflare';
 
 import { createCoffre, postgres, type GatesNamespace, type Vault as VaultBinding, type WaitUntil } from '../../src/cloudflare.ts';
+import { credentialProxy, header } from '../../src/plugins/credential-proxy.ts';
 import { processLimits } from '../../src/workloads/limits.ts';
 
 export { CoffreSigner } from '@coffre/vault/cloudflare';
@@ -36,6 +41,17 @@ const coffre = createCoffre((env: Env) => ({
   auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits() } }),
   auditChainKey: env.APP_KEY,
   gates: env.GATES,
+  plugins: [
+    credentialProxy({
+      credentials: {
+        echo: {
+          upstream: 'https://api.echo.example/v1',
+          inject: header('authorization', 'Bearer {API_KEY}'),
+          egress: { fetch: async (url, init) => Response.json({ path: url.pathname, reversed: [...(new Headers(init.headers).get('authorization') ?? '')].reverse().join('') }) },
+        },
+      },
+    }),
+  ],
 }));
 
 export const CoffreGates = coffre.Gates;

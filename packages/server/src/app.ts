@@ -10,6 +10,7 @@ import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { mcpEndpoint } from './mcp/endpoint.ts';
 import { authorizationServer, oauthRegister, oauthRevoke, oauthToken, protectedResource } from './mcp/http.ts';
+import { pluginRoute } from './plugins.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
 import { describeSignin, finishSignin, logout, pollDevice, PROVIDER_PATH, signOut, startDevice, startSignin } from './signin.ts';
@@ -91,7 +92,8 @@ export async function coffreRoute(request: Request, runtime: CoffreRuntime, sour
     const [, step, id] = provider as unknown as [string, 'signin' | 'callback', string];
     return step === 'signin' ? startSignin(request, runtime, id) : finishSignin(request, runtime, sourceIp, id);
   }
-  return null;
+  // A plugin's paths, the credential proxy's `/use` among them.
+  return pluginRoute(request, runtime, sourceIp);
 }
 
 /** What a page renders with: this response's nonce, the API as the visitor, and how they have the pages drawn. */

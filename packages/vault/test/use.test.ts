@@ -122,7 +122,7 @@ test('a use is dated as its entry is written, and its write gives up after two s
 test('a reader is handed a key, and the use is logged once: who, with what, where, which version', async () => {
   const result = await use(vault, ask('ada', 'market/prod', ['DATABASE_URL']));
   assert.ok('values' in result);
-  assert.deepEqual(result, { principal: ada, credential: result.credential, workload: null, values: [{ key: 'DATABASE_URL', secret: w.database.id, version: 2, sensitive: false, value: Buffer.from('postgres://prod') }] });
+  assert.deepEqual(result, { principal: ada, credential: result.credential, workload: null, values: [{ key: 'DATABASE_URL', secret: w.database.id, version: 2, nature: 'secret', value: Buffer.from('postgres://prod') }] });
   const [entry, ...more] = await logged();
   assert.deepEqual(more, []);
   assert.deepEqual(
@@ -191,6 +191,18 @@ test('each key is its own answer: unknown, archived, empty, sensitive, a referen
   // Only what was handed over is logged and counted, in the order asked.
   assert.deepEqual((await logged())[0]!.detail.keys, [w.database, w.flag].map((row) => ({ key: row.key, secret: row.id, version: row.currentVersion })));
   assert.deepEqual((await exposed()).map((row) => row.secret_id).sort(), [w.database.id, w.flag.id].sort());
+});
+
+test('each value says the nature it opened under: plain, secret, or sensitive', async () => {
+  const natures = async (asked: Ask) => {
+    const result = await use(vault, asked);
+    assert.ok(!('refused' in result), JSON.stringify(result));
+    return Object.fromEntries(result.values.map((each) => [each.key, 'refused' in each ? `refused: ${each.refused}` : each.nature]));
+  };
+  assert.deepEqual(await natures(ask('ada', 'market/prod', ['FLAG', 'DATABASE_URL'])), { FLAG: 'plain', DATABASE_URL: 'secret' });
+  // A sensitive value opens only where it is used or handed to a service an Owner issued for.
+  assert.deepEqual(await natures(ask('ada', 'market/prod', ['STRIPE_KEY'], { purpose: 'use' })), { STRIPE_KEY: 'sensitive' });
+  assert.deepEqual(await natures(ask('ci-sensitive', 'market/prod', ['STRIPE_KEY', 'FLAG'])), { STRIPE_KEY: 'sensitive', FLAG: 'plain' });
 });
 
 test('a sensitive value is used for a person and never handed to them, and handed to a service only on a credential an Owner issued', async () => {
