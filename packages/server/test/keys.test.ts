@@ -1,8 +1,8 @@
 // An environment's keys over HTTP on the 0.16 contract (docs/design/0.16.md,
-// "Pages"): the list, a key's versions, references and missing keys, each one
-// call to the vault (`caller`) and one statement, scoped by its answer, never
-// a value but a plain one's copy; and the environment's version, one `peek`
-// of the vault's and no statement, the one a reveal answers.
+// "Pages"): the list, a key's versions, references and missing keys, each
+// scoped by the vault's answer about its caller, never a value but a plain
+// one's copy; and the environment's version, a `peek` of the vault's, the one
+// a reveal answers. What each costs, request-cost.test.ts holds.
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
@@ -100,9 +100,9 @@ const list = async (label: string, path: string) => {
 /** Each key as `[key, version, sensitivity, readable, parent state and where from]`. */
 const brief = (keys: Key[]) => keys.map((key) => [key.key, key.version, key.sensitivity, key.readable, key.parent === null ? null : `${key.parent.state} ${key.parent.from}${key.parent.reset ? ' reset' : ''}${key.parent.held ? '' : ' unheld'}`]);
 
-test("an environment's keys: one call to the vault and one statement, no value but a plain one's, each key readable as 0.14 said", async () => {
-  const [[status, body], calls, statements] = await cost(() => call('ada-cli', 'GET', '/secrets/market/prod'));
-  assert.deepEqual([status, calls, statements], [200, ['caller'], 1], JSON.stringify(body));
+test("an environment's keys: no value but a plain one's, each key readable as 0.14 said", async () => {
+  const [status, body] = await call('ada-cli', 'GET', '/secrets/market/prod');
+  assert.equal(status, 200, JSON.stringify(body));
   const listed = body as unknown as List;
   // A sensitive value is nobody's to see; an archived key or one with no value, nothing.
   assert.deepEqual(brief(listed.keys), [
@@ -207,8 +207,8 @@ test("a key's versions: the newest twenty, then older ones a page at a time, nev
   let h = value(world, secret({ id: ids.prod, projectId: ids.market }, 'H'), 'h1');
   await write(world, ...rows('secrets', h));
   for (let at = 2; at <= 22; at += 1) h = await rewrite(world, h, `h${at}`);
-  const [[status, body], calls, statements] = await cost(() => call('ada-cli', 'GET', '/secrets/market/prod/H/versions'));
-  assert.deepEqual([status, calls, statements], [200, ['caller'], 1], JSON.stringify(body));
+  const [status, body] = await call('ada-cli', 'GET', '/secrets/market/prod/H/versions');
+  assert.equal(status, 200, JSON.stringify(body));
   type Version = { version: number; current: boolean; kek: string; plain: boolean; sensitivity: string; createdBy: string; recipe: string | null };
   const versions = body.versions as Version[];
   assert.deepEqual([body.key, body.archived, body.more, versions.map((version) => version.version)], ['H', false, true, Array.from({ length: 20 }, (_, index) => 22 - index)]);
@@ -237,10 +237,8 @@ test("a key's versions: the newest twenty, then older ones a page at a time, nev
 test('references into and out of a place, to whoever lists or manages either end', async () => {
   type Reference = { holder: string; source: string; state: string; version: number | null; readers: string[] | null; canBreak: boolean; holderArchived: boolean };
   const references = async (label: string, path: string) => {
-    const [[status, body], calls, statements] = await cost(() => call(label, 'GET', `/references?path=${encodeURIComponent(path)}`));
-    // Readers, for an access manager's alone, are one statement more.
-    const read = (body.references as Reference[] | undefined)?.some(({ readers }) => readers !== null) === true;
-    assert.deepEqual([status, calls, statements], [200, ['caller'], read ? 2 : 1], JSON.stringify(body));
+    const [status, body] = await call(label, 'GET', `/references?path=${encodeURIComponent(path)}`);
+    assert.equal(status, 200, JSON.stringify(body));
     return (body.references as Reference[]).map(({ holder, source, state, version, readers, canBreak, holderArchived }) => [holder, source, state, version, readers, canBreak, holderArchived]);
   };
   // Billing's, by the end in market Ada lists; market's own.
@@ -267,7 +265,7 @@ test('references into and out of a place, to whoever lists or manages either end
   for (const path of ['', 'a/b/c/d', 'Market', 'market/prod/1X']) assert.equal((await call('ada-cli', 'GET', `/references?path=${encodeURIComponent(path)}`))[0], 400, path);
 });
 
-test("who reads through a reference: the members who read its holder's environment, to whoever manages either project's access, at one statement more", async () => {
+test("who reads through a reference: the members who read its holder's environment, to whoever manages either project's access", async () => {
   const [hal, ivy, jo, kim, max, nia, rex] = [user('hal'), user('ivy'), user('jo'), user('kim'), user('max'), user('nia'), user('rex')];
   const [market, billing] = [{ id: ids.market }, { id: ids.billing }];
   const [staging, adas] = [{ id: ids.staging, projectId: ids.market }, { id: ids.adas, projectId: ids.market }];
@@ -289,9 +287,9 @@ test("who reads through a reference: the members who read its holder's environme
     ...rows('credentials', ...[hal, ivy].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who))),
   );
   const readers = async (label: string, path: string) => {
-    const [[status, body], calls, statements] = await cost(() => call(label, 'GET', `/references?path=${encodeURIComponent(path)}`));
+    const [status, body] = await call(label, 'GET', `/references?path=${encodeURIComponent(path)}`);
+    assert.equal(status, 200, JSON.stringify(body));
     const shown = body.references as { holder: string; readers: string[] | null }[];
-    assert.deepEqual([status, calls, statements], [200, ['caller'], shown.some((reference) => reference.readers !== null) ? 2 : 1], JSON.stringify(body));
     return Object.fromEntries(shown.map(({ holder, readers }) => [holder, readers]));
   };
   // Prod's readers: by grant, a service account's too, and by an instance role whose scope takes market in. Staging is protected:
@@ -312,8 +310,8 @@ test("who reads through a reference: the members who read its holder's environme
 
 test("what an environment lacks of its siblings' keys, and what its team dismissed", async () => {
   const missing = async (label: string, path: string) => {
-    const [[status, body], calls, statements] = await cost(() => call(label, 'GET', `/projects/${path}/missing`));
-    assert.deepEqual([status, calls, statements], [200, ['caller'], 1], JSON.stringify(body));
+    const [status, body] = await call(label, 'GET', `/projects/${path}/missing`);
+    assert.equal(status, 200, JSON.stringify(body));
     return body as { missing: { key: string; in: string[]; folder: string | null }[]; dismissed: { key: string; in: string[]; dismissedBy: string; dismissedAt: string }[] };
   };
   // Not dev's D: dev is prod's fork. Not OWN: Ada's config is nobody's sibling. Not O: old is archived.
@@ -330,10 +328,10 @@ test("what an environment lacks of its siblings' keys, and what its team dismiss
 
 /** A version, and a reveal of the whole environment, by the same caller: the same answer, or the same refusal. */
 async function sameAsRead(label: string, path: string): Promise<string | null> {
-  const [[status, body], calls, statements] = await cost(() => call(label, 'GET', `/projects/${path}/version`));
+  const [[status, body], calls] = await cost(() => call(label, 'GET', `/projects/${path}/version`));
   const [read] = await cost(() => call(label, 'POST', '/reveals', { path }));
-  // One peek of the vault's, which opens and writes nothing, and no statement of the app's.
-  assert.deepEqual([calls, statements], [['peek'], 0], `${label} ${path}`);
+  // A peek of the vault's, which opens and writes nothing.
+  assert.deepEqual(calls, ['peek'], `${label} ${path}`);
   if (read[0] === 200) {
     assert.deepEqual([status, body.version], [200, read[1].version], `${label} ${path}: ${JSON.stringify(body)}`);
     return body.version as string;

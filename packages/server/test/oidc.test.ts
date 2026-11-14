@@ -3,7 +3,8 @@
 // to learn which keys to verify under, the signature verified under them,
 // then one `token.exchange`, which decides. What the vault decides is its
 // own suite's (packages/vault/test/workloads.test.ts); here, the app's part,
-// what each refusal tells the run, and what each answer costs.
+// what each refusal tells the run, and what a refusal costs; an answer's
+// cost, request-cost.test.ts holds.
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { after, beforeEach, mock, test } from 'node:test';
@@ -114,13 +115,13 @@ const refused = (answer: Answer) => [answer.status, answer.body.error, answer.bo
 /** Whether each of `works` has settled, as of now. */
 const settledOf = (works: Promise<unknown>[]) => Promise.all(works.map((work) => Promise.race([work.then(() => true, () => true), new Promise<boolean>((resolve) => setImmediate(resolve, false))])));
 
-test("a run's token buys a five-minute token of its service: one statement, the issuer's keys fetched once, one change; it reads as the service", async () => {
-  const [answer, calls, statements] = await cost(() => exchange(idToken()));
+test("a run's token buys a five-minute token of its service, the issuer's keys fetched once; it reads as the service", async () => {
+  const answer = await exchange(idToken());
   assert.equal(answer.status, 200, JSON.stringify(answer.body));
   assert.match(answer.body.token!, /^coffre_svc_/);
   const left = Date.parse(answer.body.expiresAt!) - Date.now();
   assert.ok(left > 4 * 60_000 && left <= 5 * 60_000, `${left} ms`);
-  assert.deepEqual([calls, statements, fetched], [['change'], 1, [KEYS]]);
+  assert.deepEqual(fetched, [KEYS]);
   const me = await app.request('/api/me', { headers: { authorization: `Bearer ${answer.body.token}` } });
   assert.equal(me.status, 200);
   assert.equal(((await me.json()) as { principal: { type: string; id: string } }).principal.id, 'deploy');
@@ -228,8 +229,8 @@ test("a binding that carries its keys: the app fetches nothing, the vault verifi
   const carried = binding(DEPLOY, { profile: 'custom', issuer: KUBE, jwksUri: `sha256:${createHash('sha256').update(KUBE_JWKS).digest('hex')}`, jwks: KUBE_JWKS, claims: canonicalClaims({ sub: 'system:serviceaccount:ci:runner' }), scope: VIEWER });
   await write(world, ...rows('bindings', carried));
   const kube = (key: KeyObject, kid: string) => idToken({ iss: KUBE, sub: 'system:serviceaccount:ci:runner' }, { key, kid });
-  const [made, calls, statements] = await cost(() => exchange(kube(kube1.privateKey, 'kube-1')));
-  assert.deepEqual([made.status, calls, statements, fetched], [200, ['change'], 1, []]);
+  const made = await exchange(kube(kube1.privateKey, 'kube-1'));
+  assert.deepEqual([made.status, fetched], [200, []]);
   const stranger = pair();
   const before = app.tracked.length;
   const started = performance.now();

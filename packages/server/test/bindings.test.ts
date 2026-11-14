@@ -1,9 +1,9 @@
 // A service account's trust bindings over HTTP on the 0.16 contract
-// (docs/design/0.16.md, "A workload signing in"): the list is one call to
-// the vault (`caller`) and one statement; making, re-keying and removing one
-// is one `change` and no statement, and one `caller` and one statement more
-// before the app asks an issuer anything. The app asks an issuer where its keys
-// are, and words a binding's mistakes, before the vault is asked anything.
+// (docs/design/0.16.md, "A workload signing in"): the list, and making,
+// re-keying and removing one, each one `change`, a making weighed first. The
+// app asks an issuer where its keys are, and words a binding's mistakes,
+// before the vault is asked to change anything. What each costs,
+// request-cost.test.ts holds.
 // Who may bind, and what a binding reaches, is the vault's
 // (packages/vault/test/bindings.test.ts); here, what the app does around it.
 import assert from 'node:assert/strict';
@@ -96,18 +96,17 @@ const list = (label: string, member = ci) => cost(() => call(label, 'GET', `/mem
 
 type View = { id: string; profile: string; issuer: string; jwksUri: string; keys: unknown; claims: unknown; scope: unknown; policy: unknown; label: string | null; createdAt: string; createdBy: string; lastUsedAt: string | null };
 
-test('a manager makes a binding: weighed as one, its issuer asked where its keys are, then one change; its service\'s list shows it, one caller and one statement', async () => {
-  const [[status, body], calls, statements] = await bind('ada-cli', { label: 'pods', scope: { 'market/dev': 'developer' } });
+test('a manager makes a binding: weighed as one, its issuer asked where its keys are, then one change; its service\'s list shows it', async () => {
+  const [[status, body], calls] = await bind('ada-cli', { label: 'pods', scope: { 'market/dev': 'developer' } });
   assert.equal(status, 200, JSON.stringify(body));
   const { binding: made, replaced } = body as { binding: { id: string; scope: unknown }; replaced: string[] };
   assert.deepEqual({ scope: made.scope, replaced }, { scope: { 'market/dev': 'developer' }, replaced: [] });
-  assert.deepEqual([calls, statements], [['caller', 'change'], 1]);
+  assert.deepEqual(calls, ['caller', 'change']);
   // The discovery document, once, and never the keys: those are fetched by an exchange.
   assert.deepEqual(fetched, [`${KUBE}/.well-known/openid-configuration`]);
 
-  const [[listed, shown], listCalls, listStatements] = await list('ada-cli');
+  const [[listed, shown]] = await list('ada-cli');
   assert.equal(listed, 200);
-  assert.deepEqual([listCalls, listStatements], [['caller'], 1]);
   const [only] = (shown as { bindings: View[] }).bindings;
   assert.deepEqual({ ...only!, createdAt: undefined }, {
     id: made.id, profile: 'custom', issuer: KUBE, jwksUri: KEYS, keys: null, claims: POD, scope: { 'market/dev': 'developer' }, policy: null,
@@ -119,8 +118,8 @@ test('a manager makes a binding: weighed as one, its issuer asked where its keys
 test('the list is the service\'s own, and its managers\': anyone else is told no more than of a service that is not there', async () => {
   await write(world, ...rows('bindings', binding(ci, { profile: 'custom', issuer: KUBE, jwksUri: KEYS, claims: JSON.stringify(POD), scope: JSON.stringify([{ projectId: ids.market, environmentId: ids.dev, role: 'developer' }]) })));
   for (const label of ['root-cli', 'ada-cli', 'ci-cli']) {
-    const [[status, body], calls, statements] = await list(label);
-    assert.deepEqual([status, (body as { bindings: View[] }).bindings.length, calls, statements], [200, 1, ['caller'], 1], label);
+    const [[status, body]] = await list(label);
+    assert.deepEqual([status, (body as { bindings: View[] }).bindings.length], [200, 1], label);
   }
   // Bo holds less than the service, and a scoped token of whoever runs the instance manages nothing.
   for (const label of ['bo-cli', 'root-token']) {
@@ -217,10 +216,10 @@ test("an issuer's bindings re-keyed: each replaced by one the same but for its k
   const was = (first as { binding: { id: string } }).binding.id;
   const { publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const jwks = { keys: [{ ...publicKey.export({ format: 'jwk' }), kid: 'k2', alg: 'ES256', use: 'sig' }] };
-  const [[status, body], calls, statements] = await cost(() => call('ada-cli', 'POST', `/members/${ci}/bindings/keys`, { issuer: KUBE, jwks }));
+  const [status, body] = await call('ada-cli', 'POST', `/members/${ci}/bindings/keys`, { issuer: KUBE, jwks });
   assert.equal(status, 200, JSON.stringify(body));
   const { bindings, replaced } = body as { bindings: { id: string; scope: unknown }[]; replaced: string[] };
-  assert.deepEqual([bindings.map((made) => made.scope), replaced, calls, statements], [[{ 'market/dev': 'developer' }], [was], ['change'], 0]);
+  assert.deepEqual([bindings.map((made) => made.scope), replaced], [[{ 'market/dev': 'developer' }], [was]]);
   const [[, listed]] = await list('ada-cli');
   const [only] = (listed as { bindings: View[] }).bindings;
   assert.deepEqual([only!.id, only!.jwksUri.startsWith('sha256:'), (only!.keys as { kid: string }[]).map((key) => key.kid)], [bindings[0]!.id, true, ['k2']]);
@@ -234,8 +233,7 @@ test('removing a binding is one change; one not live is not found, and whoever d
   const id = (first as { binding: { id: string } }).binding.id;
   const remove = (label: string) => cost(() => call(label, 'DELETE', `/members/${ci}/bindings/${id}`));
   assert.deepEqual(refused((await remove('bo-cli'))[0]), [403, 'vault_refused', 'no_access']);
-  const [[status, body], calls, statements] = await remove('ada-cli');
-  assert.deepEqual([status, body, calls, statements], [200, { unbound: true }, ['change'], 0]);
+  assert.deepEqual((await remove('ada-cli'))[0], [200, { unbound: true }]);
   assert.deepEqual(refused((await remove('ada-cli'))[0]), [404, 'not_found', 'unknown_binding']);
   assert.deepEqual((await list('ada-cli'))[0][1], { bindings: [] });
 });
