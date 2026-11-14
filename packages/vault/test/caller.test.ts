@@ -270,7 +270,7 @@ test('asked for the head, the same statement brings the one the vault signed, ne
   // Every field is under the MAC, and the MAC under the vault's keys: a row edited, or signed with another key, vouches for nothing.
   const edits = [
     sql`size = 8, aging_size = 5`, sql`kept_size = 4, aging_size = 3`, sql`kept_root = decode(${'cc'.repeat(32)}, 'hex')`, sql`aging_root = decode(${'cc'.repeat(32)}, 'hex')`,
-    sql`aging_from = 2`, sql`signed_at = signed_at + interval '1 millisecond'`, sql`mac = set_byte(mac, 0, get_byte(mac, 0) # 1)`, sql`mac = set_byte(mac, 35, get_byte(mac, 35) # 1)`,
+    sql`aging_from = 2`, sql`signed_at = signed_at + interval '1 millisecond'`, sql`signed_at = 'infinity'`, sql`mac = set_byte(mac, 0, get_byte(mac, 0) # 1)`, sql`mac = set_byte(mac, 35, get_byte(mac, 35) # 1)`,
   ];
   for (const edit of edits) {
     await vault.owner.execute(sql`UPDATE log_head SET ${edit}`);

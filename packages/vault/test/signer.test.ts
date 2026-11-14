@@ -358,13 +358,17 @@ test('the full run finds an older head put back, though it is genuine, one edite
   signer = await open();
   assert.deepEqual(await run(), []);
   assert.deepEqual(signer.standing, []);
-  // Each column edited in turn, the MAC left: no caller is answered such a head, and it is not the one signed.
-  for (const edit of [sql`aging_from = aging_from + 1, aging_size = aging_size + 1, size = size + 1`, sql`kept_root = sha256(kept_root)`, sql`aging_root = sha256(aging_root)`, sql`signed_at = signed_at + interval '1 millisecond'`, sql`kept_size = kept_size + 1, size = size + 1`]) {
+  // Each column edited in turn, the MAC left, then the MAC alone: no caller is answered such a head, and it is not the
+  // one signed. A date with no number is read as one more edit, not a read that fails.
+  const edits = [
+    sql`aging_from = aging_from + 1, aging_size = aging_size + 1, size = size + 1`, sql`kept_root = sha256(kept_root)`, sql`aging_root = sha256(aging_root)`,
+    sql`signed_at = signed_at + interval '1 millisecond'`, sql`signed_at = 'infinity'`, sql`kept_size = kept_size + 1, size = size + 1`, sql`mac = set_byte(mac, 35, get_byte(mac, 35) # 1)`,
+  ];
+  for (const edit of edits) {
     const [{ before }] = (await rowsOf<{ before: unknown }>(vault.owner, sql`SELECT to_jsonb(log_head) AS before FROM log_head`)) as [{ before: unknown }];
     await vault.owner.execute(sql`UPDATE log_head SET ${edit}`);
-    assert.equal(await head(), kept());
     assert.deepEqual(await run(), wrong);
-    await vault.owner.execute(sql`UPDATE log_head SET (size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at) = (SELECT size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at FROM jsonb_populate_record(NULL::log_head, ${JSON.stringify(before)}::jsonb))`);
+    await vault.owner.execute(sql`UPDATE log_head SET (size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac) = (SELECT size, kept_size, kept_root, aging_size, aging_root, aging_from, signed_at, mac FROM jsonb_populate_record(NULL::log_head, ${JSON.stringify(before)}::jsonb))`);
     assert.deepEqual(await run(), []);
     assert.deepEqual(signer.standing, []);
   }

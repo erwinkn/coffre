@@ -115,7 +115,9 @@ const ROWS = sql.join(
 const ENDS = sql`SELECT 'end', encode(${leafOf('last.body')}, 'hex'), to_jsonb(coalesce(last.leaf + 1, 0)), tree.kept, NULL, NULL
   FROM (VALUES (true), (false)) tree(kept) LEFT JOIN LATERAL (SELECT leaf, body FROM log WHERE log.kept = tree.kept ORDER BY leaf DESC LIMIT 1) last ON true`;
 // The head as the database holds it, every column (`headRow`): no entry writes it, so the mirror has no row for it.
-const HEAD = sql`SELECT 'head', NULL, jsonb_build_array(size, kept_size, encode(kept_root, 'hex'), aging_size, encode(aging_root, 'hex'), aging_from, round(extract(epoch FROM signed_at) * 1000)::bigint), NULL, NULL, mac FROM log_head`;
+// A date with no number, `infinity`, reads as null: not the one signed, like any other, and never a read that fails.
+const HEAD = sql`SELECT 'head', NULL, jsonb_build_array(size, kept_size, encode(kept_root, 'hex'), aging_size, encode(aging_root, 'hex'), aging_from,
+  CASE WHEN isfinite(signed_at) THEN round(extract(epoch FROM signed_at) * 1000)::bigint END), NULL, NULL, mac FROM log_head`;
 /** What a finding names when the head is not the one last signed, as it names a row. */
 export const HEAD_ROW = JSON.stringify(['log_head']);
 
