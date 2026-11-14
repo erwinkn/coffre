@@ -14,6 +14,7 @@ import { change, commit, prepare, type Operation, type Parts } from '../src/chan
 import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
+import { MOST_KEYS } from '../src/ops/input.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
 import { amend, binding, credential, dismissed, environment, grant, instance, principal, project, rewrite, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
 
@@ -292,4 +293,20 @@ test('a fork that copies is asked as the contract says, or it is a fault, before
   for (const more of bad) await assert.rejects(vault.change({ ...forking('ada-cli', 'qa', 'prod'), ...more } as never), TypeError, JSON.stringify(more));
   await assert.rejects(vault.change({ ...shown('ada-cli'), op: 'environment.create', project: 'market', environment: 'prod', mine: true, copy: { from: 'prod', references: false } } as never), TypeError);
   assert.equal(world.woken.length, 0);
+});
+
+test(`a fork copies ${MOST_KEYS} values at most in its one change: past that it is refused, and nothing is made; by reference, it copies none`, async () => {
+  const big = environment(market, 'big');
+  const keys = Array.from({ length: MOST_KEYS }, (_, n) => value(world, secret(big, `KEY_${String(n).padStart(4, '0')}`), `value-${n}`));
+  await write(world, ...rows('environments', big), ...rows('secrets', ...keys));
+  // At the bound, every value copied.
+  assert.equal(answered(await vault.change(forking('ada-cli', 'whole', 'big'))).forked!.keys, MOST_KEYS);
+  // One more, and the fork is refused, whole: no environment, key or version made.
+  await write(world, ...rows('secrets', value(world, secret(big, 'ONE_MORE'), 'more')));
+  const before = await counts();
+  assert.deepEqual(await vault.change(forking('ada-cli', 'over', 'big')), { refused: 'too_many_keys' });
+  assert.deepEqual(await counts(), before);
+  // As references, it seals no value, and is made.
+  const referred = answered(await vault.change(forking('ada-cli', 'over', 'big', true))).forked!;
+  assert.deepEqual([referred.keys, referred.references, referred.copied], [MOST_KEYS + 1, MOST_KEYS + 1, []]);
 });

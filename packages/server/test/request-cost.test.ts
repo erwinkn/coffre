@@ -373,6 +373,13 @@ const requests: Record<string, Entry> = {
   'PATCH /projects/:project': { request: () => api('cy-cli', 'PATCH', `/projects/shop-${round}`, { folder: 'Payments' }), calls: ['change'], statements: 0 },
   'PATCH /folders/:folder': { request: () => api('cy-cli', 'PATCH', '/folders/Payments', { name: 'Shops' }), calls: ['change'], statements: 0 },
   'DELETE /folders/:folder': { request: () => api('cy-cli', 'DELETE', '/folders/Shops'), calls: ['change'], statements: 0 },
+  // The round's places deleted for good, once archived: a preview is one `weigh`, a deletion one change, however much each erases.
+  'PATCH /projects/:project/:environment, archived': { request: () => api('cy-cli', 'PATCH', `/projects/shop-${round}/qa-fork`, { archived: true }), calls: ['change'], statements: 0 },
+  'DELETE /projects/:project/:environment?dryRun=1': { request: () => api('cy-cli', 'DELETE', `/projects/shop-${round}/qa-fork?dryRun=1`), calls: ['weigh'], statements: 0 },
+  'DELETE /projects/:project/:environment': { request: () => api('cy-cli', 'DELETE', `/projects/shop-${round}/qa-fork`), calls: ['change'], statements: 0 },
+  'PATCH /projects/:project, archived': { request: () => api('cy-cli', 'PATCH', `/projects/shop-${round}`, { archived: true }), calls: ['change'], statements: 0 },
+  'DELETE /projects/:project?dryRun=1': { request: () => api('cy-cli', 'DELETE', `/projects/shop-${round}?dryRun=1`), calls: ['weigh'], statements: 0 },
+  'DELETE /projects/:project': { request: () => api('cy-cli', 'DELETE', `/projects/shop-${round}`), calls: ['change'], statements: 0 },
   'PUT /members/:member': { request: () => api('cy-cli', 'PUT', '/members/user:temp@acme.example', {}), calls: ['change'], statements: 0 },
   'PUT /members/:member, a role and a scope': { request: () => api('cy-cli', 'PUT', '/members/user:temp@acme.example', { role: 'auditor', scope: { projects: { only: ['market'] } } }), calls: ['change'], statements: 0 },
   // No role keeps theirs, and its scope, which names projects by id, is worded by slug: one statement, after the change.

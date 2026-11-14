@@ -35,3 +35,10 @@ export function presented(input: Presented): Trace & { token: Buffer; proof: str
 
 /** A key's name, as the table's own check has it (`secrets_key_check`): told before anything is read or sealed. */
 export const KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+
+/**
+ * The most values one change seals: the keys of one write, as the app's
+ * routes bound them, and the values a fork copies, each opened and sealed
+ * again (a fork by reference, or one that inherits, seals none).
+ */
+export const MOST_KEYS = 2000;

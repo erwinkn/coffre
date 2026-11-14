@@ -359,21 +359,37 @@ test("a folder of projects is renamed or emptied whole, in one call, by who mana
   assert.deepEqual(app.calls, []);
 });
 
-test('deleting a place for good is not served yet: 501, and the vault is not asked', async () => {
-  for (const path of ['/projects/shelf', '/projects/market/old', '/projects/market/old?dryRun=1']) {
-    const [[status, body], calls] = await cost(() => call('cy-cli', 'DELETE', path));
-    assert.deepEqual([status, body.error, calls], [501, 'not_implemented', []], path);
-    assert.match(String(body.message), /not served yet/);
-  }
+test('an archived place is deleted for good by one change, and previewed by one weigh; a personal config by its owner, or whoever manages the environments', async () => {
+  const day = new Date().toISOString().slice(0, 10);
+  // shelf is archived: a preview changes nothing, then the deletion, neither an app statement.
+  const [[status, preview], weighed, read] = await cost(() => call('cy-cli', 'DELETE', '/projects/shelf?dryRun=1'));
+  assert.deepEqual([status, weighed, read], [200, ['weigh'], 0]);
+  assert.deepEqual(preview, { dryRun: true, deletion: { path: 'shelf', tombstone: `shelf~deleted-${day}`, environments: ['prod'], keys: 0, versions: 0, grants: [], references: [], stranded: [] } });
+  assert.ok(await projectRow('shelf'));
+  const [[done, body], changed, wrote] = await cost(() => call('cy-cli', 'DELETE', '/projects/shelf'));
+  assert.deepEqual([done, body.dryRun, changed, wrote], [200, false, ['change'], 0]);
+  assert.equal(await projectRow('shelf'), undefined, 'its slug is free');
+  // An environment deleted is archived itself; whoever manages the project but does not run the instance deletes nothing.
+  assert.deepEqual(refused(await call('cy-cli', 'DELETE', '/projects/market/prod')), [409, 'conflict', 'not_archived']);
+  assert.deepEqual(refused(await call('bo-cli', 'DELETE', '/projects/market/old')), NO_ACCESS);
+  assert.deepEqual((await call('cy-cli', 'DELETE', '/projects/market/old'))[1].deletion, { path: 'market/old', tombstone: `old~deleted-${day}`, environments: ['old'], keys: 1, versions: 0, grants: [], references: [], stranded: [] });
+  // Dee's own personal config as `prod@me`, live; Ada's by its slug, by Bo, who manages market's environments; Ed's, who has none, nothing.
+  assert.deepEqual(((await call('dee-cli', 'DELETE', '/projects/market/prod@me'))[1].deletion as { path: string }).path, 'market/prod@dee@acme.example');
+  assert.deepEqual(((await call('bo-cli', 'DELETE', '/projects/market/prod-ada'))[1].deletion as { path: string }).path, 'market/prod@ada@acme.example');
+  assert.deepEqual(refused(await call('ed-cli', 'DELETE', '/projects/market/prod@me')), NO_ACCESS);
+  // A query other than the preview's is refused before the vault is asked.
+  const [[bad], asked] = await cost(() => call('cy-cli', 'DELETE', '/projects/market/staging?dry=1'));
+  assert.deepEqual([bad, asked], [400, []]);
 });
 
 test("each place refusal is answered with 0.14's status for the same case", () => {
-  const statuses = Object.fromEntries(['exists', 'referenced', 'inherited', 'parent_archived', 'broken_chain', 'too_deep', 'workload_cannot_issue', 'not_a_person', 'no_access'].map((reason) => {
+  const statuses = Object.fromEntries(['exists', 'referenced', 'inherited', 'parent_archived', 'broken_chain', 'too_deep', 'not_archived', 'too_large', 'too_many_keys', 'workload_cannot_issue', 'not_a_person', 'no_access'].map((reason) => {
     const error = refusal(reason);
     return [reason, [error.status, error.code]];
   }));
   assert.deepEqual(statuses, {
     exists: [409, 'conflict'], referenced: [409, 'conflict'], inherited: [409, 'conflict'], parent_archived: [409, 'conflict'], broken_chain: [409, 'conflict'], too_deep: [409, 'conflict'],
+    not_archived: [409, 'conflict'], too_large: [409, 'conflict'], too_many_keys: [409, 'conflict'],
     workload_cannot_issue: [403, 'forbidden'], not_a_person: [403, 'forbidden'], no_access: [403, 'vault_refused'],
   });
 });

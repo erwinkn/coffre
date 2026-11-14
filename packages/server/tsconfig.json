@@ -11,15 +11,13 @@
   // goes from this list when its area is moved, deleted or rewritten; one named here that no longer exists fails
   // the suite. Nothing outside this list imports a file in it.
   "exclude": [
-    // Secrets' generated values, forks, deletion for good, dismissals (W418).
+    // Secrets' generated values, forks, dismissals (W418).
     "src/api/secrets.ts",
-    "src/api/projects.ts",
     "src/api/missing.ts",
     "src/api/inheritance.ts",
     "src/api/keys.ts",
     "src/api/references.ts",
     "src/api/personal.ts",
-    "test/deletion.test.ts",
     "test/forks-properties.test.ts",
     "test/generated-values.test.ts",
     "test/recipes.test.ts",
