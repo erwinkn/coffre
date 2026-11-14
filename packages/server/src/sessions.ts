@@ -19,6 +19,7 @@
 // which never issued its nonce, or name a key the vault's row does not.
 import { hashToken, parseProof, tokenKind, verifyProof, type GateCount, type ParsedProof } from '@coffre/core/identity';
 
+import { limitAlert, sendAlert } from './alerts.ts';
 import { ApiError } from './api/errors.ts';
 import { routedSession, type RoutedSession } from './db/queries/sessions.ts';
 import { errorResponse, jsonResponse } from './http.ts';
@@ -125,15 +126,17 @@ export function sessionProof(request: Request, runtime: Pick<CoffreRuntime, 'aut
  * the app routed it by (`row`, read unchecked), then taken by that
  * service's gate, with `counts` in the same call. `content`: the request's
  * headers and its body's line, which a proxied request's proof signs
- * (`hdr`, `req`). Throws `SessionRefused`; a count refused is 429 `limit`.
+ * (`hdr`, `req`). Throws `SessionRefused`; a count refused is 429 `limit`,
+ * and its window's first refusal the deployment's alert (`limitAlert`),
+ * from `sourceIp`, kept alive past the response by `track`.
  */
 export async function gated(
   request: Request,
-  runtime: Pick<CoffreRuntime, 'publicUrl' | 'gates'>,
+  runtime: Pick<CoffreRuntime, 'publicUrl' | 'gates' | 'auth'>,
   token: string,
   parsed: ParsedProof,
   row: RoutedSession,
-  more: { content?: { headers: Headers; body: string }; counts?: readonly GateCount[] } = {},
+  more: { content?: { headers: Headers; body: string }; counts?: readonly GateCount[]; sourceIp?: string | null; track?: (work: Promise<unknown>) => void } = {},
 ): Promise<{ proven: ProvenSession; hdr: readonly string[] | null }> {
   const verified = await verifyProof(parsed, { method: request.method, url: signedUrl(request, runtime.publicUrl), jkt: row.jkt, token, ...(more.content === undefined ? {} : { content: more.content }) });
   if (!verified.ok) throw proofRefused(verified.reason, verified.message);
@@ -152,6 +155,9 @@ export async function gated(
         throw refused(new ApiError('too_many_requests', 'this workload sends more requests than its gate takes: try again shortly', 'overloaded'), { 'retry-after': '1' });
       case 'limit':
         if (more.counts === undefined || more.counts.length === 0) throw new Error(`the workload gate refused a count it was not asked for: ${admitted.key}`);
+        if (admitted.first && runtime.auth.mode === 'signin' && runtime.auth.signin.workloads !== null) {
+          await sendAlert(runtime.auth.signin.workloads, limitAlert({ principal: row.principal, session: row.id, sourceIp: more.sourceIp ?? null }, admitted), more.track ?? (() => {}));
+        }
         throw refused(new ApiError('too_many_requests', `past this workload's limit for ${admitted.key}`, 'limit'), { 'retry-after': String(Math.ceil(admitted.retryAfterMs / 1000)) });
     }
   } catch (error) {

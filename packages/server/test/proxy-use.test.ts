@@ -10,14 +10,14 @@ import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
 import { bodyDigest, createProof, generateProofKey, thumbprint, UNSIGNED_BODY, type ProofKey } from '@coffre/client/dpop';
-import { generateToken, github, hashToken, signin } from '@coffre/core/identity';
+import { generateToken, github, hashToken, signin, type WorkloadAlert } from '@coffre/core/identity';
 import { amend, binding, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, session, value, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 
 import { processGates, type Gates } from '../src/gate.ts';
 import { basic, credentialProxy, header, sigv4, type Egress } from '../src/plugins/credential-proxy.ts';
 import { routedCredential } from '../src/db/queries/sessions.ts';
-import { checkPlugins, routed } from '../src/plugins.ts';
+import { checkPlugins, routed, WorkloadRefused, type CoffrePlugin } from '../src/plugins.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { openApp, PUBLIC_URL } from './app-fixture.ts';
@@ -54,8 +54,27 @@ const gates: Gates = (service) => {
   return held(service);
 };
 
-const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits() } });
-const app = await openApp({ auth, workloads: {}, gates, plugins: [proxy] });
+/** The deployment's alerts, as its function was handed them. */
+const alerts: WorkloadAlert[] = [];
+const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits(), alert: (alert) => alerts.push(alert) } });
+/** A plugin's WebSocket that a session opens, one a minute: what its admission counts in the gate, as the proxy's requests are. */
+const counted: CoffrePlugin = {
+  name: 'counted',
+  routes: {
+    prefix: '/counted',
+    fetch: async () => new Response(null, { status: 404 }),
+    socket: async (request, context) => {
+      try {
+        await context.workload(request, { place: null, counts: [{ key: 'counted per minute', windowMs: 60_000, most: 1 }] });
+        return new Response('admitted');
+      } catch (error) {
+        if (error instanceof WorkloadRefused) return error.response;
+        throw error;
+      }
+    },
+  },
+};
+const app = await openApp({ auth, workloads: {}, gates, plugins: [proxy, counted] });
 const { world } = app;
 after(() => app.close());
 
@@ -120,6 +139,15 @@ async function asDeploy(path: string, options: { nonce?: string | null; jti?: st
   const signed = { 'x-request': 'one' };
   const proof = await createProof(deploy.key, { method: 'GET', url, token: deploy.token, ...(nonce === undefined ? {} : { nonce }), content: { headers: signed, body: await bodyDigest(new Uint8Array()) }, ...(options.jti === undefined ? {} : { jti: options.jti }) });
   return app.request(path, { headers: { authorization: `DPoP ${deploy.token}`, dpop: proof, ...signed } });
+}
+
+/** A WebSocket the deploy session asks for at `path`, its proof under the gate's nonce. */
+async function deploySocket(path: string): Promise<Response> {
+  const url = `${PUBLIC_URL}${path}`;
+  const proof = await createProof(deploy.key, { method: 'GET', url, token: deploy.token, nonce: await held(DEPLOY).nonce() });
+  const answer = await app.socket(path, { headers: { authorization: `DPoP ${deploy.token}`, dpop: proof, upgrade: 'websocket' } });
+  assert.ok(answer instanceof Response);
+  return answer;
 }
 
 const failed = async (response: Response) => [response.status, ((await response.json()) as { reason?: string }).reason];
@@ -203,6 +231,22 @@ test("a session's request: one statement finds its gate, key and place; the gate
   assert.equal((await asDeploy('/use/stripe/charges')).status, 200);
   const [limited, limitedCalls] = await cost(() => asDeploy('/use/stripe/charges'));
   assert.deepEqual([...(await failed(limited)), limitedCalls], [429, 'limit', []]);
+  // Its window's first refusal is the deployment's alert; the next is refused as quietly.
+  assert.deepEqual(alerts.map(({ kind, service, binding, session, ip }) => ({ kind, service, binding, session, ip })), [{ kind: 'limit', service: DEPLOY, binding: null, session: deploy.id, ip: '192.0.2.7' }]);
+  assert.match(alerts[0]!.text, /^deploy is past its limit for stripe per minute, from 192\.0\.2\.7: refused for \d+ s$/);
+  assert.deepEqual(await failed(await asDeploy('/use/stripe/charges')), [429, 'limit']);
+  assert.equal(alerts.length, 1);
+});
+
+test("a plugin's WebSocket past its count: the first refusal alerts, and the platform keeps the alert alive past the answer", async () => {
+  assert.equal(await (await deploySocket('/counted/x')).text(), 'admitted');
+  alerts.length = 0;
+  const tracked = app.tracked.length;
+  assert.deepEqual(await failed(await deploySocket('/counted/x')), [429, 'limit']);
+  assert.deepEqual(alerts.map(({ kind, session }) => ({ kind, session })), [{ kind: 'limit', session: deploy.id }]);
+  assert.equal(app.tracked.length, tracked + 1, "the alert's delivery, told to the socket's Durable Object");
+  assert.deepEqual(await failed(await deploySocket('/counted/x')), [429, 'limit']);
+  assert.equal(alerts.length, 1);
 });
 
 test("a row that is not what its token's shape says routes nothing: a handle-shaped token on a session's row, a session's token on a handle's; neither asks the vault", async () => {

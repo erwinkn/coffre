@@ -61,9 +61,11 @@ const UNREACHABLE = new Set([
 /**
  * Workers' words for a connection lost, and Hyperdrive's for one it could
  * not make ("Server connection attempt failed: destination_unavailable";
- * local workerd's says only "connection attempt failed").
+ * local workerd's says only "connection attempt failed"), and Workers' for
+ * a call it cancelled as hung ("… detected that your Worker's code had
+ * hung"): the vault's, or its database's, that never answered.
  */
-const UNREACHABLE_WORDS = /connection terminated|network connection lost|connect(ion)? timeout|connection attempt failed/i;
+const UNREACHABLE_WORDS = /connection terminated|network connection lost|connect(ion)? timeout|connection attempt failed|code had hung/i;
 
 /** Hyperdrive's words for a pool with no connection to give. */
 const POOL_FULL_WORDS = /open slot in the pool|acquire a connection from the pool/i;

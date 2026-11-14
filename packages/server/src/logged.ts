@@ -2,18 +2,20 @@
 // only its stack on Workers, without its message, and none of what Postgres
 // said: an unhandled error in production then names the line and nothing
 // else. So each error is logged as a plain object: its name and message,
-// Postgres's fields (`code`, `detail`, `hint`, …), the SQL Drizzle ran but
-// never its parameters, which may hold values, the same for its cause, and
-// its stack last.
+// Postgres's fields (`code`, `constraint`, `table`, …), the SQL Drizzle ran
+// but never its parameters, which may hold values, the same for its cause,
+// and its stack last. Nor Postgres's `detail`, which quotes the row that
+// broke a constraint ("Key (key)=(…) already exists", "Failing row
+// contains (…)"): a token's hash, a name, a value.
 
 /**
  * The fields postgres.js copies from a Postgres error response, each by the
  * name a log line gives it: the names node-postgres gave, which logs kept.
+ * All but `detail`, which may quote a row.
  */
 const POSTGRES_FIELDS = [
   ['severity', 'severity'],
   ['code', 'code'],
-  ['detail', 'detail'],
   ['hint', 'hint'],
   ['position', 'position'],
   ['where', 'where'],
