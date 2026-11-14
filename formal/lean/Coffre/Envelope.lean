@@ -1,4 +1,4 @@
-import Coffre.Decide
+import Std.Data.String.ToNat
 
 /-!
 # Envelope encryption: what a ciphertext is bound to
@@ -6,8 +6,9 @@ import Coffre.Decide
 `packages/core/src/envelope.ts` and `context.ts`: each version's value is
 sealed under a fresh data key (DEK) with AES-256-GCM, its AAD the secret's
 ids; the vault wraps the DEK under the KEK, its AAD the whole context: the
-ids, a personal config's owner (hashed), and whether it is sensitive, then
-the KEK's identity (`kek/local.ts`).
+ids, a personal config's owner (hashed), whether it is sensitive or plain,
+and, from envelope format 2, the version's number, then the KEK's identity
+(`kek/local.ts`).
 
 We do not prove AES-GCM secure. We take the standard property of an AEAD,
 integrity of ciphertexts, as an assumption about the world (`Assumptions`):
@@ -19,28 +20,28 @@ is one the vault made for exactly that context.
 - `encodeAad_injective`: no two contexts encode to the same AAD.
 - `open_only_as_sealed`: what opens as `ctx` is a value whose key the vault
   wrapped as exactly `ctx`, and the value encrypted under that key: no
-  swap across projects, environments, keys, owners or sensitivity.
-- `versions_not_bound`: what is not bound. Two versions of one key share a
-  context, so either's row opens as the other's: a rollback, which needs a
-  write to the database and is the limit coffre accepts everywhere
+  swap across projects, environments, keys, owners, sensitivity, plainness
+  or versions.
+- `versions_bound`: a row whose key the vault never wrapped as the version
+  asked for does not open: an older version's row put back over the newer,
+  or a wrap of before format 2, which names no version. A write to the
+  database can still make the older version the current one, which then
+  opens as itself: the rollback coffre accepts everywhere
   (docs/design/oidc.md, "Rollback is the accepted limit").
-- `no_person_opens_sensitive`: the decision and the binding together. Even
-  when an attacker rewrites the database's sensitivity, owner or place
-  columns, a person is handed back only a value whose key the vault wrapped
-  not sensitive for that place, and no personal config's value but their own;
-  `sensitive_value_never_reaches_a_person`: so never a value whose key it
-  only ever wrapped sensitive.
 -/
 
 namespace Coffre.Envelope
 
-/-- `SecretContext`: the ids, a personal config's owner as `ownerKey` hashes them, and whether it is sensitive. -/
+/-- `SecretContext`: the ids, a personal config's owner as `ownerKey` hashes them, whether it is sensitive or plain, and
+the version's number, none in a wrap of before envelope format 2. -/
 structure Ctx where
   project : String
   env : String
   secret : String
   owner : Option String
   sensitive : Bool
+  plain : Bool
+  version : Option Nat
   deriving DecidableEq, Repr, Inhabited
 
 /-! ## The AAD encoding is injective -/
@@ -99,12 +100,16 @@ def AAD_VERSION : String := "coffre.aad.v1"
 def fields (c : Ctx) : List (List Char) :=
   [AAD_VERSION.toList, c.project.toList, c.env.toList, c.secret.toList] ++
     ((c.owner.map fun o => ["owner:".toList ++ o.toList]).getD []) ++
-    (if c.sensitive then ["sensitive".toList] else [])
+    (if c.sensitive then ["sensitive".toList] else []) ++
+    (if c.plain then ["plain".toList] else []) ++
+    ((c.version.map fun n => ["version:".toList ++ (Nat.repr n).toList]).getD [])
 
-/-- `encodeAad`: `coffre.aad.v1|<project>|<environment>|<secret>[|owner:<hash>][|sensitive]`. -/
+/-- `encodeAad`: `coffre.aad.v1|<project>|<environment>|<secret>[|owner:<hash>][|sensitive][|plain][|version:<n>]`. -/
 def encodeAad (c : Ctx) : List Char := joinSep (fields c)
 
-/-- What `checkContext` ensures, and all injectivity needs: no field holds the separator (a UUID, a hex hash). -/
+/-- What `checkContext` ensures that injectivity needs: no field holds the separator (a UUID, a hex hash; a version's
+decimal digits never do, which `fields_sep` proves). It needs none of `checkContext`'s other rules (never `plain` with
+`sensitive`, a version from 1). -/
 def Wellformed (c : Ctx) : Prop :=
   SEP ∉ c.project.toList ∧ SEP ∉ c.env.toList ∧ SEP ∉ c.secret.toList ∧ ∀ o, c.owner = some o → SEP ∉ o.toList
 
@@ -112,7 +117,7 @@ theorem fields_sep {c : Ctx} (h : Wellformed c) : ∀ w ∈ fields c, SEP ∉ w 
   obtain ⟨hp, he, hs, ho⟩ := h
   intro w hw
   simp only [fields, List.mem_append, List.mem_cons, List.not_mem_nil, or_false] at hw
-  rcases hw with ((hw | hw | hw | hw) | hw) | hw
+  rcases hw with ((((hw | hw | hw | hw) | hw) | hw) | hw) | hw
   · subst hw; decide
   · subst hw; exact hp
   · subst hw; exact he
@@ -127,16 +132,33 @@ theorem fields_sep {c : Ctx} (h : Wellformed c) : ∀ w ∈ fields c, SEP ∉ w 
   · split at hw
     · simp at hw; subst hw; decide
     · simp at hw
+  · split at hw
+    · simp at hw; subst hw; decide
+    · simp at hw
+  · cases hc : c.version with
+    | none => simp [hc] at hw
+    | some n =>
+      simp only [hc, Option.map_some, Option.getD_some, List.mem_cons, List.not_mem_nil, or_false] at hw
+      subst hw
+      simp only [List.mem_append, not_or]
+      refine ⟨by decide, fun h => ?_⟩
+      rw [Nat.toList_repr] at h
+      exact absurd (Nat.isDigit_of_mem_toDigits (by decide) (by decide) h) (by decide)
+
+/-- A version's decimal digits name one number. -/
+theorem toDigits_ten_inj {n m : Nat} : Nat.toDigits 10 n = Nat.toDigits 10 m ↔ n = m :=
+  ⟨fun h => Nat.repr_injective (by rw [Nat.repr_eq_ofList_toDigits, Nat.repr_eq_ofList_toDigits, h]), (· ▸ rfl)⟩
 
 /-- **The AAD names one context.** Two well-formed contexts with the same AAD are the same context. -/
 theorem encodeAad_injective {c d : Ctx} (hc : Wellformed c) (hd : Wellformed d)
     (h : encodeAad c = encodeAad d) : c = d := by
   have := joinSep_injective (by simp [fields]) (by simp [fields]) (fields_sep hc) (fields_sep hd) h
-  obtain ⟨p, e, s, o, sens⟩ := c
-  obtain ⟨p', e', s', o', sens'⟩ := d
+  obtain ⟨p, e, s, o, sens, pl, v⟩ := c
+  obtain ⟨p', e', s', o', sens', pl', v'⟩ := d
   simp only [fields, List.cons_append, List.cons.injEq, String.toList_inj] at this
   obtain ⟨-, rfl, rfl, rfl, rest⟩ := this
-  cases o <;> cases o' <;> cases sens <;> cases sens' <;> simp_all [String.toList_inj]
+  cases o <;> cases o' <;> cases sens <;> cases sens' <;> cases pl <;> cases pl' <;> cases v <;> cases v' <;>
+    simp_all [String.toList_inj, toDigits_ten_inj]
 
 /-- The wrap's AAD: the context's, then the KEK's identity (`|local|<id>|<version>`), the same for every key one KEK wraps. -/
 def wrapAad (kekId : List Char) (c : Ctx) : List Char := encodeAad c ++ kekId
@@ -146,7 +168,7 @@ theorem wrapAad_injective {k : List Char} {c d : Ctx} (hc : Wellformed c) (hd : 
   encodeAad_injective hc hd (List.append_cancel_right h)
 
 /-- The value's own AAD: the ids alone, so that a version made sensitive keeps its ciphertext. -/
-def valueAad (c : Ctx) : List Char := encodeAad { c with owner := none, sensitive := false }
+def valueAad (c : Ctx) : List Char := encodeAad { c with owner := none, sensitive := false, plain := false, version := none }
 
 /-! ## An ideal AEAD, and what was sealed
 
@@ -215,7 +237,8 @@ def Ctx.ids (c : Ctx) : String × String × String := (c.project, c.env, c.secre
 
 theorem valueAad_injective {c d : Ctx} (hc : Wellformed c) (hd : Wellformed d) (h : valueAad c = valueAad d) :
     c.ids = d.ids := by
-  have := encodeAad_injective (c := { c with owner := none, sensitive := false }) (d := { d with owner := none, sensitive := false })
+  have := encodeAad_injective (c := { c with owner := none, sensitive := false, plain := false, version := none })
+    (d := { d with owner := none, sensitive := false, plain := false, version := none })
     ⟨hc.1, hc.2.1, hc.2.2.1, by simp⟩ ⟨hd.1, hd.2.1, hd.2.2.1, by simp⟩ h
   simp only [Ctx.mk.injEq] at this
   simp [Ctx.ids, this]
@@ -226,7 +249,7 @@ variable {dec : Key → List Char → Cipher → Option Key} {decValue : Key →
 /--
 **A row opens only as it was sealed.** Whatever the database holds, if it
 opens as `ctx`, the vault wrapped its key as exactly `ctx` (its project,
-environment, key, owner and sensitivity), and what opens is the value the
+environment, key, owner, sensitivity, plainness and version), and what opens is the value the
 app encrypted under that key, for those ids.
 -/
 theorem open_only_as_sealed (A : Assumptions dec decValue kek kekId values wraps) {ctx : Ctx} (hctx : Wellformed ctx)
@@ -245,105 +268,20 @@ theorem open_only_as_sealed (A : Assumptions dec decValue kek kekId values wraps
     exact ⟨w, hwm, hctxw, hww, v, hv, hdek, hplain, hsealed, valueAad_injective (A.wellformedValues v hv) hctx haad⟩
 
 /--
-**What is not bound: the version.** Two versions of one key share its
-context, so either one's row opens in the other's place: putting back an
-older version's row reads its older value. That takes a write to the
-database, which could as well point the key at its older version: the
-rollback coffre accepts everywhere.
+**The version is bound.** A row opens as version `n` of a key only if the
+vault wrapped its data key as version `n` of that key: an older version's
+row put back over the newer one does not open, nor does a wrap of before
+envelope format 2, which names no version, as every `open` of 0.16 names
+one. A write to the database can still make the older version the current
+one, which opens as itself: the rollback coffre accepts everywhere.
 -/
-theorem versions_not_bound (A : Assumptions dec decValue kek kekId values wraps) {w : Wrap Key Cipher}
-    {v : Value Key Cipher Plain} (hw : w ∈ wraps) (hv : v ∈ values) (hdek : v.dek = w.dek)
-    (hids : valueAad v.ids = valueAad w.ctx) {ctx : Ctx} (hsame : w.ctx = ctx) :
-    openRow dec decValue kek kekId ctx ⟨w.wrapped, v.sealed⟩ = some v.plain := by
-  have h₁ := A.correctWrap w hw
-  have h₂ := A.correctValue v hv
-  subst hsame
-  simp [openRow, h₁, ← hdek, ← hids, h₂]
-
-/-! ## The decision and the binding together
-
-The vault opens a key with the context its decision read (`context` in
-`vault.ts`): the ids, its environment's owner, hashed, and whether the
-version is sensitive, all as the database says. An attacker who writes to
-the database can change any of them. The decision then decides on what they
-wrote, and the binding refuses to open what they lied about. -/
-
-/-- The context a read opens with: its environment's owner as `ownerKey` hashes them, and the sensitivity the decision read. -/
-def readCtx (ownerKey : String → String) (k : KeyRead) (secretId : String) : Ctx :=
-  { project := k.secret.project, env := k.secret.env, secret := secretId,
-    owner := ((k.envs.get? k.secret.env).bind (·.owner)).map ownerKey,
-    sensitive := k.sensitive }
-
-theorem allowed_not_sensitive {k : KeyRead} {vet : Code} (hperson : k.principal.startsWith "user:" = true)
-    (hb : handsBack (k.purpose.getD "") k.keepsSensitive = true) (h : k.decide vet = none) : k.sensitive = false := by
-  cases hs : k.sensitive
-  · rfl
-  · have := no_person_reads_sensitive k vet hperson hs hb
-    rw [h] at this; cases this
-
-theorem allowed_own_config {k : KeyRead} {vet : Code} (h : k.decide vet = none) :
-    ∀ o, k.envs.get? k.secret.env = some o → o.owner = none ∨ o.owner = some k.principal := by
-  intro o ho
-  cases hown : o.owner with
-  | none => exact Or.inl rfl
-  | some v =>
-    refine Or.inr ?_
-    cases hv : decide (v = k.principal) with
-    | true => simp at hv; rw [hv]
-    | false =>
-    have hne : v ≠ k.principal := by simpa using hv
-    have hp : some k.principal ≠ o.owner := by rw [hown]; exact fun e => hne (Option.some.inj e).symm
-    have := personal_owner_only (r := k.reader) (p := k.permission) (held := k.held) (need := none) (owns := false)
-      ho (by simp [hown]) (Or.inl hp)
-    unfold KeyRead.decide at h
-    rw [this] at h
-    simp [sensitiveRefusal, useOnlyRefusal, Option.orElse] at h
-
-/--
-**No person opens a sensitive value, nor another's personal config, whatever
-the database says.** Take any read the vault allows a person, to be handed
-back, with any row: the sensitivity, owner and place it was decided on as an
-attacker may have rewritten them. If the row opens, the vault once wrapped
-that value's key not sensitive, for that place, and, if in a personal config,
-in the reader's own (as `ownerKey` names them).
--/
-theorem no_person_opens_sensitive (A : Assumptions dec decValue kek kekId values wraps) (ownerKey : String → String)
-    {k : KeyRead} {vet : Code} {secretId : String} (hctx : Wellformed (readCtx ownerKey k secretId))
-    (hperson : k.principal.startsWith "user:" = true)
-    (hb : handsBack (k.purpose.getD "") k.keepsSensitive = true) (hallowed : k.decide vet = none)
-    {row : Row Cipher} {m : Plain} (hopen : openRow dec decValue kek kekId (readCtx ownerKey k secretId) row = some m) :
-    ∃ v ∈ values, v.plain = m ∧ ∃ w ∈ wraps, w.dek = v.dek ∧ w.ctx = readCtx ownerKey k secretId ∧
-      w.ctx.sensitive = false ∧ (w.ctx.owner = none ∨ w.ctx.owner = some (ownerKey k.principal)) := by
-  obtain ⟨w, hw, hctxw, -, v, hv, hdek, hplain, -, -⟩ := open_only_as_sealed A hctx hopen
-  refine ⟨v, hv, hplain, w, hw, hdek.symm, hctxw, ?_, ?_⟩
-  · rw [hctxw]; exact allowed_not_sensitive hperson hb hallowed
-  · rw [hctxw]
-    simp only [readCtx]
-    cases hrow : k.envs.get? k.secret.env with
-    | none => simp
-    | some o =>
-      rcases allowed_own_config hallowed o hrow with h | h <;> simp [h]
-
-/--
-So a value whose key the vault only ever wrapped sensitive never reaches a
-person, whatever the database says. That every wrap of a sensitive value's
-key is sensitive is a hypothesis here (`honly`): `rewrap` in `vault.ts` is
-written to keep it (`LOOSER`, and its re-check of the newest version under
-the head; only an Owner of the project makes one a secret, R30), and neither
-is modelled.
--/
-theorem sensitive_value_never_reaches_a_person (A : Assumptions dec decValue kek kekId values wraps)
-    (ownerKey : String → String) {v : Value Key Cipher Plain} (hv : v ∈ values)
-    (honly : ∀ w ∈ wraps, w.dek = v.dek → w.ctx.sensitive = true)
-    {k : KeyRead} {vet : Code} {secretId : String} (hctx : Wellformed (readCtx ownerKey k secretId))
-    (hperson : k.principal.startsWith "user:" = true)
-    (hb : handsBack (k.purpose.getD "") k.keepsSensitive = true) (hallowed : k.decide vet = none)
-    {row : Row Cipher} {m : Plain} (hopen : openRow dec decValue kek kekId (readCtx ownerKey k secretId) row = some m) :
-    ∃ v' ∈ values, v'.plain = m ∧ v' ≠ v := by
-  obtain ⟨v', hv', hplain, w, hw, hdek, -, hns, -⟩ := no_person_opens_sensitive A ownerKey hctx hperson hb hallowed hopen
-  refine ⟨v', hv', hplain, fun heq => ?_⟩
-  subst heq
-  have := honly w hw hdek
-  rw [hns] at this; cases this
+theorem versions_bound (A : Assumptions dec decValue kek kekId values wraps) {ctx : Ctx} (hctx : Wellformed ctx)
+    {row : Row Cipher} (hother : ∀ w ∈ wraps, w.wrapped = row.wrapped → w.ctx.version ≠ ctx.version) :
+    openRow dec decValue kek kekId ctx row = none := by
+  cases h : openRow dec decValue kek kekId ctx row with
+  | none => rfl
+  | some m =>
+    obtain ⟨w, hw, hctxw, hww, -⟩ := open_only_as_sealed A hctx h
+    exact absurd (congrArg Ctx.version hctxw) (hother w hw hww)
 
 end Coffre.Envelope

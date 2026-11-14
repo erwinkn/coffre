@@ -119,35 +119,6 @@ def account (j : Json) : Parse ServiceAccount := do
   let grants ← (← list (← req j "grants")).mapM fun g => do pure (← str (← req g "role"), ← place (← req g "place"))
   pure ⟨grants, ← optStr (field j "admittedBy")⟩
 
-def status (j : Json) : Parse Status := do
-  match ← str j with
-  | "active" => pure .active
-  | "removed" => pure .removed
-  | "unknown" => pure .unknown
-  | "tampered" => pure .tampered
-  | s => throw s!"no status {s}"
-
-def reader (j : Json) : Parse Reader := do
-  pure ⟨← status (← req j "status"), ← holdings (← req j "live"), ← holdings (← req j "all")⟩
-
-def secretPlace (j : Json) : Parse SecretPlace := do pure ⟨← str (← req j "projectId"), ← str (← req j "environmentId")⟩
-
-def nature (j : Json) : Parse Nature := do
-  match ← str j with
-  | "plain" => pure .plain
-  | "secret" => pure .secret
-  | "sensitive" => pure .sensitive
-  | s => throw s!"no nature {s}"
-
-def envRows (j : Json) : Parse (Table EnvRow) := do
-  (← list j).mapM fun pair => do
-    let id ← str (← req pair "id")
-    let e ← req pair "row"
-    pure (id, ⟨← str (← req e "projectId"), ← str (← req e "slug"), ← optStr (field e "owner"),
-      ← optStr (← present e "parentId"), ← (← req e "deleted").getBool?⟩)
-
-def code (c : Code) : Json := match c with | some s => Json.str s | none => Json.null
-
 def jsonPerms (ps : List Permission) : Json := Json.arr (ps.map (Json.str ·.name)).toArray
 
 def jsonGrant (g : ScopeGrant) : Json :=
@@ -162,16 +133,10 @@ def jsonGrant (g : ScopeGrant) : Json :=
       | some (.keys ids) => [("reads", Json.arr (ids.map Json.str).toArray)]
       | none => []))
 
-def action (j : Json) : Parse Action := do
-  match ← str j with
-  | "secret.read" => pure .read
-  | "key.wrap" => pure .wrap
-  | "key.rewrap" => pure .rewrap
-  | s => throw s!"no action {s}"
-
 def aadCtx (j : Json) : Parse Envelope.Ctx := do
   pure ⟨← str (field j "projectId"), ← str (field j "environmentId"), ← str (field j "secretId"),
-    ← optStr (field j "owner"), ← flag (field j "sensitive")⟩
+    ← optStr (field j "owner"), ← flag (field j "sensitive"), ← flag (field j "plain"),
+    ← if (field j "version").isNull then pure none else some <$> (field j "version").getNat?⟩
 
 /-- `verifyEntries`' control, each entry's hash and MAC checked by the driver, which holds the keys. -/
 def verifyCase (j : Json) : Parse Json := do
@@ -218,50 +183,9 @@ def answer (j : Json) : Parse Json := do
     let sc ← (← list (← req j "scope")).mapM fun g => do pure (← str (← req g "role"), ← place (← req g "place"), ← optDef (field g "kept"))
     pure (Json.bool (issuesCredential (← holdings (field j "holder")) (← optScope (field j "setting")) (← str (field j "actor"))
       (← account (field j "account")) sc))
-  | "handsBack" => pure (Json.bool (handsBack (← str (field j "purpose")) (← flag (field j "keepsSensitive"))))
-  | "keyRefusals" =>
-    let r ← reader (field j "reader")
-    let principal ← str (field j "principal")
-    let p ← permission (field j "permission")
-    let secrets ← (← list (← req j "secrets")).mapM secretPlace
-    let held ← (← list (← req j "at")).mapM secretPlace
-    if held.length < secrets.length then throw "a place for each secret"
-    let envs ← envRows (← req j "environments")
-    let needs ← (← list (← req j "needs")).mapM fun n => if n.isNull then pure none else some <$> permissions n
-    let owns ← (if (field j "owns").isNull then pure [] else list (field j "owns")) >>= (·.mapM flag)
-    let codes := (List.range secrets.length).map fun i =>
-      keyRefusal r principal p (secrets.getD i default) (held.getD i default) envs (needs.getD i none) (owns.getD i false)
-    pure (Json.arr (codes.map code).toArray)
-  | "sensitiveRefusals" =>
-    let r ← reader (field j "reader")
-    let a ← action (field j "action")
-    let principal ← str (field j "principal")
-    let purpose ← optStr (field j "purpose")
-    let keeps ← flag (field j "keepsSensitive")
-    let codes ← (← list (← req j "codes")).mapM optStr
-    let secrets ← (← list (← req j "secrets")).mapM fun s => do pure (← str (field s "projectId"), ← flag (field s "sensitive"))
-    let via ← (if (field j "viaReference").isNull then pure [] else list (field j "viaReference")) >>= (·.mapM flag)
-    let out := (List.range secrets.length).map fun i =>
-      let (project, sensitive) := secrets.getD i ("", false)
-      sensitiveRefusal (codes.getD i none) r a principal purpose keeps project sensitive (via.getD i false)
-    pure (Json.arr (out.map code).toArray)
-  | "useOnlyRefusals" =>
-    let r ← reader (field j "reader")
-    let a ← action (field j "action")
-    let purpose ← optStr (field j "purpose")
-    let codes ← (← list (← req j "codes")).mapM optStr
-    let secrets ← (← list (← req j "secrets")).mapM fun s => do pure (← secretPlace s, ← str (← req s "secretId"))
-    let out := (List.range secrets.length).map fun i =>
-      let (place, id) := secrets.getD i (default, "")
-      useOnlyRefusal (codes.getD i none) r a purpose place id
-    pure (Json.arr (out.map code).toArray)
   | "useOnly" =>
     let key ← req j "key"
     pure (Json.bool (useOnly (← holdings (field j "holder")) (← str (← req key "projectId")) (← str (← req key "environmentId")) (← str (← req key "secretId"))))
-  | "referenceRefusal" =>
-    let source ← req j "source"
-    pure (code (referenceRefusal (← reader (← req j "reader")) (← secretPlace (← req j "holder")) (← secretPlace source) (← str (← req source "secretId"))
-      (← envRows (← req j "environments")) (← nature (← req j "nature"))))
   | "encodeAad" => pure (Json.str (String.ofList (Envelope.encodeAad (← aadCtx (field j "ctx")))))
   | "verifyEntries" => verifyCase j
   | _ => throw s!"no op {op}"

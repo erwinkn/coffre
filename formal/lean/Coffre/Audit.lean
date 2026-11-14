@@ -1,10 +1,14 @@
 /-!
 # The audit chain: tamper-evidence and the bounded walk
 
+This is 0.14's chain: in 0.16.0 only the restore code awaiting its port
+(`packages/cli/src/restore.ts`) reads it, and 0.16's Merkle log
+(`@coffre/core/log`) has no Lean model.
+
 `packages/core/src/audit/chain.ts`: each entry's hash covers the one before,
 its fields and its MAC; `verifyEntries` checks a run of entries from a
-starting point. The app walks the chain from where it last verified
-(`walkChain` in `packages/server/src/db/audit.ts`), a batch at a time, each
+starting point. 0.14's app walked the chain from where it last verified
+(`walkChain`, in its `packages/server/src/db/audit.ts`), a batch at a time, each
 starting where the last one stopped (R25), and the vault signs checkpoints:
 a sequence number and the hash of the entry there.
 

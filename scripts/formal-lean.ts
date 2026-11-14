@@ -1,5 +1,5 @@
-// Holds coffre's access rules, the vault's per-key decision, the AAD encoding
-// and the audit chain's verifier to their Lean model, case by case
+// Holds coffre's access rules, the AAD encoding and 0.14's audit chain
+// verifier to their Lean model, case by case
 // (docs/formal.md). Each case runs through the TypeScript here and through
 // formal/lean's oracle, which runs the model the proofs are about; any answer
 // that differs fails the run and prints the case.
@@ -44,8 +44,6 @@ import {
 } from '../packages/core/src/access.ts';
 import { deriveLogKey, GENESIS_HASH, entryHash, entryMac, sealEntry, verifyEntries, type LogFields, type LogKey, type StoredEntry } from '../packages/core/src/audit/chain.ts';
 import { encodeAad, type SecretContext } from '../packages/core/src/context.ts';
-import { handsBack, type RefusalCode } from '../packages/core/src/vault.ts';
-import { keyRefusals, referenceRefusal, sensitiveRefusals, useOnlyRefusals, type EnvironmentRow, type Reader, type SecretPlace } from '../packages/vault/src/decide.ts';
 
 const [oracle, ...flags] = process.argv.slice(2);
 if (oracle === undefined || !flags.every((flag) => flag === '--long' || /^--seed=\d+$/.test(flag))) {
@@ -178,12 +176,10 @@ const canonical = (value: unknown): unknown =>
   Array.isArray(value) ? value.map(canonical)
     : value !== null && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => [k, canonical(v)]))
       : value;
-// How often each yes-or-no function says yes, or a decision allows every key: a generator that only ever met one
-// answer would hold the model to nothing. Undefined for functions that answer otherwise.
-const yes = (op: string, value: unknown): boolean | undefined => {
-  if (op === 'referenceRefusal') return value === null;
+// How often each yes-or-no function says yes: a generator that only ever met one answer would hold the model to
+// nothing. Undefined for functions that answer otherwise.
+const yes = (value: unknown): boolean | undefined => {
   if (typeof value === 'boolean') return value;
-  if (Array.isArray(value)) return value.length > 0 && value.every((code) => code === null);
   if (typeof value === 'object' && value !== null && 'ok' in value) return value.ok === true;
   return undefined;
 };
@@ -197,10 +193,10 @@ function compare(): void {
   const answers = run.stdout.trimEnd().split('\n');
   if (answers.length !== cases.length) throw new Error(`the oracle answered ${answers.length} of ${cases.length} cases`);
   cases.forEach(({ input, expected }, i) => {
-    const count = counts.get(input.op) ?? { cases: 0, differ: 0, yes: yes(input.op, expected) === undefined ? undefined : 0 };
+    const count = counts.get(input.op) ?? { cases: 0, differ: 0, yes: yes(expected) === undefined ? undefined : 0 };
     counts.set(input.op, count);
     count.cases += 1;
-    if (count.yes !== undefined && yes(input.op, expected) === true) count.yes += 1;
+    if (count.yes !== undefined && yes(expected) === true) count.yes += 1;
     const answer = JSON.parse(answers[i]!) as unknown;
     if (JSON.stringify(canonical(answer)) === JSON.stringify(canonical(expected))) return;
     count.differ += 1;
@@ -262,113 +258,17 @@ repeat(6000, () => {
   const asked = some([{ role: pick(ROLE_NAMES), place: place() }, { role: pick(ROLE_NAMES), place: place(), kept: definition() }], 2);
   add({ op: 'issuesCredential', holder, setting: where, actor, account: of, scope: asked }, issuesCredential(holder, where, actor, of, asked));
 });
-for (const purpose of ['reveal', 'run', 'compare', 'copy', 'use', 'expose', '', 'other']) {
-  for (const keepsSensitive of [true, false]) add({ op: 'handsBack', purpose, keepsSensitive }, handsBack({ purpose, keepsSensitive }));
-}
-
-// --- the vault's decision ----------------------------------------------------
-function environments(): Map<string, EnvironmentRow> {
-  const rows = new Map<string, EnvironmentRow>();
-  for (const id of ENVIRONMENTS) {
-    if (id === '' || id === 'ghost' || chance(0.1)) continue;
-    const personal = id.endsWith('@ada');
-    rows.set(id, {
-      projectId: chance(0.95) ? projectOf(id) : pick(PROJECTS),
-      slug: slugOf(id) ?? 'none',
-      owner: personal ? (chance(0.8) ? 'user:ada' : null) : chance(0.05) ? pick(PEOPLE) : null,
-      parentId: personal || id.endsWith('fork') ? (chance(0.9) ? `${projectOf(id)}/dev` : pick(ENVIRONMENTS)) : null,
-      deleted: chance(0.08),
-      archived: chance(0.1),
-    });
-  }
-  return rows;
-}
-const STATUSES = ['active', 'active', 'active', 'active', 'active', 'active', 'removed', 'unknown', 'tampered'] as const;
-function reader(): Reader {
-  // Half the time someone who holds much: an Owner or Developer of everything, on a session.
-  const live = chance(0.5) ? holdings() : { ...holdings(), role: pick(['owner', 'developer'] as const), scope: { projects: 'all' as const, environments: 'all' as const }, credentialScope: chance(0.6) ? null : [scopeGrant()] };
-  return { status: pick(STATUSES), live, all: { ...live, grants: [...live.grants, ...some([grant(), grant()], 2)] } };
-}
-const secretPlace = (): SecretPlace => {
-  // A personal config's key a fifth of the time: its owner's rules are the least common, and the strictest.
-  const environmentId = chance(0.2) ? 'market/dev@ada' : pick(ENVIRONMENTS);
-  return { projectId: chance(0.9) ? projectOf(environmentId) : pick(PROJECTS), environmentId };
-};
-const CODES: (RefusalCode | null)[] = [null, null, null, 'no_grant', 'personal', 'deleted', 'ended'];
-/** A key where its value is held: its place, and its ID. */
-const heldKey = () => ({ ...secretPlace(), secretId: pick(KEYS) });
+// Whether a value is use-only: a workload's, unlisted by key where it is held; nobody else's.
 /** A workload whose scope covers `key`'s place half the time, listing it, `'*'` or others. */
 function workload(key: { projectId: string; environmentId: string }): Holdings {
   const at = (): ScopeGrant => ({ ...scopeGrant(), projectId: key.projectId, environmentId: chance(0.5) ? null : key.environmentId });
   return { ...holdings(), kind: 'workload', credentialScope: chance(0.1) ? null : some([at(), scopeGrant(), at()], 3) };
 }
-repeat(10000, () => {
-  const who = reader();
-  const principal = chance(0.4) ? 'user:ada' : pick(PEOPLE);
-  const permission = pick(PERMISSIONS);
-  const secrets = chance(0.5) ? [secretPlace()] : some([secretPlace(), secretPlace(), secretPlace()], 3);
-  const at = secrets.map((secret) => (chance(0.6) ? secret : secretPlace()));
-  const rows = environments();
-  const needs = secrets.map(() => (chance(0.6) ? null : unique(some(PERMISSIONS, 2))));
-  const owns = secrets.map(() => chance(0.2));
-  add(
-    { op: 'keyRefusals', reader: who, principal, permission, secrets, at, environments: [...rows].map(([id, row]) => ({ id, row })), needs, owns },
-    keyRefusals(who, { principal, permission, secrets, at, environments: rows, needs, owns }),
-  );
-  const action = pick(['secret.read', 'secret.read', 'key.wrap', 'key.rewrap'] as const);
-  const purpose = chance(0.1) ? undefined : pick(['reveal', 'run', 'compare', 'copy', 'use', 'expose', 'other']);
-  const keepsSensitive = chance(0.3) ? undefined : chance(0.5);
-  const codes = secrets.map(() => pick(CODES));
-  const flagged = secrets.map((secret) => ({ projectId: secret.projectId, ...(chance(0.3) ? {} : { sensitive: chance(0.6) }) }));
-  const viaReference = chance(0.3) ? undefined : secrets.map(() => chance(0.4));
-  add(
-    {
-      op: 'sensitiveRefusals', codes, reader: who, action, principal, ...(purpose === undefined ? {} : { purpose }),
-      ...(keepsSensitive === undefined ? {} : { keepsSensitive }), secrets: flagged, ...(viaReference === undefined ? {} : { viaReference }),
-    },
-    sensitiveRefusals(codes, who, { action, principal, purpose, keepsSensitive, secrets: flagged, viaReference }),
-  );
-  // A workload's list, at where each value is held.
-  const held = secrets.map((secret) => ({ ...secret, secretId: pick(KEYS) }));
-  const listing: Reader = chance(0.5) ? who : { ...who, live: workload(held.length === 0 ? heldKey() : pick(held)) };
-  add(
-    { op: 'useOnlyRefusals', codes, reader: listing, action, ...(purpose === undefined ? {} : { purpose }), secrets: held },
-    useOnlyRefusals(codes, listing, { action, purpose, secrets: held }),
-  );
-});
-
-// Whether a value is use-only: a workload's, unlisted by key where it is held; nobody else's.
 repeat(6000, () => {
-  const key = heldKey();
+  const environmentId = pick(ENVIRONMENTS);
+  const key = { projectId: chance(0.9) ? projectOf(environmentId) : pick(PROJECTS), environmentId, secretId: pick(KEYS) };
   const holder = chance(0.7) ? workload(key) : holdings();
   add({ op: 'useOnly', holder, key }, useOnly(holder, key));
-});
-
-// A personal config's key read by its owner, whose credential and holdings at its parent decide.
-repeat(3000, () => {
-  const live: Holdings = { ...holdings(), role: pick(['developer', 'auditor', 'member'] as const), scope: { projects: 'all', environments: 'all' }, credentialScope: chance(0.3) ? null : some([scopeGrant(), { ...scopeGrant(), projectId: 'market', environmentId: 'market/dev' }], 2) };
-  const who: Reader = { status: 'active', live, all: live };
-  const rows = environments();
-  rows.set('market/dev@ada', { projectId: 'market', slug: 'dev', owner: 'user:ada', parentId: 'market/dev', deleted: chance(0.05), archived: false });
-  const secrets = [{ projectId: 'market', environmentId: 'market/dev@ada' }];
-  const permission = pick(PERMISSIONS);
-  add(
-    { op: 'keyRefusals', reader: who, principal: 'user:ada', permission, secrets, at: secrets, environments: [...rows].map(([id, row]) => ({ id, row })), needs: [null], owns: [false] },
-    keyRefusals(who, { principal: 'user:ada', permission, secrets, at: secrets, environments: rows, needs: [null], owns: [false] }),
-  );
-});
-
-// Making a reference: the maker's rights at both ends, the source's nature, and personal configs at either.
-repeat(6000, () => {
-  const holder = secretPlace();
-  const source = heldKey();
-  const who = chance(0.7) ? reader() : { ...reader(), status: 'active' as const, live: { ...workload(source), role: 'owner' as const, scope: EVERYWHERE_SCOPE } };
-  const rows = environments();
-  const nature = pick(['plain', 'secret', 'sensitive'] as const);
-  add(
-    { op: 'referenceRefusal', reader: who, holder, source, environments: [...rows].map(([id, row]) => ({ id, row })), nature },
-    referenceRefusal(who, holder, source, rows, nature),
-  );
 });
 
 // --- envelope: the AAD -------------------------------------------------------
@@ -380,8 +280,15 @@ const uuid = () => {
   const h = hex(16);
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 };
+// A version's number of 1 to 16 digits, the largest the code takes now and then; none, as a wrap of before envelope
+// format 2 has. Sensitive, plain or neither, never both (`checkContext`).
+const versionNumber = () => (chance(0.05) ? Number.MAX_SAFE_INTEGER : 1 + Math.floor(random() * 10 ** Math.floor(1 + random() * 15)));
 repeat(2000, () => {
-  const ctx: SecretContext = { projectId: uuid(), environmentId: uuid(), secretId: uuid(), ...(chance(0.5) ? { owner: hex(32) } : {}), ...(chance(0.5) ? { sensitive: true as const } : {}) };
+  const nature = pick([{}, { sensitive: true as const }, { plain: true as const }]);
+  const ctx: SecretContext = {
+    projectId: uuid(), environmentId: uuid(), secretId: uuid(), ...(chance(0.5) ? { owner: hex(32) } : {}), ...nature,
+    ...(chance(0.2) ? {} : { version: versionNumber() }),
+  };
   add({ op: 'encodeAad', ctx }, encodeAad(ctx).toString('utf8'));
 });
 

@@ -2,9 +2,9 @@
 # Checks the Lean proofs in formal/lean and holds the model they are about to
 # the code (docs/formal.md): builds every proof and the oracle, then runs
 # scripts/formal-lean.ts, which compares the oracle's answers with
-# packages/core's and the vault's on generated cases.
+# packages/core's on generated cases.
 #
-#   scripts/formal-lean.sh                 the proofs, and about 120,000 cases
+#   scripts/formal-lean.sh                 the proofs, and about 100,000 cases
 #   scripts/formal-lean.sh --long          ten times as many cases
 #   scripts/formal-lean.sh --seed=42       another reproducible set of them
 #

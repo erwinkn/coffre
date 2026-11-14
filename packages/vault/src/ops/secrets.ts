@@ -192,10 +192,9 @@ function valid(item: KeyWrite): boolean {
  * decision, made again under the lock when a row it read moved, finds it
  * so too.
  *
- * A key made a reference (0.14's `referenceTargets` and the vault's
- * `referenceRefusal`) takes `secret.write` here, and `secret.read` where its
- * source is, `secret.use` too for a sensitive one: its maker hands the value
- * to whoever reads here. The source is a key of a live project and
+ * A key made a reference (0.14's `referenceTargets`) takes `secret.write`
+ * here, and `secret.read` where its source is, `secret.use` too for a
+ * sensitive one: its maker hands the value to whoever reads here. The source is a key of a live project and
  * environment, no personal config's, as is the key made one; it is no
  * reference, and nor is the key made one read by one: one hop. Each is
  * decided on what the write leaves, its other keys included. A reference
