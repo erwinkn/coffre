@@ -8,7 +8,7 @@ import { CoffreError } from '@coffre/client';
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect } from '../report.ts';
+import { expect, until } from '../report.ts';
 import type { Cli } from './cli.ts';
 import type { Person } from './people.ts';
 import { query } from './storage.ts';
@@ -82,10 +82,16 @@ export async function deletion(deployment: Deployment, cli: Cli, admin: Person):
   await admin.api.secrets.set(`${PROJECT}/prod`, { API_KEY: fresh });
   expect((await projectId(deployment, PROJECT)) !== id, 'the new project took the deleted one\'s row');
   expect((await admin.api.secrets.reveal(`${PROJECT}/prod/API_KEY`)).values.API_KEY === fresh, 'the new project does not read its own value');
-  const page = await admin.api.audit.list({ path: tombstone!.slug, limit: 500 }).catch((error: unknown) => error);
+  // The page lists the deletion once the signer has published it, within its minute.
+  type Page = Awaited<ReturnType<typeof admin.api.audit.list>>;
+  let page: Page | Error | undefined;
+  const deleted = () => page !== undefined && !(page instanceof Error) && page.entries.some((entry) => entry.action === 'project.delete' && entry.decision === 'allow');
+  await until('the deletion on the log under its tombstone', async () => {
+    page = await admin.api.audit.list({ path: tombstone!.slug, limit: 500 }).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
+    return page instanceof Error || deleted();
+  }, 90).catch(() => undefined);
   expect(!(page instanceof Error), 'the log cannot be read under the tombstone\'s slug', page instanceof Error ? page.message : page);
-  const { entries } = page as Awaited<ReturnType<typeof admin.api.audit.list>>;
-  expect(entries.some((entry) => entry.action === 'project.delete' && entry.decision === 'allow'), 'the deletion is not in the log under its tombstone', entries.slice(0, 5));
+  expect(deleted(), 'the deletion is not in the log under its tombstone', (page as Page | undefined)?.entries.slice(0, 5));
 
   // An environment alone, the same way.
   await admin.api.environments.update(`${PROJECT}/prod`, { archived: true });

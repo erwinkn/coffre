@@ -6,10 +6,10 @@
 // ends it at the next call, and every step is in the log under the client.
 import { createHash, randomBytes } from 'node:crypto';
 
-import { CoffreError } from '@coffre/client';
+import { CoffreError, type AuditEntryView } from '@coffre/client';
 
 import type { Deployment } from '../harness.ts';
-import { expect } from '../report.ts';
+import { expect, until } from '../report.ts';
 
 import { bearer } from '../browser.ts';
 import { canary, deviceLogin, DEV, personaOn, PROD, PROJECT, valuesIn, type Canaries, type People, type Person } from './people.ts';
@@ -210,14 +210,26 @@ export async function mcpConnect(deployment: Deployment, people: People): Promis
   expect(!(await discovers(deployment, third.access_token)), 'an access token outlived its disconnection');
   expect((await people.reader.api.apps.list()).apps.length === 0, 'a disconnected app is still listed');
 
-  // Every step in the log, under the client.
-  const { entries } = await people.admin.api.audit.list({ actor: people.reader.member, detail: '1', limit: 500 });
-  const mine = entries.filter((entry) => entry.metadata.clientId === clientId);
-  const count = (action: string) => mine.filter((entry) => entry.action === action && entry.decision === 'allow').length;
-  const counts = { connect: count('mcp.connect'), token: count('mcp.token'), disconnect: count('mcp.disconnect') };
-  expect(counts.connect === 3 && counts.token === 4 && counts.disconnect === 3, 'the log does not hold each connection, token and disconnection', counts);
+  // Every step in the log, under the client. 0.16 names it `client`; a reused code or refresh token is the vault's
+  // own disconnect, with no actor, so the whole log is read; Connected apps' is the credential's end, `token.revoke`
+  // (docs/design/0.16.md, "MCP"). The page lists an entry once the signer has published it, within its minute.
+  let entries: AuditEntryView[] = [];
+  let mine: AuditEntryView[] = [];
+  let counts = {};
+  const done = () => {
+    mine = entries.filter((entry) => entry.metadata.client === clientId);
+    const count = (action: string) => mine.filter((entry) => entry.action === action && entry.decision === 'allow').length;
+    const ended = entries.filter((entry) => entry.action === 'token.revoke' && entry.decision === 'allow' && entry.metadata.kind === 'mcp' && entry.metadata.credential === listed[0]!.id);
+    counts = { connect: count('mcp.connect'), token: count('mcp.token'), disconnect: count('mcp.disconnect'), revoked: ended.length };
+    return JSON.stringify(counts) === JSON.stringify({ connect: 3, token: 4, disconnect: 2, revoked: 1 });
+  };
+  await until('the connections, tokens and disconnections on the log', async () => {
+    ({ entries } = await people.admin.api.audit.list({ detail: '1', limit: 500 }));
+    return done();
+  }, 90).catch(() => undefined);
+  expect(done(), 'the log does not hold each connection, token and disconnection', counts);
   const reasons = mine.filter((entry) => entry.action === 'mcp.disconnect').map((entry) => entry.metadata.reason).sort();
-  expect(JSON.stringify(reasons) === JSON.stringify(['code_reused', 'person', 'refresh_reused']), 'the disconnections do not say why', reasons);
+  expect(JSON.stringify(reasons) === JSON.stringify(['code_reused', 'refresh_reused']), 'the disconnections do not say why', reasons);
   return '401 and both metadata documents; registered, approved, redeemed and discovered; only at /mcp, and only its token there; a reused refresh token, a reused code and a disconnection each end the connection, and the log says so';
 }
 
@@ -310,8 +322,17 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
 
   // 0.16 writes no entry for a tools/call: the vault's use and change log what matters, and these calls read names alone
   // (docs/design/0.16.md, "The server", MCP's OAuth). 0.14.7 logged each, `mcp.read` and `mcp.call`, under the client.
-  const { entries } = await people.admin.api.audit.list({ actor: people.reader.member, detail: '1', limit: 500 });
-  const mine = entries.filter((entry) => (entry.metadata.via as { clientId?: string } | undefined)?.clientId === clientId);
+  // Its connection's own entries aside, nothing names the client (`client`) or its connection (`via`), once the
+  // connection's entry is published.
+  let entries: AuditEntryView[] = [];
+  const connections = new Set<unknown>();
+  await until('the connection on the log', async () => {
+    ({ entries } = await people.admin.api.audit.list({ actor: people.reader.member, detail: '1', limit: 500 }));
+    for (const entry of entries) if (entry.action === 'mcp.connect' && entry.metadata.client === clientId) connections.add(entry.metadata.connection);
+    return connections.size > 0;
+  }, 90).catch(() => undefined);
+  expect(connections.size === 1, 'the connection is not in the log under its client', connections.size);
+  const mine = entries.filter((entry) => (entry.metadata.client === clientId && entry.action !== 'mcp.connect' && entry.action !== 'mcp.token') || connections.has(entry.metadata.via));
   expect(mine.length === 0, 'a read-only tools/call left an entry under the client', mine.map((entry) => entry.action));
   return `on 2026-07-28 and 2025-11-25, the Read tools as the reader: ${DEV} listed, ${PROD} refused, no value in any answer; headers held to the body; no entry for the calls, which read names alone`;
 }
@@ -446,10 +467,21 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   // No value in any answer; each change made once, by the person, via the client and its approval.
   const leaked = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
   expect(leaked.length === 0, 'a change tool answered with a secret value', leaked);
-  const { entries } = await admin.api.audit.list({ actor: changer.member, limit: 500 });
-  const viaApproval = (action: string) => entries.filter((entry) => entry.action === action && entry.decision === 'allow' && typeof (entry.metadata.via as { approvalId?: unknown } | undefined)?.approvalId === 'string');
-  const once = { archive: viaApproval('secret.archive').length, rename: viaApproval('secret.rename').length, write: viaApproval('secret.write').length };
-  expect(once.archive === 1 && once.rename === 1 && once.write === 2, 'the changes are not each made once, via the client and its approval', once);
+  // 0.16's change entry names the connection (`via`) and the approval (`approval`) by their IDs; the page lists
+  // each once the signer has published it, within its minute.
+  let entries: AuditEntryView[] = [];
+  let once = {};
+  const changed = () => {
+    const connections = new Set(entries.filter((entry) => entry.action === 'mcp.connect' && entry.metadata.client === clientId).map((entry) => entry.metadata.connection));
+    const viaApproval = (action: string) => entries.filter((entry) => entry.action === action && entry.decision === 'allow' && connections.has(entry.metadata.via) && typeof entry.metadata.approval === 'string');
+    once = { archive: viaApproval('secret.archive').length, rename: viaApproval('secret.rename').length, write: viaApproval('secret.write').length };
+    return JSON.stringify(once) === JSON.stringify({ archive: 1, rename: 1, write: 2 });
+  };
+  await until('the changes on the log', async () => {
+    ({ entries } = await admin.api.audit.list({ actor: changer.member, limit: 500 }));
+    return changed();
+  }, 90).catch(() => undefined);
+  expect(changed(), 'the changes are not each made once, via the client and its approval', once);
   const decisions = entries.filter((entry) => entry.action === 'mcp.approve').map((entry) => `${entry.decision} ${entry.reason ?? ''}`.trim()).sort();
   expect(JSON.stringify(decisions) === JSON.stringify(['allow', 'allow', 'allow', 'allow', 'deny approved', 'deny changed']), 'the decisions, and the two refused, are not in the log', decisions);
   return `Read stepped up to Write, saying how as its result; Write ticked beyond what was asked; with Write, the link without URL elicitation and an elicitation with it; nothing changed until ${changer.email} approved on coffre's page, another person, another site and a CLI session refused, a replayed requestState refused; each change made once, via the client and its approval; a value typed on the page only, and one coffre made reaching no one`;
