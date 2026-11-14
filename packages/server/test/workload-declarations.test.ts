@@ -12,7 +12,6 @@ import { routes } from '../src/api/routes.ts';
 import { PERSONAL_TOKEN_ROUTES } from '../src/api/personal-tokens.ts';
 import { ISSUING_ROUTES, WORKLOAD_ROUTES } from '../src/api/workload-routes.ts';
 import { PROOFS } from '../src/api/workloads.ts';
-import { ROUTE_SCOPES } from '../src/mcp/scopes.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -93,11 +92,9 @@ test("each route of the design is declared in the API and answers 501, naming th
   for (const key of Object.keys(routes) as (keyof typeof routes)[]) {
     assert.equal(typeof WORKLOAD_ROUTES[key], 'boolean', key);
     assert.equal(typeof PERSONAL_TOKEN_ROUTES[key], 'boolean', key);
-    assert.ok(key in ROUTE_SCOPES, key);
   }
   for (const key of ['POST /members/:member/bindings/:id/enrollments', 'POST /freezes', 'DELETE /freezes/:target', 'POST /members/:member/tokens/:id/approve'] as const) {
     assert.equal(PERSONAL_TOKEN_ROUTES[key], false, key);
-    assert.equal(ROUTE_SCOPES[key], null, key);
   }
   // A session reaches what a service token does, its handlers deciding, but issues nothing and changes no access; what a person does stays theirs.
   for (const key of ['GET /personal/:project', 'PATCH /secrets/:project/:environment', 'DELETE /members/:member/tokens/:id'] as const) {

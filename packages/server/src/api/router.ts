@@ -3,8 +3,8 @@ import type { z } from 'zod';
 import { errorResponse, jsonResponse, readJson } from '../http.ts';
 import type { ApiContext } from './context.ts';
 import { ApiError, badRequest, notFound, noteTampered } from './errors.ts';
-import { PARAMS, type Route } from './route.ts';
-import { routes } from './routes.ts';
+import { PARAMS, type Params, type Route } from './route.ts';
+import { routes, type RouteInput, type RouteKey, type RouteOutput } from './routes.ts';
 
 /**
  * The most an API request body may be, read as it streams and abandoned
@@ -122,6 +122,14 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
 
 /** Steps 2 and 3: the path's segments and the input checked, then the handler. */
 async function serveRoute(request: Request, url: URL, def: AnyRoute, params: Record<string, string>, ctx: ApiContext): Promise<Response> {
+  checkParams(params);
+  const raw = request.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(request, API_BODY_BYTES, {});
+  const query = request.method === 'GET' || def.query === undefined ? undefined : def.query.parse(Object.fromEntries(url.searchParams));
+  return jsonResponse(await runChecked(def, params, raw, query, ctx));
+}
+
+/** Each named segment as its schema reads it, or a 400. */
+function checkParams(params: Record<string, string>): void {
   for (const [name, value] of Object.entries(params)) {
     if (PARAMS[name] === undefined) continue;
     const parsed = PARAMS[name].safeParse(value);
@@ -129,12 +137,30 @@ async function serveRoute(request: Request, url: URL, def: AnyRoute, params: Rec
     // As its schema writes it: an id in lowercase, as the vault takes one.
     params[name] = parsed.data;
   }
-  const raw = request.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(request, API_BODY_BYTES, {});
+}
+
+/** The input checked, then the handler. */
+async function runChecked(def: AnyRoute, params: Record<string, string>, raw: unknown, query: unknown, ctx: ApiContext): Promise<unknown> {
   // An object body naming more than the cap is refused before validation walks every entry.
   if (raw !== null && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw).length > MAX_BODY_KEYS) {
     throw badRequest(`the body names more than ${MAX_BODY_KEYS} entries`);
   }
   const input = def.input === undefined ? undefined : def.input.parse(raw);
-  const query = request.method === 'GET' || def.query === undefined ? undefined : def.query.parse(Object.fromEntries(url.searchParams));
-  return jsonResponse(await def.run(ctx, { params, input, query } as never));
+  return def.run(ctx, { params, input, query } as never);
+}
+
+/**
+ * One route's handler run in process, with its segments and input checked
+ * as a request's are: what an MCP tool calls (`mcp/tools.ts`), as its
+ * connection, rather than a second request with a forged identity.
+ */
+export async function runRoute<K extends RouteKey>(key: K, params: Params<K>, input: RouteInput<K>, ctx: ApiContext): Promise<RouteOutput<K>> {
+  try {
+    const checked: Record<string, string> = { ...params };
+    checkParams(checked);
+    return (await runChecked(routes[key] as AnyRoute, checked, input ?? {}, undefined, ctx)) as RouteOutput<K>;
+  } catch (error) {
+    noteTampered(error, key, ctx.shown.request);
+    throw error;
+  }
 }

@@ -150,8 +150,15 @@ let oauth = { client: '', verifier: '', code: '', access: '', refresh: '', conne
 const MCP_REDIRECT = 'http://127.0.0.1/callback';
 const consent = () => {
   const challenge = createHash('sha256').update(oauth.verifier).digest('base64url');
-  return { client_id: oauth.client, redirect_uri: MCP_REDIRECT, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', state: 's', scope: 'read' };
+  return { client_id: oauth.client, redirect_uri: MCP_REDIRECT, response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', state: 's', scope: 'read reveal' };
 };
+/** A 2026-07-28 request to `/mcp` on the round's access token. */
+const mcpCall = (method: string, params: Record<string, unknown> = {}) =>
+  app.request('/mcp', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${oauth.access}`, 'content-type': 'application/json', 'mcp-protocol-version': '2026-07-28', 'mcp-method': method, ...(typeof params.name === 'string' ? { 'mcp-name': params.name } : {}) },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: { ...params, _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} } } }),
+  });
 const oauthForm = (path: string, fields: Record<string, string>) =>
   app.request(path, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields).toString() });
 /** The key a binding's re-keying carries, a new one each round. */
@@ -292,7 +299,7 @@ const requests: Record<string, Entry> = {
   },
   'GET /oauth/authorizations': { request: () => app.request(`/api/oauth/authorizations?${new URLSearchParams(consent())}`, { headers: asCy }), calls: ['caller'], statements: 1, fixed: true },
   'POST /oauth/authorizations': {
-    request: () => take<{ redirect: string }>(app.request('/api/oauth/authorizations', { method: 'POST', headers: asCy, body: JSON.stringify({ request: consent(), approve: true, scopes: ['read'] }) }), (body) => (oauth.code = new URL(body.redirect).searchParams.get('code')!)),
+    request: () => take<{ redirect: string }>(app.request('/api/oauth/authorizations', { method: 'POST', headers: asCy, body: JSON.stringify({ request: consent(), approve: true, scopes: ['read', 'reveal'] }) }), (body) => (oauth.code = new URL(body.redirect).searchParams.get('code')!)),
     calls: ['caller', 'change'], statements: 1,
   },
   'POST /api/oauth/token': {
@@ -303,14 +310,22 @@ const requests: Record<string, Entry> = {
     calls: ['change'], statements: 0,
   },
   'POST /api/oauth/token, a refresh': {
-    request: () => take<{ refresh_token: string }>(oauthForm('/api/oauth/token', { grant_type: 'refresh_token', refresh_token: oauth.refresh, client_id: oauth.client }), (body) => (oauth.refresh = body.refresh_token)),
+    request: () => take<{ access_token: string; refresh_token: string }>(oauthForm('/api/oauth/token', { grant_type: 'refresh_token', refresh_token: oauth.refresh, client_id: oauth.client }), (body) => {
+      oauth.access = body.access_token;
+      oauth.refresh = body.refresh_token;
+    }),
     calls: ['change'], statements: 0,
   },
+  // `/mcp` on the access token: one `caller`, which answers who it is and its scopes; a read tool then costs what its
+  // route does, on that answer; a reveal is the route's `use`.
+  'POST /mcp, tools/list': { request: () => mcpCall('tools/list'), calls: ['caller'], statements: 0 },
+  'POST /mcp, a read tool': { request: () => mcpCall('tools/call', { name: 'list_secrets', arguments: { environment: 'market/dev' } }), calls: ['caller'], statements: 1, fixed: true },
+  'POST /mcp, reveal_secret_values': { request: () => mcpCall('tools/call', { name: 'reveal_secret_values', arguments: { path: 'market/dev/API_KEY' } }), calls: ['caller', 'use'], statements: 0 },
   'GET /apps': { request: () => take<{ apps: { id: string }[] }>(app.request('/api/apps', { headers: asCy }), (body) => (oauth.connection = body.apps[0]!.id)), calls: ['caller'], statements: 1, fixed: true },
   'POST /api/oauth/revoke': { request: () => oauthForm('/api/oauth/revoke', { token: oauth.access, client_id: oauth.client }), calls: ['change'], statements: 0 },
   // The round's connection ended by its client just now: its person's Disconnect needs another, made as above.
   'POST /oauth/authorizations, again': {
-    request: () => take<{ redirect: string }>(app.request('/api/oauth/authorizations', { method: 'POST', headers: asCy, body: JSON.stringify({ request: consent(), approve: true, scopes: ['read'] }) }), (body) => (oauth.code = new URL(body.redirect).searchParams.get('code')!)),
+    request: () => take<{ redirect: string }>(app.request('/api/oauth/authorizations', { method: 'POST', headers: asCy, body: JSON.stringify({ request: consent(), approve: true, scopes: ['read', 'reveal'] }) }), (body) => (oauth.code = new URL(body.redirect).searchParams.get('code')!)),
     calls: ['caller', 'change'], statements: 1,
   },
   'POST /api/oauth/token, again': {

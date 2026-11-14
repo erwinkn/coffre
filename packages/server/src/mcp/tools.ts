@@ -1,23 +1,28 @@
-// The tools MCP clients call (docs/design/mcp.md, section 6): each is plain
-// API calls, as its person, through the same route table, checks and vault
-// as a page's render. A tool can do no more than its person could with the
-// CLI; the scope it declares, and the API's own table (`ROUTE_SCOPES`), hold
-// it to its connection's. Read, here: what is there, never a value. The
-// tools that change something are in changes.ts, each through an approval.
-import { apiMember, type CoffreClient } from '@coffre/client';
-import { makesProjects, PERMISSIONS, runsInstance, type Permission } from '@coffre/core/access';
+// The tools MCP clients call (docs/design/mcp.md, section 6; docs/design/0.16.md,
+// "`/mcp`"): each runs the API's own handlers in process, as its connection,
+// with the vault's answer about it, so a tool can do no more than its person
+// could with the CLI, and the vault holds each use to the connection's own
+// rules: a value only with `reveal`, no change at all. Read, here: what is
+// there, and values only to a connection with Reveal values.
+import { apiMember } from '@coffre/client';
+import { PERMISSIONS, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
+import type { Called, Presented } from '@coffre/core/vault';
 import { z } from 'zod';
 
-import { canAnywhere, type Caller } from '../api/caller.ts';
-import { CHANGE_TOOLS, SHOW_VALUE, type Change } from './changes.ts';
-import type { McpConnection } from './service.ts';
+import { canAnywhere } from '../api/caller.ts';
+import type { ApiContext } from '../api/context.ts';
+import { badRequest } from '../api/errors.ts';
+import { runRoute } from '../api/router.ts';
 
 /** What a tool answers: its structured result, and the text a model reads. */
 export type ToolResult = { structured: Record<string, unknown>; text?: string };
 
-/** What a tool runs with: the API as its person, and where coffre is. */
-export type ToolContext = { api: CoffreClient; connection: McpConnection; publicUrl: string };
+/** The connection a call comes on: what its request showed, the vault's answer about its access token, and the connection and scopes that answer gave. */
+export type Connection = { called: Called; id: string; scopes: McpScope[]; shown: Presented };
+
+/** What a tool runs with: the API's context as the connection, and the connection. */
+export type ToolContext = { ctx: ApiContext; connection: Connection };
 
 export type Tool<I extends z.ZodObject = z.ZodObject> = {
   name: string;
@@ -33,13 +38,8 @@ export type Tool<I extends z.ZodObject = z.ZodObject> = {
   input: I;
   /** The result's top-level fields, which `structuredContent` holds. */
   output: Record<string, unknown>;
-  /** The places and members the call names, for its audit entry: never a value. */
-  names: (args: z.infer<I>) => string[];
-} & (
-  | { run: (ctx: ToolContext, args: z.infer<I>) => Promise<ToolResult>; change?: undefined }
-  /** A change: asked for when called, made by coffre's page once its person approves. */
-  | { change: Change<I>; run?: undefined }
-);
+  run: (tool: ToolContext, args: z.infer<I>) => Promise<ToolResult>;
+};
 
 const environment = z.string().min(1).max(200).describe('An environment, as project/environment: market/prod');
 const secret = z.string().min(1).max(300).describe('A secret, as project/environment/KEY: market/prod/STRIPE_KEY');
@@ -50,6 +50,13 @@ const list = { type: 'array' };
 
 function tool<I extends z.ZodObject>(definition: Tool<I>): Tool {
   return definition as unknown as Tool;
+}
+
+/** A path's slash-separated parts, exactly `count` of them, as the route's segments: what each holds, the route checks. */
+function split(path: string, count: 2 | 3, shape: string): string[] {
+  const parts = path.split('/');
+  if (parts.length !== count || parts.some((part) => part === '')) throw badRequest(`${path} is no ${shape}`);
+  return parts;
 }
 
 /** The Read tools: every one read-only, idempotent, and about this instance only. */
@@ -65,9 +72,8 @@ const READ_TOOLS: readonly Tool[] = [
     destructive: false,
     input: z.object({}).strict(),
     output: object({ me: { type: 'object' }, connection: { type: 'object' } }),
-    names: () => [],
-    run: async ({ api, connection }) => ({
-      structured: { me: await api.me(), connection: { client: connection.clientName, scopes: connection.scopes } },
+    run: async ({ ctx, connection }) => ({
+      structured: { me: await runRoute('GET /me', {}, undefined, ctx), connection: { id: connection.id, scopes: connection.scopes } },
     }),
   }),
   tool({
@@ -81,8 +87,7 @@ const READ_TOOLS: readonly Tool[] = [
     destructive: false,
     input: z.object({}).strict(),
     output: object({ projects: list }),
-    names: () => [],
-    run: async ({ api }) => ({ structured: await api.projects.list() }),
+    run: async ({ ctx }) => ({ structured: await runRoute('GET /projects', {}, undefined, ctx) }),
   }),
   tool({
     name: 'list_secrets',
@@ -96,8 +101,10 @@ const READ_TOOLS: readonly Tool[] = [
     destructive: false,
     input: z.object({ environment }).strict(),
     output: object({ keys: list, permissions: list }),
-    names: ({ environment }) => [environment],
-    run: async ({ api }, { environment }) => ({ structured: await api.secrets.list(environment) }),
+    run: async ({ ctx }, args) => {
+      const [project, environment] = split(args.environment, 2, 'project/environment');
+      return { structured: await runRoute('GET /secrets/:project/:environment', { project: project!, environment: environment! }, undefined, ctx) };
+    },
   }),
   tool({
     name: 'secret_history',
@@ -111,8 +118,10 @@ const READ_TOOLS: readonly Tool[] = [
     destructive: false,
     input: z.object({ secret }).strict(),
     output: object({ versions: list }),
-    names: ({ secret }) => [secret],
-    run: async ({ api }, { secret }) => ({ structured: await api.secrets.history(secret) }),
+    run: async ({ ctx }, args) => {
+      const [project, environment, key] = split(args.secret, 3, 'project/environment/KEY');
+      return { structured: await runRoute('GET /secrets/:project/:environment/:key/versions', { project: project!, environment: environment!, key: key! }, {}, ctx) };
+    },
   }),
   tool({
     name: 'list_access',
@@ -125,8 +134,7 @@ const READ_TOOLS: readonly Tool[] = [
     destructive: false,
     input: z.object({ place: z.string().min(1).max(200).optional().describe('A project or project/environment: market, market/prod') }).strict(),
     output: object({ members: list }),
-    names: ({ place }) => (place === undefined ? [] : [place]),
-    run: async ({ api }, { place }) => ({ structured: await api.members.list(place) }),
+    run: async ({ ctx }, { place }) => ({ structured: await runRoute('GET /members', {}, place === undefined ? {} : { path: place }, ctx) }),
   }),
   tool({
     name: 'describe_member',
@@ -139,59 +147,36 @@ const READ_TOOLS: readonly Tool[] = [
     destructive: false,
     input: z.object({ member }).strict(),
     output: object({ member: { type: 'object' } }),
-    names: ({ member }) => [apiMember(member)],
-    run: async ({ api, connection }, args) => {
+    run: async ({ ctx, connection }, args) => {
       const name = apiMember(args.member);
+      const params = { member: name };
       // What it read anywhere is the instance's to know; its manager reads what it holds.
-      const report = runsInstance(connection.caller) || !name.startsWith('token:') ? await api.members.get(name) : await api.members.access(name);
+      const report = runsInstance(connection.called.holds) || !name.startsWith('token:') ? await runRoute('GET /members/:member', params, undefined, ctx) : await runRoute('GET /members/:member/access', params, undefined, ctx);
       if (!name.startsWith('token:')) return { structured: { member: report } };
-      const [{ tokens }, { bindings }] = await Promise.all([api.tokens.list(name), api.bindings.list(name)]);
+      const { tokens } = await runRoute('GET /members/:member/tokens', params, undefined, ctx);
+      // An instance that trusts no workload has no bindings to list.
+      const workloads = ctx.auth.mode === 'signin' && ctx.auth.signin.workloads !== null;
+      const { bindings } = workloads ? await runRoute('GET /members/:member/bindings', params, undefined, ctx) : { bindings: [] };
       return { structured: { member: report, tokens, bindings } };
     },
   }),
-  tool({
-    name: 'read_audit_log',
-    needs: 'audit.read',
-    title: 'Read the audit log',
-    description: 'The audit log, newest first: what was done, by whom, where, allowed or refused. 50 entries a call unless asked; page back with `before`, the oldest seq seen.',
-    scope: 'read',
-    readOnly: true,
-    idempotent: true,
-    destructive: false,
-    input: z
-      .object({
-        path: z.string().min(1).max(300).optional().describe('Only entries about a project, environment or secret'),
-        actor: z.string().min(1).max(320).optional().describe('Only entries by this member'),
-        decision: z.enum(['allow', 'deny']).optional(),
-        before: z.number().int().min(1).optional().describe('Only entries older than this seq'),
-        limit: z.number().int().min(1).max(200).optional(),
-      })
-      .strict(),
-    output: object({ entries: list }),
-    names: ({ path, actor }) => [...(path === undefined ? [] : [path]), ...(actor === undefined ? [] : [apiMember(actor)])],
-    run: async ({ api }, { actor, limit, ...rest }) => ({
-      structured: await api.audit.list({ ...rest, ...(actor === undefined ? {} : { actor: apiMember(actor) }), limit: limit ?? 50 }),
-    }),
-  }),
 ];
 
-/** Values to the model: only with Reveal values, which the person ticked under its warning. */
+/** Values to the model: only with Reveal values, which the person ticked under its warning, and which the vault holds the use to. */
 const REVEAL_VALUES = tool({
   name: 'reveal_secret_values',
   needs: 'secret.read',
   title: 'Reveal secret values',
-  description:
-    "Read the values of one secret or of a whole environment into this conversation. Use it only when the person wants you to see the values. To show the person a value without you seeing it, use show_secret_value.",
+  description: 'Read the values of one secret or of a whole environment into this conversation. Use it only when the person wants you to see the values.',
   scope: 'reveal',
   readOnly: true,
   idempotent: true,
   destructive: false,
   input: z.object({ path: z.string().min(1).max(300).describe('An environment, market/prod, or one secret, market/prod/STRIPE_KEY') }).strict(),
   output: object({ path: { type: 'string' }, values: { type: 'object' }, sensitive: list }),
-  names: ({ path }) => [path],
-  run: async ({ api }, { path }) => {
+  run: async ({ ctx }, { path }) => {
     // A whole environment's sensitive values are left out, by name: nobody is handed one.
-    const { values, sensitive } = await api.secrets.reveal(path);
+    const { values, sensitive } = await runRoute('POST /reveals', {}, { path }, ctx);
     const left = sensitive.length === 0 ? '' : `\n\nLeft out, sensitive, which nobody sees and apps use through the credential proxy: ${sensitive.join(', ')}`;
     return {
       structured: { path, values, sensitive },
@@ -200,19 +185,19 @@ const REVEAL_VALUES = tool({
   },
 });
 
-export const TOOLS: readonly Tool[] = [...READ_TOOLS, SHOW_VALUE, REVEAL_VALUES, ...CHANGE_TOOLS];
+export const TOOLS: readonly Tool[] = [...READ_TOOLS, REVEAL_VALUES];
 
 export const TOOL_BY_NAME = new Map(TOOLS.map((entry) => [entry.name, entry]));
 
 /**
  * Who could ever use a tool, by their roles: every member (`anyone`), those
- * who may make a project (`new-project`), those who may set up a service
+ * who may set up a service
  * account (`services`: who runs the instance, or a person who holds
  * anything anywhere, as the instance's setting allows, which the API
  * applies), or whoever holds a permission somewhere, by a grant or their
  * instance role.
  */
-export type Need = 'anyone' | 'new-project' | 'services' | Permission;
+export type Need = 'anyone' | 'services' | Permission;
 
 /**
  * Whether the person's roles, as they are now, let them use `tool`
@@ -220,13 +205,13 @@ export type Need = 'anyone' | 'new-project' | 'services' | Permission;
  * count: a tool they lack the scope for stays listed, and its call asks for
  * the scope. Nor is this a check: each call is held to the API's, as ever.
  */
-export function usable(caller: Caller, tool: Tool): boolean {
+export function usable(called: Called, tool: Tool): boolean {
   const { needs } = tool;
+  const person = called.principal.startsWith('user:');
   if (needs === 'anyone') return true;
-  if (needs === 'new-project') return makesProjects(caller);
-  if (needs === 'services') return runsInstance(caller) || (caller.principal.type === 'user' && PERMISSIONS.some((permission) => canAnywhere(caller, permission)));
+  if (needs === 'services') return runsInstance(called.holds) || (person && PERMISSIONS.some((permission) => canAnywhere(called, permission)));
   // Reading takes read, or, of a person's own personal config, use of the environment it configures (R8).
-  return canAnywhere(caller, needs) || (needs === 'secret.read' && caller.principal.type === 'user' && canAnywhere(caller, 'secret.use'));
+  return canAnywhere(called, needs) || (needs === 'secret.read' && person && canAnywhere(called, 'secret.use'));
 }
 
 /** A tool as `tools/list` describes it, in either era. */
@@ -250,8 +235,7 @@ export function listed(entry: Tool): Record<string, unknown> {
 /** What clients pass the model about coffre, once. */
 export const INSTRUCTIONS = [
   "coffre keeps this team's secrets. These tools act as the person who connected them, and never beyond their access.",
-  'Never ask the person to paste a secret into the conversation: to set one, use request_secret_value, and they type it on coffre.',
-  "Every change waits for the person to approve it on coffre's own page: when a tool answers with an approval link, show it to them, and once they approve, call the tool again with the same arguments for the outcome.",
+  'Never ask the person to paste a secret into the conversation.',
   'To use secrets in a command, run it in the person\'s terminal as `coffre run <project>/<env> [<project>/<env> …] -- <command>`, with the CLI signed in: the values go to the process, never the conversation, so avoid commands that print them.',
-  'reveal_secret_values puts values into the conversation: use it only when the person wants you to see them; show_secret_value shows a value to the person alone.',
+  'reveal_secret_values puts values into the conversation: use it only when the person wants you to see them.',
 ].join(' ');
