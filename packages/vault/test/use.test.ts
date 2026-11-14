@@ -391,6 +391,23 @@ test("a person's own read is never remembered, on any credential of theirs: they
   }
 });
 
+test("a person's proxied use answers only their next proxied use: their reveal or peek of the same keys within the memory reads again, as with an outage's length", async () => {
+  for (const outage of [0, 300]) {
+    Object.assign(vault, { memory: memoryOf(2, outage) });
+    vault.tick(60_000);
+    const proxied = ask('ada', 'market/prod', ['DATABASE_URL'], { purpose: 'use' });
+    assert.equal(typeof (await got(proxied)), 'object');
+    await rewrite(vault, w.database, `postgres://used-${outage}`);
+    // The same token, place and keys: the rows the use kept are not the person's to read back.
+    assert.deepEqual(await got({ ...proxied, purpose: 'reveal' }), { DATABASE_URL: `postgres://used-${outage}` }, `reveal, outage ${outage}`);
+    await got(proxied);
+    const written = await rewrite(vault, w.database, `postgres://peeked-${outage}`);
+    const peeked = await peek(vault, { ...proxied, purpose: 'run' });
+    assert.ok(!('refused' in peeked));
+    assert.deepEqual(peeked.items.map((item) => ('refused' in item ? item.refused : item.version)), [written.currentVersion], `peek, outage ${outage}`);
+  }
+});
+
 test('a memory decides again as of now: a credential that expires within it stops at once', async () => {
   await write(vault, ...rows('credentials', credential('brief', ada, { expiresAt: new Date(vault.now() + 1000) })));
   assert.deepEqual(await got(ask('brief', 'market/prod', ['FLAG'])), { FLAG: 'on' });

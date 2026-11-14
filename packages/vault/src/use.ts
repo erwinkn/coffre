@@ -156,7 +156,8 @@ export function recall(vault: Serving, ask: Ask): Read | undefined {
   // Past all they are kept for, the rows go now, with the values opened from them, not when the next read happens to push them out.
   if (!within(read, now, keptMs(memory, read))) memory.reads.delete(shapeOfAsk(ask));
   // Fresh for the memory's length alone: what is kept longer answers an outage, and nothing while the database does (`use`).
-  return within(read, now, memory.seconds * 1000) ? read : undefined;
+  // And for an ask they may answer: a person's proxied use keeps its rows, which their reveal of the same keys may not read back.
+  return within(read, now, memory.seconds * 1000) && remembered(ask, read) ? read : undefined;
 }
 
 /**
