@@ -100,8 +100,11 @@ function freezing(frozen: boolean) {
         const ofIt = (row: { principal: string; generation: number; revokedAt: Date | null } | undefined) =>
           row !== undefined && row.principal === account!.id && row.generation === account!.generation && row.revokedAt === null;
         // What it names, live: an active service account, or one of its bindings, or one of its workloads' sessions.
+        // A session is a workload's, and not ended: past its expiry or its hard end, it is no longer there to freeze.
+        const running = session !== undefined && session.kind === 'workload' && session.expiresAt.getTime() > at
+          && session.notAfter !== null && session.notAfter.getTime() > at;
         const live = account !== undefined && account.status === 'active' && account.id.startsWith('token:')
-          && (kind === 'token' || (kind === 'binding' ? ofIt(bound) : ofIt(session) && session!.kind === 'workload'));
+          && (kind === 'token' || (kind === 'binding' ? ofIt(bound) : ofIt(session) && running));
         if (!live || !managesSealed(caller, seen, account.id, at)) {
           // Whoever runs the instance manages every service account: one whose row is written behind the vault is theirs to be told of.
           return runs(caller) && Object.values(unsealed).some((count) => count > 0) ? { refused: 'tampered' } : { refused: 'no_access' };

@@ -28,6 +28,8 @@ let revoked: ReturnType<typeof binding>;
 let pod: ReturnType<typeof session>;
 let ppod: ReturnType<typeof session>;
 let stale: ReturnType<typeof binding>;
+let ended: ReturnType<typeof session>;
+let cut: ReturnType<typeof session>;
 beforeEach(async () => {
   await emptyDatabase(world.owner);
   world.memory.reads.clear();
@@ -43,6 +45,9 @@ beforeEach(async () => {
   stale = binding('token:back', { profile: 'kubernetes', scope: '[]', policy: '{}' });
   pod = session('pod', bound);
   ppod = session('ppod', prodBound);
+  // Two of CI's sessions over: one past its expiry, one past its hard end.
+  ended = session('ended', bound, { expiresAt: new Date(Date.UTC(2026, 10, 13, 11)) });
+  cut = session('cut', bound, { notAfter: new Date(Date.UTC(2026, 10, 13, 11)) });
   await write(world, ...rows('projects', market), ...rows('environments', dev, prod),
     ...rows('roles', role(true, 'owner', ['grant.manage']), role(true, 'admin', ['grant.manage']), role(true, 'member', []),
       role(false, 'viewer', ['secret.read']), role(false, 'developer', ['secret.read', 'secret.use', 'secret.write'], ['secret.use'])),
@@ -55,8 +60,8 @@ beforeEach(async () => {
     ...rows('policy', instance()),
     ...rows('grants', grant(dv, 'developer', { environment: dev }), grant(ci!, 'developer', { environment: dev }), grant(prodOnly!, 'viewer', { environment: prod })),
     ...rows('bindings', bound, revoked, prodBound, stale),
-    ...rows('credentials', ...[ada, cy, fay, dv, bo].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who)), pod, ppod,
-      credential('ci-token', ci!, { scope: '[]' }), credential('ada-pat', ada, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'developer' }]) })));
+    ...rows('credentials', ...[ada, cy, fay, dv, bo].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who)), pod, ppod, ended, cut,
+      credential('ci-token', ci!, { scope: '[]' }), credential('ci-ending', ci!, { scope: '[]', notAfter: new Date(Date.UTC(2027, 0, 1)) }), credential('ada-pat', ada, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'developer' }]) })));
   world.woken.length = 0;
 });
 
@@ -141,6 +146,12 @@ test('whoever manages a service account freezes it, one of its bindings or one o
     assert.deepEqual(await freeze('fay-cli', 'token:nobody'), { refused: 'no_access' });
     assert.deepEqual(await freeze('fay-cli', 'token:gone'), { refused: 'no_access' }, 'a service account removed');
     assert.deepEqual(await freeze('fay-cli', `binding:${stale.id}`), { refused: 'no_access' }, 'a binding of a generation before');
+    assert.deepEqual(await freeze('dv-cli', `session:${ended.id}`), { refused: 'no_access' }, 'a session past its expiry');
+    assert.deepEqual(await freeze('fay-cli', `session:${ended.id}`), { refused: 'no_access' });
+    assert.deepEqual(await freeze('fay-cli', `session:${(await rowsOf<{ id: string }>(world.owner, sql`SELECT id::text FROM credentials WHERE label = 'ci-ending'`))[0]!.id}`), { refused: 'no_access' }, 'a service account\'s token, even with a hard end');
+    assert.deepEqual(await unfreeze('dv-cli', `session:${ended.id}`), { refused: 'no_access' });
+    assert.deepEqual(await freeze('dv-cli', `session:${cut.id}`), { refused: 'no_access' }, 'a session past its hard end');
+    assert.deepEqual(await unfreeze('fay-cli', `session:${cut.id}`), { refused: 'no_access' });
     assert.deepEqual(await freeze('fay-cli', 'binding:00000000-0000-4000-8000-000000000000'), { refused: 'no_access' });
     assert.deepEqual(await freeze('fay-cli', `session:${(await rowsOf<{ id: string }>(world.owner, sql`SELECT id::text FROM credentials WHERE principal = ${dv}`))[0]!.id}`), { refused: 'no_access' }, 'a person\'s session is no workload\'s');
     assert.deepEqual(await freeze('fay-cli', `session:${(await rowsOf<{ id: string }>(world.owner, sql`SELECT id::text FROM credentials WHERE principal = ${ci} AND kind = 'service'`))[0]!.id}`), { refused: 'no_access' }, 'nor a service account\'s token');
