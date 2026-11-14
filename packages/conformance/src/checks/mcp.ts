@@ -188,7 +188,11 @@ export async function mcpConnect(deployment: Deployment, people: People): Promis
   // The replaced refresh token, again: the connection ends, and everything under it.
   await refused(deployment, 'a replaced refresh token', { grant_type: 'refresh_token', refresh_token: first.refresh_token, client_id: clientId });
   await refused(deployment, 'the current refresh token, after a reuse', { grant_type: 'refresh_token', refresh_token: next.refresh_token, client_id: clientId });
-  expect(!(await discovers(deployment, next.access_token)), 'an access token outlived its connection, ended by a reused refresh token');
+  // A revocation takes up to the vault's memory, 2 seconds (D218): the token was asked about a moment ago. Asked every
+  // 250 ms until refused, for that and a second more.
+  for (const started = Date.now(); await discovers(deployment, next.access_token); await new Promise((resolve) => setTimeout(resolve, 250))) {
+    expect(Date.now() - started < 3000, `an access token outlived its connection, ended by a reused refresh token, by ${Date.now() - started} ms`);
+  }
 
   // A second: its code, presented twice, ends it.
   const asked = await connect(deployment, people.reader, clientId);
@@ -304,17 +308,12 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
   const leaked = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
   expect(leaked.length === 0, 'a Read tool answered with a secret value', leaked);
 
-  // Every call in the log, under the client; the API's own refusal names the connection.
+  // 0.16 writes no entry for a tools/call: the vault's use and change log what matters, and these calls read names alone
+  // (docs/design/0.16.md, "The server", MCP's OAuth). 0.14.7 logged each, `mcp.read` and `mcp.call`, under the client.
   const { entries } = await people.admin.api.audit.list({ actor: people.reader.member, detail: '1', limit: 500 });
   const mine = entries.filter((entry) => (entry.metadata.via as { clientId?: string } | undefined)?.clientId === clientId);
-  const reads = mine.filter((entry) => entry.action === 'mcp.read').length;
-  const refused = mine.filter((entry) => entry.action === 'mcp.call' && entry.decision === 'deny').length;
-  expect(reads === 5 && refused === 1, 'the log does not hold each call under the client', { reads, refused });
-  const api = mine.filter((entry) => !entry.action.startsWith('mcp.'));
-  expect(api.length > 0, "the API's own entries for the calls do not name the connection", mine.map((entry) => entry.action));
-  const shown = (await people.admin.api.audit.list({ actor: people.reader.member, limit: 500 })).entries;
-  expect(!shown.some((entry) => entry.action === 'mcp.read'), 'read-only calls are not detail');
-  return `on 2026-07-28 and 2025-11-25, the Read tools as the reader: ${DEV} listed, ${PROD} refused, no value in any answer; headers held to the body; ${reads} reads as detail and the refusal shown, each under the client`;
+  expect(mine.length === 0, 'a read-only tools/call left an entry under the client', mine.map((entry) => entry.action));
+  return `on 2026-07-28 and 2025-11-25, the Read tools as the reader: ${DEV} listed, ${PROD} refused, no value in any answer; headers held to the body; no entry for the calls, which read names alone`;
 }
 
 type ToolAnswer = {
@@ -403,7 +402,8 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   expect(decided.status === 'approved' && (await archived('OLD')), 'Approve did not make the change', decided);
   const again = await changer.api.approvals.decide(approval!.id, { approve: true, digest: shown.digest, basis: shown.basis }).then(() => null, (error: unknown) => error);
   expect(again instanceof CoffreError && again.status === 409, 'an approval was decided twice', again);
-  const reported = await call(write, 'archive_secret', { secret: `${place}/OLD` });
+  // A client with no requestState names its approval to be told how it ended (docs/design/0.16.md, "The server", an MCP client's changes).
+  const reported = await call(write, 'archive_secret', { secret: `${place}/OLD`, approval: approval!.id });
   expect(reported.result?.structuredContent?.status === 'approved' && reported.result.isError !== true, 'calling again does not report the approved change', reported.result);
 
   // With URL elicitation: asked to open the page, and the retry's requestState is that call's only.
@@ -483,7 +483,7 @@ export async function mcpValues(deployment: Deployment, people: People, canaries
   expect(page.kind === 'reveal', 'the approval page does not say it shows a value', page);
   const shown = await reader.api.approvals.decide(id!, { approve: true, digest: page.digest, basis: page.basis });
   expect(shown.shown.some((line) => line.value === dev.API_KEY), 'Reveal did not show the person the value');
-  const told = await call(reading, 'show_secret_value', { secret: `${DEV}/API_KEY` });
+  const told = await call(reading, 'show_secret_value', { secret: `${DEV}/API_KEY`, approval: id });
   expect(told.result?.structuredContent?.status === 'approved', 'show_secret_value does not report the value as shown', told.result);
   const readLeaks = Object.entries(canaries).filter(([, value]) => answers.some((answer) => answer.includes(value))).map(([path]) => path);
   expect(readLeaks.length === 0, 'a Read answer held a value', readLeaks);

@@ -36,14 +36,28 @@ async function forgeGrant(sql: Sql, principal: string): Promise<string> {
   return id;
 }
 
-/** A use that reads nothing, whatever it is refused as. */
-async function readsNothing(person: Person, path: string, values: string[], what: string): Promise<number> {
-  const response = await person.browser.send('POST', '/api/reveals', { path });
-  const text = await response.text();
-  expect(!response.ok, `${what} was honoured`, text);
-  expect(!values.some((value) => text.includes(value)), `${what} was refused with a value`, text);
-  return response.status;
+/**
+ * A use that reads nothing, refused as `refusal` says: 401 for a member row
+ * that is no longer the vault's, 403 for a place the member's sealed grants
+ * do not reach. The vault may answer from its memory of the caller for up
+ * to 2 seconds (D218), so it is asked again until then and a second more.
+ */
+async function readsNothing(person: Person, path: string, values: string[], what: string, refusal: { status: 401; error: 'unauthenticated' } | { status: 403; reason: 'no_access' }): Promise<number> {
+  const started = Date.now();
+  for (;;) {
+    const response = await person.browser.send('POST', '/api/reveals', { path });
+    const text = await response.text();
+    expect(!response.ok, `${what} was honoured`, text);
+    expect(!values.some((value) => text.includes(value)), `${what} was refused with a value`, text);
+    const body = JSON.parse(text) as { error?: string; reason?: string };
+    const as = 'error' in refusal ? body.error === refusal.error : body.reason === refusal.reason;
+    if (response.status === refusal.status && as) return response.status;
+    expect(Date.now() - started < 3000, `${what} was refused as ${response.status}, not ${refusal.status}`, text);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 }
+
+const NO_ACCESS = { status: 403, reason: 'no_access' } as const;
 
 /**
  * A member row or grant written around the vault: a forged grant or an
@@ -79,10 +93,10 @@ export async function memberTampering(deployment: Deployment, people: People, ki
       } else if (kind === 'member') {
         // The instance role, as the database's owner could set it: an Owner reads every value.
         await query(sql, "UPDATE principals SET role = 'owner' WHERE id = $1", [person.member]);
-        refused = await readsNothing(person, PROD, protectedValues, 'an edited member row');
+        refused = await readsNothing(person, PROD, protectedValues, 'an edited member row', { status: 401, error: 'unauthenticated' });
       } else {
         named = ['grants', await forgeGrant(sql, person.member)];
-        refused = await readsNothing(person, PROD, protectedValues, 'a forged grant');
+        refused = await readsNothing(person, PROD, protectedValues, 'a forged grant', NO_ACCESS);
       }
       if (named !== undefined) await alerted(deployment, ...named);
     } finally {
@@ -164,6 +178,7 @@ export async function sealingRace(deployment: Deployment, people: People): Promi
       const [owner] = await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
       await holder.exec('BEGIN');
       let pending;
+      let outcome: { value: unknown } | { error: unknown } | undefined;
       try {
         await holder.query(`SELECT pg_advisory_xact_lock(${CHANGE_LOCK})`);
         pending = admin.api.access.set(person.member, { [DEV]: 'developer' }).then(
@@ -178,11 +193,16 @@ export async function sealingRace(deployment: Deployment, people: People): Promi
         forged = await forgeGrant(sql, person.member);
       } finally {
         await holder.exec('ROLLBACK');
-        if (pending !== undefined) await pending;
+        if (pending !== undefined) outcome = await pending;
       }
+      // The change went through once the lock was let go: otherwise the grant keeps no MAC whatever sealing does.
+      expect(outcome !== undefined && 'value' in outcome, 'the change that waited on the lock did not go through', outcome !== undefined && 'error' in outcome ? String(outcome.error) : outcome);
+      const [dev] = await query<{ role: string }>(sql, `SELECT g.role FROM grants g JOIN environments e ON e.id = g.environment_id
+        JOIN projects p ON p.id = e.project_id WHERE g.principal = $1 AND p.slug = 'conformance' AND e.slug = 'dev' AND length(g.mac) > 0`, [person.member]);
+      expect(dev?.role === 'developer', 'the change that waited on the lock did not make the member a developer on dev', dev);
       const [row] = await query<{ mac: Uint8Array }>(sql, 'SELECT mac FROM grants WHERE id = $1', [forged]);
       expect(row !== undefined && row.mac.length === 0, 'the change sealed the grant inserted while it waited', row);
-      await readsNothing(person, PROD, protectedValues, 'the grant inserted while the change waited');
+      await readsNothing(person, PROD, protectedValues, 'the grant inserted while the change waited', NO_ACCESS);
     }));
   } finally {
     if (forged !== undefined) await using(deployment.database(), (sql) => query(sql, 'DELETE FROM grants WHERE id = $1', [forged]));

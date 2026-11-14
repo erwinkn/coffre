@@ -123,6 +123,17 @@ export async function setUpLive(admin: Person, canaries: Canaries) {
 }
 
 /** The canaries in one environment, by key. */
+/**
+ * A value written over one the checks made. The old one stays, under a name
+ * no place has (`valuesIn` never lists it), for the scans to look for: its
+ * version is still stored, and may still be in some output.
+ */
+export function replaced(canaries: Canaries, path: string, value: string): void {
+  const was = canaries[path];
+  if (was !== undefined) canaries[`replaced ${Object.keys(canaries).length} ${path}`] = was;
+  canaries[path] = value;
+}
+
 export function valuesIn(canaries: Canaries, environment: string): Record<string, string> {
   return Object.fromEntries(
     Object.entries(canaries)

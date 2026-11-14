@@ -5,15 +5,13 @@
 // back is caught asked `GET /audit/verification`, which 0.16 drops: the
 // page's proofs and `coffre verify --full` read the log now
 // (docs/design/0.16.md, "The server").
-import { randomUUID } from 'node:crypto';
-
 import { judgeProofs, type AuditEntryView, type CoffreClient, type ProofJudgment } from '@coffre/client';
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, until } from '../report.ts';
 import { LOG_REFUSAL, logBodies, logRefuses, query, type Body } from './storage.ts';
-import { canary, DEV, PROJECT, valuesIn, type Canaries, type People } from './people.ts';
+import { canary, DEV, PROJECT, replaced, valuesIn, type Canaries, type People } from './people.ts';
 
 /**
  * Every returned value read, committed by the vault under the response's
@@ -26,7 +24,7 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
   // promises"): a version the reader read a moment ago gets no new entry. Each value read is written afresh first.
   const fresh = Object.fromEntries(Object.keys(purpose === 'reveal' ? { API_KEY: '' } : valuesIn(canaries, DEV)).map((key) => [key, canary()]));
   await admin.api.secrets.set(DEV, fresh);
-  for (const [key, value] of Object.entries(fresh)) canaries[`${DEV}/${key}`] = value;
+  for (const [key, value] of Object.entries(fresh)) replaced(canaries, `${DEV}/${key}`, value);
   const { operationId, values } = await reader.api.secrets.reveal(path);
   expect(typeof operationId === 'string' && operationId.length > 0, 'the read returned no operation id');
   const expected = purpose === 'reveal' ? { API_KEY: canaries[`${DEV}/API_KEY`] } : valuesIn(canaries, DEV);
@@ -172,7 +170,10 @@ const UNLOGGED = 'NO_AUDIT_NO_VALUE';
 
 export async function noAuditNoValue(deployment: Deployment, { admin }: People, canaries: Canaries): Promise<string> {
   let status = 0;
-  await admin.api.secrets.set(DEV, { [UNLOGGED]: `unlogged-${randomUUID()}` });
+  // Not a place's value for the checks after (it is gone at the end), but one for the scans to look for.
+  const value = canary();
+  canaries[`unlogged ${DEV}/${UNLOGGED}`] = value;
+  await admin.api.secrets.set(DEV, { [UNLOGGED]: value });
   await using(deployment.database(), (sql) => logRefuses(sql, async () => {
     const before = deployment.output().split(LOG_REFUSAL).length;
     const response = await admin.browser.send('POST', '/api/reveals', { path: DEV });
@@ -182,12 +183,13 @@ export async function noAuditNoValue(deployment: Deployment, { admin }: People, 
     expect(status === 500 && body.error === 'internal_error' && body.reason === undefined,
       'the unlogged reveal did not fail as internal_error', { status, body });
     expect(body.message === 'something went wrong; see the server log', 'the audit failure exposed another reason', body);
-    expect(!Object.values(canaries).some((value) => text.includes(value)), 'a reveal that could not be logged carried a value', text);
+    expect(!text.includes(value), 'a reveal that could not be logged carried the value it could not log', text);
+    expect(!Object.values(canaries).some((known) => text.includes(known)), 'a reveal that could not be logged carried a value', text);
     // A lost vault gives the same public error; the trigger must be its cause.
     await until('the injected audit refusal in the processes\' output', async () => deployment.output().split(LOG_REFUSAL).length > before, 5);
   }, 'secret.read'));
   const after = await admin.api.secrets.reveal(DEV);
-  expect(after.values.API_KEY === canaries[`${DEV}/API_KEY`] && after.values[UNLOGGED] !== undefined, 'reveals did not come back once the log took writes again');
+  expect(after.values.API_KEY === canaries[`${DEV}/API_KEY`] && after.values[UNLOGGED] === value, 'reveals did not come back once the log took writes again');
   await admin.api.secrets.set(DEV, { [UNLOGGED]: null });
   return `a reveal the audit log would not take: ${status} internal_error, its injected cause in the log, and no value`;
 }

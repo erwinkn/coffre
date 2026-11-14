@@ -29,11 +29,13 @@ for (const [error, reason, passes] of [
   });
 }
 
-async function auditFixture(t: test.TestContext, status: number, error: string, down = false) {
+async function auditFixture(t: test.TestContext, status: number, error: string, down = false, leaks = false) {
   const database = await scratch(t);
   await using(database(), (sql) => sql.exec('CREATE TABLE log_pending (body TEXT)'));
   let output = '';
   const deployment = { database, output: () => output } as Deployment;
+  // What the admin wrote, as a reveal reads it back.
+  const stored: Record<string, string> = { API_KEY: 'canary' };
   const admin = {
     browser: { send: async () => {
       if (!down) {
@@ -45,9 +47,15 @@ async function auditFixture(t: test.TestContext, status: number, error: string, 
           }
         });
       }
-      return Response.json({ error, message: 'something went wrong; see the server log' }, { status });
+      return Response.json({ error, message: 'something went wrong; see the server log', ...(leaks ? { value: stored.NO_AUDIT_NO_VALUE } : {}) }, { status });
     } },
-    api: { secrets: { set: async () => ({}), reveal: async () => ({ values: { API_KEY: 'canary', NO_AUDIT_NO_VALUE: 'unlogged' } }) } },
+    api: { secrets: {
+      set: async (_path: string, values: Record<string, string | null>) => {
+        for (const [key, value] of Object.entries(values)) if (value === null) delete stored[key]; else stored[key] = value;
+        return {};
+      },
+      reveal: async () => ({ values: { ...stored } }),
+    } },
   };
   return { deployment, people: { admin } as unknown as People, canaries: { [`${DEV}/API_KEY`]: 'canary' } };
 }
@@ -62,6 +70,11 @@ for (const [status, error] of [[403, 'forbidden'], [503, 'unavailable']] as cons
 test('a dead vault does not count as a refused audit append', async (t) => {
   const { deployment, people, canaries } = await auditFixture(t, 500, 'internal_error', true);
   await assert.rejects(noAuditNoValue(deployment, people, canaries), /injected audit refusal/);
+});
+
+test('a failed reveal that carries the value it could not log fails conformance', async (t) => {
+  const { deployment, people, canaries } = await auditFixture(t, 500, 'internal_error', false, true);
+  await assert.rejects(noAuditNoValue(deployment, people, canaries), /carried the value it could not log/);
 });
 
 test('the exact audit failure with its injected cause passes conformance', async (t) => {
