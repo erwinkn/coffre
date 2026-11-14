@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
+import { CoffreError } from '@coffre/client';
 import { cloudflareAccess } from '@coffre/core/identity';
 import { rowsOf } from '@coffre/db/dialect';
 import { credential, emptyDatabase, environment, grant, identity, instance, principal, project, rewrite, role, rows, secret, user, value, write } from '@coffre/vault/testing';
@@ -19,7 +20,31 @@ import { vaultKv } from '../src/plugins/vault-kv.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { openApp, SESSION, type TestApp } from './app-fixture.ts';
 
-const plugins = [vaultKv()];
+/**
+ * Beside the adapter, a plugin of the test's own that makes several API calls
+ * on one request, as `PluginContext.api` lets a plugin: who the token is, the
+ * projects it reaches, and who it is again. Its answer says what it saw, or
+ * the refusal, as a `CoffreError`.
+ */
+const probe: CoffrePlugin = {
+  name: 'probe',
+  routes: {
+    prefix: '/probe',
+    fetch: async (request, coffre) => {
+      const api = coffre.api(request.headers.get('x-token') ?? '');
+      try {
+        const me = await api.me();
+        const { projects } = await api.projects.list();
+        const again = await api.me();
+        return Response.json({ registered: [me.registered, again.registered], projects: projects.map((one) => one.slug) });
+      } catch (error) {
+        if (!(error instanceof CoffreError)) throw error;
+        return Response.json({ status: error.status, code: error.code, reason: error.reason ?? null }, { status: 418 });
+      }
+    },
+  },
+};
+const plugins = [vaultKv(), probe];
 const app = await openApp({ plugins });
 const { world } = app;
 after(() => app.close());
@@ -31,6 +56,10 @@ const STAGING = { DATABASE_URL: 'postgres://staging' };
 const HIDDEN = 'sk_hidden_staging';
 const PERSONAL = `coffre_pat_${'p'.repeat(43)}`;
 const BROWSER = `coffre_web_${'w'.repeat(43)}`;
+/** Credentials the API takes from no one: root's handle and MCP client's token, and ESO's workload session, each live. */
+const HANDLE = `coffre_use_${'h'.repeat(43)}`;
+const MCP = `coffre_mcp_${'m'.repeat(43)}`;
+const WORKLOAD = `coffre_wl_${'k'.repeat(43)}`;
 /** ESO's token ends then: lookup-self says what it has left. */
 const ENDS = new Date(Date.now() + 30 * 86_400_000);
 
@@ -81,6 +110,9 @@ beforeEach(async () => {
       credential('dev-cli', dev),
       credential(PERSONAL, dev, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: staging.id, role: 'viewer' }]) }),
       credential(BROWSER, root, { kind: 'browser', identityId: github.id }),
+      credential(HANDLE, root, { kind: 'handle', ...scoped(prod), places: JSON.stringify([{ environmentId: prod.id, personal: false }]) }),
+      credential(MCP, root, { kind: 'mcp', client: JSON.stringify({ id: 'https://claude.ai/client.json', host: 'claude.ai', registration: 'cimd', redirectUri: 'https://claude.ai/callback', scopes: 'read' }) }),
+      credential(WORKLOAD, ESO, { kind: 'workload', jkt: 'eso-key', ...scoped(prod) }),
     ),
   );
   // The database's migrations are known from the first request on: none of a test's counts is that question.
@@ -105,6 +137,12 @@ async function cost<T>(run: () => Promise<T>): Promise<[T, string[], number]> {
   const [calls, statements] = [app.calls.length, app.statements];
   const result = await run();
   return [result, app.calls.slice(calls), app.statements - statements];
+}
+/** A body that counts its reads: a request built on it is read only if something pulls it. */
+function counted(text: string) {
+  let pulls = 0;
+  const body = new ReadableStream<Uint8Array>({ pull: (sink) => void (pulls++, sink.enqueue(new TextEncoder().encode(text)), sink.close()) }, { highWaterMark: 0 });
+  return { init: { method: 'PUT', body, duplex: 'half' } as RequestInit & { headers?: Record<string, string> }, pulls: () => pulls };
 }
 const logged = async () => (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`)).map((row) => row.body);
 
@@ -246,15 +284,50 @@ test("`vault kv get` and vals learn the mount's version first, without a token",
   assert.equal((await vault('sys/internal/ui/mounts/kv/market/prod', null)).status, 403);
 });
 
+test("`PluginContext.api`: a plugin's several API calls on one request ask the vault who the token is once, for all of them", async () => {
+  const [response, calls, statements] = await cost(() => app.request('/probe', { headers: { 'x-token': 'eso-token' } }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { registered: [true, true], projects: ['market'] });
+  assert.deepEqual(calls, ['caller']);
+  // Each call's own statements, as over HTTP: the shared caller saves the vault's asking, not the app's reads.
+  const [, alone, separately] = await cost(async () => {
+    for (const path of ['/api/me', '/api/projects', '/api/me']) await app.request(path, { headers: { authorization: 'Bearer eso-token' } });
+  });
+  assert.deepEqual([alone, statements], [['caller', 'caller', 'caller'], separately]);
+});
+
+test('a handle, an MCP client\'s token and a workload\'s session sent through `PluginContext.api` are each refused, as the API refuses them, before the vault', async () => {
+  for (const [token, status, code, reason] of [
+    [HANDLE, 403, 'forbidden', 'handle'],
+    [MCP, 401, 'unauthenticated', null],
+    [WORKLOAD, 401, 'unauthenticated', 'workload'],
+  ] as const) {
+    const [probed, calls, statements] = await cost(async () => [await app.request('/probe', { headers: { 'x-token': token } }), await vault('secret/data/market/prod', token), await vault('auth/token/lookup-self', token)] as const);
+    const [direct, read, self] = probed;
+    assert.deepEqual([direct.status, await direct.json()], [418, { status, code, reason }], token);
+    // Vault's 403, with no value.
+    for (const refusal of [read, self]) {
+      assert.equal(refusal.status, 403, token);
+      const text = await refusal.text();
+      assert.match(text, /permission denied/);
+      assert.equal(text.includes(PROD.DATABASE_URL), false);
+    }
+    assert.deepEqual([calls, statements], [[], 0], token);
+  }
+});
+
 test('a token whose account was removed is refused at lookup-self and at reads', async () => {
   assert.equal((await vault('auth/token/lookup-self', 'old-token')).status, 403);
   assert.equal((await vault('secret/data/market/prod', 'old-token')).status, 403);
 });
 
 test('an instance that trusts no workloads signs nothing in: 400, never 404, which no read names', async () => {
-  const none = await vault('auth/kubernetes/login', null, { method: 'PUT', body: JSON.stringify({ role: 'eso', jwt: 'x.y.z' }) });
+  const login = counted(JSON.stringify({ role: 'eso', jwt: 'x.y.z' }));
+  const [none, calls, statements] = await cost(() => vault('auth/kubernetes/login', null, login.init));
   assert.equal(none.status, 400);
   assert.match((await none.json() as Vault).errors![0]!, /trusts no workloads/);
+  // Refused before its body is read, or anything asked.
+  assert.deepEqual([login.pulls(), calls, statements], [0, [], 0]);
 });
 
 test("behind Cloudflare Access, which 0.16.0 serves to browsers alone, a token is refused as the API's bearer is: before the vault, never a value", async () => {
@@ -270,6 +343,10 @@ test("behind Cloudflare Access, which 0.16.0 serves to browsers alone, a token i
       assert.ok([400, 401, 403].includes(response.status), `${path}: ${response.status}`);
       assert.equal((await response.text()).includes(PROD.DATABASE_URL), false);
     }
+    // A login's body is never read: the exchange is refused first.
+    const login = counted(JSON.stringify({ role: 'eso', jwt: 'x.y.z' }));
+    assert.equal((await vault('auth/kubernetes/login', null, login.init, behind)).status, 400);
+    assert.equal(login.pulls(), 0);
     assert.deepEqual(behind.calls, []);
   } finally {
     await behind.close();
