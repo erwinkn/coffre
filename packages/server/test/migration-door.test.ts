@@ -20,6 +20,7 @@ import { sql } from 'drizzle-orm';
 import { coffreRoute, respond, schemaReady } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
+import { admitSocket } from '../src/socket-admission.ts';
 import { TEST_OWNER_DATABASE_URL, TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -134,4 +135,17 @@ test('a database that cannot be reached is let through the door, to meet its out
   assert.deepEqual([denied.status, denied.rendered], [500, false]);
   const busy = await ask(freshRuntime(failing(new Error('Failed to acquire a connection from the pool.'))), '/api/projects');
   assert.deepEqual([busy.status, busy.rendered], [503, false]);
+});
+
+test("below its migrations, a plugin's WebSocket is refused 503 at the same door, and its plugin is never asked; migrated, it is", async () => {
+  let asked = 0;
+  const runtime: CoffreRuntime = { ...freshRuntime(), plugins: [{ name: 'sockets', routes: { prefix: '/sockets', fetch: async () => new Response(), socket: async () => ((asked += 1), new Response('admitted')) } }] };
+  const admit = async () => (await admitSocket(new Request(`${ORIGIN}/sockets/x`), runtime, null)) as Response;
+  await migratedBefore(async () => {
+    const answer = await admit();
+    assert.deepEqual([answer.status, await answer.text()], [503, "coffre's database lacks this version's migrations"]);
+    assert.equal(runtime.schema.migrated, false);
+  });
+  assert.equal(asked, 0);
+  assert.deepEqual([(await admit()).status, asked], [200, 1]);
 });
