@@ -7,7 +7,7 @@ import type { Presented } from '@coffre/core/vault';
  * verifies nothing: the vault finds the credential by the hash, and decides.
  */
 
-function readCookie(request: Request, name: string): string | null {
+export function readCookie(request: Request, name: string): string | null {
   const raw = request.headers.get('cookie');
   if (raw === null) return null;
   for (const part of raw.split(';')) {

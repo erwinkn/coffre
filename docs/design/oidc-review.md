@@ -11,7 +11,7 @@ is no critical finding. Keeping authentication in the app is reasonable;
 moving bindings into the vault would not, by itself, fix these problems.
 
 This review covers [the proposal](oidc.md), the existing
-[sign-in service](../../packages/server/src/api/signin.ts),
+[sign-in service](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/src/api/signin.ts),
 [authentication boundary](../../packages/server/src/auth.ts),
 [credential queries](../../packages/server/src/db/queries.ts), both
 [Postgres](../../packages/db/src/schema.ts) and
@@ -544,7 +544,7 @@ Coffre records denied administrative actions using the same action name
 and `decision=deny`: see `requireOwner` in
 [context.ts](../../packages/server/src/api/context.ts) and the denied
 `token.revoke` entries in
-[signin.ts](../../packages/server/src/api/signin.ts). If unbind follows that
+[signin.ts](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/src/api/signin.ts). If unbind follows that
 convention, a non-owner who knows a binding ID can attempt removal, receive
 a 403, and leave an authentic audit entry that disables the binding. A
 former owner who remains an ordinary member is one concrete example.

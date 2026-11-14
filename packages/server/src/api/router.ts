@@ -2,7 +2,7 @@ import type { z } from 'zod';
 
 import { errorResponse, jsonResponse, readJson } from '../http.ts';
 import type { ApiContext } from './context.ts';
-import { ApiError, badRequest, notFound } from './errors.ts';
+import { ApiError, badRequest, notFound, noteTampered } from './errors.ts';
 import { PARAMS, type Route } from './route.ts';
 import { routes } from './routes.ts';
 
@@ -23,6 +23,8 @@ const MAX_BODY_KEYS = 2000;
 type AnyRoute = Route<string, z.ZodType | undefined, unknown, z.ZodType | undefined>;
 
 type Compiled = {
+  /** `METHOD /route`, as the table names it. */
+  key: string;
   method: string;
   segments: ({ literal: string } | { param: string })[];
   def: AnyRoute;
@@ -31,6 +33,7 @@ type Compiled = {
 const compiled: Compiled[] = Object.entries(routes).map(([key, def]) => {
   const [method, shape] = key.split(' ') as [string, string];
   return {
+    key,
     method,
     segments: shape
       .split('/')
@@ -108,8 +111,18 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
   if ('allowed' in found) {
     return errorResponse(new ApiError('method_not_allowed', `use ${found.allowed.join(' or ')}`), { allow: found.allowed.join(', ') });
   }
-  const { def } = found.route;
-  for (const [name, value] of Object.entries(found.params)) {
+  const { def, key } = found.route;
+  try {
+    return await serveRoute(request, url, def, found.params, ctx);
+  } catch (error) {
+    noteTampered(error, key, ctx.shown.request);
+    throw error;
+  }
+}
+
+/** Steps 2 and 3: the path's segments and the input checked, then the handler. */
+async function serveRoute(request: Request, url: URL, def: AnyRoute, params: Record<string, string>, ctx: ApiContext): Promise<Response> {
+  for (const [name, value] of Object.entries(params)) {
     if (PARAMS[name] !== undefined && !PARAMS[name].safeParse(value).success) throw badRequest(`"${value}" is not a valid ${name}`);
   }
   const raw = request.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(request, API_BODY_BYTES, {});
@@ -119,5 +132,5 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
   }
   const input = def.input === undefined ? undefined : def.input.parse(raw);
   const query = request.method === 'GET' || def.query === undefined ? undefined : def.query.parse(Object.fromEntries(url.searchParams));
-  return jsonResponse(await def.run(ctx, { params: found.params, input, query } as never));
+  return jsonResponse(await def.run(ctx, { params, input, query } as never));
 }

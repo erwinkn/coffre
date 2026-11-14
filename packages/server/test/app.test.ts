@@ -364,12 +364,12 @@ test('a path is a route or it is not: its method, its segments and its body are 
   assert.deepEqual(await tried('/api/secrets/market/prod', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(Array.from({ length: 2001 }, (_, i) => [`K${i}`, 'x']))) }), [400, 'bad_request', null]);
   assert.deepEqual(await tried('/api/secrets/market/prod', { method: 'PATCH', body: JSON.stringify({ A: 'x'.repeat(1024 * 1024) }) }), [400, 'bad_request', null]);
   assert.deepEqual(app.calls, []);
-  // Outside the API: health, and nothing else of coffre's yet.
+  // Outside the API: health, sign-in (signin.test.ts), and no MCP yet.
   assert.deepEqual(await tried('/livez'), [200, undefined, null]);
   assert.deepEqual(await answered(app.request('/readyz')), [200, { ok: true }]);
   assert.equal((await app.request('/livez', { method: 'HEAD' })).status, 200);
   assert.deepEqual(await tried('/livez', { method: 'POST' }), [405, 'method_not_allowed', 'GET']);
-  assert.deepEqual(await tried('/auth/signin/github'), [404, 'not_found', null]);
+  assert.deepEqual(await tried('/mcp', { method: 'POST' }), [404, 'not_found', null]);
 });
 
 test('who is asking, and where they hold something: one call to the vault, one statement, scoped by its answer', async () => {

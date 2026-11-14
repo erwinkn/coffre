@@ -23,6 +23,8 @@ import { logged } from '../logged.ts';
  *   501 not_implemented    a route this release declares and does not serve yet
  *   503 unavailable        something coffre needs is not answering: the vault, a platform, its database
  *   503 migrating          the database lacks this version's migrations: nothing is served until `coffre migrate`
+ *   503 adopting           the vault has not taken the database over yet: nobody signs in until it has
+ *   500 tampered           a row the vault read is not one it wrote: the operator reads which in the server log
  *   500 internal_error     a bug; the details are in the server log only
  *
  * The message is written for a person and is safe to show them.
@@ -43,6 +45,8 @@ export const ERROR_STATUS = {
   not_implemented: 501,
   unavailable: 503,
   migrating: 503,
+  adopting: 503,
+  tampered: 500,
   internal_error: 500,
 } as const;
 
@@ -113,12 +117,35 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   last_owner: ['conflict', 'the instance keeps one Owner of all of it: make another one first'],
   configured_owner: ['conflict', "the deployment names them an Owner, which they stay while its configuration says so"],
   invalid: ['conflict', 'a role the instance does not have, one that holds what only a project has given on an environment, or an end that has passed'],
+  // Any operation's: the vault refuses to decide on a row it did not write, and the operator must look (`noteTampered`).
+  tampered: ['tampered', "a record coffre's vault reads failed its integrity check: whoever runs coffre has the details in its server log"],
+  adopting: ['adopting', "coffre's vault has not taken over its database yet; try again in a moment"],
+  // Sign-in (signin.ts, routes/signin.ts): as 0.14 answered.
+  unknown_identity: ['not_found', 'unknown sign-in account'],
+  unknown_code: ['not_found', 'that code is unknown or has expired'],
 };
 
-/** The vault's refusal, as the API answers it: `what` names what was asked for, `market/prod/KEY`. */
+/** Refusals about the instance, not what was asked for: their words are the same whatever the request named. */
+const UNNAMED = new Set(['tampered', 'adopting']);
+
+/**
+ * The vault's refusal, as the API answers it: `what` names what was asked
+ * for, `market/prod/KEY`, but on a refusal about the instance itself
+ * (`tampered`, `adopting`), whose words name no row.
+ */
 export function refusal(refused: string, what?: string): ApiError {
   const [code, message] = REFUSALS[refused] ?? ['vault_refused', `the vault refused: ${refused}`];
-  return new ApiError(code, what === undefined ? message : `${what}: ${message}`, refused);
+  return new ApiError(code, what === undefined || UNNAMED.has(refused) ? message : `${what}: ${message}`, refused);
+}
+
+/**
+ * A refusal that says the vault read a row it did not write, said once in
+ * the server's log: whoever runs coffre must find it, and the caller is
+ * told nothing of which. `route` is the route's pattern and `request` the
+ * request's id, never anything the caller typed.
+ */
+export function noteTampered(error: unknown, route: string, request: string | null): void {
+  if (error instanceof ApiError && error.code === 'tampered') console.error('the vault refused a request on a row it did not write', { route, request });
 }
 
 /**

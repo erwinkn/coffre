@@ -1,3 +1,4 @@
+import type { AuthConfig } from '@coffre/core/identity';
 import type { Called, Presented, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
@@ -17,6 +18,8 @@ export type ApiContext = {
    * itself.
    */
   caller(): Promise<Called>;
+  /** How the deployment signs people in: what a sign-in route says of it (`cliSessionDays`). */
+  auth: AuthConfig;
   /** Days a value may go unchanged before the pages flag it for rotation, as the deployment says (`rotateAfterDays`); null for no flag. */
   rotateAfterDays: number | null;
 };

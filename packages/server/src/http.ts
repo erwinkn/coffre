@@ -14,7 +14,7 @@ export function jsonResponse(
 /** Anything thrown, as the API's one error shape: `{ error, message }`; a moment's 503 says when to ask again. */
 export function errorResponse(error: unknown, headers: HeadersInit = {}): Response {
   const { status, body } = toErrorBody(error);
-  const momentary = status === 503 && body.error === 'unavailable' && body.reason === undefined && !new Headers(headers).has('retry-after');
+  const momentary = status === 503 && ((body.error === 'unavailable' && body.reason === undefined) || body.error === 'adopting') && !new Headers(headers).has('retry-after');
   return jsonResponse(body, status, momentary ? { ...Object.fromEntries(new Headers(headers)), 'retry-after': UNAVAILABLE_RETRY_AFTER } : headers);
 }
 
