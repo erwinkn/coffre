@@ -850,6 +850,75 @@ test('a handle reaches what its scope does; an upstream credential frozen in an 
   assert.equal(await got(ask('dee', 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: 'stripe' })), 'no_access');
 });
 
+test("a peek says what `coffre run` generates by: each key's version id, its recipe, whether it is the caller's own, and whether the read found their personal config", async () => {
+  // Made by a recipe, as `coffre run` writes one (the helper writes a typed value); and staging's reference to a value a
+  // recipe made in billing, whose recipe is its source's, no value of its own that a write could replace.
+  const sealed = { ...value(vault, secret(w.adas, 'SEAL_KEY'), 'own-seal'), recipe: 'bytes:32:hex' };
+  const source = { ...value(vault, secret(w.billed, 'MADE'), 'made-in-billing'), recipe: 'bytes:16:hex' };
+  await write(vault, ...rows('secrets', sealed, source, secret(w.staging, 'REF', { sourceId: source.id })));
+  const versionIds = new Map((await rowsOf<{ secret_id: string; version: number; id: string }>(vault.owner, sql`SELECT secret_id, version, id FROM secret_versions`)).map((row) => [`${row.secret_id} ${row.version}`, row.id]));
+  const items = async (asked: Ask) => {
+    const peeked = await peek(vault, asked);
+    assert.ok(!('refused' in peeked));
+    return { personal: peeked.personal, items: Object.fromEntries(peeked.items.map((item) => ['refused' in item ? item.key : item.key, 'refused' in item ? item.refused : { versionId: item.versionId, recipe: item.recipe, own: item.own }])) };
+  };
+  const at = (row: { id: string }, version: number) => versionIds.get(`${row.id} ${version}`)!;
+  // Ada's personal config of staging: her own two keys, then what staging and prod pass down; LINK's own row has no recipe.
+  assert.deepEqual(await items(ask('ada', 'market/staging', null, { purpose: 'use', mine: true })), {
+    personal: true,
+    items: {
+      DATABASE_URL: { versionId: at(w.own, 1), recipe: null, own: true },
+      HOLLOW: 'no_value',
+      LINK: { versionId: at(w.token, 1), recipe: null, own: false },
+      REF: { versionId: at(source, 1), recipe: null, own: false },
+      SEAL_KEY: { versionId: at(sealed, 1), recipe: 'bytes:32:hex', own: true },
+      STRIPE_KEY: { versionId: at(w.stripe, 1), recipe: null, own: false },
+    },
+  });
+  // Staging itself, and `@me` of an environment its caller has no config of, is no personal config, and holds nothing of anyone's own.
+  for (const asked of [ask('ada', 'market/staging', null, { purpose: 'use' }), ask('ada', 'market/prod', null, { purpose: 'use', mine: true })]) {
+    const { personal, items: said } = await items(asked);
+    assert.deepEqual([personal, Object.values(said).some((item) => typeof item === 'object' && item.own)], [false, false]);
+  }
+  // A key refused is its name and why, and nothing else: a parent Bo does not read tells him neither its version nor its recipe.
+  const bos = await peek(vault, ask('bo', 'market/staging', ['DATABASE_URL', 'LINK'], { purpose: 'use' }));
+  assert.ok(!('refused' in bos));
+  assert.deepEqual(bos.items.find((item) => item.key === 'LINK'), { key: 'LINK', refused: 'parent_unreadable' });
+});
+
+test('a fresh ask reads its rows now, never from the memory, and is remembered all the same: a peek and a use alike', async () => {
+  let statements = 0;
+  const db = new Proxy(vault.db, {
+    get(target, name, receiver) {
+      const member = Reflect.get(target, name, receiver) as unknown;
+      if (name !== 'execute' || typeof member !== 'function') return member;
+      return (...args: unknown[]) => ((statements += 1), (member as (...args: unknown[]) => unknown).apply(target, args));
+    },
+  });
+  const counted = { ...vault, db };
+  const asked = ask('ada', 'market/prod', ['DATABASE_URL'], { purpose: 'run' });
+  const fresh = { ...asked, fresh: true };
+  const version = async (each: Ask, how: typeof peek | typeof use) => {
+    const answer = await how(counted, each);
+    assert.ok(!('refused' in answer));
+    return 'items' in answer ? (answer.items[0] as { version: number }).version : (answer.values[0] as { version: number }).version;
+  };
+  for (const how of [peek, use] as const) {
+    vault.memory.reads.clear();
+    vault.tick(60_000);
+    const before = await version(asked, how);
+    // A change the memory has not seen: a new version of the key.
+    await rewrite(vault, w.database, `postgres://${how.name}`);
+    statements = 0;
+    assert.equal(await version(asked, how), before, 'from the memory');
+    const read = statements;
+    assert.equal(await version(fresh, how), before + 1, 'read now');
+    assert.ok(statements > read, 'a statement of its own');
+    // Remembered: the next ask, fresh or not, is the new version.
+    assert.equal(await version(asked, how), before + 1);
+  }
+});
+
 test('a peek is what a use would give, key by key, and writes nothing: no entry, no exposure, no last use; one read, none within the memory', async () => {
   let statements = 0;
   const db = new Proxy(vault.db, {
@@ -863,7 +932,7 @@ test('a peek is what a use would give, key by key, and writes nothing: no entry,
   const run = { purpose: 'run' };
   // A whole environment, a fork, a personal config, the sensitive one on an Owner's token, a place Bo holds nothing in, and keys named.
   const asks = [ask('ada', 'market/prod', null, run), ask('ada', 'market/staging', null, run), ask('ada', 'market/staging', null, { ...run, mine: true }), ask('ci-sensitive', 'market/prod', null, run), ask('bo', 'market/prod', null, run), ask('ada', 'market/prod', ['DATABASE_URL', 'STRIPE_KEY', 'LINK', 'NOPE'])];
-  const peeked = [];
+  const peeked: Awaited<ReturnType<typeof peek>>[] = [];
   for (const asked of asks) {
     statements = 0;
     const first = await peek(counted, asked);
@@ -880,7 +949,10 @@ test('a peek is what a use would give, key by key, and writes nothing: no entry,
   for (const [i, asked] of asks.entries()) {
     const used = await use(vault, asked);
     const seen = 'refused' in used ? used : { principal: used.principal, credential: used.credential, items: used.values.map((item) => ('refused' in item ? item : { key: item.key, secret: item.secret, version: item.version, nature: item.nature })) };
-    assert.deepEqual(peeked[i], seen, JSON.stringify(asked.keys));
+    // What only a peek says, for `coffre run`'s generating (the test below), set aside.
+    const said = peeked[i]!;
+    const shown = 'refused' in said ? said : { principal: said.principal, credential: said.credential, items: said.items.map((item) => ('refused' in item ? item : { key: item.key, secret: item.secret, version: item.version, nature: item.nature })) };
+    assert.deepEqual(shown, seen, JSON.stringify(asked.keys));
   }
   assert.equal((peeked[3] as { items: { key: string }[] }).items.some((item) => item.key === 'STRIPE_KEY' && !('refused' in item)), true);
   // Refused as of now from what it remembers, it forgets it, as a use does: a credential that expires within the memory.

@@ -58,14 +58,17 @@ export type PluginContext = {
    * (the vault's `peek`, decided as a use through the proxy is): each key
    * the environment holds, by the nature its rows say, or why the handle may
    * not use it. What `coffre run`'s plan chooses the keys it asks `expose`
-   * for by, never what it places a value by. A `CoffreError` for a refusal
-   * of the whole place.
+   * for by, never what it places a value by; and, for what it generates,
+   * each key's version id and recipe, whether it is the caller's own, and
+   * whether the read found their personal config (`personal`). A
+   * `CoffreError` for a refusal of the whole place.
    */
-  held(caller: string, path: string): Promise<Peeked['items']>;
+  held(caller: string, path: string): Promise<Pick<Peeked, 'personal' | 'items'>>;
   /**
    * Values handed back to the caller's own app (purpose `expose`): the keys
    * named, or every key with `null`. One call to the vault, which logs what
-   * it gives. Key by key, the values given, those of them that opened plain,
+   * it gives. Both this and `held` read the vault's rows now, never its
+   * memory: a plan follows the writes `coffre run` just made. Key by key, the values given, those of them that opened plain,
    * and why each other is not given (`sensitive`, `use_only`, …), which the
    * caller does without. A `CoffreError` for a refusal of the whole use.
    */
@@ -298,13 +301,14 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
     },
     held: async (caller, path) => {
       const [place, shown] = askedAs(caller, path);
-      const answer = await runtime.vault.peek({ ...shown, ...place, keys: null, purpose: 'use', upstream: null });
+      // Read now: a plan right after `coffre run` wrote the values it generated must see them (`UseInput.fresh`).
+      const answer = await runtime.vault.peek({ ...shown, ...place, keys: null, purpose: 'use', upstream: null, fresh: true });
       if ('refused' in answer) throw wording(caller)(refusal(answer.refused, path));
-      return answer.items;
+      return { personal: answer.personal, items: answer.items };
     },
     expose: async (caller, asked) => {
       const [place, shown] = askedAs(caller, asked.path);
-      const answer = await runtime.vault.use({ ...shown, ...place, keys: asked.keys === null ? null : [...asked.keys], purpose: 'expose', upstream: null });
+      const answer = await runtime.vault.use({ ...shown, ...place, keys: asked.keys === null ? null : [...asked.keys], purpose: 'expose', upstream: null, fresh: true });
       if ('refused' in answer) throw wording(caller)(refusal(answer.refused, asked.path));
       const exposed: Exposed = { values: Object.create(null), plain: [], refused: Object.create(null), environment: { path: asked.path.replace(/@me$/, ''), personal: place.mine } };
       for (const item of answer.values) {

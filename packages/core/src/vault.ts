@@ -112,6 +112,12 @@ export type UseInput = Presented & {
   purpose: Purpose;
   /** The upstream credential the values are used for, by its name in the deployment's configuration (`stripe`). Null for none. */
   upstream: string | null;
+  /**
+   * Read the rows now, never from the vault's memory (`memorySeconds`): an
+   * answer that must see a change just made, `coffre run`'s plan after the
+   * values it generated were written. The read is remembered all the same.
+   */
+  fresh?: boolean;
 };
 
 /**
@@ -147,12 +153,20 @@ export type Used = {
  * is refused; nothing opened. The nature is the one its rows say, which the
  * use holds the value to: what `coffre run`'s plan picks the keys it asks
  * for by, and never what it places a value by, which is the use's.
+ *
+ * For what `coffre run` generates in a personal config, of a key the caller
+ * is given and no other: `versionId`, the version's id, which a write's
+ * `replaces` names (a listing's `versionId`); `recipe`, what made it, null
+ * for a value typed or a reference; `own`, held in the caller's personal
+ * config, not inherited. `personal`: the read found the caller's personal
+ * config of the environment (`@me`), not the environment itself.
  */
 export type Peeked = {
   principal: string;
   /** The credential's id. */
   credential: string;
-  items: ({ key: string; secret: string; version: number; nature: Nature } | { key: string; refused: string })[];
+  personal: boolean;
+  items: ({ key: string; secret: string; version: number; nature: Nature; versionId: string; recipe: string | null; own: boolean } | { key: string; refused: string })[];
 };
 
 /**

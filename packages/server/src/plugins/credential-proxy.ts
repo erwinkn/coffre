@@ -54,6 +54,7 @@ import { createHash } from 'node:crypto';
 import { CoffreError } from '@coffre/client';
 import { bodyDigest, bodyLine, contentDigest, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_BODY } from '@coffre/client/dpop';
 import { constraintsAllow } from '@coffre/core/identity';
+import { parseRecipe } from '@coffre/core/recipe';
 
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { WorkloadRefused, type CoffrePlugin, type Exposed, type PluginContext, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
@@ -611,17 +612,26 @@ const WHOLE_HANDLE = new RegExp(`^${HANDLE.source}$`);
  * the peek's: a key the peek saw plain that opens a secret, under a
  * credential, stays its placeholder, its value dropped. A credential with a
  * JWT placeholder adds its own use and the handle's row (`shaped`).
+ *
+ * In an environment the deployment generates values for (`generate`), the
+ * plan reads the person's personal config of it (`readOf`), and names in
+ * `generate` each key the app goes without whose value a recipe made, for
+ * `coffre run` to write a value of the person's own by it, into that
+ * config, over the version the peek saw (`replaces`), so that of two runs
+ * at once one writes and the other is refused (409 `stale`). The peek says
+ * all of it, so the map costs nothing more. Never a key held in the
+ * person's own config sensitive: theirs, which the app goes without (R18).
  */
 async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path: string): Promise<Response> {
   // A workload's proof signs the request's content as every request under /use does: here, no body.
   const caller = await workloadOf(request, coffre, { place: path, body: await bodyDigest(new Uint8Array(0)) });
   if (caller instanceof Response) return caller;
   if (caller !== null) return answering(caller, () => workloadPlan(coffre, proxy, caller, caller.path ?? path));
-  // The personal config's recipes, which a plan names for `coffre run` to make, come with that config's writes (W418).
-  if (proxy.generate.has(path.replace(/@me$/, ''))) return notYet(`the plan of ${path}, an environment the deployment generates values for (\`generate\`),`);
   const handle = bearer(request);
   if (handle === null || !WHOLE_HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
-  const held = await coffre.held(handle, path);
+  // A person's personal config of an environment the deployment generates for, or the environment while they have none.
+  const read = readOf(proxy, path);
+  const { personal, items: held } = await coffre.held(handle, read);
   // What the handle may use, by the nature its rows say: what chooses which keys to open, and nothing more.
   const usable = new Map(held.flatMap((item) => ('refused' in item ? [] : [[item.key, item.nature] as const])));
   const holds = (key: string) => usable.has(key);
@@ -637,7 +647,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   // A plain value is no secret, wherever it is held; a secret no credential covers, its person reads where it is held.
   const asked = [...usable].filter(([key, nature]) => (nature === 'plain' && !filled.has(key)) || (nature !== 'sensitive' && !covered.has(key))).map(([key]) => key);
   // A person who only uses the environment, a Developer's protected prod, reads none of it: every value is left.
-  const exposed = asked.length === 0 ? null : await coffre.expose(handle, { path, keys: asked }).catch((error: unknown) => {
+  const exposed = asked.length === 0 ? null : await coffre.expose(handle, { path: read, keys: asked }).catch((error: unknown) => {
     if (error instanceof CoffreError && error.reason === 'no_access') return null;
     throw error;
   });
@@ -647,7 +657,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   for (const credential of using) {
     // The environment's URL, which a run of several environments tells apart.
     credentials[credential.name] = `${coffre.publicUrl}/use/${path}/${credential.name}`;
-    const placeholder = credential.placeholder === undefined ? handle : await shaped(coffre, credential, handle, path);
+    const placeholder = credential.placeholder === undefined ? handle : await shaped(coffre, credential, handle, read);
     for (const key of credential.keys) {
       env[key] = placeholder;
       placed.add(key);
@@ -672,7 +682,41 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     delete env[tunnel.key];
     placed.add(tunnel.key);
   }
-  return answer({ environment: path, env: { ...env }, credentials, tunnels: listeners, left: held.map((item) => item.key).filter((key) => !placed.has(key)) });
+  // What the app goes without and a recipe made, in an environment the deployment generates for: each is written a
+  // secret, which the app is given, since saying nothing an override takes the level of the key it overrides,
+  // sensitive here (decision 27). A key whose parent the person does not read is refused by the peek: neither its
+  // version nor its recipe is told.
+  const making = proxy.generate.get(path.replace(/@me$/, ''));
+  const generate: Record<string, { recipe: string; replaces: string; sensitivity: 'secret' }> = {};
+  const generates = (key: string) => making === 'all' || making?.includes(key) === true;
+  for (const item of held) {
+    if ('refused' in item || !generates(item.key) || placed.has(item.key) || item.recipe === null || !makesOne(item.recipe)) continue;
+    // The person's own value, made sensitive: theirs, which the app goes without, never made again over it (R18).
+    if (item.own && item.nature === 'sensitive') continue;
+    generate[item.key] = { recipe: item.recipe, replaces: item.versionId, sensitivity: 'secret' };
+  }
+  return answer({
+    environment: personal ? `${path.replace(/@me$/, '')}@me` : path,
+    env: { ...env },
+    credentials,
+    tunnels: listeners,
+    left: held.map((item) => item.key).filter((key) => !placed.has(key)),
+    ...(making === undefined ? {} : { generate }),
+  });
+}
+
+/**
+ * Whether a recipe is one the plan may hand `coffre run` to make a value by:
+ * one this server knows, of one value. A key pair's half is made only with
+ * its other half, named, which a plan does not say: 0.14.7 left both to the
+ * person, as here (`coffre generate --public-key`).
+ */
+function makesOne(recipe: string): boolean {
+  try {
+    return parseRecipe(recipe).kind !== 'pair';
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -56,6 +56,8 @@ export type Ask = {
   /** The app's request, for the log, and the address it came from, which a workload's binding may name. */
   request: string | null;
   ip: string | null;
+  /** Read now, never from the memory: an answer that must see a change just made (`UseInput.fresh`). Remembered all the same. */
+  fresh?: boolean;
 };
 
 /** One key's value, or why this caller is not given it. `secret` is where the value is held: a reference's source. */
@@ -446,7 +448,7 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
  * it `unreadable`.
  */
 export async function peek(vault: Serving, ask: Ask): Promise<Peeked | Refusal> {
-  const found = recall(vault, ask) ?? (await read(vault, ask));
+  const found = (ask.fresh === true ? undefined : recall(vault, ask)) ?? (await read(vault, ask));
   const at = vault.now();
   const decided = decide(found.seen, ask, vault.workloads, at);
   if ('refused' in decided) {
@@ -454,8 +456,12 @@ export async function peek(vault: Serving, ask: Ask): Promise<Peeked | Refusal> 
     return decided;
   }
   remember(vault.memory, ask, found, at);
-  const items = decided.items.map((item) => ('refused' in item ? item : { key: item.key, secret: item.held.id, version: item.version.version, nature: natureOf(item.version) }));
-  return { principal: decided.caller.principal, credential: decided.caller.credential.id, items };
+  const items = decided.items.map((item) => ('refused' in item ? item : {
+    key: item.key, secret: item.held.id, version: item.version.version, nature: natureOf(item.version),
+    // A reference's own row has no recipe: its source's is no value written here.
+    versionId: item.version.id, recipe: item.asked.recipe, own: item.owner !== null,
+  }));
+  return { principal: decided.caller.principal, credential: decided.caller.credential.id, personal: decided.environment.owner !== null, items };
 }
 
 /**
@@ -485,7 +491,7 @@ export async function peek(vault: Serving, ask: Ask): Promise<Peeked | Refusal> 
  */
 export async function use(vault: Serving, ask: Ask): Promise<Answer | Refusal> {
   const { memory } = vault;
-  const found = recall(vault, ask);
+  const found = ask.fresh === true ? undefined : recall(vault, ask);
   const now = vault.now();
   const spare = spareOf(memory, ask, now);
   if (spare !== undefined && now >= memory.downAt && now < memory.downAt + DOWN_MS) return answer(vault, ask, spare, true);

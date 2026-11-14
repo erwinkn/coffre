@@ -69,8 +69,9 @@ const transport: WorkloadTransport = {
 const workloads = { limits: processLimits({ perSource: 100_000, total: 100_000 }) };
 // And for MCP's OAuth endpoints, which anyone may call.
 const mcp = { limits: processLimits({ perSource: 100_000, perConnection: 100_000, total: 100_000 }) };
-// The credential proxy, for `coffre run`'s plan: one credential of dev's keys, the rest handed back as they are.
-const proxy = credentialProxy({ credentials: { cloudflare: { upstream: 'https://api.cloudflare.example/client/v4', inject: header('authorization', 'Bearer {CLOUDFLARE_API_TOKEN}') } } });
+// The credential proxy, for `coffre run`'s plan: one credential of dev's keys, the rest handed back as they are, in an
+// environment it generates values for, so that the plan reads its person's personal config and names what to make.
+const proxy = credentialProxy({ credentials: { cloudflare: { upstream: 'https://api.cloudflare.example/client/v4', inject: header('authorization', 'Bearer {CLOUDFLARE_API_TOKEN}') } }, generate: { 'market/dev': 'all' } });
 const app = await openApp({ auth: signin({ providers: [acme], workloads, mcp }), transport, workloads: {}, plugins: [proxy] });
 const { world } = app;
 
@@ -411,7 +412,11 @@ const requests: Record<string, Entry> = {
   'DELETE /sessions/:id': { request: () => api('bo-cli', 'DELETE', `/sessions/${personal}`), calls: ['change'], statements: 0 },
   'POST /handles': { request: () => take<{ id: string; token: string }>(api('ada-cli', 'POST', '/handles', { label: 'run', paths: ['market/dev'] }), (body) => ([handle, handleToken] = [body.id, body.token])), calls: ['change'], statements: 0 },
   // `coffre run`'s plan, through the handle: a peek of what it may use, then one use of what the app is handed (the credential proxy, plugins/credential-proxy.ts).
+  // Its generate map is told by the peek, and costs nothing more. Asked again at once, as `coffre run` does after it writes
+  // what it generated, it costs the same: both calls read now (`fresh`), the vault's memory on or off; the vault's own
+  // reads and write are counted in test/proxy-plan.test.ts (2 reads, and 1 write a minute).
   'GET /use/:project/:environment': { request: () => app.request('/use/market/dev', { headers: { authorization: `Bearer ${handleToken}` } }), calls: ['peek', 'use'], statements: 0, fixed: true },
+  'GET /use/:project/:environment, again': { request: () => app.request('/use/market/dev', { headers: { authorization: `Bearer ${handleToken}` } }), calls: ['peek', 'use'], statements: 0, fixed: true },
   'DELETE /handles/:id': { request: () => api('ada-cli', 'DELETE', `/handles/${handle}`), calls: ['change'], statements: 0 },
   // A service account's trust bindings. Making one is weighed as the change first, `caller` and one statement, before its
   // issuer is asked where its keys are. A CI run's exchange is one statement, which bindings to verify under, and one
