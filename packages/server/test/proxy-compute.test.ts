@@ -265,6 +265,29 @@ test("a presigned URL lasts no longer than its credential's end, the vault's wor
   const child = await sessionOf({ ancestors: JSON.stringify([deploy.id]) });
   later();
   assert.ok((await lasting(await asSession(child, PRESIGN))).seconds <= 30);
+  // What it answers is when the URL ends, X-Amz-Date and X-Amz-Expires, however long signing took: here past a second.
+  const subtle = crypto.subtle;
+  const sign = subtle.sign.bind(subtle);
+  let slowed = false;
+  subtle.sign = (async (...args: Parameters<typeof sign>) => {
+    if (!slowed) {
+      slowed = true;
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+    }
+    return sign(...args);
+  }) as typeof subtle.sign;
+  let slow: { url: string; expiresAt: string };
+  try {
+    slow = await json(await asHandle(PRESIGN));
+  } finally {
+    subtle.sign = sign;
+  }
+  assert.ok(slowed);
+  const query = new URL(slow.url).searchParams;
+  const at = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(query.get('X-Amz-Date')!)!;
+  const urlEnd = Date.UTC(+at[1]!, +at[2]! - 1, +at[3]!, +at[4]!, +at[5]!, +at[6]!) + Number(query.get('X-Amz-Expires')) * 1000;
+  assert.equal(Date.parse(slow.expiresAt), urlEnd);
+  assert.ok(urlEnd <= end);
   // A handle that ends within the second presigns nothing.
   await amend(world, 'credentials', sql`id = ${handleId}`, { expiresAt: new Date(Date.now() + 500) });
   later();

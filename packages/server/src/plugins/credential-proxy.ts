@@ -1406,7 +1406,10 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   if (HANDLE.test(bytesOf(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
   const { values, expiresAt } = await used(coffre, proxy, path, who, credential.name, credential.keys, { method, url: target });
   // Never past the handle's or the session's end, the vault's word: a revoke or a freeze since stops none already made.
-  const lasts = Math.min(expiresIn, Math.floor((Date.parse(expiresAt) - Date.now()) / 1000));
+  // One moment counts its life, and its second, the URL's X-Amz-Date, signs it and says when it ends, however long signing takes.
+  const now = Date.now();
+  const signedAt = new Date(Math.floor(now / 1000) * 1000);
+  const lasts = Math.min(expiresIn, Math.floor((Date.parse(expiresAt) - now) / 1000));
   if (lasts < 1) return failure(401, typeof who === 'string' ? 'the handle ends now: run the app with `coffre run` again' : 'the session ends now: renew it');
   let url: URL;
   try {
@@ -1414,11 +1417,11 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
       accessKeyId: render(inject.accessKeyId, values),
       secretAccessKey: render(inject.secretAccessKey, values),
       ...(inject.sessionToken === undefined ? {} : { sessionToken: render(inject.sessionToken, values) }),
-    }, inject, lasts);
+    }, inject, lasts, signedAt);
   } catch {
     return failure(409, `${credential.name}'s values sign no URL`);
   }
-  return answer({ url: url.href, expiresAt: new Date(Date.now() + lasts * 1000).toISOString() });
+  return answer({ url: url.href, expiresAt: new Date(signedAt.getTime() + lasts * 1000).toISOString() });
 }
 
 /** Which of the deployment's maps holds `name`, said to a request that asks it for what another kind does. */
