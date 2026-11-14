@@ -339,6 +339,24 @@ test('refresh tokens rotate, may narrow the scopes, never widen them, and a repl
   assert.equal((await standing(ada)).length, 1, 'a refused refresh ends nothing');
 });
 
+test("a reused refresh token ends its connection's access tokens at /mcp, past the vault's memory (D218)", async () => {
+  const discover = async (access: string) => (await app.request('/mcp', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${access}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'server/discover' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'server/discover', params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} } } }),
+  })).status;
+  const first = await connect();
+  const [status, body] = await refresh(first);
+  assert.equal(status, 200, JSON.stringify(body));
+  const next = { ...(body as Tokens), client: first.client };
+  assert.equal(await discover(next.access_token), 200);
+  assert.deepEqual((await refresh(first))[1].error, 'invalid_grant');
+  assert.deepEqual(await standing(ada), []);
+  const within = await discover(next.access_token);
+  world.memory.callers.clear();
+  assert.deepEqual([within, await discover(next.access_token)], [200, 401]);
+});
+
 test('a code is for its client, its redirect and its verifier only (its minute, the vault holds: packages/vault/test/mcp.test.ts)', async () => {
   const { verifier, challenge } = pkce();
   const redirect = 'http://localhost:7000/callback';

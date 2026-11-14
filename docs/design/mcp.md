@@ -5,6 +5,12 @@ since (#150, #151 and the pull requests after them); where building it
 settled a detail, this says what the code does. It targets MCP revision **2026-07-28**, final since 28 July 2026, and
 serves 2025-era clients too (section 2).
 
+0.16 changes two things below ([0.16.md](0.16.md#the-server)): a tool call
+writes no `mcp.call` or `mcp.read` entry of its own, the vault logging what
+it does, and a client without `requestState` hears its approval's outcome
+by naming it in the `approval` argument, not by calling again with the same
+arguments.
+
 People connect an MCP client, Claude among them, to their coffre instance.
 The client then acts as that person, within the scopes they chose when they
 connected and never beyond their own grants. coffre confirms every change on

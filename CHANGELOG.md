@@ -22,6 +22,18 @@
   lets give one something, and `serviceSetup`, the setting, as 0.14.7 did,
   still in one statement; so MCP's `admit_member` and the pages offer it
   to them again. A workload lookup costs one statement less.
+- **An MCP tool call is not logged on its own.** 0.14.7 wrote an
+  `mcp.read` or `mcp.call` entry for every `tools/call`; 0.16 logs what
+  the call does, the vault's reads, reveals and changes, a change's ask
+  as `mcp.ask`.
+- **An MCP client without `requestState` names its approval.** It asks
+  for the outcome with the `approval` argument the link's answer gives. A
+  retry with the same arguments waits on the approval while it is
+  pending, and once it is decided opens a new one, where 0.14.7 answered
+  its outcome.
+- **`account_mismatch` names no provider.** The sign-in page says to sign
+  in with the account the email already uses, then link this one, without
+  0.14.7's `?with=` list of providers: the vault does not say which.
 - **A member with an edited sign-in account is not removed.** When a
   database writer has edited one of a member's sign-in accounts' rows,
   removing them is refused `tampered` (500), where 0.14.7 removed them:
