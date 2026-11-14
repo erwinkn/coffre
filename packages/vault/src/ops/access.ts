@@ -286,14 +286,15 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
     // this read and the write is found by the write's read again, and the removal starts over and revokes it too.
     accounts: part(identities, eq(identities.principal, principal)),
   };
-  // Their live credentials at their generation, by kind, on `credentials_live_idx`: no decision goes by them.
+  // Their live credentials at their generation, by kind, on `credentials_live_idx`: no decision goes by them. Live as of
+  // each statement, the read and, behind the change lock, the write's: one that lapsed while the write waited is not ended.
   const beside = {
     ending: sql`SELECT jsonb_build_object(
       'sessions', count(*) FILTER (WHERE c.kind IN ('browser', 'cli')),
       'tokens', count(*) FILTER (WHERE c.kind NOT IN ('browser', 'cli', 'mcp')),
       'apps', count(*) FILTER (WHERE c.kind = 'mcp' AND c.ancestors IS NULL AND c.challenge IS NULL)) AS row
       FROM credentials c JOIN principals m ON m.id = c.principal AND m.generation = c.generation
-      WHERE c.principal = ${principal} AND c.revoked_at IS NULL AND c.expires_at > now()`,
+      WHERE c.principal = ${principal} AND c.revoked_at IS NULL AND c.expires_at > statement_timestamp()`,
   };
   return {
     read,

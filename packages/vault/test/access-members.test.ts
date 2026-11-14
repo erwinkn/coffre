@@ -10,7 +10,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { bindings } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
 
-import { commit, prepare } from '../src/change.ts';
+import { CHANGE_LOCK, commit, prepare } from '../src/change.ts';
 import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
@@ -302,6 +302,21 @@ test('a removal says how many ways in it ended, by kind: those of their generati
   // A service account's: its tokens and its workloads' sessions are tokens.
   await write(world, ...rows('credentials', credential('api-1', api), credential('api-2', api, { kind: 'workload', jkt: 'k', notAfter: hour(1) })));
   assert.deepEqual(await remove('ada-cli', api), removed(0, { tokens: 2 }));
+});
+
+test('a removal counts what is live as its write runs, behind the change lock: a session that lapsed while it waited starts it over', async () => {
+  await write(world, ...rows('credentials', credential('bo-soon', bo, { kind: 'browser', expiresAt: new Date(Date.now() + 600) })));
+  const deciding = { workloads: world.workloads, owners: world.owners };
+  const prepared = await prepare(world, OPERATIONS['member.remove']({ ...shown('fay-cli'), op: 'member.remove', principal: bo }, deciding));
+  assert.deepEqual('answer' in prepared && prepared.answer, removed(2, { sessions: 2 }).answer);
+  const { landing } = await world.owner.transaction(async (holder) => {
+    await holder.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
+    const landing = commit(world, prepared as never);
+    await new Promise((done) => setTimeout(done, 900));
+    return { landing };
+  });
+  assert.equal(await landing, false, 'its session lapsed behind the lock');
+  assert.deepEqual(await remove('fay-cli', bo), removed(2, { sessions: 1 }));
 });
 
 test('a removal that finds an account of the member\'s it cannot read refuses, and removes nothing', async () => {
