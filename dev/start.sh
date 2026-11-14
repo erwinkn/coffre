@@ -36,6 +36,9 @@ port="${COFFRE_DEV_PORT:-3000}"
 idp_port="${COFFRE_DEV_IDP_PORT:-8081}"
 database="${COFFRE_DEV_DATABASE:-coffre}"
 state_dir="${COFFRE_STATE_DIR:-$root/dev/.wrangler/state}"
+# Absolute: Vite resolves a relative one against its own root, not this one,
+# and the reset below must empty the storage the Workers use.
+case "$state_dir" in /*) ;; *) state_dir="$root/$state_dir" ;; esac
 owner_url="postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
 
 # What deployment/app/src/server.ts, the dev IdP and the seed read. The app's

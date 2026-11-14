@@ -15,7 +15,12 @@ const name = url.pathname.slice(1);
 url.pathname = '/postgres';
 const client = postgresSession(url.href);
 try {
-    await client.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+    // Not WITH (FORCE): a database someone is connected to, another checkout's stack on the shared `coffre`, say, is theirs.
+    await client.unsafe(`DROP DATABASE IF EXISTS ${name}`);
+} catch (error) {
+    if (error?.code !== '55006') throw error;
+    console.error(`ERROR: ${name} is in use, by another stack or a client: stop it, or run this one on a database of its own (COFFRE_DEV_DATABASE)`);
+    process.exitCode = 1;
 } finally {
     await client.end();
 }
