@@ -297,7 +297,8 @@ export const principals = pgTable(
     scope: text(),
     // Advanced by each removal. A session, token or linked account issued
     // under an older generation is dead, whatever its own row says: removing
-    // someone is one row's write, however much they hold.
+    // someone writes their row and their accounts', which a unique index
+    // would otherwise hold for good, however much else they hold.
     generation: integer().notNull(),
     createdAt: at('created_at').notNull(),
     createdBy: text('created_by').notNull(),

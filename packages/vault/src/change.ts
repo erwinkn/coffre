@@ -74,6 +74,14 @@ export type Parts = Readonly<Record<string, Part>>;
 export type Seen<P extends Parts> = { [K in keyof P]: Row<P[K]['table']>[] };
 
 /**
+ * How many rows each part found whose MAC is not the vault's: written
+ * behind it, and so no row of `Seen`. A decision that allows more for a
+ * row that is not there reads this: a row it cannot trust is not a row
+ * that is absent.
+ */
+export type Unsealed<P extends Parts> = { readonly [K in keyof P]: number };
+
+/**
  * One row written. A row is put in place of the one read (`was`), which has
  * its key, or as a new one; or the row read is dropped. Within one change a
  * row is written once, and a unique value one row gives up is not taken by
@@ -117,8 +125,8 @@ export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; ent
 
 export type Operation<P extends Parts, A> = {
   read: P;
-  /** From the rows read and the time, and nothing else. */
-  decide(seen: Seen<P>, at: number): Plan<A> | Refusal;
+  /** From the rows read and the time, and nothing else. `unsealed` counts, by part, the rows found that are not the vault's. */
+  decide(seen: Seen<P>, at: number, unsealed: Unsealed<P>): Plan<A> | Refusal;
   /**
    * What the log says of a refusal, from the same rows: who was refused
    * what, and why. Null for a caller who does not stand, who is told one
@@ -223,7 +231,7 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
  * `named` by table and key, and `tokens`, every row the statement found by
  * its part and MAC, the vault's or not.
  */
-export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'keys'>, read: P): Promise<{ seen: Seen<P>; named: Map<object, string>; tokens: string[] }> {
+export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'keys'>, read: P): Promise<{ seen: Seen<P>; unsealed: Unsealed<P>; named: Map<object, string>; tokens: string[] }> {
   const parts = Object.entries(read);
   if (parts.length === 0) throw new Error('a read names at least one part');
   // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts). Bounded as a
@@ -233,6 +241,7 @@ export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'ke
     sql`SELECT part, row, clock_timestamp() AS read_at FROM (${sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `)}) parts`,
   );
   const seen = Object.fromEntries(parts.map(([name]) => [name, [] as object[]]));
+  const unsealed = Object.fromEntries(parts.map(([name]) => [name, 0]));
   /** Each row read, with its name. One that several parts found is one object each time. */
   const named = new Map<object, string>();
   const tokens: string[] = [];
@@ -240,20 +249,23 @@ export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'ke
     const { table } = read[name]!;
     const row = fromWire(table, wire) as Row<Sealed> & { mac: Buffer };
     tokens.push(`${name}:${row.mac.toString('hex')}`);
-    if (sealedBy(vault.keys, table, row) === undefined) continue;
+    if (sealedBy(vault.keys, table, row) === undefined) {
+      unsealed[name]! += 1;
+      continue;
+    }
     seen[name]!.push(row);
     named.set(row, nameOf(table, row));
   }
-  return { seen: seen as Seen<P>, named, tokens };
+  return { seen: seen as Seen<P>, unsealed: unsealed as Unsealed<P>, named, tokens };
 }
 
 /** A change's read and its decision. */
 export async function prepare<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<Prepared<A> | (Refusal & { said?: Denied | null })> {
   const parts = Object.entries(operation.read);
-  const { seen, named: read, tokens } = await readParts(vault, operation.read);
+  const { seen, unsealed, named: read, tokens } = await readParts(vault, operation.read);
   // After the read: the entry's date is the decision's, and the write is sent next.
   const at = vault.now();
-  const plan = operation.decide(seen, at);
+  const plan = operation.decide(seen, at, unsealed);
   if ('refused' in plan) {
     // What the log says of it is the operation's to say, and never costs the refusal: one that cannot be said is not logged.
     let said: Denied | null | undefined;

@@ -20,7 +20,7 @@ import { amend, credential, identity, principal, role, rows, tokenOf, user, writ
 const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
 /** The same vault, of a deployment that names Root and Ada its Owners. */
-const owned = openLocalVault(world.db, { ...world, owners: ['root@acme.example', 'ada@acme.example'] }, { wake: world.wake, now: world.now });
+const owned = openLocalVault(world.db, { ...world, owners: ['root@acme.example', 'ada@acme.example', 'cy@acme.example'] }, { wake: world.wake, now: world.now });
 after(() => world.close());
 
 const [ada, bo, cy, dee] = [user('ada'), user('bo'), user('cy'), user('dee')];
@@ -44,7 +44,8 @@ beforeEach(async () => {
     ...rows('principals', principal(ada), principal(bo), principal(cy, { status: 'removed', generation: 1 }), principal(dee, { generation: 1 })),
     // Dee's account from before her removal: of a generation that is gone.
     ...rows('identities', bos, identity(dee, { provider: 'github', issuerHash: GITHUB, subject: 'gh-dee', generation: 0 })),
-    ...rows('credentials', credential('bo-web', bo, { kind: 'browser', identityId: bos.id }), credential('bo-cli', bo)),
+    // Cy's CLI session from before his removal.
+    ...rows('credentials', credential('bo-web', bo, { kind: 'browser', identityId: bos.id }), credential('bo-cli', bo), credential('cy-cli', cy)),
   );
   // The signer has signed the instance as made: what it finds after is a test's own.
   assert.deepEqual(await checked(), []);
@@ -84,7 +85,7 @@ test('a new account is bound to the member its email names, who signs in: two ro
   const entry = logged.at(-1)!;
   assert.deepEqual([entry.kept, entry.action, entry.actor, entry.credential, entry.request, entry.ip], [true, 'sign_in', ada, done.answer.credential, 'req-1', '192.0.2.7']);
   // It says the account is the app's word, and which email bound it.
-  assert.deepEqual({ ...entry.detail, identity: undefined }, { kind: 'browser', verified: 'app', provider: 'github', subject: 'gh-ada', emails: ['ada@acme.example', 'ada@home.example'], bound: 'ada@acme.example', identity: undefined });
+  assert.deepEqual({ ...entry.detail, identity: undefined }, { kind: 'browser', verified: 'app', provider: 'github', issuer: GITHUB, subject: 'gh-ada', emails: ['ada@acme.example', 'ada@home.example'], bound: 'ada@acme.example', identity: undefined });
   assert.ok(entry.objects.includes(`principal:${ada}`) && entry.objects.includes(`credential:${done.answer.credential}`), entry.objects.join());
   const tables = entry.rows.map(({ row, was, now }) => `${(JSON.parse(row) as string[])[0]} ${was === null ? 'made' : was === now ? 'read' : 'replaced'}`).sort();
   assert.deepEqual(tables, ['credentials made', 'identities made', 'principals read']);
@@ -99,6 +100,8 @@ test('an account bound signs its member in again: a session, the identity\'s las
   assert.deepEqual((await accounts()).find((row) => row.subject === 'gh-bo'), { principal: bo, subject: 'gh-bo', email: 'bo@acme.example', generation: 0, signed: true, revoked: false });
   const entry = (await entries()).at(-1)!;
   assert.deepEqual([entry.kept, entry.action, entry.actor, entry.detail.bound, typeof entry.detail.replaced], [false, 'sign_in', bo, undefined, 'string']);
+  // The session it ended is found from the log by its own id.
+  assert.ok(entry.objects.includes(`credential:${String(entry.detail.replaced)}`), entry.objects.join());
   // Whatever its emails say now: the account is the subject, never an address. No email at all keeps the one it had.
   assert.ok(!('refused' in await vault.change(signin(github('gh-bo', 'ada@acme.example'), 'bo-web-3'))));
   assert.equal(await who('bo-web-3'), `${bo} member browser`);
@@ -108,11 +111,17 @@ test('an account bound signs its member in again: a session, the identity\'s las
   await vault.change(signin(github('gh-bo'), 'bo-web-5', { replaces: tokenOf('bo-cli').toString('hex') }));
   await vault.change(signin(github('gh-bo'), 'bo-web-6', { replaces: tokenOf('nobody').toString('hex') }));
   assert.deepEqual([await who('bo-cli'), await who('bo-web-5'), await who('bo-web-6')], [`${bo} member cli`, `${bo} member browser`, `${bo} member browser`]);
+  // One ended already is not ended again; and a browser holds one session, whoever's the last was: Ada's sign-in ends Bo's.
+  await vault.change(signin(github('gh-bo'), 'bo-web-7', { replaces: tokenOf('bo-web').toString('hex') }));
+  assert.equal((await entries()).at(-1)!.detail.replaced, undefined);
+  await vault.change(signin(github('gh-ada', 'ada@acme.example'), 'ada-web', { replaces: tokenOf('bo-web-7').toString('hex') }));
+  assert.deepEqual([await who('ada-web'), await who('bo-web-7'), typeof (await entries()).at(-1)!.detail.replaced], [`${ada} member browser`, 'unauthenticated', 'string']);
   assert.deepEqual(await checked(), []);
 });
 
 test('a sign-in is refused to whoever is no member, was removed, or signs in with another account already; nothing is written, logged or told', async () => {
   const before = [(await entries()).length, (await accounts()).length];
+  assert.equal(world.woken.length, 0);
   const refused = async (account: Account) => vault.change(signin(account, 'x-web'));
   assert.deepEqual(await refused(github('gh-eve', 'eve@acme.example')), { refused: 'not_registered' });
   assert.deepEqual(await refused(github('gh-eve')), { refused: 'not_registered' }, 'no verified email');
@@ -126,6 +135,7 @@ test('a sign-in is refused to whoever is no member, was removed, or signs in wit
   assert.deepEqual(await refused({ ...github('gh-bo', 'bo@acme.example'), issuer: 'another-tenant' }), { refused: 'account_mismatch' });
   // An account bound before its member's removal is dead with all they held, though they are back.
   assert.deepEqual(await refused(github('gh-dee', 'dee@acme.example')), { refused: 'deactivated' });
+  assert.equal(world.woken.length, 0, 'nothing was told');
   // And one whose member was removed since: by their row's own word, whatever its generation says.
   await amend(world, 'principals', sql`${principals.id} = ${bo}`, { status: 'removed' });
   world.woken.length = 0;
@@ -150,6 +160,15 @@ test('the second of its emails names the member when the first names nobody; an 
   assert.deepEqual(await checked(), []);
 });
 
+test('an account of a generation before its member\'s last removal is no account of theirs: another binds, as a first one does', async () => {
+  // Dee's old account is dead and not revoked; she signs in with a new one.
+  assert.ok(!('refused' in await vault.change(signin(github('gh-dee-2', 'dee@acme.example'), 'dee-web'))));
+  assert.equal(await who('dee-web'), `${dee} member browser`);
+  // Now she has one: a third is refused.
+  assert.deepEqual(await vault.change(signin(github('gh-dee-3', 'dee@acme.example'), 'dee-web-2')), { refused: 'account_mismatch' });
+  assert.deepEqual(await checked(), []);
+});
+
 test('an Owner the configuration names is a member whatever the rows say: made one, or made one again, as they sign in', async () => {
   // Nobody's row: not a member of a deployment that does not name them.
   assert.deepEqual(await vault.change(signin(github('gh-root', 'root@acme.example'), 'root-web')), { refused: 'not_registered' });
@@ -168,12 +187,23 @@ test('an Owner the configuration names is a member whatever the rows say: made o
   await owned.change(signin(github('gh-ada', 'ada@acme.example'), 'ada-web'));
   entry = (await entries()).at(-1)!;
   assert.deepEqual([await who('ada-web', owned), entry.kept, entry.detail.owner], [`${ada} owner browser`, true, 'restored']);
-  const [row] = await rowsOf<{ role: string; by: string; generation: number }>(world.owner, sql`SELECT role, status_changed_by AS by, generation FROM principals WHERE id = ${ada}`);
-  assert.deepEqual(row, { role: 'owner', by: 'system:vault', generation: 0 });
-  // Demoted behind the configuration's back, and bound already: an Owner again at the next sign-in.
+  const standing = async (id: string) => (await rowsOf<{ status: string; role: string; scope: string | null; by: string; generation: number }>(world.owner, sql`SELECT status, role, scope, status_changed_by AS by, generation FROM principals WHERE id = ${id}`))[0]!;
+  // Her status did not change, so it says what it said: who admitted her.
+  const admitted = (await standing(bo)).by;
+  assert.deepEqual(await standing(ada), { status: 'active', role: 'owner', scope: null, by: admitted, generation: 0 });
+  // Demoted behind the configuration's back, or kept to some projects, and bound already: an Owner of the whole instance again at the next sign-in.
   await amend(world, 'principals', sql`${principals.id} = ${ada}`, { role: 'member' });
   await owned.change(signin(github('gh-ada'), 'ada-web-2'));
   assert.equal(await who('ada-web-2', owned), `${ada} owner browser`);
+  await amend(world, 'principals', sql`${principals.id} = ${ada}`, { scope: JSON.stringify({ projects: { only: [] }, environments: 'all' }) });
+  await owned.change(signin(github('gh-ada'), 'ada-web-3'));
+  assert.deepEqual([(await standing(ada)).scope, (await entries()).at(-1)!.detail.owner], [null, 'restored']);
+
+  // Cy was removed before the configuration named him: let back in as an Owner, in the generation his removal moved on.
+  // What he held before it stays dead.
+  assert.equal(await who('cy-cli', owned), 'unauthenticated');
+  assert.ok(!('refused' in await owned.change(signin(github('gh-cy', 'cy@acme.example'), 'cy-web'))));
+  assert.deepEqual([await standing(cy), await who('cy-web', owned), await who('cy-cli', owned)], [{ status: 'active', role: 'owner', scope: null, by: 'system:vault', generation: 1 }, `${cy} owner browser`, 'unauthenticated']);
   assert.deepEqual(await checked(), []);
 });
 
@@ -185,6 +215,25 @@ test('two sign-ins of one new account side by side bind it once: the second star
   assert.equal(await who('ada-web-2'), 'unauthenticated');
   assert.ok(!('refused' in await vault.change(signin(github('gh-ada', 'ada@acme.example'), 'ada-web-2'))));
   assert.deepEqual([(await accounts()).filter((row) => row.subject === 'gh-ada').length, await who('ada-web'), await who('ada-web-2')], [1, `${ada} member browser`, `${ada} member browser`]);
+});
+
+test('a sign-in decided before a removal, or before another account was bound, is not written: it starts over, and is refused', async () => {
+  const deciding = { workloads: world.workloads, owners: world.owners };
+  const prepared = async (account: Account, label: string) => {
+    const made = await prepare(world, OPERATIONS.signin(signin(account, label), deciding));
+    assert.ok(!('refused' in made));
+    return made;
+  };
+  // Bo is removed between his sign-in's read and its write.
+  const bos = await prepared(github('gh-bo'), 'bo-web-2');
+  await amend(world, 'principals', sql`${principals.id} = ${bo}`, { status: 'removed', generation: 1 });
+  assert.equal(await commit(world, bos), false);
+  assert.deepEqual([await vault.change(signin(github('gh-bo'), 'bo-web-2')), await who('bo-web-2')], [{ refused: 'deactivated' }, 'unauthenticated']);
+  // Two accounts that verified Ada's address, at once: one is hers, and the other is refused as any second one.
+  const [first, second] = [await prepared(github('gh-ada', 'ada@acme.example'), 'ada-web'), await prepared({ ...github('okta-ada', 'ada@acme.example'), provider: 'okta' }, 'ada-web-2')];
+  assert.deepEqual([await commit(world, first), await commit(world, second)], [true, false]);
+  assert.deepEqual(await vault.change(signin({ ...github('okta-ada', 'ada@acme.example'), provider: 'okta' }, 'ada-web-2')), { refused: 'account_mismatch' });
+  assert.deepEqual((await accounts()).filter((row) => row.principal === ada).map((row) => row.subject), ['gh-ada']);
 });
 
 test('a sign-in that is not what the contract says is a fault, before anything is read', async () => {
@@ -203,13 +252,28 @@ test('a sign-in that is not what the contract says is a fault, before anything i
   assert.ok(!('refused' in await vault.change({ ...ok, session: { token, minutes: 7 * 24 * 60, label: null } })));
 });
 
-test('an account whose row was written behind the vault binds to nobody: the sign-in fails, and writes nothing', async () => {
-  await world.owner.execute(sql`UPDATE identities SET email = 'eve@acme.example', mac = decode(repeat('00', 36), 'hex') WHERE subject = 'gh-bo'`);
-  // The row is nobody's to the vault, and still holds the account in the table: Postgres refuses the second binding.
-  await assert.rejects(vault.change(signin(github('gh-bo', 'bo@acme.example'), 'bo-web-2')));
-  assert.equal(await who('bo-web-2'), 'unauthenticated');
-  assert.equal((await rowsOf(world.owner, sql`SELECT 1 FROM ${credentials} WHERE ${credentials.tokenHash} = ${tokenOf('bo-web-2')}`)).length, 0);
-  // The session it opened before is dead with it, and the signer says which row.
-  assert.equal(await who('bo-web'), 'unauthenticated');
-  assert.deepEqual(await checked(), ['row']);
+test('a row written behind the vault is not a row that is absent: a sign-in that would read it is refused, whoever it would have let in', async () => {
+  const before = (await entries()).length;
+  const edit = (table: string, where: string) => world.owner.execute(sql`UPDATE ${sql.identifier(table)} SET mac = decode(repeat('00', 36), 'hex') WHERE ${sql.raw(where)}`);
+  const okta = (subject: string, ...emails: string[]): Account => ({ ...github(subject, ...emails), provider: 'okta' });
+  // Bo's account, edited: it is not his to sign in with, nor free for another to be bound in its place, to him or through his address.
+  await edit('identities', "subject = 'gh-bo'");
+  assert.deepEqual(await vault.change(signin(github('gh-bo', 'bo@acme.example'), 'x-web')), { refused: 'tampered' });
+  assert.deepEqual(await vault.change(signin(github('gh-bo'), 'x-web')), { refused: 'tampered' }, 'by the account alone, with no email that names him');
+  assert.deepEqual(await vault.change(signin(okta('okta-bo', 'bo@acme.example'), 'x-web')), { refused: 'tampered' }, 'not the second account it would hide');
+  assert.equal(await who('bo-web'), 'unauthenticated', 'nor do its sessions stand');
+  // Cy's row, removed and edited: not passed over for the next email, which names Ada.
+  await edit('principals', `id = '${cy}'`);
+  assert.deepEqual(await vault.change(signin(github('gh-cy', 'cy@acme.example', 'ada@acme.example'), 'x-web')), { refused: 'tampered' });
+  // Nor made anew for an Owner the configuration names, over the row that is there.
+  assert.deepEqual(await owned.change(signin(github('gh-cy', 'cy@acme.example'), 'x-web')), { refused: 'tampered' });
+  // Dee's row, edited: the account bound to her says nothing of who she is now.
+  await edit('principals', `id = '${dee}'`);
+  assert.deepEqual(await vault.change(signin(github('gh-dee'), 'x-web')), { refused: 'tampered' });
+  // Ada, whom none of it touches, signs in.
+  assert.ok(!('refused' in await vault.change(signin(github('gh-ada', 'ada@acme.example'), 'ada-web'))));
+  assert.deepEqual([await who('x-web'), (await entries()).length], ['unauthenticated', before + 1]);
+  assert.equal((await rowsOf(world.owner, sql`SELECT 1 FROM ${credentials} WHERE ${credentials.tokenHash} = ${tokenOf('x-web')}`)).length, 0);
+  // The signer says which rows.
+  assert.deepEqual(await checked(), ['row', 'row', 'row']);
 });

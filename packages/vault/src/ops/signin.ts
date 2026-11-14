@@ -4,7 +4,7 @@ import type { Answers, Asked, SigninChanges } from '@coffre/core/vault';
 import { credentials, identities, principals } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
-import { amended, part, put, type Operation, type Parts, type Seen, type Write } from '../change.ts';
+import { amended, part, put, type Operation, type Parts, type Seen, type Unsealed, type Write } from '../change.ts';
 import type { Fresh } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
@@ -44,33 +44,39 @@ function signin(input: Asked<'signin'>, vault: Deciding): Operation<Parts, Answe
   const named = emails.map((address) => `user:${address}`);
   // Drawn here: a decision draws nothing.
   const ids = { identity: randomUUID(), credential: randomUUID() };
-  const bound = sql`i.provider = ${provider} AND i.issuer_hash = ${issuer} AND i.subject = ${subject} AND i.revoked_at IS NULL`;
+  // Where it is bound: one row at most, found by the unique index that holds an account to one member (`identities_active_subject`).
+  const bound = sql`i.provider = ${provider} AND i.issuer_hash = ${issuer} AND i.active_subject = ${subject}`;
   const read = {
-    // The account, where it is bound: one row at most, by the table's unique index.
     account: part(identities, sql`${identities.id} IN (SELECT i.id FROM identities i WHERE ${bound})`),
-    // Whoever it is bound to, and whoever its emails name.
-    member: part(principals, sql`${principals.id} = ANY(${sql.param(named)}::text[]) OR ${principals.id} IN (SELECT i.principal FROM identities i WHERE ${bound})`),
+    // Whoever it is bound to, and whoever its emails name: each by its key.
+    holder: part(principals, sql`${principals.id} IN (SELECT i.principal FROM identities i WHERE ${bound})`),
+    named: part(principals, sql`${principals.id} = ANY(${sql.param(named)}::text[])`),
     // The accounts those the emails name sign in with already.
     theirs: part(identities, sql`${identities.principal} = ANY(${sql.param(named)}::text[]) AND ${identities.revokedAt} IS NULL`),
     replaced: part(credentials, replaces === null ? sql`false` : sql`${credentials.tokenHash} = decode(${replaces}, 'hex')`),
   };
   return {
     read,
-    decide(seen: Seen<typeof read>, at: number) {
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+      // A row written behind the vault is not a row that is absent: an account hidden would bind again, a member hidden
+      // would be passed over for the next email, an account of theirs hidden would let a second one in. None signs in.
+      if (unsealed.account + unsealed.holder + unsealed.named + unsealed.theirs > 0) return { refused: 'tampered' };
       const now = new Date(at);
       const writes: Write[] = [];
-      const detail: Record<string, unknown> = { kind: 'browser', verified: 'app', provider, subject, emails };
+      const detail: Record<string, unknown> = { kind: 'browser', verified: 'app', provider, issuer, subject, emails };
+      const members = [...seen.holder, ...seen.named];
       /**
        * A member as this change leaves them: their row; or, for one the
        * configuration names an Owner, an active Owner of the whole
        * instance, made or made one again here. Undefined for no member.
        */
       const memberOf = (id: string): Fresh<typeof principals> | undefined => {
-        const row = seen.member.find((other) => other.id === id);
+        const row = members.find((other) => other.id === id);
         if (!vault.owners.includes(id.slice('user:'.length))) return row;
         if (row !== undefined && row.status === 'active' && row.role === 'owner' && row.scope === null) return row;
-        const owner = { status: 'active', role: 'owner', scope: null, statusChangedAt: now, statusChangedBy: VAULT };
-        const made: Fresh<typeof principals> = row === undefined ? { id, generation: 0, createdAt: now, createdBy: VAULT, frozenAt: null, ...owner } : { ...row, ...owner };
+        // Let back in, their status says when and by whom; given the role alone, it says what it said.
+        const owner = { status: 'active', role: 'owner', scope: null, ...(row?.status === 'active' ? {} : { statusChangedAt: now, statusChangedBy: VAULT }) };
+        const made: Fresh<typeof principals> = row === undefined ? { id, generation: 0, createdAt: now, createdBy: VAULT, frozenAt: null, statusChangedAt: now, statusChangedBy: VAULT, ...owner } : { ...row, ...owner };
         writes.push(row === undefined ? put(principals, made) : amended(principals, row, owner));
         detail.owner = row === undefined ? 'made' : 'restored';
         return made;
@@ -86,11 +92,11 @@ function signin(input: Asked<'signin'>, vault: Deciding): Operation<Parts, Answe
         writes.push(amended(identities, identity, { lastSignInAt: now, email: emails[0] ?? identity.email }));
         identityId = identity.id;
       } else {
-        const id = named.find((other) => seen.member.some((row) => row.id === other) || vault.owners.includes(other.slice('user:'.length)));
+        const id = named.find((other) => members.some((row) => row.id === other) || vault.owners.includes(other.slice('user:'.length)));
         if (id === undefined) return { refused: 'not_registered' };
         who = memberOf(id)!;
         if (who.status !== 'active') return { refused: 'deactivated' };
-        // One who signs in with another account already links this one from a session of theirs.
+        // One who signs in with another account already links this one from a session of theirs. An account of a generation before their last removal is dead, and no account of theirs.
         if (seen.theirs.some((other) => other.principal === who!.id && other.generation === who!.generation)) return { refused: 'account_mismatch' };
         writes.push(put(identities, { id: ids.identity, provider, subject, issuerHash: issuer, generation: who.generation, principal: who.id, email: emails[0] ?? null, createdAt: now, createdBy: who.id, lastSignInAt: now, revokedAt: null, revokedBy: null }));
         identityId = ids.identity;
@@ -105,9 +111,10 @@ function signin(input: Asked<'signin'>, vault: Deciding): Operation<Parts, Answe
       }));
       // The session the browser showed ends with this one's start: a browser holds one.
       const [old] = seen.replaced;
-      if (old !== undefined && old.kind === 'browser' && old.revokedAt === null) {
-        writes.push(amended(credentials, old, { revokedAt: now, revokedBy: who.id }));
-        detail.replaced = old.id;
+      const ended = old !== undefined && old.kind === 'browser' && old.revokedAt === null ? old : undefined;
+      if (ended !== undefined) {
+        writes.push(amended(credentials, ended, { revokedAt: now, revokedBy: who.id }));
+        detail.replaced = ended.id;
       }
       return {
         writes,
@@ -115,7 +122,7 @@ function signin(input: Asked<'signin'>, vault: Deciding): Operation<Parts, Answe
           // A session's coming ages out with the uses; an account bound, or an Owner made, is kept.
           kept: detail.bound !== undefined || detail.owner !== undefined,
           action: 'sign_in', actor: who.id, credential: ids.credential, request: from.request, ip: from.ip,
-          objects: [`principal:${who.id}`, `credential:${ids.credential}`, `identity:${identityId}`],
+          objects: [`principal:${who.id}`, `credential:${ids.credential}`, `identity:${identityId}`, ...(ended === undefined ? [] : [`credential:${ended.id}`])],
           detail: { ...detail, identity: identityId },
         },
         answer: { principal: who.id, credential: ids.credential, expiresAt: expiresAt.toISOString() },

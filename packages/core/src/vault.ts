@@ -78,7 +78,7 @@ export type Presented = Trace & {
  * request showed, or for one nobody asks (`Unasked`), where it came from
  * alone.
  */
-export type Asked<O extends Change['op']> = (O extends Unasked ? Trace : Presented) & Extract<Change, { op: O }>;
+export type Asked<O extends Change['op']> = O extends Change['op'] ? (O extends Unasked ? Trace : Presented) & Extract<Change, { op: O }> : never;
 
 export type UseInput = Presented & {
   /** The place, by its slugs. */
