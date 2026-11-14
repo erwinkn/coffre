@@ -206,8 +206,9 @@ same race). Conformance does not hold either to a tampered log yet.
 `coffre verify instance` checks an instance someone runs, from the outside:
 the current one, or the one its argument names. As no one, it writes
 nothing. With a token, as in CI, it writes nothing either, with one
-exception: each run adds a few entries to the instance's audit log, which is
-append-only, so they stay for good. It says so when it starts. They are the
+exception: each run adds a few entries to the instance's audit log. They
+are uses, so they age out with the rest after `log.keepUsesDays` (90 days by
+default). It says so when it starts. They are the
 canary's read, and a refused read for each place it tries and must not
 reach: two a run with the setup below, a refused one more for each other
 environment in the canary's project. Besides, coffre notes when the token
@@ -320,7 +321,7 @@ holds nothing on:
 
 ```
 Checking https://secrets.example.com, as no one and with the bearer token `coffre login --token` saved
-  The token's reads add a few entries to the instance's audit log, for good.
+  The token's reads add a few entries to the instance's audit log, kept as long as it keeps uses.
 
   ✓ health              /livez and /readyz
   ✓ headers             a fresh CSP nonce per page, frames refused, nosniff; no CORS; /_coffre/assets/index-C4woDgwj.js served

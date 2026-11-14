@@ -97,13 +97,15 @@ The migrations create three group roles, and grant the first two to their logins
 
 | Login | Group | Rights |
 |---|---|---|
-| `coffre_runtime` | `coffre_app` | app data and sessions; app entries in the log; read-only access to members and grants |
-| `coffre_vault_runtime` | `coffre_vault` | members and grants; read the secret context it decides on; vault entries in the log |
+| `coffre_runtime` | `coffre_app` | read coffre's tables; write none |
+| `coffre_vault_runtime` | `coffre_vault` | read and write coffre's tables, the log's included: every row and every entry |
 | `coffre_backup_login`, or yours | `coffre_backup` | read every row, the log's included, for `coffre backup` ([restore.md](restore.md#backing-up)); write nothing |
 
-Neither runtime login owns tables or may change or delete audit entries.
-Row-level security permits each to append only as its own author. Do not run
-either component as the owner or give the runtime logins additional roles.
+Neither runtime login owns tables. The vault writes every entry, each with
+a MAC under its key, so a row someone else wrote or changed fails to verify;
+its login may also delete, which the signer does to uses past
+`log.keepUsesDays`. Do not run either component as the owner or give the
+runtime logins additional roles.
 
 `coffre setup` makes `coffre_backup_login` and grants it the group.
 `coffre migrate --backup-login <role>` grants `coffre_backup` to that
@@ -118,7 +120,11 @@ own: anyone else's, a superuser's included, only warns.
 
 0.4.0 is a clean break: a deployment of 0.3 or earlier is not upgraded, but
 deployed afresh ([From a release before 0.4.0](#from-a-release-before-040)).
-From 0.4.0 on:
+0.14 to 0.16.0 is the other exception: it converts 0.14's tables in place,
+with coffre offline, and 0.14 cannot serve on what it leaves. Its migration
+refuses to run while a runtime login can still log in or has a session open.
+Follow [Upgrade from 0.14](design/0.16.md#upgrade-from-014) instead of the
+steps below. From 0.4.0 on, every other release:
 
 The database migrates before the deploy, in the deployment's own pipeline:
 its deploy workflow, Workers Builds, other CI, or a script before a restart. The new version never
@@ -622,8 +628,9 @@ pnpm exec wrangler secret put GITHUB_CLIENT_SECRET -c app/wrangler.jsonc
 
 Keep old vault keys too: after a rotation, the old one stays in `previousKeks`,
 and escrowed, for good. It still opens what it wrapped, and what the vault
-signed under it before the rotation verifies only while it is configured;
-it vouches for nothing after ([keys.md](keys.md#a-local-key)).
+signed under it verifies while it is configured: in 0.16.0 with no cutoff,
+so an entry signed under it after the rotation verifies too
+([keys.md](keys.md#a-local-key)).
 
 With AWS KMS instead of a key of your own, the vault never sees its key, so
 it cannot derive its signing key from it, and needs a third key,

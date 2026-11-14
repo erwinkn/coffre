@@ -52,8 +52,9 @@ Checks an instance from outside, the current one unless <url> names another:
   --canary         the canary the token reads; its value is asked for, or
                    piped in, so that it stays out of the shell's history
 
-Each run adds a few entries to the instance's audit log, which is
-append-only, so they stay: the canary's read, and the reads it was refused.
+Each run adds a few entries to the instance's audit log, kept as long as
+it keeps uses (90 days by default): the canary's read, and the reads it was
+refused.
 A run as an owner leaves its project, environment and service for the next,
 and writes its canary and its grants. Exits 1 when a check fails.`;
 
@@ -122,7 +123,7 @@ export async function verifyInstance(
       stop(2, `coffre: ${error instanceof Error ? error.message : String(error)}`);
     }
     out.write(`${s.bold(`Checking ${origin}`)}, as no one and with the bearer token \`coffre login --token\` saved\n`);
-    out.write(s.dim("  The token's reads add a few entries to the instance's audit log, for good.\n\n"));
+    out.write(s.dim("  The token's reads add a few entries to the instance's audit log, kept as long as it keeps uses.\n\n"));
     // Behind Access, as the checks found, the token is not sent.
     if (await anonymousChecks(report, origin, send)) stop(1, `coffre: ${browsersOnly(origin)}`);
     await tokenChecks(report, origin, { token, canary }, send);
@@ -144,7 +145,7 @@ export async function verifyInstance(
   out.write(`${s.bold(`Checking ${origin}`)}, as no one, then as you\n`);
   out.write(
     s.dim(
-      `  It keeps ${PROBE.project}/${PROBE.environment} and ${shownMember(PROBE.service)} for the next run, and its reads stay in the audit log, for good.\n\n`,
+      `  It keeps ${PROBE.project}/${PROBE.environment} and ${shownMember(PROBE.service)} for the next run, and its reads stay in the audit log as long as it keeps uses.\n\n`,
     ),
   );
   // Behind Access, as the checks found, the session is not sent.

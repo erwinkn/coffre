@@ -49,14 +49,13 @@ A deployment is a small project of your own that imports coffre's packages
 and configures them in code. It runs two components, as two Cloudflare
 Workers or two Node processes:
 
-- **the app**: the API, sign-in, the pages, and a job every five
-  minutes;
+- **the app**: the API, sign-in and the pages;
 - **the vault**: the vault key, which wraps every value's own key, who is a
   member, and who holds what. It decides every read and write of a key, and
   nothing else can.
 
-Both use one Postgres database, each through its own login, and both write
-to one audit log. Say Ada runs `coffre run market/prod -- ./deploy`. The app
+Both use one Postgres database, each through its own login: the app's
+reads, and the vault's writes every row and the audit log. Say Ada runs `coffre run market/prod -- ./deploy`. The app
 checks her session and asks the vault for the data keys of
 `market/prod`'s nine secrets. The vault checks her grants, logs one
 `secret.read` entry in her name listing the nine, commits it, and only then
@@ -118,7 +117,8 @@ pnpm check:docs        # every path and script the docs name exists
 ```
 
 `scripts/restore-drill.sh` restores a backup end to end on this machine
-([docs/restore.md](docs/restore.md)). [AGENTS.md](AGENTS.md) has the rest:
+([docs/restore.md](docs/restore.md)); not in 0.16.0, whose CLI has no
+`coffre backup` or `coffre restore` yet. [AGENTS.md](AGENTS.md) has the rest:
 ports, a second stack beside the first, and how the packages find each
 other's sources.
 
@@ -330,9 +330,10 @@ argument: a command asks for it at a hidden prompt, or reads it from stdin.
 CI signs in as a
 service account, a machine identity: by OIDC, its ID token matched by a trust
 binding, `--service`, with nothing to store ([docs/ci.md](docs/ci.md)); or
-with a bearer token from the service account's page, piped to `coffre login
---token`; or, behind Access, with an Access service token
-([docs/deployment-auth.md](docs/deployment-auth.md)):
+or with a bearer token from the service account's page, piped to `coffre login
+--token`. Behind Cloudflare Access, 0.16.0 signs in browsers only: the CLI
+and CI come back behind it in 0.16.x
+([docs/deploy.md](docs/deploy.md#1-settings)):
 
 ```sh
 printf '%s' "$TOKEN" | coffre login https://secrets.acme.example --token
@@ -470,9 +471,11 @@ leaves; if the entry cannot be written, the read does not happen.
 versions", not "she read the environment", which is true and useless. Ask
 the log about any one of the nine and that entry answers.
 
-**Gaps mean tampering.** An entry's number comes from a locked head row, not
-a sequence, because a rolled-back transaction would burn a sequence value,
-and that gap would look exactly like a deleted entry.
+**Gaps mean tampering.** A change writes its entry as pending, numbered by
+a sequence that a rolled-back transaction may skip. The signer then gives
+each entry its number, its place in a Merkle tree, and signs the tree's head,
+so a published number has no gap, and a deleted entry no longer matches the
+signed head.
 
 **Ciphertext is bound to ids, never names.** A value is encrypted for
 `project_id/environment_id/secret_id`, so renaming an environment orphans
@@ -481,9 +484,9 @@ data key. `packages/core/test/envelope-aad-isolation.test.ts` exists because
 the obvious test passes at the wrapping layer and would miss the other one
 regressing.
 
-**History is never deleted; values can be.** The log references projects,
-environments, secrets and their versions with `ON DELETE RESTRICT`, so
-nothing ever read or written leaves the database. Archiving hides a place
+**Changes are never deleted; uses age out; values can be.** Every change is
+kept for good. Uses, a read or a sign-in, and refused changes are kept 90
+days, then pruned (`log.keepUsesDays`, `null` to keep them all). Archiving hides a place
 or a secret: refused to readers, reversible, every row still there.
 Archiving a rotated-out secret also stops `coffre run` injecting it.
 Deleting an archived project or environment is for good, and for those who
@@ -493,10 +496,11 @@ names stays, renamed `market~deleted-2026-10-05`, so the log still reads and
 verifies, and `market` is free for a new project. Backups taken before still
 hold the encrypted values ([Deleting for good](docs/architecture.md#deleting-for-good)).
 
-**Append-only by grant, not by convention.** Neither login may change or
-delete a log entry; each may append only as itself; only the vault's login
-may change members and grants. Each entry also carries its author's MAC,
-which even the database's owner cannot forge without that author's key.
+**Tamper-evident by key, not by grant.** The app's login only reads; the
+vault's writes every row and every entry. Each entry carries the vault's
+MAC, which even the database's owner cannot forge without its key, and the
+signer signs the log's head, so an entry changed, added or removed fails to
+verify.
 
 **`/api` is the one front door.** Every call, a page's own server render
 included, goes through it. The pages call the same typed client as the CLI,
