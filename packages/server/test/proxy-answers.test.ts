@@ -157,6 +157,13 @@ test('a redirect under the upstream is the proxy\'s URL for it, the stable URL\'
     assert.deepEqual([refused.status, refused.headers.get('location')], [502, null], location);
     assert.ok(!said.includes('evil') && !said.includes(KEY), said);
   }
+  // The credential's own URL is its upstream's, with no slash added; with one, the upstream's redirect back to it is the
+  // proxy's URL again, as 0.14.7 answered, so a client that follows it is not sent in a loop.
+  answer = (url) => (url.pathname === '/v1/' ? new Response(null, { status: 308, headers: { location: 'https://api.schumann.example/v1' } }) : Response.json({ ok: true }));
+  const own = await app.request('/use/market/dev/schumann', { headers: { 'x-api-key': handle } });
+  assert.deepEqual([own.status, sent.at(-1)!.url.pathname], [200, '/v1']);
+  const slashed = await app.request('/use/market/dev/schumann/', { headers: { 'x-api-key': handle } });
+  assert.deepEqual([slashed.status, slashed.headers.get('location'), sent.at(-1)!.url.pathname], [308, `${PUBLIC_URL}/use/market/dev/schumann`, '/v1/']);
 });
 
 test("an answer comes back no-store, sandboxed, without cookies, its headers and reason phrase redacted, and a body in another charset byte for byte", async () => {

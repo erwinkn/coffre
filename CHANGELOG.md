@@ -97,6 +97,10 @@
   without `--apply`) answers 0.14.7's `KeysPlan`: the keys as checked, the
   bindings on the issuer they would replace, and the places whose sensitive
   values the new bindings would withhold. It was 501.
+- **No word for a handle from before 0.9.** One that names no
+  environment is answered as one whose environment is gone (409), no
+  longer told to run `coffre run` again: 0.16 upgrades only from 0.14.7,
+  and a handle lasts a week at most.
 - **The vault is told of workloads too.** It decides each CI run's
   sign-in now, on its own configuration: a deployment that trusts
   workloads adds `workloads: {}` to `vault(env => …)` in
