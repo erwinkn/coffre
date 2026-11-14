@@ -7,7 +7,7 @@
 // and decides nothing on"), and the vault decides on its own rows.
 import { CoffreError } from '@coffre/client';
 import { hashToken, type BindingPolicy, type Constraints, type GateCount } from '@coffre/core/identity';
-import type { Presented, Used as VaultUsed } from '@coffre/core/vault';
+import type { Peeked, Presented, Used as VaultUsed } from '@coffre/core/vault';
 import { isUnreachable } from '@coffre/db/dialect';
 
 import { ApiError, refusal, toErrorBody } from './api/errors.ts';
@@ -53,6 +53,23 @@ export type PluginContext = {
    * whole use or of one key, or a key the environment does not hold (409).
    */
   use(caller: string | WorkloadUse, asked: UseAsked): Promise<Used>;
+  /**
+   * What a handle may use at `path`, with nothing opened and nothing logged
+   * (the vault's `peek`, decided as a use through the proxy is): each key
+   * the environment holds, by the nature its rows say, or why the handle may
+   * not use it. What `coffre run`'s plan chooses the keys it asks `expose`
+   * for by, never what it places a value by. A `CoffreError` for a refusal
+   * of the whole place.
+   */
+  held(caller: string, path: string): Promise<Peeked['items']>;
+  /**
+   * Values handed back to the caller's own app (purpose `expose`): the keys
+   * named, or every key with `null`. One call to the vault, which logs what
+   * it gives. Key by key, the values given, those of them that opened plain,
+   * and why each other is not given (`sensitive`, `use_only`, …), which the
+   * caller does without. A `CoffreError` for a refusal of the whole use.
+   */
+  expose(caller: string | WorkloadUse, asked: { path: string; keys: readonly string[] | null }): Promise<Exposed>;
   /**
    * The environments a handle was made for, by path as they are named now
    * (`market/dev@me`), or null where one was deleted, and when it ends: the
@@ -126,6 +143,9 @@ export type Used = {
   environment: { path: string; personal: boolean };
   workload: { policy: BindingPolicy; constraints: Constraints | null } | null;
 };
+
+/** What `expose` hands back: by key, the values given and those that opened plain, and why the others are not given. */
+export type Exposed = { values: Record<string, string>; plain: string[]; refused: Record<string, string>; environment: { path: string; personal: boolean } };
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const PREFIX = /^(\/[a-z0-9][a-z0-9._-]*)+$/;
@@ -270,24 +290,49 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
       }
     },
     use: async (caller, asked) => {
-      const place = placeOf(asked.path);
-      if (place === null) throw thrown(new ApiError('bad_request', 'an environment is named by its path, project/environment'));
-      let shown: Presented;
-      if (typeof caller === 'string') {
-        shown = { token: hashToken(caller).toString('hex'), proof: null, request: crypto.randomUUID(), ip: sourceIp };
-      } else {
-        // A workload caller `workload` made for this request, and no other: one a plugin built itself is no one.
-        const standing = standings.get(caller);
-        if (standing === undefined) throw thrown(new ApiError('unauthenticated', 'that workload is no caller coffre authenticated'));
-        shown = { token: hashToken(standing.token).toString('hex'), proof: standing.proof, request: crypto.randomUUID(), ip: standing.sourceIp };
-      }
+      const [place, shown] = askedAs(caller, asked.path);
       const answer = await runtime.vault.use({ ...shown, ...place, keys: [...asked.keys], purpose: asked.purpose, upstream: asked.upstream });
-      // A workload's stop worded as 0.14.7 did (`sessionStopped`); any other refusal as the API words it.
-      const word = (error: ApiError) => thrown((typeof caller === 'string' ? error : sessionStopped(error, sourceIp)) as ApiError);
+      const word = wording(caller);
       if ('refused' in answer) throw word(refusal(answer.refused, asked.path));
       return usedOf(answer, asked, place.mine, word);
     },
+    held: async (caller, path) => {
+      const [place, shown] = askedAs(caller, path);
+      const answer = await runtime.vault.peek({ ...shown, ...place, keys: null, purpose: 'use', upstream: null });
+      if ('refused' in answer) throw wording(caller)(refusal(answer.refused, path));
+      return answer.items;
+    },
+    expose: async (caller, asked) => {
+      const [place, shown] = askedAs(caller, asked.path);
+      const answer = await runtime.vault.use({ ...shown, ...place, keys: asked.keys === null ? null : [...asked.keys], purpose: 'expose', upstream: null });
+      if ('refused' in answer) throw wording(caller)(refusal(answer.refused, asked.path));
+      const exposed: Exposed = { values: Object.create(null), plain: [], refused: Object.create(null), environment: { path: asked.path.replace(/@me$/, ''), personal: place.mine } };
+      for (const item of answer.values) {
+        if ('refused' in item) exposed.refused[item.key] = item.refused;
+        else {
+          exposed.values[item.key] = item.value;
+          if (item.nature === 'plain') exposed.plain.push(item.key);
+        }
+      }
+      return exposed;
+    },
   };
+
+  /** Where `path` names and what the request shows the vault: a handle's hash, or a workload caller's this context made, and no other. */
+  function askedAs(caller: string | WorkloadUse, path: string): [NonNullable<ReturnType<typeof placeOf>>, Presented] {
+    const place = placeOf(path);
+    if (place === null) throw thrown(new ApiError('bad_request', 'an environment is named by its path, project/environment'));
+    if (typeof caller === 'string') return [place, { token: hashToken(caller).toString('hex'), proof: null, request: crypto.randomUUID(), ip: sourceIp }];
+    // A workload caller `workload` made for this request, and no other: one a plugin built itself is no one.
+    const standing = standings.get(caller);
+    if (standing === undefined) throw thrown(new ApiError('unauthenticated', 'that workload is no caller coffre authenticated'));
+    return [place, { token: hashToken(standing.token).toString('hex'), proof: standing.proof, request: crypto.randomUUID(), ip: standing.sourceIp }];
+  }
+
+  /** A workload's stop worded as 0.14.7 did (`sessionStopped`); any other refusal as the API words it. */
+  function wording(caller: string | WorkloadUse): (error: ApiError) => CoffreError {
+    return (error) => thrown((typeof caller === 'string' ? error : sessionStopped(error, sourceIp)) as ApiError);
+  }
 }
 
 /** The vault's answer as a plugin takes it: every key asked for, or why not. */

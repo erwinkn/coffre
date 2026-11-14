@@ -145,8 +145,8 @@ test('a reveal through the app is answered its value, and its entry is in the lo
     assert.deepEqual([await count('log'), await count('log_pending')], [written + 1, 0]);
     // A peek through the binding: what the reveal was given, key by key, and nothing logged.
     const peeked = await vault.peek('ada-cli', 'market/prod', ['KEY_0', 'NOPE']);
-    const [held] = first.body.values as { secret: string; version: number }[];
-    assert.deepEqual([peeked.status, peeked.body.items], [200, [{ key: 'KEY_0', secret: held!.secret, version: held!.version }, { key: 'NOPE', refused: 'unknown_key' }]]);
+    const [held] = first.body.values as { secret: string; version: number; nature: string }[];
+    assert.deepEqual([peeked.status, peeked.body.items], [200, [{ key: 'KEY_0', secret: held!.secret, version: held!.version, nature: held!.nature }, { key: 'NOPE', refused: 'unknown_key' }]]);
     assert.deepEqual([await count('log'), await count('log_pending')], [written + 1, 0]);
   } finally {
     await vault.stop();

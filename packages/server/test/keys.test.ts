@@ -9,6 +9,7 @@ import { after, beforeEach, test } from 'node:test';
 import { credential, dismissed, emptyDatabase, environment, grant, principal, project, rewrite, role, rows, secret, user, value, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 
+import { versionOf } from '../src/api/routes/secrets.ts';
 import { openApp } from './app-fixture.ts';
 
 const app = await openApp();
@@ -512,4 +513,14 @@ test('the rules of a use, edge by edge: a chain too long or cut, references that
   assert.deepEqual((prodMissing.missing as { key: string }[]).map(({ key }) => key), ['Z']);
   const [, devMissing] = await call('bo-cli', 'GET', '/projects/market/dev/missing');
   assert.deepEqual((devMissing.missing as { key: string; in: string[] }[]).map(({ key, in: where }) => [key, where]), [['AREF', ['dev2']], ['C', ['staging']], ['Y', ['staging']], ['Z', ['staging']]]);
+});
+
+test("a version is each key's secret and version alone: what else a peek or a read says of a key, its nature, leaves it as it was", () => {
+  const read = [
+    { key: 'A', secret: '11111111-1111-4111-8111-111111111111', version: 3 },
+    { key: 'B', secret: '22222222-2222-4222-8222-222222222222', version: 1 },
+  ];
+  // The string a watch compared before peeks named each key's nature: one it holds from then must still match.
+  assert.equal(versionOf(read), 'o9-wbe2hJSoJxsC_-Wsfe94I0wr_K46CtIhB5MfBVjw');
+  assert.equal(versionOf(read.map((item, i) => ({ ...item, nature: i === 0 ? ('plain' as const) : ('sensitive' as const) }))), versionOf(read));
 });

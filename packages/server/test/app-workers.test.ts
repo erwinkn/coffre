@@ -49,6 +49,8 @@ before(async () => {
   const [prod, staging, apis] = [environment(market, 'prod'), environment(market, 'staging', { protected: true }), environment(market, 'apis')];
   const url = await value(world, secret(prod, 'DATABASE_URL'), 'postgres://märkt');
   const apiKey = await value(world, secret(apis, 'API_KEY'), API_KEY);
+  // A plain value no credential covers: what `coffre run`'s plan hands the app as it is.
+  const region = await value(world, secret(apis, 'REGION'), 'eu-west-3', { plain: true });
   const used = { lastUsedAt: new Date() };
   const github = identity(bo);
   const deploy = binding(DEPLOY, { policy: '{}', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) });
@@ -56,7 +58,7 @@ before(async () => {
     world,
     ...rows('projects', market),
     ...rows('environments', prod, staging, apis),
-    ...rows('secrets', url, apiKey),
+    ...rows('secrets', url, apiKey, region),
     ...rows('roles', role(false, 'viewer', ['secret.read', 'secret.use'], []), role(false, 'developer', ['secret.read', 'secret.write']), role(true, 'member', [])),
     ...rows('policy', instance()),
     ...rows('principals', principal(ada), principal(bo), principal(DEPLOY)),
@@ -206,4 +208,11 @@ test('a request through the credential proxy on Workers: one use of the vault, b
   assert.deepEqual(bySession.body, ECHOED);
   assert.ok(bySession.headers.get('dpop-nonce') !== null);
   assert.equal(vaultAsked, 1);
+
+  // `coffre run`'s plan through the handle: the peek, each key's nature through the binding, then one use of what the app
+  // is handed, each its own connection; none of the app's.
+  const [plan, planApp, planVault] = await opened(() => ask('/use/market/apis', bearer(HANDLE)));
+  assert.equal(plan.status, 200, JSON.stringify(plan.body));
+  assert.deepEqual(plan.body, { environment: 'market/apis', env: { API_KEY: HANDLE, REGION: 'eu-west-3' }, credentials: { echo: 'https://secrets.acme.example/use/market/apis/echo' }, tunnels: {}, left: [] });
+  assert.deepEqual([planApp, planVault], [0, 2]);
 });
