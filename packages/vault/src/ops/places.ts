@@ -165,7 +165,7 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
  * most, so that the new one has three. A missing one breaks the chain: a
  * row someone deleted refuses, it never shortens the chain.
  */
-function chainOf(parent: Row<typeof environments>, rows: readonly Row<typeof environments>[]): 'ok' | 'broken_chain' | 'too_deep' {
+export function chainOf(parent: Row<typeof environments>, rows: readonly Row<typeof environments>[]): 'ok' | 'broken_chain' | 'too_deep' {
   let above = 0;
   for (let last = parent; last.parentId !== null; above += 1) {
     if (above + 1 >= MAX_PARENTS) return 'too_deep';

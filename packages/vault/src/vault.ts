@@ -1,9 +1,9 @@
-import { PURPOSES, type Answers, type Asked, type Change, type UseInput, type Vault } from '@coffre/core/vault';
+import { PURPOSES, type Answers, type Asked, type Change, type Unasked, type UseInput, type Vault, type WorkloadsUnasked } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
 import type { ResolvedVaultConfig } from './config.ts';
 import { caller } from './caller.ts';
-import { change, type Operation, type Parts } from './change.ts';
+import { change, weigh, type Operation, type Parts } from './change.ts';
 import { OPERATIONS } from './ops/index.ts';
 import { presented, text } from './ops/input.ts';
 import { keyOf } from './rows.ts';
@@ -46,6 +46,9 @@ function asked(input: UseInput): Ask {
   return { ...presented(input), project, environment, mine, keys: keys as string[] | null, purpose, upstream };
 }
 
+/** The changes nobody asks, by name: each rests on a proof, which a weighing would try and not spend. */
+const UNASKED: Record<Unasked | WorkloadsUnasked, true> = { signin: true, 'device.start': true, 'device.redeem': true, 'token.exchange': true, 'workload.signin': true };
+
 /**
  * What every operation is given of the vault's configuration, past its
  * input: what it takes of workloads, and the people it names Owners
@@ -64,6 +67,12 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
     }
   };
   const serving: Serving = { ...prepared, db, now, wake: told };
+  const operation = <O extends Change['op']>(input: Asked<O>) => {
+    if (!Object.hasOwn(OPERATIONS, input.op)) throw new TypeError('a change names an operation the contract has');
+    // The registry holds each operation under its own name: what it answers is that name's.
+    const made = OPERATIONS[input.op] as unknown as (input: Asked<O>, vault: Deciding) => Operation<Parts, Answers[O], unknown>;
+    return made(input, { workloads: serving.workloads, owners: prepared.owners });
+  };
   return {
     async use(input) {
       const answer = await use(serving, asked(input));
@@ -76,11 +85,12 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
     async caller(input) {
       return caller(serving, { ...presented(input), head: input.head === true });
     },
-    async change<O extends Change['op']>(input: Asked<O>) {
-      if (!Object.hasOwn(OPERATIONS, input.op)) throw new TypeError('a change names an operation the contract has');
-      // The registry holds each operation under its own name: what it answers is that name's.
-      const operation = OPERATIONS[input.op] as unknown as (input: Asked<O>, vault: Deciding) => Operation<Parts, Answers[O], unknown>;
-      return change(serving, operation(input, { workloads: serving.workloads, owners: prepared.owners }));
+    async change(input) {
+      return change(serving, operation(input));
+    },
+    async weigh(input) {
+      if (Object.hasOwn(UNASKED, input.op)) throw new TypeError('a change nobody asks is not weighed');
+      return weigh(serving, operation(input));
     },
   };
 }

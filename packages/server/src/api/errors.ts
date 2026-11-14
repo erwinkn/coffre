@@ -106,6 +106,8 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   no_reference: ['not_found', 'that key is no reference'],
   // Folders of keys (routes/secrets.ts).
   no_folder: ['not_found', 'no key is filed in that folder there'],
+  // A fork's key reset to what it inherits, or that undone (routes/secrets.ts).
+  not_inherited: ['conflict', 'no environment it inherits from passes that key down: archive it, or bring it back, instead'],
   inherited: ['conflict', 'a fork inherits from it: archive the fork first'],
   parent_archived: ['conflict', 'it inherits from an environment that is archived or deleted: restore that first'],
   too_deep: ['conflict', 'that environment already inherits from three: fork one higher up'],

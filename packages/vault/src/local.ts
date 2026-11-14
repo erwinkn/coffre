@@ -4,7 +4,11 @@ import type { Database } from '@coffre/db';
 import { openVault, type PreparedVault, type VaultOptions } from './vault.ts';
 
 /** Every call the vault answers, in the order of the `Vault` interface. */
-export const METHODS = ['use', 'peek', 'caller', 'change'] as const satisfies readonly (keyof Vault)[];
+export const METHODS = ['use', 'peek', 'caller', 'change', 'weigh'] as const satisfies readonly (keyof Vault)[];
+/** Every call is in the list: one left out is a call no transport carries. */
+export type AllCalls = Exclude<keyof Vault, (typeof METHODS)[number]> extends never ? true : never;
+const _all: AllCalls = true;
+void _all;
 
 export type LocalVault = Vault & { close(): Promise<void> };
 
