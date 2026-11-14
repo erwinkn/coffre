@@ -5,7 +5,6 @@ import { z } from 'zod';
 
 import { changed } from '../change.ts';
 import { ApiError, badRequest, refusal } from '../errors.ts';
-import { stopOf } from '../given.ts';
 import { parsePath } from '../paths.ts';
 import { route } from '../route.ts';
 
@@ -33,6 +32,20 @@ export function versionOf(read: readonly { key: string; secret: string; version:
   const hash = createHash('sha256');
   for (const item of read) hash.update(`${item.key}\0${item.secret}:${item.version}\n`);
   return hash.digest('base64url');
+}
+
+/** What a whole environment's read leaves out and names, and what it leaves out as not there: any other refusal of a key refuses the read. */
+const LEFT_OUT = new Set(['sensitive', 'use_only', 'unknown_key', 'no_value']);
+
+/**
+ * The key that refuses a whole environment's read, or none: past a key's
+ * name, a fork says nothing of what its reader cannot read, so a parent
+ * the caller does not read is told first. The reveal's rule, and the
+ * version's (`GET …/version`).
+ */
+export function stopOf(items: readonly ({ key: string } | { key: string; refused: string })[]): { key: string; refused: string } | undefined {
+  const stops = items.filter((item): item is { key: string; refused: string } => 'refused' in item && !LEFT_OUT.has(item.refused));
+  return stops.find((item) => item.refused === 'parent_unreadable') ?? stops[0];
 }
 
 /**

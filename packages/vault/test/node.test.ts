@@ -67,7 +67,8 @@ test("the vault's database not answering crosses the socket as the outage it is,
   const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-socket-'));
   try {
     const socket = join(dir, 'vault.sock');
-    const answers = [failureOf(lock), failureOf(Object.assign(new Error('invalid input syntax for type uuid: "connection timeout"'), { code: '22P02' }))];
+    const bugged = () => failureOf(Object.assign(new Error('invalid input syntax for type uuid: "connection timeout"'), { code: '22P02' }));
+    const answers = [failureOf(lock), bugged(), failureOf(lock), bugged()];
     const server = createServer((_req, res) => {
       const { status, body } = answers.shift()!;
       res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
@@ -79,6 +80,9 @@ test("the vault's database not answering crosses the socket as the outage it is,
       assert.equal(isUnavailable(busy), true);
       const bug = await vault.use(NOBODY).then(() => assert.fail('answered'), (error: unknown) => error);
       assert.equal(isUnavailable(bug), false);
+      // A peek crosses as a use does, its outage and its bug told apart the same way.
+      const peeked = () => vault.peek(NOBODY).then(() => assert.fail('answered'), (error: unknown) => isUnavailable(error));
+      assert.deepEqual([await peeked(), await peeked()], [true, false]);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

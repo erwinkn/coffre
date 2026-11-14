@@ -5,22 +5,65 @@ import type { Called } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { chainOf, historyOf, keyNamesOf, referencesOf, type EnvironmentRow, type Nature, type ProjectRow, type SecretRow } from '../../db/queries/secrets.ts';
-import { can, permissionsAt, type Place } from '../caller.ts';
+import { can, permissionsAt, placeOf, type Place } from '../caller.ts';
 import { badRequest, refusal } from '../errors.ts';
-import { decideRead, live, parentsOf, placeAt, readsAt, stopOf, type Given } from '../given.ts';
 import { parsePath } from '../paths.ts';
 import { route } from '../route.ts';
-import { environmentOf, versionOf } from './secrets.ts';
+import { environmentOf, stopOf, versionOf } from './secrets.ts';
 
 /**
  * An environment's keys as its pages list them (docs/design/0.16.md,
  * "Pages"): the keys, a key's versions, the references into and out of a
- * place, what an environment is missing, and its version. Never a value.
- * Each is one call to the vault, `caller`, and one statement; what the
- * caller may see is worked out from the vault's answer about them. A place
- * that is not there and one they may not list are the same refusal,
- * `no_access`.
+ * place, what an environment is missing, and its version. Never a value,
+ * but a plain one's copy for the pages. The lists are each one call to the
+ * vault, `caller`, and one statement; what the caller may see is worked
+ * out from the vault's answer about them. The version is the vault's
+ * alone, `peek`. A place that is not there and one they may not list are
+ * the same refusal, `no_access`.
  */
+
+/** Parents an environment may have above it, as a use follows them. */
+const MAX_PARENTS = 3;
+
+/** A place that is there: not archived, and not a deletion's tombstone. */
+const live = (row: { archived: boolean; deleted: boolean }) => !row.archived && !row.deleted;
+
+/** An environment as a permission check names it, with the parent a personal config holds what it holds by. */
+function placeAt(project: { id: string }, environment: EnvironmentRow, environments: ReadonlyMap<string, EnvironmentRow>): Place {
+  const parent = environment.parentId === null ? null : (environments.get(environment.parentId) ?? null);
+  return placeOf(project, { ...environment, parent });
+}
+
+/**
+ * Whether anyone lists an environment, as the vault reads one before any
+ * grant: a personal config only while its parent is there and live. Cy's
+ * config of an archived dev answers no one, whether named `dev@me` or
+ * `dev-cy`.
+ */
+function readsAt(row: EnvironmentRow, environments: ReadonlyMap<string, EnvironmentRow>): boolean {
+  if (row.owner === null) return true;
+  const parent = row.parentId === null ? undefined : environments.get(row.parentId);
+  return parent !== undefined && live(parent);
+}
+
+/**
+ * What an environment inherits from, nearest first, as a use follows it:
+ * three parents at most, four above a personal config read as `dev@me`
+ * (`mine`), not when named by its own slug. Null for a chain a use refuses
+ * as broken: a parent not there, archived, in another project, or one too
+ * many. b4 → b3 → b2 → b1 → prod inherits nothing, and neither does a fork
+ * of an archived environment; Cy's config of b3 inherits prod's keys as
+ * `b3@me`, and nothing as `b3-cy`.
+ */
+function parentsOf(first: EnvironmentRow, environments: ReadonlyMap<string, EnvironmentRow>, mine: boolean): EnvironmentRow[] | null {
+  const parents: EnvironmentRow[] = [];
+  for (let id = first.parentId; id !== null; id = parents.at(-1)!.parentId) {
+    const parent = environments.get(id);
+    if (parent === undefined || !live(parent) || parent.projectId !== first.projectId || parents.length >= MAX_PARENTS + (mine ? 1 : 0)) return null;
+    parents.push(parent);
+  }
+  return parents;
+}
 
 /** Whether the caller reads or uses values at a place, which is who lists its keys: a role that writes there also reads or uses. */
 const lists = (who: Called, place: Place) => can(who, 'secret.read', place) || can(who, 'secret.use', place);
@@ -61,11 +104,22 @@ type ListedKey = {
   updatedBy: string | null;
   /** How its current value was made, when a client generated it: what Regenerate makes the next one by. */
   generated: Generation | null;
-  /** Always null: a page lists no value, a plain one included. A reveal hands it. */
-  value: null;
+  /**
+   * A plain value itself, from the copy its version keeps for the pages:
+   * its own, or its source's through a live reference, and, inherited, only
+   * to a lister of the parent that holds it. Null for any other, a secret
+   * whose version carries a copy included: never opened.
+   */
+  value: string | null;
   /** Who sees its current value: its own, or a live reference's source's. Null where there is no value to read. */
   sensitivity: Nature | null;
-  /** Whether a reveal by the caller would hand them its current value: the rules of a use, as `given.ts` works them out. */
+  /**
+   * Whether the caller may see its current value, as 0.14 said it: a plain
+   * one listed here, or a secret where they read it, here and, inherited,
+   * on the parent that holds it. False for a sensitive value, an archived
+   * key, and where there is no value. The vault decides again at the
+   * reveal.
+   */
   readable: boolean;
   /**
    * In a fork, the key its parents hold under this name: `inherited`, no
@@ -253,10 +307,6 @@ export const keyRoutes = {
       for (const key of cut.keys()) if (held.has(key) || !known.has(key)) cut.delete(key);
       const removed = new Set(dismissedAt(here.id));
 
-      // What a reveal would hand: the use's rules, opening nothing.
-      const decided = decideRead(who, read, mine);
-      const given = new Set('refused' in decided ? [] : decided.items.filter((item): item is Given => !('refused' in item)).map((item) => item.key));
-
       const rows = rowsAt(here.id);
       const own = new Set(rows.filter((row) => !row.archived).map((row) => row.key));
       const made = generations([...rows, ...[...held].filter(([key]) => !own.has(key) && !removed.has(key)).map(([, { row }]) => row)]);
@@ -266,6 +316,8 @@ export const keyRoutes = {
         return row.sourceId !== null && stateOf(read, row, source) === 'live' ? source! : null;
       };
       const writtenAt = (row: SecretRow): string | null => row.current?.createdAt ?? liveSource(row)?.current?.createdAt ?? null;
+      // A plain value's copy: its own, or its source's through a live reference. The query gives none for a secret.
+      const plainOf = (row: SecretRow): string | null => (row.sourceId === null ? (row.current?.plaintext ?? null) : (liveSource(row)?.current?.plaintext ?? null));
       const view = (row: SecretRow): Omit<ListedKey, 'parent' | 'readable'> => {
         const source = sourceOf(row);
         const reference = row.sourceId === null ? null : referenceView(read, row, source);
@@ -280,17 +332,23 @@ export const keyRoutes = {
           updatedAt: writtenAt(row),
           updatedBy: row.current?.createdBy ?? null,
           generated: made.get(row.id) ?? null,
-          value: null,
+          value: plainOf(row),
           sensitivity: row.nature ?? liveSource(row)?.nature ?? null,
         };
       };
-      // Told of a parent's key, its version and age, as a lister of the parent is.
+      // Told of a parent's key, its version, age and plain value, as a lister of the parent is.
       const told = (from: EnvironmentRow) => lists(who, placeAt(project, from, environments));
+      // Whether the caller reads values where they are held, as 0.14 said it (v0.14.7 api/secrets.ts:387-391): a Contributor only uses, and
+      // reads their own values in dev@me, none of dev's. A plain value is any lister's; a sensitive one, nobody's.
+      const readsHere = can(who, 'secret.read', at);
+      const readsFrom = (from: EnvironmentRow) => can(who, 'secret.read', placeAt(project, from, environments));
+      const readable = (key: Pick<ListedKey, 'value' | 'sensitivity'>, reader: boolean) => key.sensitivity !== null && key.sensitivity !== 'sensitive' && (key.value !== null || reader);
 
       // An override reset to the parent's: listed once, as inherited or removed, saying its own value is kept.
       const reset = new Set(rows.filter((row) => row.archived && (held.has(row.key) || (removed.has(row.key) && cut.has(row.key)))).map((row) => row.key));
       const keys: ListedKey[] = rows.filter((row) => !reset.has(row.key)).map((row) => {
-        const listed = { ...view(row), readable: !row.archived && given.has(row.key) };
+        const shown = view(row);
+        const listed = { ...shown, readable: !row.archived && readable(shown, readsHere) };
         const parent = row.archived ? undefined : held.get(row.key);
         if (parent === undefined) return { ...listed, parent: null };
         const [mine, theirs] = [writtenAt(row), writtenAt(parent.row)];
@@ -301,13 +359,17 @@ export const keyRoutes = {
         if (own.has(key)) continue;
         const isRemoved = removed.has(key);
         const shown = !isRemoved && told(from);
-        keys.push({
+        const listed = {
           ...view(row),
-          ...(shown ? {} : { reference: null, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, sensitivity: null }),
+          ...(shown ? {} : { reference: null, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null }),
           // A removed key resolves to nothing here, and has nothing to regenerate.
-          ...(isRemoved ? { generated: null, sensitivity: null } : {}),
+          ...(isRemoved ? { generated: null, value: null, sensitivity: null } : {}),
+        };
+        keys.push({
+          ...listed,
           archived: false,
-          readable: !isRemoved && given.has(key),
+          // Read through here, so by a reader of here and of the parent that holds it.
+          readable: readable(listed, readsHere && readsFrom(from)),
           parent: { from: from.slug, state: isRemoved ? 'removed' : 'inherited', changed: false, reset: reset.has(key), held: true },
         });
       }
@@ -333,8 +395,7 @@ export const keyRoutes = {
         unprotectable: !personal && ownsProject(who.holds, project.id),
         /** Whether the caller may make a sensitive value of its own a secret in place: an Owner of its project. */
         loosenable: ownsProject(who.holds, project.id),
-        /** Not served yet: the deployment's setting is not among what a request's handler is given. */
-        rotateAfterDays: null,
+        rotateAfterDays: ctx.rotateAfterDays,
       };
     },
   }),
@@ -479,23 +540,21 @@ export const keyRoutes = {
    * The version of what a read of the environment would hand the caller,
    * which changes whenever that does: `coffre export --watch` asks it
    * before reading, and compares it with the read's own (`POST /reveals`).
-   * Worked out from the app's rows by the rules of a use, opening nothing
-   * and logging nothing; refused as that read would be. Where a row is not
-   * what its MAC says, the vault's read refuses, and the watch keeps what
-   * it has. The bulk cap is not asked, as 0.14 did not: it bounds the
-   * values a principal is handed, and a version hands none. A caller past
-   * it sees the version move, and its read is refused `bulk_limit`.
+   * One call to the vault, `peek`, which decides as a reveal of the whole
+   * environment would and opens and writes nothing, and no statement of the
+   * app's; refused as that reveal would be. The bulk cap is not asked, as
+   * 0.14 did not: it bounds the values a principal is handed, and a version
+   * hands none. A caller past it sees the version move, and its read is
+   * refused `bulk_limit`.
    */
   ...route('GET /projects/:project/:environment/version', {
     run: async (ctx, { params }) => {
-      const who = await ctx.caller();
-      const { environment, mine } = environmentOf(params.environment);
       const path = `${params.project}/${params.environment}`;
-      const decided = decideRead(who, await chainOf(ctx.db, params.project, environment, mine ? who.principal : null), mine);
-      if ('refused' in decided) throw refusal(decided.refused, path);
-      const stop = stopOf(decided.items);
+      const answer = await ctx.vault.peek({ ...ctx.shown, project: params.project, ...environmentOf(params.environment), keys: null, purpose: 'run', upstream: null });
+      if ('refused' in answer) throw refusal(answer.refused, path);
+      const stop = stopOf(answer.items);
       if (stop !== undefined) throw refusal(stop.refused, `${path}/${stop.key}`);
-      return { version: versionOf(decided.items.flatMap((item) => ('refused' in item ? [] : [{ key: item.key, secret: item.held.id, version: item.version }]))) };
+      return { version: versionOf(answer.items.flatMap((item) => ('refused' in item ? [] : [item]))) };
     },
   }),
 };

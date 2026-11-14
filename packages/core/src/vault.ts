@@ -37,6 +37,12 @@ export interface Vault {
   /** Open values for whoever presented a token: a reveal, `coffre run`, an export, a proxied request, a signature. */
   use(input: UseInput): Promise<Used | Refused>;
   /**
+   * What `use` would give, as of now, without opening or writing anything:
+   * each key's secret and version, or why it is refused. What a watch
+   * compares before it reads (`GET …/version`).
+   */
+  peek(input: UseInput): Promise<Peeked | Refused>;
+  /**
    * Who a request's credential is and all it holds, for the app to scope a
    * page's queries with. Nothing is opened or changed on the answer: a use
    * and a change read their caller themselves.
@@ -114,6 +120,14 @@ export type Used = {
   values: UsedValue[];
   /** For a workload's session, what only the app can hold its request to: an unsigned upload its binding must allow, a narrowed session's methods and paths. */
   workload: { binding: string; profile: string; policy: BindingPolicy; constraints: Constraints | null } | null;
+};
+
+/** What a use would give: each key's secret and version, or why it is refused; nothing opened. */
+export type Peeked = {
+  principal: string;
+  /** The credential's id. */
+  credential: string;
+  items: ({ key: string; secret: string; version: number } | { key: string; refused: string })[];
 };
 
 /**

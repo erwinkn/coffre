@@ -1,8 +1,8 @@
 // An environment's keys over HTTP on the 0.16 contract (docs/design/0.16.md,
-// "Pages"): the list, a key's versions, references, missing keys and the
-// environment's version, each one call to the vault (`caller`) and one
-// statement, scoped by its answer, never a value. The version is the one a
-// reveal answers, worked out without opening anything.
+// "Pages"): the list, a key's versions, references and missing keys, each one
+// call to the vault (`caller`) and one statement, scoped by its answer, never
+// a value but a plain one's copy; and the environment's version, one `peek`
+// of the vault's and no statement, the one a reveal answers.
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
@@ -44,15 +44,16 @@ beforeEach(async () => {
   const adas = environment(market, 'prod-ada', { parentId: prod.id, owner: ada });
   const [billed, stale] = [environment(billing, 'prod'), environment(billing, 'stale')];
   const a = value(world, secret(prod, 'A'), 'a');
+  const b = value(world, secret(prod, 'B'), 'b', { plain: true });
   const c = value(world, secret(prod, 'C', { archivedAt: new Date(0) }), 'c');
   const [own, o] = [value(world, secret(adas, 'OWN'), 'own'), value(world, secret(old, 'O'), 'o')];
-  ids = { market: market.id, billing: billing.id, prod: prod.id, staging: staging.id, dev: dev.id, old: old.id, adas: adas.id, billed: billed.id, a: a.id, c: c.id, own: own.id, o: o.id };
+  ids = { market: market.id, billing: billing.id, b: b.id, prod: prod.id, staging: staging.id, dev: dev.id, old: old.id, adas: adas.id, billed: billed.id, a: a.id, c: c.id, own: own.id, o: o.id };
   await write(
     world,
     ...rows('projects', market, billing),
     ...rows('environments', prod, staging, dev, old, adas, billed, stale),
     ...rows('secrets',
-      a, value(world, secret(prod, 'B'), 'b', { plain: true }), value(world, secret(prod, 'S'), 's', { sensitive: true }), c, secret(prod, 'E'), secret(prod, 'R', { sourceId: a.id, folder: 'links' }),
+      a, b, value(world, secret(prod, 'S'), 's', { sensitive: true }), c, secret(prod, 'E'), secret(prod, 'R', { sourceId: a.id, folder: 'links' }),
       value(world, secret(staging, 'A'), 'sa'), value(world, secret(staging, 'Y'), 'y'), value(world, secret(staging, 'Z'), 'z', { plain: true }),
       value(world, secret(dev, 'A'), 'da'), value(world, secret(dev, 'D'), 'd'), value(world, secret(dev, 'S', { archivedAt: new Date(0) }), 'ds'),
       own, o,
@@ -89,8 +90,8 @@ async function cost<T>(run: () => Promise<T>): Promise<[T, string[], number]> {
 const refused = (answer: [number, Body]) => [answer[0], answer[1].error, answer[1].reason];
 const NO_ACCESS = [403, 'vault_refused', 'no_access'];
 
-type Key = { key: string; reference: { holder: string; source: string; state: string; version: number | null; canOpenSource: boolean } | null; folder: string | null; archived: boolean; version: number | null; versionId: string | null; updatedAt: string | null; updatedBy: string | null; generated: unknown; value: null; sensitivity: string | null; readable: boolean; parent: { from: string; state: string; changed: boolean; reset: boolean; held: boolean } | null };
-type List = { permissions: string[]; keys: Key[]; parents: string[]; personal: { of: string; fallback: boolean } | null; protected: boolean; unprotectable: boolean; loosenable: boolean; rotateAfterDays: null };
+type Key = { key: string; reference: { holder: string; source: string; state: string; version: number | null; canOpenSource: boolean } | null; folder: string | null; archived: boolean; version: number | null; versionId: string | null; updatedAt: string | null; updatedBy: string | null; generated: unknown; value: string | null; sensitivity: string | null; readable: boolean; parent: { from: string; state: string; changed: boolean; reset: boolean; held: boolean } | null };
+type List = { permissions: string[]; keys: Key[]; parents: string[]; personal: { of: string; fallback: boolean } | null; protected: boolean; unprotectable: boolean; loosenable: boolean; rotateAfterDays: number | null };
 const list = async (label: string, path: string) => {
   const [status, body] = await call(label, 'GET', `/secrets/${path}`);
   assert.equal(status, 200, JSON.stringify(body));
@@ -99,11 +100,11 @@ const list = async (label: string, path: string) => {
 /** Each key as `[key, version, sensitivity, readable, parent state and where from]`. */
 const brief = (keys: Key[]) => keys.map((key) => [key.key, key.version, key.sensitivity, key.readable, key.parent === null ? null : `${key.parent.state} ${key.parent.from}${key.parent.reset ? ' reset' : ''}${key.parent.held ? '' : ' unheld'}`]);
 
-test("an environment's keys: one call to the vault and one statement, no value, each key as a reveal by the caller would hand it", async () => {
+test("an environment's keys: one call to the vault and one statement, no value but a plain one's, each key readable as 0.14 said", async () => {
   const [[status, body], calls, statements] = await cost(() => call('ada-cli', 'GET', '/secrets/market/prod'));
   assert.deepEqual([status, calls, statements], [200, ['caller'], 1], JSON.stringify(body));
   const listed = body as unknown as List;
-  // A person is handed no sensitive value; an archived key or one with no value, nothing.
+  // A sensitive value is nobody's to see; an archived key or one with no value, nothing.
   assert.deepEqual(brief(listed.keys), [
     ['A', 1, 'secret', true, null],
     ['B', 1, 'plain', true, null],
@@ -112,20 +113,19 @@ test("an environment's keys: one call to the vault and one statement, no value, 
     ['R', null, 'secret', true, null],
     ['S', 1, 'sensitive', false, null],
   ]);
-  assert.ok(listed.keys.every((key) => key.value === null));
+  assert.deepEqual(listed.keys.map((key) => key.value), [null, 'b', null, null, null, null]);
   const [a, , c, , r] = listed.keys;
   assert.deepEqual([a!.updatedBy !== null, typeof a!.versionId, c!.archived, r!.folder], [true, 'string', true, 'links']);
   // A reference: its source, read live, as old as the version it reads.
   assert.deepEqual({ ...r!.reference, id: undefined }, { id: undefined, holder: 'market/prod/R', source: 'market/prod/A', state: 'live', version: 1, createdBy: null, createdAt: null, endedBy: null, endedAt: null, canOpenSource: true });
   assert.equal(r!.updatedAt, a!.updatedAt);
-  assert.deepEqual([listed.permissions, listed.parents, listed.personal, listed.protected, listed.unprotectable, listed.loosenable, listed.rotateAfterDays], [['secret.read'], [], null, false, false, false, null]);
+  assert.deepEqual([listed.permissions, listed.parents, listed.personal, listed.protected, listed.unprotectable, listed.loosenable, listed.rotateAfterDays], [['secret.read'], [], null, false, false, false, 365]);
 
-  // A service account on an Owner's token is handed the sensitive one; on another's, not it, which a reveal of it alone would refuse.
-  assert.deepEqual((await list('ci-token', 'market/prod')).keys.filter((key) => key.readable).map((key) => key.key), ['A', 'B', 'R', 'S']);
-  assert.deepEqual((await list('cj-token', 'market/prod')).keys.filter((key) => key.readable).map((key) => key.key), ['A', 'B', 'R']);
-  // Fay uses and never reads: she lists the keys, and reads none.
+  // A sensitive value is readable to nobody, as 0.14 listed it: not a service account on an Owner's token, which a reveal hands it, nor an Owner.
+  for (const label of ['ci-token', 'cj-token', 'cy-cli']) assert.deepEqual((await list(label, 'market/prod')).keys.filter((key) => key.readable).map((key) => key.key), ['A', 'B', 'R'], label);
+  // Fay uses and never reads: she lists the keys, and sees the plain one alone.
   const fays = await list('fay-cli', 'market/prod');
-  assert.deepEqual([fays.keys.length, fays.keys.some((key) => key.readable), fays.permissions], [6, false, ['secret.use', 'secret.write']]);
+  assert.deepEqual([fays.keys.length, fays.keys.filter((key) => key.readable).map((key) => [key.key, key.value]), fays.permissions], [6, [['B', 'b']], ['secret.use', 'secret.write']]);
   // Bo maintains it; Cy owns the instance, who may loosen a sensitive value and take a protection off.
   assert.deepEqual([(await list('bo-cli', 'market/prod')).permissions, (await list('cy-cli', 'market/prod')).unprotectable, (await list('cy-cli', 'market/prod')).loosenable], [['secret.read', 'secret.write', 'environment.manage', 'project.manage'], true, true]);
   // staging is protected: as its row says.
@@ -188,7 +188,8 @@ test('a place that is not there, one the caller holds nothing in and an archived
   const paths = ['/secrets/market/prod', '/secrets/market/prod/A/versions', '/projects/market/prod/missing', '/projects/market/prod/version'];
   for (const path of paths) {
     const [answer, calls, statements] = await cost(() => call('gus-cli', 'GET', path));
-    assert.deepEqual([refused(answer), calls, statements], [NO_ACCESS, ['caller'], 1], path);
+    // The version is the vault's alone.
+    assert.deepEqual([refused(answer), calls, statements], [NO_ACCESS, ...(path.endsWith('/version') ? [['peek'], 0] : [['caller'], 1])], path);
   }
   for (const path of ['/secrets/market/nope', '/secrets/nope/prod', '/secrets/market/old', '/secrets/market/old/O/versions', '/projects/market/old/missing', '/projects/market/old/version', '/secrets/billing/prod']) {
     assert.deepEqual(refused(await call('ada-cli', 'GET', path)), NO_ACCESS, path);
@@ -286,8 +287,8 @@ test("what an environment lacks of its siblings' keys, and what its team dismiss
 async function sameAsRead(label: string, path: string): Promise<string | null> {
   const [[status, body], calls, statements] = await cost(() => call(label, 'GET', `/projects/${path}/version`));
   const [read] = await cost(() => call(label, 'POST', '/reveals', { path }));
-  // Asked nothing of a use, opened nothing.
-  assert.deepEqual([calls, statements], [['caller'], 1], `${label} ${path}`);
+  // One peek of the vault's, which opens and writes nothing, and no statement of the app's.
+  assert.deepEqual([calls, statements], [['peek'], 0], `${label} ${path}`);
   if (read[0] === 200) {
     assert.deepEqual([status, body.version], [200, read[1].version], `${label} ${path}: ${JSON.stringify(body)}`);
     return body.version as string;
@@ -296,7 +297,7 @@ async function sameAsRead(label: string, path: string): Promise<string | null> {
   return null;
 }
 
-test("an environment's version is the one a read of it answers, worked out without opening anything, and refused as that read would be", async () => {
+test("an environment's version is the one a read of it answers, peeked without opening anything, and refused as that read would be", async () => {
   const answered = [
     ['ada-cli', 'market/prod'], ['ada-cli', 'market/dev'], ['ada-cli', 'market/prod@me'], ['bo-cli', 'market/prod@me'], ['bo-cli', 'market/dev'],
     ['ci-token', 'market/prod'], ['ci-token', 'market/dev'], ['cy-cli', 'billing/prod'], ['cy-cli', 'market/staging'],
@@ -329,7 +330,43 @@ test("an environment's version is the one a read of it answers, worked out witho
   // dev's dismissal of B gone: it is handed prod's B, and its version changes.
   await world.owner.execute(sql`DELETE FROM dismissed_keys WHERE environment_id = ${ids.dev} AND key = 'B'`);
   world.memory.reads.clear();
-  assert.notEqual(await sameAsRead('ada-cli', 'market/dev'), devAfter);
+  const devNow = await sameAsRead('ada-cli', 'market/dev');
+  assert.notEqual(devNow, devAfter);
+
+  // A row whose MAC is not the vault's is no row, to the version as to the reveal: dev without its D, and prod's R reading an A that is not there.
+  await world.owner.execute(sql`UPDATE secrets SET mac = set_byte(mac, 35, (get_byte(mac, 35) + 1) % 256) WHERE environment_id = ${ids.dev} AND key = 'D'`);
+  world.memory.reads.clear();
+  const forged = await sameAsRead('ada-cli', 'market/dev');
+  assert.ok(forged !== null && forged !== devNow);
+  await world.owner.execute(sql`UPDATE secrets SET mac = set_byte(mac, 35, (get_byte(mac, 35) + 1) % 256) WHERE id = ${ids.a}`);
+  world.memory.reads.clear();
+  assert.equal(await sameAsRead('ada-cli', 'market/prod'), null);
+  assert.deepEqual(refused(await call('ada-cli', 'GET', '/projects/market/prod/version')), [409, 'conflict', 'unreadable']);
+});
+
+test("a plain value's copy is listed, its own or through a live reference, and inherited to a lister of the parent; a secret's never, whatever its version carries", async () => {
+  // A's version carries a copy it should not: A is a secret, and no copy of it is listed.
+  await world.owner.execute(sql`UPDATE secret_versions SET plaintext = 'planted' WHERE secret_id = ${ids.a}`);
+  // billing/prod's PLAIN reads prod's B; dev's dismissal of B is gone, so dev inherits it.
+  await write(world, ...rows('secrets', secret({ id: ids.billed, projectId: ids.billing }, 'PLAIN', { sourceId: ids.b })));
+  await world.owner.execute(sql`DELETE FROM dismissed_keys WHERE environment_id = ${ids.dev} AND key = 'B'`);
+  const shown = async (label: string, path: string) => (await list(label, path)).keys.flatMap((key) => (key.value === null ? [] : [[key.key, key.value]]));
+  for (const [label, path, values] of [
+    ['ada-cli', 'market/prod', [['B', 'b']]], ['fay-cli', 'market/prod', [['B', 'b']]], ['cy-cli', 'billing/prod', [['PLAIN', 'b']]], ['bo-cli', 'market/dev', [['B', 'b']]], ['ada-cli', 'market/prod@me', [['B', 'b']]],
+    // Ed lists dev and not prod: he is told B's name, not its value.
+    ['ed-cli', 'market/dev', []],
+    ['cy-cli', 'market/staging', [['Z', 'z']]],
+  ] as const) assert.deepEqual(await shown(label, path), values, `${label} ${path}`);
+  // A key's versions show no value, as 0.14's did.
+  assert.ok(((await call('ada-cli', 'GET', '/secrets/market/prod/B/versions'))[1].versions as object[]).every((version) => !('value' in version)));
+});
+
+test("readable, as 0.14 said it: a Contributor's personal config reads its own values and none of its parent's; a sensitive value, nobody", async () => {
+  const fays = environment({ id: ids.market }, 'dev-fay', { parentId: ids.dev, owner: fay });
+  await write(world, ...rows('environments', fays), ...rows('secrets', value(world, secret(fays, 'MINE'), 'mine')));
+  assert.deepEqual(brief((await list('fay-cli', 'market/dev@me')).keys).map(([key, , , readable]) => [key, readable]), [['A', false], ['D', false], ['E', false], ['MINE', true], ['R', false], ['S', false]]);
+  // Cy owns the instance and reads everywhere: every value but the sensitive one, and none of what is archived or has none.
+  assert.deepEqual((await list('cy-cli', 'market/dev')).keys.map((key) => [key.key, key.readable]), [['A', true], ['B', false], ['D', true], ['E', false], ['R', true], ['S', false]]);
 });
 
 test('the rules of a use, edge by edge: a chain too long or cut, references that cannot be read, a dismissal restored, a recipe', async () => {

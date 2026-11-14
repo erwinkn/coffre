@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import test, { after } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import type { Used } from '@coffre/core/vault';
+import type { Peeked, Used } from '@coffre/core/vault';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
@@ -48,6 +48,7 @@ type Answer = { status: number; body: Used & { refused?: string; error?: string 
 /** A fresh isolate of the vault Worker and its signer, over the suite's database through the vault's login. */
 async function freshVault(database: string, { signer = true } = {}): Promise<{
   reveal(bearer: string, path: string, keys: string[] | null): Promise<Answer>;
+  peek(bearer: string, path: string, keys: string[] | null): Promise<{ status: number; body: Peeked }>;
   write(bearer: string, path: string, values: Record<string, string>): Promise<{ status: number; body: { answer?: { keys: Record<string, { version: number; nature: string }> }; refused?: string; error?: string } }>;
   post(path: string): Promise<{ error?: string }>;
   stop(): Promise<void>;
@@ -85,6 +86,10 @@ async function freshVault(database: string, { signer = true } = {}): Promise<{
     async reveal(bearer, path, keys) {
       const response = await worker.fetch('/reveals', { method: 'POST', headers: { authorization: `Bearer ${bearer}` }, body: JSON.stringify({ path, keys }), signal: AbortSignal.timeout(20_000) });
       return { status: response.status, body: (await response.json()) as Answer['body'] };
+    },
+    async peek(bearer, path, keys) {
+      const response = await worker.fetch('/reveals', { method: 'PUT', headers: { authorization: `Bearer ${bearer}` }, body: JSON.stringify({ path, keys }), signal: AbortSignal.timeout(20_000) });
+      return { status: response.status, body: (await response.json()) as Peeked };
     },
     async write(bearer, path, values) {
       const response = await worker.fetch('/secrets', { method: 'PATCH', headers: { authorization: `Bearer ${bearer}` }, body: JSON.stringify({ path, values }), signal: AbortSignal.timeout(20_000) });
@@ -137,6 +142,11 @@ test('a reveal through the app is answered its value, and its entry is in the lo
     // The same key again within the minute is given, and logged once.
     const again = await vault.reveal('ada-cli', 'market/prod', ['KEY_0']);
     assert.deepEqual(given(again), [{ key: 'KEY_0', value: 'value of KEY_0' }]);
+    assert.deepEqual([await count('log'), await count('log_pending')], [written + 1, 0]);
+    // A peek through the binding: what the reveal was given, key by key, and nothing logged.
+    const peeked = await vault.peek('ada-cli', 'market/prod', ['KEY_0', 'NOPE']);
+    const [held] = first.body.values as { secret: string; version: number }[];
+    assert.deepEqual([peeked.status, peeked.body.items], [200, [{ key: 'KEY_0', secret: held!.secret, version: held!.version }, { key: 'NOPE', refused: 'unknown_key' }]]);
     assert.deepEqual([await count('log'), await count('log_pending')], [written + 1, 0]);
   } finally {
     await vault.stop();

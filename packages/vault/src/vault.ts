@@ -7,7 +7,7 @@ import { change, type Operation, type Parts } from './change.ts';
 import { OPERATIONS } from './ops/index.ts';
 import { presented, text } from './ops/input.ts';
 import { keyOf } from './rows.ts';
-import { memoryOf, use, type Ask, type Serving } from './use.ts';
+import { memoryOf, peek, use, type Ask, type Serving } from './use.ts';
 
 /**
  * The vault behind its contract (`Vault` in @coffre/core/vault,
@@ -69,6 +69,9 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
       const answer = await use(serving, asked(input));
       if ('refused' in answer) return answer;
       return { ...answer, values: answer.values.map((value) => ('refused' in value ? value : { ...value, value: value.value.toString('utf8') })) };
+    },
+    async peek(input) {
+      return peek(serving, asked(input));
     },
     async caller(input) {
       return caller(serving, presented(input));

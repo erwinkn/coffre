@@ -4,7 +4,8 @@ import { sql } from 'drizzle-orm';
 
 /**
  * The secrets area's page reads (docs/design/0.16.md, "Pages"): keys, their
- * versions and references, never a value. Each is one statement, whatever
+ * versions and references, never a value but a plain one's copy for the
+ * pages. Each is one statement, whatever
  * the instance holds; the rows it reads are those of the place it names.
  * Read as they are, their MACs unchecked: they say what a page lists, and
  * decide no use and no change.
@@ -31,8 +32,12 @@ export type SecretRow = {
   recipe: string | null;
   pairId: string | null;
   pairHalf: 'private' | 'public' | null;
-  /** Its current version's row, null when it has none or that row is not there. */
-  current: { id: string; createdAt: string; createdBy: string } | null;
+  /**
+   * Its current version's row, null when it has none or that row is not
+   * there. `plaintext`, the copy for the pages a plain value keeps: only
+   * while the secret's row says it is plain, never a secret's.
+   */
+  current: { id: string; createdAt: string; createdBy: string; plaintext: string | null } | null;
 };
 
 /**
@@ -60,7 +65,8 @@ const PROJECT = sql`jsonb_build_object('id', t.id, 'slug', t.slug, 'archived', t
 const ENVIRONMENT = sql`jsonb_build_object('id', t.id, 'projectId', t.project_id, 'slug', t.slug, 'parentId', t.parent_id, 'owner', t.owner, 'archived', t.archived_at IS NOT NULL, 'protected', t.protected)`;
 const SECRET = sql`jsonb_build_object('id', t.id, 'projectId', t.project_id, 'environmentId', t.environment_id, 'key', t.key, 'archived', t.archived_at IS NOT NULL, 'folder', t.folder,
   'sourceId', t.source_id, 'currentVersion', t.current_version, 'nature', t.nature, 'recipe', t.recipe, 'pairId', t.pair_id, 'pairHalf', t.pair_half,
-  'current', (SELECT jsonb_build_object('id', v.id, 'createdAt', v.created_at, 'createdBy', v.created_by) FROM secret_versions v WHERE v.secret_id = t.id AND v.version = t.current_version))`;
+  'current', (SELECT jsonb_build_object('id', v.id, 'createdAt', v.created_at, 'createdBy', v.created_by, 'plaintext', CASE WHEN t.nature = 'plain' THEN v.plaintext END)
+    FROM secret_versions v WHERE v.secret_id = t.id AND v.version = t.current_version))`;
 
 const projectOf = (row: Wire): ProjectRow => ({ id: row.id as string, slug: row.slug as string, archived: row.archived as boolean, deleted: (row.slug as string).includes('~') });
 const environmentOf = (row: Wire): EnvironmentRow => ({
@@ -88,7 +94,7 @@ const secretOf = (row: Wire): SecretRow => {
     recipe: row.recipe as string | null,
     pairId: row.pairId as string | null,
     pairHalf: row.pairHalf as SecretRow['pairHalf'],
-    current: current === null ? null : { id: current.id as string, createdAt: iso(current.createdAt), createdBy: current.createdBy as string },
+    current: current === null ? null : { id: current.id as string, createdAt: iso(current.createdAt), createdBy: current.createdBy as string, plaintext: (current.plaintext ?? null) as string | null },
   };
 };
 
