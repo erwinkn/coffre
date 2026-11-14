@@ -2,8 +2,8 @@
 
 `coffre` is a pnpm monorepo secrets manager, shipped as packages a deployment imports
 and configures in code: `packages/server` (`@coffre/server`: `/api`, sign-in,
-its queries in `src/db`; `/cloudflare` and `/node` entry
-points; the optional plugins a deployment adds, in `src/plugins`,
+its queries in `src/db`; `/cloudflare` and, from 0.16.1, `/node` entry
+points (`docs/design/0.16.md`, "Node in 0.16.0"); the optional plugins a deployment adds, in `src/plugins`,
 `docs/design/plugins.md`), `packages/db` (`@coffre/db`: the Drizzle schema for Postgres, its
 migrations and migrator, the dialect helpers, and the connections, Hyperdrive's
 included), `packages/ui` (`@coffre/ui`: the TanStack
@@ -210,7 +210,10 @@ unsupported diff select full validation.
   login; Node runs the built app under srvx, as its `pnpm start`. Each holds the build's client
   files to holding no server code (`packages/conformance/src/bundle.ts`): a deployment's
   own build no longer checks. A check that fails prints what it saw, then the processes'
-  output.
+  output. 0.16.0 ships for Workers only: until `@coffre/server` exports `./node` again,
+  Node conformance and the packed consumer's `node` leg pass in CI with a notice
+  (`scripts/node-ships.mjs`), `pnpm typecheck` skips `examples/node`, and
+  `pnpm conformance:node` and `pnpm bench:node` fail (`docs/design/0.16.md`, "Node in 0.16.0").
 - `pnpm test:compat [--release <v>] [--schema <v>]` installs
   the newest release of this checkout's line (`0.14.x`) from npm as `init` writes it, has its own conformance
   migrate with this checkout's migrations, and requires it conformant; then
@@ -219,8 +222,8 @@ unsupported diff select full validation.
   network and Postgres. Workers only: the newest release's Node deployment
   runs on SQLite, which this checkout no longer migrates. CI runs it only
   once a 0.16 release is on npm ("Migrations: expand, then contract").
-- `pnpm test:consumer [<dir>]` packs the eight packages, runs the packed CLI's
-  `init` for both kinds outside the workspace, diffs them against the examples,
+- `pnpm test:consumer [--kind workers|node] [<dir>]` packs the eight packages, runs the packed CLI's
+  `init` for both kinds (Workers alone until `@coffre/server` exports `./node`) outside the workspace, diffs them against the examples,
   installs the tarballs (pnpm overrides, no workspace links), then typechecks,
   builds and runs conformance on each. It also loads and calls the packed
   client, which declares Node >= 20, with each Node `COFFRE_CLIENT_NODES`

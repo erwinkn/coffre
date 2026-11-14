@@ -6,7 +6,8 @@
 # `coffre-conformance`, as its own `pnpm conformance`.
 #
 #   pnpm test:consumer [--kind workers|node] [<dir>]
-# <dir> defaults to a new temporary one. Without --kind, exercise both kinds.
+# <dir> defaults to a new temporary one. Without --kind, exercise both kinds
+# (Workers alone while @coffre/server exports no ./node: scripts/node-ships.mjs).
 #
 # The packed client also loads and calls on every Node it declares, 20 and up,
 # as COFFRE_CLIENT_NODES lists them (Node binaries, space-separated; the
@@ -21,12 +22,16 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-kinds=(workers node)
 if [[ "${1:-}" == --kind ]]; then
     case "${2:-}" in
         workers | node) kinds=("$2"); shift 2 ;;
         *) echo 'consumer-test: --kind must be workers or node' >&2; exit 2 ;;
     esac
+else
+    kinds=(workers)
+    # Node too once @coffre/server exports ./node: 0.16.0 is Workers only (D198; docs/design/0.16.md, "Node in 0.16.0").
+    node_ships="$(node "$root/scripts/node-ships.mjs" 'The Node deployment')"
+    if [[ "$node_ships" == true ]]; then kinds+=(node); fi
 fi
 temporary=false
 if [[ -n "${1:-}" ]]; then

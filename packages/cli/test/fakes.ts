@@ -368,9 +368,9 @@ export function realWrangler(): string {
  * `deploy` tells the fake API the Worker exists, with its bindings and the
  * secrets it got, unless `<state>/fail-<name>` says to fail. With `real`,
  * the real wrangler first deploys the same files with the same stdin, in a
- * dry run, with a stub for the Worker's code and no assets: what it says
- * is in `<state>/dry-<name>`, and a refusal fails the deploy. Each call
- * says its pid in `<state>/pid-<command>`. With `<state>/listen-late`,
+ * dry run, with a stub for the Worker's code (the Durable Object classes its
+ * config binds, empty) and no assets: what it says is in `<state>/dry-<name>`,
+ * and a refusal fails the deploy. Each call says its pid in `<state>/pid-<command>`. With `<state>/listen-late`,
  * `login` answers nothing for a while after printing its link, as the real
  * one, which prints it before it listens, may not: the file says how long,
  * in milliseconds (700 when empty). With `<state>/slow`, `deploy` takes a
@@ -379,7 +379,6 @@ export function realWrangler(): string {
 export function fakeWrangler(dir: string, state: string, token: string, real?: string): void {
   mkdirSync(join(dir, 'node_modules', '.bin'), { recursive: true });
   mkdirSync(join(state, 'assets'), { recursive: true });
-  writeFileSync(join(state, 'stub.js'), 'export default { fetch: () => new Response("ok") };\n');
   const jsonc = createRequire(import.meta.url).resolve('jsonc-parser');
   const script = `#!${process.execPath}
 import { spawnSync } from 'node:child_process';
@@ -436,6 +435,9 @@ if (args[0] === 'auth' && apiToken !== null) {
   const name = config.name;
   if (existsSync(STATE + '/fail-' + name)) { console.error('✘ [ERROR] A request to the Cloudflare API failed.'); process.exit(1); }
   if (REAL !== null) {
+    // The stub exports each Durable Object class the config binds in this Worker, as its code does: wrangler refuses one missing.
+    const classes = (config.durable_objects?.bindings ?? []).filter((b) => !b.script_name).map((b) => b.class_name);
+    writeFileSync(STATE + '/stub.js', 'export default { fetch: () => new Response("ok") };\\n' + classes.map((c) => 'export class ' + c + ' {}\\n').join(''));
     // Its stdin a pipe, as setup gives it: see deploymentWrangler.
     const dry = spawnSync('/bin/sh', ['-c', 'cat | "$0" "$@"', process.execPath, REAL, 'deploy', STATE + '/stub.js', '--assets', STATE + '/assets', '--dry-run', ...args.slice(1)], {
       input: stdin,

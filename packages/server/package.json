@@ -31,11 +31,6 @@
       "types": "./dist/cloudflare.d.ts",
       "default": "./dist/cloudflare.js"
     },
-    "./node": {
-      "coffre:source": "./src/node.ts",
-      "types": "./dist/node.d.ts",
-      "default": "./dist/node.js"
-    },
     "./start": {
       "coffre:source": "./src/start.ts",
       "types": "./dist/start.d.ts",

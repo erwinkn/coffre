@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Workers only, for now.** 0.16.0 runs on Cloudflare Workers alone, and
+  Node comes back in 0.16.1: `@coffre/server` exports no `./node`, so a
+  Node deployment that updates fails at its import of
+  `@coffre/server/node`. Stay on 0.14 until 0.16.1.
 - **Postgres only.** coffre no longer runs on SQLite. `@coffre/db` drops its
   SQLite schema, migrations and driver (`@libsql/client`), and a `file:`
   URL is refused wherever a database URL is taken (`createCoffre`,

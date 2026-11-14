@@ -3,6 +3,9 @@
 // own; only the app Worker's service binding reaches it.
 import { postgres, vault } from '@coffre/vault/cloudflare';
 
+// The signer's Durable Object, configured as the vault below is: vault/wrangler.jsonc binds it as SIGNER.
+export { CoffreSigner } from '@coffre/vault/cloudflare';
+
 type Env = {
   VAULT_HYPERDRIVE: Hyperdrive;
   VAULT_KEY_ID: string;
