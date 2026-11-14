@@ -67,9 +67,13 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
 export async function auditProven({ admin }: People): Promise<string> {
   type Page = Awaited<ReturnType<CoffreClient['audit']['list']>>;
   let page: Page | undefined;
-  await until('a head the vault signed', async () => {
+  // A batch the signer publishes between the vault reading its head and the
+  // app reading the log can put every entry listed past the head, honestly
+  // unproven; so wait for a page its head numbers an entry of.
+  await until('a head the vault signed that numbers a listed entry', async () => {
     page = await admin.api.audit.list({ detail: '1', limit: 200 });
-    return page.head !== null;
+    const { head } = page;
+    return head !== null && page.entries.some((entry) => entry.seq < head.size);
   }, 90);
   const { entries, head } = page!;
   expect(head !== null && entries.length > 0, 'the audit page has no head or no entries', page);
@@ -85,15 +89,21 @@ export async function auditProven({ admin }: People): Promise<string> {
 
 /**
  * The audit page is sent with what its proofs found, rendered by the
- * server, never a verdict to come; and a log that proves is not shown as
- * one coffre could not check.
+ * server, never a verdict to come: each entry's row says its proof in
+ * `data-proof` (`proven`, `unproven` or `failed`), which the page's port
+ * writes; at least one row proves, none fails, and a log that proves is
+ * not shown as one coffre could not check.
  */
 export async function auditPageProofs({ admin }: People): Promise<string> {
   const page = await admin.browser.fetch('/audit');
   const html = await page.text();
   expect(page.status === 200 && !html.includes('Verifying'), 'the audit page was not sent with its proofs', { status: page.status });
+  const proofs = [...html.matchAll(/data-proof="([a-z]+)"/g)].map((match) => match[1]);
+  const proven = proofs.filter((proof) => proof === 'proven').length;
+  expect(proven > 0, "the audit page's rows say no proof, or none proven", { status: page.status, proofs: proofs.slice(0, 10) });
+  expect(!proofs.includes('failed'), 'the audit page shows an entry whose proof failed', { proofs: proofs.slice(0, 10) });
   expect(!html.includes('could not check the log'), 'the audit page says coffre could not check the log', { status: page.status });
-  return 'the audit page sent with its proofs, rendered by the server';
+  return `the audit page sent with its proofs, rendered by the server: ${proven} of ${proofs.length} rows proven`;
 }
 
 /**

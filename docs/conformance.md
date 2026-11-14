@@ -177,8 +177,11 @@ of `GET /audit/verification` (full verification, the rewritten, forged and
 missing entries, the earlier checkpoint and the deleted tail) went with the
 route. In 0.16 the audit page proves each entry it lists against the head
 the vault signed: `audit proven` requires every entry the head numbers
-proven and only those past it not, and `audit page proofs` that the page is
-sent with them rendered, which waits for the page's port. `coffre verify
+proven and only those past it not (it waits for a head that numbers an
+entry on the page: a batch signed between the head's read and the log's can
+leave the whole page past it), and `audit page proofs` that the page is sent
+with them rendered, each row's proof in `data-proof`, at least one proven
+and none failed, which waits for the page's port. `coffre verify
 --full` reads the log, and conformance does not hold either to a tampered
 log yet.
 
