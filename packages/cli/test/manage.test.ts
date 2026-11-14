@@ -194,6 +194,10 @@ test('admit makes a member, and for a service names the next steps: grant, then 
     assert.deepEqual(service.calls, [{ method: 'PUT', path: '/members/token:deploy', body: {} }]);
     assert.equal(service.written.out, 'service:deploy is a member already\n');
   }
+  // Its one role, `member`, is sent as none: a person who sets service accounts up and does not run the instance names no role.
+  const member = fixture(() => ({ member: 'token:deploy', instanceRole: 'member', scope: EVERYWHERE, created: true }));
+  await manage.admit(member.connect, ['deploy', '--service', '--role', 'member'], member.io);
+  assert.deepEqual(member.calls, [{ method: 'PUT', path: '/members/token:deploy', body: {} }]);
 });
 
 test('revoke takes a grant away, and says when there was none', async () => {

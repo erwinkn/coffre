@@ -164,7 +164,7 @@ const anotherOwner = (seen: readonly Row<typeof principals>[], principal: string
  * one and stays one. A service account holds no role but `member`.
  *
  * A person who does not run the instance, on a session, sets up a service
- * account, as `member`, where they could give it something
+ * account, asking no role, where they could give it something
  * (`setsUpServices`): every place there is, and the instance's setting,
  * are read with the change. One removed only its remover brings back, or
  * whoever runs the instance, as 0.14.7 allowed.
@@ -199,9 +199,9 @@ function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Par
       const caller = managing(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       if (!runs(caller)) {
-        // Only a person, on a session (a service account's credentials always have a scope), sets up a service account, as
-        // `member`: what they set up would outlive a credential with a scope.
-        if (!service || (role !== null && role !== 'member') || scope !== null || !onSession(caller)) return { refused: 'no_access' };
+        // Only a person, on a session (a service account's credentials always have a scope), sets up a service account, and
+        // names no role, `member` included, as 0.14.7 refused one: what they set up would outlive a credential with a scope.
+        if (!service || role !== null || scope !== null || !onSession(caller)) return { refused: 'no_access' };
         const places: Place[] = [
           ...seen.everyProject.map((row) => ({ projectId: row.id })),
           ...seen.everyEnvironment.map((row) => ({ projectId: row.projectId, environmentId: row.id, environmentSlug: row.slug })),

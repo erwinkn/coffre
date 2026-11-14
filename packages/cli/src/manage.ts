@@ -632,16 +632,18 @@ export async function admit(connect: () => CoffreClient, args: string[], io: Io 
   const scoped = projects !== undefined || environments !== undefined;
   if (scoped && role === undefined) throw new UsageError('a scope goes with a role: add --role');
   if (service && role !== undefined && role !== 'member') throw new UsageError('a service account holds project grants only: drop --role, then coffre grant');
+  // A service account's one role, `member`, is sent as none: whoever sets one up and does not run the instance names no role.
+  const asked = service ? undefined : role;
   const who = memberOf(name, service);
   const api = connect();
   const result = await api.members.add(
     who,
-    access !== undefined ? { access } : role === undefined ? {} : { role, ...(scoped ? { scope: { ...(projects && { projects }), ...(environments && { environments }) } } : {}) },
+    access !== undefined ? { access } : asked === undefined ? {} : { role: asked, ...(scoped ? { scope: { ...(projects && { projects }), ...(environments && { environments }) } } : {}) },
   );
   const as = result.instanceRole === 'member' ? '' : ` as ${roleInWords(result)}`;
   const shown = shownMember(result.member);
   const granted = access === undefined ? '' : `, holding ${Object.entries(access).map(([place, held]) => `${held} on ${place}`).join(', ')}`;
-  io.out.write(result.created ? `admitted ${shown}${as}${granted}\n` : `${shown} is a member${as}${role === undefined && access === undefined ? ' already' : ' now'}${granted}\n`);
+  io.out.write(result.created ? `admitted ${shown}${as}${granted}\n` : `${shown} is a member${as}${asked === undefined && access === undefined ? ' already' : ' now'}${granted}\n`);
   if (service && result.created && access === undefined) {
     const bare = serviceName(who);
     io.out.write(
