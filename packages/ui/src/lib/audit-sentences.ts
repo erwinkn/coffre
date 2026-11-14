@@ -58,6 +58,8 @@ type Template = {
   what: (facts: Facts) => Part[];
   /** Said only of what happened: ", now version 5". */
   then?: (facts: Facts) => Part[];
+  /** Asked, and nothing changed: said after it, ", unchanged", as `unchanged: true` in its detail is. */
+  unchanged?: (facts: Facts) => boolean;
 };
 
 // --- the pieces of a sentence ---------------------------------------------------
@@ -138,10 +140,13 @@ function secrets(facts: Facts): Part[] {
 /** "OLD in market/prod", "OLD and STALE in market/prod", or "5 keys in market/prod". */
 function keysIn(entry: AuditEntry, keys: string[]): Part[] {
   const [here, mine] = asPersonal(entry);
-  if (keys.length === 0) return [...place(here), ...mine];
+  if (keys.length === 0) return [...environmentOf(here), ...mine];
   const named = keys.length > 3 ? plural(keys.length, 'key') : keys.length === 1 ? keys[0]! : `${keys.slice(0, -1).join(', ')} and ${keys.at(-1)!}`;
   return [named, ' in ', ...environmentOf(here), ...mine];
 }
+
+/** A folder renamed onto its own name: nothing moved. */
+const sameFolder = ({ entry }: Facts) => entry.metadata.folder === entry.metadata.to;
 
 /** " to the folder stripe", or " out of its folder". */
 function intoFolder(folder: unknown): Part[] {
@@ -242,11 +247,11 @@ const changesOf = ({ metadata }: AuditEntry) => (Array.isArray(metadata.changes)
 const accessSentence: Template = {
   did: ({ entry }) => {
     const [first] = changesOf(entry);
-    return first === undefined ? 'left' : first.role === null ? 'took' : 'gave';
+    return first === undefined ? 'set' : first.role === null ? 'took' : 'gave';
   },
   what: ({ entry }) => {
     const [first] = changesOf(entry);
-    if (first === undefined) return ['the access of ', ...subject(entry), ' on ', ...environmentOf(entry), ' as it was'];
+    if (first === undefined) return ['the access of ', ...subject(entry), ' on ', ...environmentOf(entry)];
     if (first.role !== null) return [...subject(entry), ` ${text(first.role) ?? 'a role'} on `, ...environmentOf(entry)];
     const role = text(first.was);
     return [...(role === null ? ['access to '] : [`${role} on `]), ...environmentOf(entry), ' from ', ...subject(entry)];
@@ -264,6 +269,7 @@ const accessSentence: Template = {
       ...(entry.metadata.admitted === 'member.add' ? [', added to coffre with it'] : entry.metadata.admitted === 'member.restore' ? [', brought back with it'] : []),
     ];
   },
+  unchanged: ({ entry }) => changesOf(entry).length === 0,
 };
 
 /** The changes after a grant's first: "on 2 other places" where each gave or took what the first did; else "2 other changes". */
@@ -314,12 +320,12 @@ const empty = ({ metadata }: AuditEntry) => Array.isArray(metadata.keys) && meta
 /** A write's sentence, and a loosening's: one key as what was done to it; a batch as what was done to every key, or as written. */
 const writeSentence: Template = {
   did: ({ entry, batch }) => {
-    if (empty(entry)) return 'changed nothing in';
+    if (empty(entry)) return 'marked keys in';
     const kinds = new Set(batch.map(written));
     if (batch.length === 1 || (kinds.size === 1 && !kinds.has('reference') && !kinds.has('own'))) return WRITTEN[written(entry)];
     return [...kinds].every((kind) => kind === 'add' || kind === 'change') ? 'wrote' : 'changed';
   },
-  what: (facts) => (empty(facts.entry) ? environmentOf(facts.entry) : [...secrets(facts), ...(facts.batch.length === 1 && written(facts.entry) === 'reference' ? [' a reference'] : [])]),
+  what: (facts) => (empty(facts.entry) ? keysIn(facts.entry, []) : [...secrets(facts), ...(facts.batch.length === 1 && written(facts.entry) === 'reference' ? [' a reference'] : [])]),
   then: ({ entry, batch }) => {
     if (empty(entry)) return [];
     const kind = written(entry);
@@ -331,6 +337,7 @@ const writeSentence: Template = {
     if (kind === 'mark') return [` ${text(entry.metadata.nature) ?? ''}, from ${text(entry.metadata.was) ?? ''}, its value kept`];
     return kind === 'add' || kind === 'change' || kind === 'own' ? [...((entry.version ?? 1) === 1 ? [] : [`, now version ${entry.version}`]), ...nature(entry)] : [];
   },
+  unchanged: ({ entry }) => empty(entry),
 };
 
 // --- one template per action ----------------------------------------------------
@@ -354,37 +361,40 @@ const TEMPLATES: Record<LogAction, Template> = {
       const forks = new Set(rest.filter((environment) => environment !== null && environment !== own)).size;
       return forks === 0 ? [] : [`, and in ${plural(forks, 'fork')}`];
     },
+    unchanged: ({ entry }) => text(entry.metadata.to) === text(entry.metadata.key),
   },
-  'secret.refile': { did: 'moved', what: ({ entry }) => keysIn(entry, list(entry.metadata.keys)), then: ({ entry }) => intoFolder(entry.metadata.to) },
+  'secret.refile': { did: 'moved', what: ({ entry }) => keysIn(entry, list(entry.metadata.keys)), then: ({ entry }) => intoFolder(entry.metadata.to), unchanged: sameFolder },
   // The source, by id alone in the entry, is no path the page can say.
   'reference.break': { did: 'broke', what: ({ entry }) => ['the reference ', ...place(entry)] },
   // What changed, by key: dismissed, brought back, both, or neither (asked as it was).
   'missing.dismiss': {
-    did: ({ entry }) => (list(entry.metadata.dismissed).length > 0 ? 'dismissed' : list(entry.metadata.restored).length > 0 ? 'restored' : 'left'),
+    did: ({ entry }) => (list(entry.metadata.dismissed).length > 0 ? 'dismissed' : list(entry.metadata.restored).length > 0 ? 'restored' : 'set which missing keys are dismissed in'),
     what: ({ entry }) => {
       const dismissed = list(entry.metadata.dismissed);
       const restored = list(entry.metadata.restored);
-      if (dismissed.length === 0 && restored.length === 0) return ['the missing keys of ', ...keysIn(entry, [])];
+      if (dismissed.length === 0 && restored.length === 0) return keysIn(entry, []);
       return keysIn(entry, dismissed.length > 0 ? dismissed : restored);
     },
     then: ({ entry }) => {
       const dismissed = list(entry.metadata.dismissed);
       const restored = list(entry.metadata.restored);
-      if (dismissed.length === 0) return [restored.length === 0 ? ' as they were' : ' to the missing keys'];
+      if (dismissed.length === 0) return restored.length === 0 ? [] : [' to the missing keys'];
       return [' as not needed', ...(restored.length === 0 ? [] : [`, and restored ${restored.length > 3 ? plural(restored.length, 'key') : restored.join(', ')} to the missing keys`])];
     },
+    unchanged: ({ entry }) => list(entry.metadata.dismissed).length === 0 && list(entry.metadata.restored).length === 0,
   },
   'project.create': created('project'),
   'project.update': updated('project'),
   'project.archive': plainly('project', 'archived'),
   'project.restore': plainly('project', 'restored'),
   'project.delete': plainly('project', 'deleted'),
-  'project.move': { ...plainly('project', 'moved'), then: ({ entry }) => intoFolder(entry.metadata.to) },
+  'project.move': { ...plainly('project', 'moved'), then: ({ entry }) => intoFolder(entry.metadata.to), unchanged: ({ entry }) => entry.metadata.from === entry.metadata.to },
   // A folder renamed, or emptied: every project filed there.
   'folder.refile': {
     did: ({ entry }) => (text(entry.metadata.to) === null ? 'emptied' : 'renamed'),
     what: ({ entry }) => [text(entry.metadata.folder) === null ? 'a folder' : `the folder ${text(entry.metadata.folder)}`],
     then: ({ entry }) => [...(text(entry.metadata.to) === null ? [] : [` to ${text(entry.metadata.to)}`]), `, ${plural(list(entry.metadata.projects).length, 'project')}`],
+    unchanged: sameFolder,
   },
   'environment.create': created('environment'),
   'environment.update': updated('environment'),
@@ -749,19 +759,22 @@ export function perSecret<T extends AuditEntry>(entry: T): T[] {
 
 /** What a line says: one entry, or a batch that shares an operation. */
 export function describe(batch: AuditEntry[]): Sentence {
-  const entry = perSecret(leadOf(batch))[0]!;
-  const same = batch.filter((other) => other.action === entry.action).flatMap(perSecret);
+  const lead = perSecret(leadOf(batch))[0]!;
+  const same = batch.filter((other) => other.action === lead.action).flatMap(perSecret);
+  // A batch is what was done: its refusals are counted after it, never said or counted as done.
+  const allowed = same.filter((other) => other.decision !== 'deny');
   const denied = same.filter((other) => other.decision === 'deny');
-  const refused = denied.length === same.length;
-  if (refused) return { parts: refusal(entry), refused };
-  const facts: Facts = { entry, batch: same, count: new Set(same.map((other) => `${other.project}/${other.environment}/${other.key}`)).size };
+  const refused = allowed.length === 0;
+  if (refused) return { parts: refusal(lead), refused };
+  const entry = allowed[0]!;
+  const facts: Facts = { entry, batch: allowed, count: new Set(allowed.map((other) => `${other.project}/${other.environment}/${other.key}`)).size };
   const template = Object.hasOwn(TEMPLATES, entry.action) ? TEMPLATES[entry.action as LogAction] : undefined;
   if (template === undefined) return { parts: [entry.action, ' ', ...place(entry)], refused };
   const what = template.what(facts);
   const gap = what.length === 0 ? [] : [' '];
   const partly = denied.length === 0 ? [] : [`, ${denied.length} refused: ${reasonInWords(denied[0]!.reason)}`];
   // A change that changed nothing, and one made through an MCP client's approval, say so.
-  const unchanged = entry.metadata.unchanged === true ? [', unchanged'] : [];
+  const unchanged = entry.metadata.unchanged === true || template.unchanged?.(facts) === true ? [', unchanged'] : [];
   const approved = text(entry.metadata.via) === null ? [] : [', approved through MCP'];
   return { parts: [typeof template.did === 'string' ? template.did : template.did(facts), ...gap, ...what, ...(template.then?.(facts) ?? []), ...unchanged, ...approved, ...partly], refused };
 }

@@ -351,8 +351,15 @@ test('what an entry says follows what its detail recorded, not what was asked', 
   await keys({ key: 'A', folder: 'two' }, { key: 'B', value: 'b2' });
   await keys({ key: 'A', folder: 'three' }, { key: 'B', folder: 'three' });
   await ok('cy-cli', 'PATCH', '/secrets/market/dev/A', { key: 'Z' });
-  // A nature asked of a key that has it already writes no key, and says so.
+  // Asked, and nothing changed: a nature a key has already, here and in a personal config (named by the environment it is a config of), and renames and moves onto themselves.
   await ok('cy-cli', 'PATCH', '/secrets/market/dev', { Z: { sensitivity: 'secret' } });
+  await ok('cy-cli', 'PATCH', '/secrets/market/dev@me', { P: 'p1' });
+  await ok('cy-cli', 'PATCH', '/secrets/market/dev@me', { P: { sensitivity: 'secret' } });
+  await ok('cy-cli', 'PATCH', '/secrets/market/dev/Z', { key: 'Z' });
+  await ok('cy-cli', 'PATCH', '/folders/market/dev/three', { name: 'three' });
+  await ok('cy-cli', 'PATCH', '/projects/market', { folder: 'apps' });
+  await ok('cy-cli', 'PATCH', '/projects/market', { folder: 'apps' });
+  await ok('cy-cli', 'PATCH', '/folders/apps', { name: 'apps' });
   // A binding is said by its profile: a CI run's, or a platform's workloads.
   const bind = (profile: string, issuer: string, claims: Record<string, unknown>, policy: Record<string, unknown> | null) =>
     made(app.vault.change({ ...as('cy-cli'), op: 'token.bind', member: 'token:ci', binding: { profile, issuer, claims, keys: { uri: `${issuer}/jwks` }, policy, scope: null, label: profile, replaces: [] } }));
@@ -367,17 +374,24 @@ test('what an entry says follows what its detail recorded, not what was asked', 
     'access.grant: gave ed@acme.example viewer on market/prod',
     'access.grant: took viewer on market/dev from ed@acme.example',
     'access.grant: gave ed@acme.example viewer on market/dev, and 1 other change',
-    'access.grant: left the access of ed@acme.example on market/dev as it was',
+    'access.grant: set the access of ed@acme.example on market/dev, unchanged',
     'access.grant: gave ed@acme.example developer on market/dev, was viewer, and 1 other change',
     'access.revoke: took developer on market/dev from ed@acme.example, and 1 other change',
     'missing.dismiss: dismissed X in market/dev as not needed',
-    'missing.dismiss: left the missing keys of market/dev as they were',
+    'missing.dismiss: set which missing keys are dismissed in market/dev, unchanged',
     'missing.dismiss: dismissed Y in market/dev as not needed, and restored X to the missing keys',
     'missing.dismiss: dismissed Z in market/dev as not needed',
     'secret.write: changed market/dev: 2 secrets',
     'secret.write: moved market/dev: 2 secrets to the folder three',
     'secret.rename: renamed market/dev/A to Z',
-    'secret.write: changed nothing in market/dev',
+    'secret.write: marked keys in market/dev, unchanged',
+    'secret.write: added market/dev/P, in their personal config',
+    'secret.write: marked keys in market/dev, in their personal config, unchanged',
+    'secret.rename: renamed market/dev/Z to Z, unchanged',
+    'secret.refile: moved B and Z in market/dev to the folder three, unchanged',
+    'project.move: moved project market to the folder apps',
+    'project.move: moved project market to the folder apps, unchanged',
+    'folder.refile: renamed the folder apps to apps, 1 project, unchanged',
     'token.bind: trusted CI runs to sign in as service:ci, reaching viewer on 1 place',
     'token.bind: trusted kubernetes workloads to sign in as service:ci, reaching viewer on 1 place',
   ]);
@@ -506,6 +520,10 @@ test('a refused change says what kind of change was refused, where and why, and 
     'workload.renew: tried to renew a workload session: unauthenticated',
     'mcp.connect: tried to connect an MCP client: unknown client',
   ]);
+  // A batch that holds a refusal says and counts what was done, and the refusal after it.
+  const done = (await logged()).find((entry) => entry.action === 'secret.write' && entry.decision !== 'deny')!;
+  const denied = entries.find((entry) => entry.action === 'secret.write')!;
+  assert.equal(plain(describe([denied, done]).parts), `${plain(describe([done]).parts)}, 1 refused: no access`);
   // Every action a caller who stands can be refused: the others are never refused one, or logged.
   // A refused use is not logged (D236); every membership refused is logged as an addition; nobody who stands is refused their own sign-out.
   const never = ['secret.read', 'member.restore', 'member.role', 'sign_in', 'sign_out', 'device.start', 'token.exchange', 'oauth.register', 'mcp.token', 'mcp.ask', 'mcp.disconnect', 'upkeep.expire', 'vault.adopt'];
