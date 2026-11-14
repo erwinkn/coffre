@@ -3,6 +3,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
 
 import type { PlaceRow } from './places.ts';
+import { ENVIRONMENT, environmentOf, PROJECT, projectOf, SECRET, secretOf, type EnvironmentRow, type ProjectRow, type SecretRow } from './secrets.ts';
 import { SCOPE_ID, type TokenRow } from './tokens.ts';
 
 /**
@@ -276,7 +277,17 @@ export type ReportRow = Omit<MemberRow, 'grants' | 'roleHolds' | 'roleDefinition
   tokens: TokenRow[];
   /** The slug of each project and environment the two lists' scopes name, by id, those still there. */
   slugs: Record<string, string>;
+  /** The references they made that still stand, oldest first: each its holder's and source's rows, and both their places'. */
+  made: MadeRow[];
+  /** How many of each list there are in all: each list stops at `LISTED`. */
+  totals: { issued: number; tokens: number; made: number };
 };
+
+/** The most rows each of a report's lists holds: a member may hold any number of tokens, or have made any number of references. */
+export const LISTED = 200;
+
+/** A reference someone made, as their report reads it: its rows, for its view (`referenceView`). */
+export type MadeRow = { holder: SecretRow; source: SecretRow | undefined; projects: ProjectRow[]; environments: EnvironmentRow[] };
 
 /** A service token someone issued, its row as stored: `service` is its account, `token:ci`; `scope` its JSON, by place id. */
 export type IssuedRow = { id: string; service: string; label: string | null; hint: string | null; scope: string | null; expiresAt: string; lastUsedAt: string | null };
@@ -287,11 +298,23 @@ type ListedCredential = { id: string; kind: string; principal: string; label: st
 /**
  * What one member holds and has seen: their row, what still lets them in,
  * the live keys they read or wrote (`seenBy`), their personal configs, the
- * service tokens they issued and a person's own tokens. One statement,
- * driven from their own rows; null for no such member. The tokens they
- * issued are found by account: `credentials_issued_by_idx` leads with the
- * account, so one probe for each service account still there, however many
- * credentials the instance keeps.
+ * service tokens they issued, a person's own tokens, and the references
+ * they made that still stand. One statement, driven from their own rows;
+ * null for no such member. The tokens they issued are found by account:
+ * `credentials_issued_by_idx` leads with the account, so one probe for each
+ * service account still there, however many credentials the instance
+ * keeps. Each of the three lists stops at `LISTED`, and says how many there
+ * are in all: what it counts it reads, to the last row, but builds no more
+ * than `LISTED` of.
+ *
+ * A reference stands while its row points at its source (`source_set_by`
+ * says who pointed it): one broken, or written over, points nowhere and
+ * lends nothing, and the log keeps it. One held in a key archived, or in an
+ * environment or project archived or deleted, lends nothing either, until
+ * it comes back, and is not listed. They are found among every reference
+ * the instance holds, by `secrets_source_idx`, with no index of their own:
+ * 3.6 ms for 20 of 20,000 at 200,000 keys, and 7.5 ms for 1,000 of
+ * 21,000, 200 of them built (drive: `W419-plans/member-references-explain.txt`).
  */
 export async function reportOf(db: Queryable, principal: string, now: Date): Promise<ReportRow | null> {
   const at = now.toISOString();
@@ -304,6 +327,8 @@ export async function reportOf(db: Queryable, principal: string, now: Date): Pro
     issued: ListedCredential[] | null;
     own: ListedCredential[] | null;
     slugs: Record<string, string> | null;
+    made: Record<string, unknown>[] | null;
+    issued_total: number | string | null; own_total: number | string | null; made_total: number | string | null;
   }>(
     db,
     sql`
@@ -322,7 +347,7 @@ export async function reportOf(db: Queryable, principal: string, now: Date): Pro
           JOIN projects pp ON pp.id = pe.project_id
           JOIN environments parent ON parent.id = pe.parent_id
           WHERE pe.owner = m.id AND strpos(pe.slug, '~') = 0 AND strpos(pp.slug, '~') = 0) AS personal,
-        issued.list AS issued, mine.list AS own, named.slugs
+        issued.list AS issued, issued.total AS issued_total, mine.list AS own, mine.total AS own_total, named.slugs, made.list AS made, made.total AS made_total
       FROM principals m
       LEFT JOIN LATERAL (
         SELECT count(*) FILTER (WHERE c.kind IN ('browser', 'cli')) AS sessions,
@@ -338,19 +363,48 @@ export async function reportOf(db: Queryable, principal: string, now: Date): Pro
       -- The service tokens they made that still work: of an account still there, at its generation, whatever became of them.
       LEFT JOIN LATERAL (
         SELECT json_agg(json_build_object('id', c.id, 'kind', c.kind, 'principal', c.principal, 'label', c.label, 'hint', c.token_hint, 'scope', c.scope,
-            'created_at', c.created_at, 'created_by', c.created_by, 'expires_at', c.expires_at, 'last_used_at', c.last_used_at, 'last_used_ip', c.last_used_ip) ORDER BY c.principal, c.created_at, c.id) AS list, array_agg(c.scope) AS scopes
-        FROM principals sa
-        JOIN credentials c ON c.principal = sa.id AND c.created_by = m.id AND c.generation = sa.generation
-        WHERE sa.id LIKE 'token:%' AND sa.status = 'active' AND c.kind = 'service' AND c.revoked_at IS NULL AND c.expires_at > ${at}::timestamptz
+            'created_at', c.created_at, 'created_by', c.created_by, 'expires_at', c.expires_at, 'last_used_at', c.last_used_at, 'last_used_ip', c.last_used_ip) ORDER BY c.principal, c.created_at, c.id) AS list,
+          array_agg(c.scope) AS scopes, max(c.total) AS total
+        FROM (
+          SELECT c.*, count(*) OVER () AS total
+          FROM principals sa
+          JOIN credentials c ON c.principal = sa.id AND c.created_by = m.id AND c.generation = sa.generation
+          WHERE sa.id LIKE 'token:%' AND sa.status = 'active' AND c.kind = 'service' AND c.revoked_at IS NULL AND c.expires_at > ${at}::timestamptz
+          ORDER BY c.principal, c.created_at, c.id LIMIT ${LISTED}
+        ) c
       ) issued ON true
       -- A person's own: what removing them revokes, as the count above has it.
       LEFT JOIN LATERAL (
         SELECT json_agg(json_build_object('id', c.id, 'kind', c.kind, 'principal', c.principal, 'label', c.label, 'hint', c.token_hint, 'scope', c.scope,
-            'created_at', c.created_at, 'created_by', c.created_by, 'expires_at', c.expires_at, 'last_used_at', c.last_used_at, 'last_used_ip', c.last_used_ip) ORDER BY c.created_at DESC, c.id) AS list, array_agg(c.scope) AS scopes
-        FROM credentials c
-        WHERE m.id LIKE 'user:%' AND c.principal = m.id AND c.generation = m.generation AND c.kind IN ('personal', 'handle')
-          AND c.revoked_at IS NULL AND c.expires_at > ${at}::timestamptz
+            'created_at', c.created_at, 'created_by', c.created_by, 'expires_at', c.expires_at, 'last_used_at', c.last_used_at, 'last_used_ip', c.last_used_ip) ORDER BY c.created_at DESC, c.id) AS list,
+          array_agg(c.scope) AS scopes, max(c.total) AS total
+        FROM (
+          SELECT c.*, count(*) OVER () AS total
+          FROM credentials c
+          WHERE m.id LIKE 'user:%' AND c.principal = m.id AND c.generation = m.generation AND c.kind IN ('personal', 'handle')
+            AND c.revoked_at IS NULL AND c.expires_at > ${at}::timestamptz
+          ORDER BY c.created_at DESC, c.id LIMIT ${LISTED}
+        ) c
       ) mine ON true
+      -- The references they made that still stand, the oldest first, each built only once picked: its rows and its places'.
+      LEFT JOIN LATERAL (
+        SELECT json_agg(json_build_object(
+            'holder', (SELECT ${SECRET} FROM secrets t WHERE t.id = r.id),
+            'source', (SELECT ${SECRET} FROM secrets t WHERE t.id = r.source_id),
+            'projects', (SELECT json_agg(${PROJECT}) FROM projects t WHERE t.id IN (r.project_id, (SELECT s.project_id FROM secrets s WHERE s.id = r.source_id))),
+            'environments', (SELECT json_agg(${ENVIRONMENT}) FROM environments t WHERE t.id IN (r.environment_id, (SELECT s.environment_id FROM secrets s WHERE s.id = r.source_id)))
+          ) ORDER BY r.source_set_at, r.id) AS list, max(r.total) AS total
+        FROM (
+          SELECT h.id, h.project_id, h.environment_id, h.source_id, h.source_set_at, count(*) OVER () AS total
+          -- Theirs first, from every reference (secrets_source_idx), then their places: OFFSET 0 keeps Postgres from
+          -- walking every key of every place instead, by the places' unique index, 80 times as long at 200,000 keys.
+          FROM (SELECT * FROM secrets h WHERE h.source_set_by = m.id AND h.source_id IS NOT NULL AND h.archived_at IS NULL OFFSET 0) h
+          JOIN environments he ON he.id = h.environment_id
+          JOIN projects hp ON hp.id = h.project_id
+          WHERE he.archived_at IS NULL AND hp.archived_at IS NULL AND strpos(he.slug, '~') = 0 AND strpos(hp.slug, '~') = 0
+          ORDER BY h.source_set_at, h.id LIMIT ${LISTED}
+        ) r
+      ) made ON true
       LEFT JOIN LATERAL (
         SELECT json_object_agg(place.id, place.slug) AS slugs FROM (
           SELECT DISTINCT (regexp_matches(scope, ${SCOPE_ID}, 'g'))[1]::uuid AS id FROM unnest(issued.scopes || mine.scopes) scope WHERE scope IS NOT NULL
@@ -396,5 +450,12 @@ export async function reportOf(db: Queryable, principal: string, now: Date): Pro
       lastUsedIp: token.last_used_ip,
     })),
     slugs: row.slugs ?? {},
+    made: (row.made ?? []).map((item) => ({
+      holder: secretOf(item.holder as Record<string, unknown>),
+      source: item.source === null ? undefined : secretOf(item.source as Record<string, unknown>),
+      projects: ((item.projects ?? []) as Record<string, unknown>[]).map(projectOf),
+      environments: ((item.environments ?? []) as Record<string, unknown>[]).map(environmentOf),
+    })),
+    totals: { issued: Number(row.issued_total ?? 0), tokens: Number(row.own_total ?? 0), made: Number(row.made_total ?? 0) },
   };
 }

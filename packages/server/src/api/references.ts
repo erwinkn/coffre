@@ -138,11 +138,6 @@ export async function currentReferences(db: Queryable, secretIds: readonly strin
   return new Map(resolved.map((reference) => [reference.row.holder.secretId, reference]));
 }
 
-/** The references `member` made, `user:ada@acme.example`, each resolved. */
-export async function referencesBy(db: Queryable, member: string): Promise<Resolved[]> {
-  return resolveReferences(db, await referenceRows(db, { createdBy: member }));
-}
-
 /** Live references whose source is one of these secrets: what reads them from elsewhere. */
 export async function readersOf(db: Queryable, secretIds: readonly string[]): Promise<Resolved[]> {
   if (secretIds.length === 0) return [];

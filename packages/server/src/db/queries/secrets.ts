@@ -27,6 +27,9 @@ export type SecretRow = {
   archived: boolean;
   folder: string | null;
   sourceId: string | null;
+  /** Who pointed it at its source, and when, while it is a reference. */
+  sourceSetBy: string | null;
+  sourceSetAt: string | null;
   currentVersion: number | null;
   nature: Nature | null;
   recipe: string | null;
@@ -61,15 +64,16 @@ type Wire = Record<string, unknown>;
 
 const iso = (value: unknown): string => new Date(value as string).toISOString();
 
-const PROJECT = sql`jsonb_build_object('id', t.id, 'slug', t.slug, 'archived', t.archived_at IS NOT NULL)`;
-const ENVIRONMENT = sql`jsonb_build_object('id', t.id, 'projectId', t.project_id, 'slug', t.slug, 'parentId', t.parent_id, 'owner', t.owner, 'archived', t.archived_at IS NOT NULL, 'protected', t.protected)`;
-const SECRET = sql`jsonb_build_object('id', t.id, 'projectId', t.project_id, 'environmentId', t.environment_id, 'key', t.key, 'archived', t.archived_at IS NOT NULL, 'folder', t.folder,
-  'sourceId', t.source_id, 'currentVersion', t.current_version, 'nature', t.nature, 'recipe', t.recipe, 'pairId', t.pair_id, 'pairHalf', t.pair_half,
+/** A project's, an environment's and a secret's rows as JSON, of the row aliased `t`, and the rows they read back as. */
+export const PROJECT = sql`jsonb_build_object('id', t.id, 'slug', t.slug, 'archived', t.archived_at IS NOT NULL)`;
+export const ENVIRONMENT = sql`jsonb_build_object('id', t.id, 'projectId', t.project_id, 'slug', t.slug, 'parentId', t.parent_id, 'owner', t.owner, 'archived', t.archived_at IS NOT NULL, 'protected', t.protected)`;
+export const SECRET = sql`jsonb_build_object('id', t.id, 'projectId', t.project_id, 'environmentId', t.environment_id, 'key', t.key, 'archived', t.archived_at IS NOT NULL, 'folder', t.folder,
+  'sourceId', t.source_id, 'sourceSetBy', t.source_set_by, 'sourceSetAt', t.source_set_at, 'currentVersion', t.current_version, 'nature', t.nature, 'recipe', t.recipe, 'pairId', t.pair_id, 'pairHalf', t.pair_half,
   'current', (SELECT jsonb_build_object('id', v.id, 'createdAt', v.created_at, 'createdBy', v.created_by, 'plaintext', CASE WHEN t.nature = 'plain' THEN v.plaintext END)
     FROM secret_versions v WHERE v.secret_id = t.id AND v.version = t.current_version))`;
 
-const projectOf = (row: Wire): ProjectRow => ({ id: row.id as string, slug: row.slug as string, archived: row.archived as boolean, deleted: (row.slug as string).includes('~') });
-const environmentOf = (row: Wire): EnvironmentRow => ({
+export const projectOf = (row: Wire): ProjectRow => ({ id: row.id as string, slug: row.slug as string, archived: row.archived as boolean, deleted: (row.slug as string).includes('~') });
+export const environmentOf = (row: Wire): EnvironmentRow => ({
   id: row.id as string,
   projectId: row.projectId as string,
   slug: row.slug as string,
@@ -79,7 +83,7 @@ const environmentOf = (row: Wire): EnvironmentRow => ({
   deleted: (row.slug as string).includes('~'),
   protected: row.protected as boolean,
 });
-const secretOf = (row: Wire): SecretRow => {
+export const secretOf = (row: Wire): SecretRow => {
   const current = row.current as Wire | null;
   return {
     id: row.id as string,
@@ -89,6 +93,8 @@ const secretOf = (row: Wire): SecretRow => {
     archived: row.archived as boolean,
     folder: row.folder as string | null,
     sourceId: row.sourceId as string | null,
+    sourceSetBy: row.sourceSetBy as string | null,
+    sourceSetAt: row.sourceSetAt == null ? null : iso(row.sourceSetAt),
     currentVersion: row.currentVersion as number | null,
     nature: row.nature as Nature | null,
     recipe: row.recipe as string | null,

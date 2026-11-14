@@ -7,7 +7,7 @@ import { useChange, useChangeStatus } from '../lib/use-change';
 import { Key, X } from './icons';
 import { Card } from './page';
 import { RowFailure, RowPending, rowClass } from './row-state';
-import { ConfirmButton, EmptyState, ErrorLine, Timestamp } from './ui';
+import { ConfirmButton, EmptyState, ErrorLine, Timestamp, ofAll } from './ui';
 
 /**
  * Personal tokens, which act as their person within what each reaches:
@@ -21,6 +21,7 @@ export function PersonalTokensCard<TData>({
   description,
   empty,
   emptyActions,
+  total = null,
 }: {
   tokens: TokenRow[] | { error: string };
   change: Change<TData, TokenRow, TokenRow, unknown>;
@@ -29,11 +30,13 @@ export function PersonalTokensCard<TData>({
   empty?: ReactNode;
   /** Beneath it, what to do about it. */
   emptyActions?: ReactNode;
+  /** How many there are when the list stops short of all of them (a member's report lists 200 at most). */
+  total?: number | null;
 }) {
   const revoke = useChange(change);
   const { status, dismiss } = useChangeStatus(change.list.queryKey);
   return (
-    <Card labelledBy="personal-tokens" title="Personal tokens" description={description}>
+    <Card labelledBy="personal-tokens" title={`Personal tokens${'error' in tokens ? '' : ofAll(tokens.length, total)}`} description={description}>
       {'error' in tokens ? (
         <div className="card-body">
           <ErrorLine error={tokens.error} />

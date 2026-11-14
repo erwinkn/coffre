@@ -1054,7 +1054,8 @@ async function list(args: string[]): Promise<void> {
       if (reference !== null) {
         // A reference reads its source's current version; one that cannot read says why.
         const state = reference.state === 'live' ? `v${reference.version}` : reference.state.replace('_', ' ');
-        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${written}${plain}${due}${archived}${standing}\n`);
+        const maker = reference.createdBy === null ? '-' : shownMember(reference.createdBy).replace(/^user:/, '');
+        process.stdout.write(`${indent}${entry.key}\t→ ${reference.source}\t${state}\t${maker}\t${written}${plain}${due}${archived}${standing}\n`);
         continue;
       }
       process.stdout.write(`${indent}${entry.key}\tv${entry.version ?? '-'}\t${entry.updatedBy ?? '-'}\t${written}${made}${plain}${due}${archived}${standing}\n`);
@@ -1694,7 +1695,7 @@ async function whoHasAccess(args: string[]): Promise<void> {
   if (into.length === 0) return;
   process.stdout.write(`\nAlso readable through references\n`);
   for (const reference of into) {
-    process.stdout.write(`  ${reference.source} through ${reference.holder}\n`);
+    process.stdout.write(`  ${reference.source} through ${reference.holder}${reference.createdBy === null ? '' : `, made by ${shownMember(reference.createdBy).replace(/^user:/, '')}`}\n`);
     for (const reader of reference.readers!) process.stdout.write(`    ${shownMember(reader).replace(/^user:/, '')}\n`);
   }
 }
@@ -1917,14 +1918,17 @@ async function offboard(args: string[]): Promise<void> {
     }
   }
 
+  // Each list stops at 200 on 0.16, which counts them all (`totals`; an instance before says nothing): the rest, said.
+  const rest = (listed: number, total: number | null | undefined) => (total == null || total <= listed ? '' : `  …and ${total - listed} more\n`);
   // An instance before 0.7 lists none; 0.16's lists them as null, below.
   const personalTokens = report.personalTokens ?? [];
   if (personalTokens.length > 0) {
-    process.stdout.write(`\nPersonal tokens, which act as them and removing them revokes (${personalTokens.length})\n`);
+    process.stdout.write(`\nPersonal tokens, which act as them and removing them revokes (${report.totals?.personalTokens ?? personalTokens.length})\n`);
     for (const token of personalTokens) {
       const used = token.lastUsedAt === null ? 'never used' : `last used ${token.lastUsedAt.slice(0, 10)}`;
       process.stdout.write(`  "${token.label ?? ''}" ${token.hint}, reaching ${reaches(token.scope)}, ${used}, expires ${token.expiresAt.slice(0, 16).replace('T', ' ')} UTC\n`);
     }
+    process.stdout.write(rest(personalTokens.length, report.totals?.personalTokens));
   }
 
   if (report.issuedTokens !== null && report.issuedTokens.length > 0) {
@@ -1935,6 +1939,7 @@ async function offboard(args: string[]): Promise<void> {
         `  service:${serviceName(token.service)}${label} ${token.hint}, reaching ${reaches(token.scope)}, expires ${token.expiresAt.slice(0, 10)}\n`,
       );
     }
+    process.stdout.write(rest(report.issuedTokens.length, report.totals?.issuedTokens));
   }
 
   if (report.references !== null && report.references.length > 0) {
@@ -1943,6 +1948,7 @@ async function offboard(args: string[]): Promise<void> {
       const state = reference.state === 'live' ? '' : `  (${reference.state.replace('_', ' ')})`;
       process.stdout.write(`  ${reference.holder} → ${reference.source}, ${reference.createdAt.slice(0, 10)}${state}\n`);
     }
+    process.stdout.write(rest(report.references.length, report.totals?.references));
   }
 
   // Null is "not listed", never none: say so, as a bearer token they issued may still work.

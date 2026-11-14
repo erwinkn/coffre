@@ -72,7 +72,7 @@ async function setUp() {
   // A second version of prod's API_KEY: five versions in all in gone's two environments, and Ada's own.
   await rewrite(world, apiKey, 'prod-key-2');
   // LINK becomes a reference to gone/prod/API_KEY: its value before stays history, and it holds none of its own now.
-  await amend(world, 'secrets', eq(secrets.id, link.id), { sourceId: apiKey.id, currentVersion: null, nature: null });
+  await amend(world, 'secrets', eq(secrets.id, link.id), { sourceId: apiKey.id, sourceSetAt: new Date(world.now()), sourceSetBy: ada, currentVersion: null, nature: null });
   world.woken.length = 0;
 }
 beforeEach(setUp);

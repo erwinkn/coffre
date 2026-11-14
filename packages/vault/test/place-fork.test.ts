@@ -167,6 +167,9 @@ test('a fork as references makes each key a reference to where its value is held
   assert.deepEqual(Object.fromEntries(Object.entries(held).map(([key, row]) => [key, [row.source, row.current, row.folder]])), {
     ACCOUNT: [ids.ACCOUNT, null, null], DATABASE_URL: [ids.DATABASE_URL, null, 'database'], LINK: [ids.SOURCE, null, 'links'], SIGNING: [ids.SIGN, null, null], STRIPE_KEY: [ids.STRIPE_KEY, null, null],
   });
+  // Each made by its forker, then: the member report lists them under her.
+  assert.deepEqual(await rowsOf(world.owner, sql`SELECT DISTINCT s.source_set_by AS by, s.source_set_at = to_timestamp(${world.now()} / 1000.0) AS now FROM secrets s
+    JOIN environments e ON e.id = s.environment_id WHERE e.project_id = ${market.id} AND e.slug = 'qa'`), [{ by: ada, now: true }]);
   assert.deepEqual(await given(reveal('ada-cli', 'qa', ['DATABASE_URL', 'LINK'])), { DATABASE_URL: 'postgres://prod', LINK: 'from billing' });
   // Written over in prod, it reads the new value.
   await rewrite(world, { id: ids.DATABASE_URL! }, 'postgres://moved');

@@ -12,7 +12,7 @@ import { changed } from '../change.ts';
 import { ApiError, badRequest, refusal } from '../errors.ts';
 import { formatPath, parsePath, type Path } from '../paths.ts';
 import { route } from '../route.ts';
-import type { ReferenceView } from './keys.ts';
+import { referenceView, type ReferenceView } from './keys.ts';
 import { tokenScope, tokenView, type TokenView } from './tokens.ts';
 
 /**
@@ -137,16 +137,10 @@ export type IssuedServiceToken = {
 };
 
 /**
- * A reference someone made, live ones first, as their report lists it: who made it and when are what the list is by.
- * The report lists ended references too, so a state may also be `replaced`, which no live reference has.
+ * A reference someone made that still stands, live ones first, as their report lists it. One ended lends nothing,
+ * and is not listed: 0.14's `replaced`, and who ended one, are the log's (`reference.break`).
  */
-export type MadeReference = Omit<ReferenceView, 'state' | 'createdBy' | 'createdAt' | 'endedBy' | 'endedAt'> & {
-  state: ReferenceView['state'] | 'replaced';
-  createdBy: string;
-  createdAt: string;
-  endedBy: string | null;
-  endedAt: string | null;
-};
+export type MadeReference = Omit<ReferenceView, 'createdBy' | 'createdAt'> & { createdBy: string; createdAt: string };
 
 /** A person's connected MCP app, as 0.14.7 listed it in their report. */
 export type ConnectedApp = {
@@ -191,6 +185,11 @@ export type OffboardingReport = {
   apps: ConnectedApp[] | null;
   personalTokens: TokenView[] | null;
   references: MadeReference[] | null;
+  /**
+   * How many there are in all of each of the three lists above, each of which stops at 200: more than it holds
+   * when it is full. Null where the list is.
+   */
+  totals: { issuedTokens: number | null; personalTokens: number | null; references: number | null };
   /** Their personal configs, by project, the environment each is a config of, and the slug that deletes it. */
   personal: { project: string; of: string; slug: string }[];
 };
@@ -431,10 +430,10 @@ export const memberRoutes = {
    * first written, or wrote that value themselves (`seenBy`). One call to
    * the vault and one statement, from their own rows, which also lists the
    * service tokens they issued that still work and a person's own tokens,
-   * as their accounts' token lists show them. Their connected apps are not
-   * read here yet, and the references they made need who made a reference,
-   * which 0.16 keeps nowhere: each null, "not listed", which the client's
-   * type allows.
+   * as their accounts' token lists show them, and the references they made
+   * that still stand, each list 200 at most (`totals` counts them all).
+   * Their connected apps are not read here yet: null, "not listed", which
+   * the client's type allows.
    */
   ...route('GET /members/:member', {
     run: async (ctx, { params }): Promise<OffboardingReport> => {
@@ -471,7 +470,12 @@ export const memberRoutes = {
         apps: null,
         // A service account's tokens are on its own page.
         personalTokens: typeOf(principal) === 'user' ? row.tokens.map((token) => tokenView(token, row.slugs)) : [],
-        references: null,
+        references: row.made.map((made): MadeReference => {
+          const places = { projects: new Map(made.projects.map((place) => [place.id, place])), environments: new Map(made.environments.map((place) => [place.id, place])) };
+          // Theirs, as the statement picked it, and dated: a row that points somewhere says when (`secrets_source_set_check`).
+          return { ...referenceView(places, made.holder, made.source), createdBy: principal, createdAt: made.holder.sourceSetAt! };
+        }).sort((a, b) => Number(b.state === 'live') - Number(a.state === 'live')),
+        totals: { issuedTokens: row.totals.issued, personalTokens: typeOf(principal) === 'user' ? row.totals.tokens : 0, references: row.totals.made },
         personal: row.personal,
       };
     },

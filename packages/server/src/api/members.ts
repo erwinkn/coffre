@@ -23,20 +23,16 @@ import {
   type Scope,
 } from '@coffre/core/access';
 import { isTombstone } from '@coffre/core/schemas';
-import type { Queryable } from '@coffre/db';
-import { credentials, identities, mcpConnections } from '@coffre/db/schema';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { actorParts } from '../db/audit.ts';
 import {
   revokePriorMembership,
-  liveConnections,
   memberAccess as readMemberAccess,
   memberActivity,
   members as loadMembers,
   missingMembers,
   places,
-  updateAuth,
   type MemberRow,
   type PlaceRow,
   type StoredGrant,
@@ -45,11 +41,8 @@ import { setAccess, type AccessChange, type AccessValue } from './access.ts';
 import { canAnywhere, placeOf } from './caller.ts';
 import { type ApiContext, audited, denied, Refusal, requireInstance, through, vaultCredential, withRefusals } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
-import type { ConnectedApp } from '../db/queries/mcp.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
-import { referencesBy, type ReferenceView } from './references.ts';
-import { tokenRows, type TokenRow } from './signin.ts';
-import { accountOf, managedAccount, notManager, readScope, scopeByPath, serviceSettingFor, setsUp, type ScopeByPath } from './services.ts';
+import { accountOf, serviceSettingFor, setsUp } from './services.ts';
 
 export type MemberGrant = {
   /** Its member and place, `user:ada@acme.example/market/prod`: one grant per member per place. */
@@ -112,74 +105,6 @@ export type ExposedSecret = {
   /** The last time they read or wrote it. */
   at: string;
 };
-
-export type IssuedToken = {
-  id: string;
-  service: string;
-  label: string | null;
-  hint: string;
-  expiresAt: string;
-  lastUsedAt: string | null;
-  /** What it reaches, of what its account holds (`ServiceTokenRow`). */
-  scope: ScopeByPath | null;
-};
-
-/**
- * What one person or service can still reach, and what they have seen.
- *
- * Built from the audit log, which records the version of every value read or
- * written. A value they saw that is still current is one they could still use
- * somewhere, so it is listed to rotate; writing a new version takes it off.
- */
-export type OffboardingReport = {
-  principalType: 'user' | 'service';
-  principalId: string;
-  status: 'active' | 'removed' | 'tampered';
-  instanceRole: Member['instanceRole'];
-  scope: Scope;
-  /** As in `Member`. */
-  declared: boolean;
-  removedAt: string | null;
-  removedBy: string | null;
-  /** What still lets them in. All zero once removed. */
-  live: WaysIn;
-  /** Current values they read or wrote, by project, environment and key. */
-  exposed: ExposedSecret[];
-  /** Secrets they saw that have had a new version since. */
-  rotated: number;
-  /**
-   * Service tokens they issued that still work. This and the three lists
-   * below are null where the instance does not list them (0.16 does not
-   * yet), which is not the same as none: the UI then says nothing of them.
-   */
-  issuedTokens: IssuedToken[] | null;
-  /** A person's connected MCP apps, which removing them disconnects. */
-  apps: ConnectedApp[] | null;
-  /** A person's personal tokens, which removing them revokes; none for a service account, whose tokens are on its page. */
-  personalTokens: TokenRow[] | null;
-  /**
-   * References they made, live ones first, as the log's `reference.create`
-   * entries name their actor: each belongs to the environment that holds
-   * it, and their leaving ends none. Listed for review
-   * (docs/design/environments.md, "Offboarding").
-   */
-  references: ReferenceView[] | null;
-  /**
-   * Their personal configs (docs/design/forking.md), by project, the
-   * environment each is a config of, and the slug that deletes it: values
-   * nobody else reads, which leaving makes unreadable, listed for deletion.
-   */
-  personal: { project: string; of: string; slug: string }[];
-};
-
-/**
- * What lets a member in, counted: what removing them revokes. `tokens` are
- * a service account's bearer tokens, or a person's personal tokens.
- */
-export type WaysIn = { grants: number; sessions: number; tokens: number; identities: number; apps: number };
-
-/** Whether a credential is a session, a browser's or a command line's, rather than a token. */
-const isSession = (credential: { kind: string }) => credential.kind === 'browser' || credential.kind === 'cli';
 
 /** Someone no longer a member, and how many of their report's values are left. */
 export type RemovedMember = {
@@ -483,70 +408,6 @@ function exposure(
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
- * Who someone is to this instance and what to rotate if they leave, for
- * those who run the instance. Works for removed members too: that is when
- * it matters most.
- */
-export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<OffboardingReport> {
-  if (!runsInstance(ctx.caller)) throw forbidden('only admins and owners of the whole instance may see what someone has access to');
-  // Everyone, not just them: the service tokens they issued belong to others.
-  const [everyone, known, owners] = await Promise.all([directory(ctx, new Date()), places(ctx.db), declaredOwners(ctx)]);
-  const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
-  if (listed === undefined) throw notFound('no such member');
-  const { row, status } = listed;
-
-  const held = row?.credentials ?? [];
-  const issued = everyone
-    .filter((entry) => entry.status === 'active')
-    .flatMap((entry) => (entry.row?.credentials ?? []).map((credential) => ({ service: entry.member.id, ...credential })))
-    .filter((credential) => credential.kind === 'service' && credential.createdBy === member.id)
-    .sort((a, b) => compare(a.service, b.service) || a.createdAt.getTime() - b.createdAt.getTime());
-
-  const activity = await ctx.db.transaction((tx) => memberActivity(tx, [member.id]), SNAPSHOT);
-  const { exposed, rotated } = exposure([member], activity).get(formatMember(member))!;
-  const made = (await referencesBy(ctx.db, formatMember(member))).map((reference) => reference.view);
-  made.sort((a, b) => Number(b.state === 'live') - Number(a.state === 'live') || a.createdAt.localeCompare(b.createdAt));
-  // Only people connect apps. Removal disconnects them, but 0.4.0's left
-  // them to the generation alone: a removed member's are never listed.
-  const apps = member.type === 'user' && status !== 'removed' && ctx.mcp !== null ? await ctx.mcp.appsOf(formatMember(member)) : [];
-  return {
-    principalType: member.type,
-    principalId: member.id,
-    status,
-    instanceRole: instanceRole(listed),
-    scope: scopeView(scopeOf(listed), known),
-    declared: declared(owners, member),
-    // When and by whom, as the vault wrote it: the removal is its decision.
-    removedAt: status === 'removed' ? row!.statusChangedAt.toISOString() : null,
-    removedBy: status === 'removed' ? parseGrantee(row!.statusChangedBy).id : null,
-    live: {
-      grants: listed.grants.length,
-      sessions: held.filter(isSession).length,
-      tokens: held.filter((credential) => !isSession(credential)).length,
-      identities: row?.identities.length ?? 0,
-      apps: apps.length,
-    },
-    exposed,
-    rotated,
-    issuedTokens: issued.map((token) => ({
-      id: token.id,
-      service: token.service,
-      label: token.label,
-      hint: token.tokenHint,
-      expiresAt: token.expiresAt.toISOString(),
-      lastUsedAt: token.lastUsedAt?.toISOString() ?? null,
-      scope: scopeByPath(readScope(token.scope), known),
-    })),
-    apps,
-    personalTokens: member.type === 'user' ? tokenRows(held, known) : [],
-    references: made,
-    personal: known.flatMap((project) => project.environments
-      .filter((environment) => environment.owner === formatMember(member))
-      .map((environment) => ({ project: project.slug, of: environment.parentSlug ?? '?', slug: environment.slug }))),
-  };
-}
-
-/**
  * Who reads each of these environments, by a grant or their instance role,
  * as members: those a reference held there lets read its source. As the
  * policy has it: a person holds their roles' protected column in a
@@ -745,78 +606,4 @@ export function scopeIds(input: { projects?: FilterInput; environments?: FilterI
     projects: projects === 'all' ? 'all' : 'only' in projects ? { only: projects.only.map(id) } : { except: projects.except.map(id) },
     environments: input.environments ?? 'all',
   });
-}
-
-/**
- * Offboard a member: the vault revokes every grant and refuses them from
- * then on, whatever sessions they still hold; the app signs out every
- * session and revokes their tokens, sign-in accounts and connected apps.
- * Re-adding them later is a fresh start. Returns their report, which is
- * what to rotate, to those who run the instance; a service account's
- * manager removes it too (`managesService`), and reads no report: it names
- * what it read anywhere.
- */
-export async function removeMember(
-  ctx: ApiContext,
-  member: MemberRef,
-): Promise<{ revoked: WaysIn; report: OffboardingReport | null }> {
-  const principal = formatMember(member);
-  const fields = { principalType: member.type, principalId: member.id };
-  const revoked = await withRefusals(ctx, async () => {
-    if (member.type !== 'service' || runsInstance(ctx.caller)) {
-      requireInstance(ctx, 'member.remove', { metadata: fields }, 'remove members');
-    } else if (!(await managedAccount(ctx, ctx.caller, member.id)).managed) {
-      throw notManager(ctx, 'member.remove', fields, 'remove it');
-    }
-    // The vault logs the removal, and one `access.revoke` per grant it took, so each project's log shows it.
-    const result = await ctx.vault.remove({
-      actor: formatMember(ctx.caller.principal),
-      principal,
-      requestId: ctx.requestId,
-      operationId: randomUUID(),
-      credentialId: vaultCredential(ctx),
-      ...through(ctx.caller),
-    });
-    if (!result.ok) {
-      if (result.refusal.code === 'not_a_member' || result.refusal.code === 'removed') {
-        throw new Refusal(
-          notFound('no such member'),
-          denied(ctx, 'member.remove', 'unknown_principal', { metadata: fields }),
-        );
-      }
-      throw vaultRefused(result.refusal);
-    }
-    const { generation } = result;
-    // Following through on the vault's removal, made under its head: no fence (`audited`), the ways in end whatever came since.
-    return audited({ db: ctx.db, chainKey: ctx.chainKey }, async (tx) => {
-      const now = new Date();
-      const [held] = await loadMembers(tx, ctx.chainKey, { member }, now);
-      const liveCredentials = (held?.credentials ?? []).filter((row) => row.generation < generation);
-      const liveIdentities = (held?.identities ?? []).filter((row) => row.generation < generation);
-      // The generation already ends them; revoked, Connected apps and their report say so.
-      const liveApps =
-        member.type === 'user' ? (await liveConnections(tx, ctx.chainKey, principal, now)).filter((row) => row.generation < generation) : [];
-      const revokedBy = ctx.caller.principal.id;
-      const ids = (rows: { id: string }[]) => rows.map((row) => row.id);
-      if (liveCredentials.length > 0) {
-        await updateAuth(tx, ctx.chainKey, credentials, { id: ids(liveCredentials) }, { revokedAt: now, revokedBy });
-      }
-      if (liveIdentities.length > 0) {
-        await updateAuth(tx, ctx.chainKey, identities, { id: ids(liveIdentities) }, { revokedAt: now, revokedBy });
-      }
-      if (liveApps.length > 0) {
-        await updateAuth(tx, ctx.chainKey, mcpConnections, { id: ids(liveApps) }, { revokedAt: now, revokedBy });
-      }
-
-      return {
-        grants: result.revoked.length,
-        sessions: liveCredentials.filter(isSession).length,
-        tokens: liveCredentials.filter((row) => !isSession(row)).length,
-        identities: liveIdentities.length,
-        // As the report counts them: a code never redeemed was no app yet.
-        apps: liveApps.filter((row) => row.refreshHash !== null).length,
-      };
-    });
-  });
-  return { revoked, report: runsInstance(ctx.caller) ? await memberReport(ctx, member) : null };
 }

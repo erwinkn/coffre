@@ -9,22 +9,20 @@ import { useAction } from '../lib/use-action';
 import { secretKeyProblem } from '../lib/validation';
 import { ArrowRight } from './icons';
 import { Card } from './page';
-import { ConfirmDialog, ErrorLine, Modal, Notice } from './ui';
+import { ConfirmDialog, ErrorLine, Modal, Notice, Timestamp } from './ui';
 
 /**
  * References: a secret read live through another (docs/design/environments.md).
  * The vault makes and checks each one; these only show them.
  */
 
-/** Why a reference does not read, in a few words; null while it does. A member's report also names one whose holder has a value of its own again, `replaced`. */
-export function referenceProblem(state: ReferenceView['state'] | 'replaced'): string | null {
+/** Why a reference does not read, in a few words; null while it does. */
+export function referenceProblem(state: ReferenceView['state']): string | null {
   switch (state) {
     case 'live':
       return null;
     case 'broken':
       return 'Broken';
-    case 'replaced':
-      return 'No value';
     case 'source_archived':
       return 'Source archived';
     case 'source_deleted':
@@ -34,6 +32,17 @@ export function referenceProblem(state: ReferenceView['state'] | 'replaced'): st
     case 'source_empty':
       return 'Source has no value';
   }
+}
+
+/** Who made a reference and how long ago, after `lead`: nothing where its row says no one. */
+function MadeBy({ reference, lead }: { reference: { createdBy: string | null; createdAt: string | null }; lead: string }) {
+  if (reference.createdBy === null || reference.createdAt === null) return null;
+  return (
+    <>
+      {lead}
+      {reference.createdBy.replace(/^user:/, '')} <Timestamp iso={reference.createdAt} display="relative" />
+    </>
+  );
 }
 
 /** A secret's path as a link to it, when you can open it there. */
@@ -85,6 +94,7 @@ export function LentReferences({ references, onBreak }: { references: ListedRefe
         <li key={reference.id}>
           <span>
             Read through <SecretPath path={reference.holder} open={false} />
+            <MadeBy reference={reference} lead=", made by " />
             {reference.readers !== null && (
               <span className="cell-muted">
                 {' '}
@@ -222,7 +232,14 @@ export function ReferencesInto({ project }: { project: string }) {
               <tr key={reference.id}>
                 <td className="mono" data-label="Secret">{reference.source}</td>
                 <td data-label="Read through">
-                  <span className="mono">{reference.holder}</span>
+                  <span className="cell-stack">
+                    <span className="mono">{reference.holder}</span>
+                    {reference.createdBy !== null && (
+                      <small className="cell-muted">
+                        <MadeBy reference={reference} lead="Made by " />
+                      </small>
+                    )}
+                  </span>
                 </td>
                 <td data-label="Readers">
                   {reference.readers === null

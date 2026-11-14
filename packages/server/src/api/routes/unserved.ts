@@ -27,5 +27,6 @@ export const unservedRoutes = {
   ...unserved('GET /workloads/lookup', 'looking up a repository'),
   ...unserved('GET /workloads/repositories', "the GitHub App's repositories"),
   // What `coffre verify keys` checks an escrowed key against: the log's page is served (routes/audit.ts).
-  ...unserved('GET /audit/keys', "the keys' public material"),
+  // 0.14's material, its `key.check` entries and the app key's fingerprint, is gone: comes with the vault's `about` (Settings).
+  ...unserved('GET /audit/keys', "the keys' public material, which comes with `about` (Settings),"),
 };

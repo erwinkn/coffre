@@ -165,6 +165,10 @@ export const secrets = pgTable(
     // A reference: the secret whose value this one's is, read live through it
     // by whoever reads this one's environment (docs/design/environments.md).
     sourceId: uuid('source_id'),
+    // Who pointed it at its source, and when: set with `source_id`, cleared with it. Under the MAC: the member report
+    // lists what a member lent through references they made, which outlive their access to the source.
+    sourceSetAt: at('source_set_at'),
+    sourceSetBy: text('source_set_by'),
     // How its current value is kept: 'plain', 'secret' or 'sensitive'. Null
     // when it has no value of its own. Here, under the MAC, so that a change
     // reads it: its version's row says it too, as its encryption names it.
@@ -186,6 +190,7 @@ export const secrets = pgTable(
     check('secrets_key_check', sql`${table.key} ~ '^[A-Za-z_][A-Za-z0-9_]{0,127}$'`),
     check('secrets_versions_check', sql`${table.versions} >= 0 AND (${table.currentVersion} IS NULL OR (${table.currentVersion} = ${table.versions} AND ${table.versions} > 0))`),
     check('secrets_source_check', sql`${table.sourceId} IS NULL OR (${table.sourceId} <> ${table.id} AND ${table.currentVersion} IS NULL)`),
+    check('secrets_source_set_check', sql`(${table.sourceSetAt} IS NULL) = (${table.sourceId} IS NULL) AND (${table.sourceSetBy} IS NULL) = (${table.sourceId} IS NULL)`),
     check('secrets_nature_check', sql`(${table.nature} IS NULL) = (${table.currentVersion} IS NULL) AND (${table.nature} IS NULL OR ${table.nature} IN ('plain', 'secret', 'sensitive'))`),
     check('secrets_recipe_check', sql`(${table.recipe} IS NULL AND ${table.pairId} IS NULL) OR ${table.currentVersion} IS NOT NULL`),
     check('secrets_pair_check', sql`(${table.pairId} IS NULL) = (${table.pairHalf} IS NULL) AND (${table.pairHalf} IS NULL OR ${table.pairHalf} IN ('private', 'public'))`),

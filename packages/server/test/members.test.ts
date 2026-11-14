@@ -8,9 +8,10 @@ import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
 import { rowsOf } from '@coffre/db/dialect';
-import { sql } from 'drizzle-orm';
+import { secrets } from '@coffre/db/schema';
+import { eq, sql } from 'drizzle-orm';
 
-import { credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, user, write } from '@coffre/vault/testing';
+import { amend, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, user, write } from '@coffre/vault/testing';
 
 import { openApp } from './app-fixture.ts';
 
@@ -412,7 +413,7 @@ test("a member's report: the keys whose current value they read or wrote, a rest
   assert.deepEqual(rest, {
     principalType: 'user', principalId: 'ada@acme.example', status: 'active', instanceRole: 'member', scope: { projects: 'all', environments: 'all' }, declared: false,
     removedAt: null, removedBy: null, live: { grants: 2, sessions: 1, tokens: 0, identities: 0, apps: 0 }, rotated: 0,
-    issuedTokens: [], apps: null, personalTokens: [], references: null, personal: [{ project: 'market', of: 'prod', slug: 'prod-ada' }],
+    issuedTokens: [], apps: null, personalTokens: [], references: [], totals: { issuedTokens: 0, personalTokens: 0, references: 0 }, personal: [{ project: 'market', of: 'prod', slug: 'prod-ada' }],
   });
   // Al's scope, by slug. Cy's token is a token, an app connected through MCP an app; he has no personal config.
   assert.deepEqual((await report(al))[0].scope, { projects: { only: ['market'] }, environments: 'all' });
@@ -508,6 +509,60 @@ test("a member's report lists the service tokens they issued that still work, an
   await ok(call('cy-cli', 'DELETE', `/members/${ada}`));
   const [left] = await report(ada);
   assert.deepEqual([(left.issuedTokens as unknown[]).length, left.personalTokens], [2, []]);
+});
+
+test("a member's report lists the references they made that still stand, by their row, in its one statement", async () => {
+  await ok(call('dee-cli', 'PATCH', '/secrets/market/prod', { SRC: 'v', OTHER: 'w', GONE: 'g' }));
+  // Dee points six keys at market/prod: then breaks one, writes a value over another, archives a third's key, and Cy
+  // points a fourth elsewhere; GONE, a fifth's source, is archived. Cy makes one of his own.
+  await ok(call('dee-cli', 'PATCH', '/secrets/market/dev', { KEPT: { ref: 'market/prod/SRC' }, BROKEN: { ref: 'market/prod/SRC' }, OVER: { ref: 'market/prod/SRC' },
+    SHUT: { ref: 'market/prod/SRC' }, TAKEN: { ref: 'market/prod/SRC' }, DIM: { ref: 'market/prod/GONE' } }));
+  await ok(call('cy-cli', 'PATCH', '/secrets/billing/prod', { CYS: { ref: 'market/prod/SRC' } }));
+  await ok(call('dee-cli', 'DELETE', '/secrets/market/dev/BROKEN/reference'));
+  await ok(call('dee-cli', 'PATCH', '/secrets/market/dev', { OVER: 'own' }));
+  await amend(world, 'secrets', eq(secrets.key, 'SHUT'), { archivedAt: new Date() });
+  await ok(call('cy-cli', 'PATCH', '/secrets/market/dev', { TAKEN: { ref: 'market/prod/OTHER' } }));
+  await amend(world, 'secrets', eq(secrets.key, 'GONE'), { archivedAt: new Date() });
+  const made = await rowsOf<{ key: string; at: string }>(world.owner, sql`SELECT key, source_set_at AS at FROM secrets WHERE source_set_by = ${dee}`);
+  const at = (key: string) => new Date(made.find((row) => row.key === key)!.at).toISOString();
+
+  const [dees, calls, statements] = await report(dee);
+  assert.deepEqual([calls, statements], [['caller'], 1]);
+  type Made = { id: string; holder: string; source: string; state: string; version: number | null; createdBy: string; createdAt: string; endedBy: null; endedAt: null };
+  assert.deepEqual((dees.references as Made[]).map(({ id: _, ...reference }) => reference), [
+    { holder: 'market/dev/KEPT', source: 'market/prod/SRC', state: 'live', version: 1, createdBy: dee, createdAt: at('KEPT'), endedBy: null, endedAt: null },
+    { holder: 'market/dev/DIM', source: 'market/prod/GONE', state: 'source_archived', version: null, createdBy: dee, createdAt: at('DIM'), endedBy: null, endedAt: null },
+  ]);
+  assert.deepEqual(dees.totals, { issuedTokens: 0, personalTokens: 0, references: 2 });
+  const [cys] = await report(cy);
+  assert.deepEqual((cys.references as Made[]).map((reference) => [reference.holder, reference.source]), [['billing/prod/CYS', 'market/prod/SRC'], ['market/dev/TAKEN', 'market/prod/OTHER']]);
+  // The keys' own lists say who made each, and when.
+  const [, listed] = await call('cy-cli', 'GET', '/secrets/market/dev');
+  const views = Object.fromEntries((listed.keys as { key: string; reference: { createdBy: string | null } | null }[]).map((key) => [key.key, key.reference?.createdBy ?? null]));
+  assert.deepEqual([views.KEPT, views.TAKEN, views.BROKEN, views.OVER], [dee, cy, null, null]);
+
+  // Dee leaves: what she lent goes on lending, and her report still says so.
+  await ok(call('cy-cli', 'DELETE', `/members/${dee}`));
+  assert.deepEqual(((await report(dee))[0].references as Made[]).map((reference) => reference.holder), ['market/dev/KEPT', 'market/dev/DIM']);
+});
+
+test("a member's report lists 200 of each list at most, and counts them all", async () => {
+  const day = (n: number) => new Date(Date.UTC(2026, 0, 1, 0, n));
+  await ok(call('dee-cli', 'PATCH', '/secrets/market/prod', { SRC: 'v' }));
+  const [src] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM secrets WHERE key = 'SRC'`);
+  const dev = { id: ids.dev!, projectId: ids.market! };
+  await write(world,
+    ...rows('credentials', ...Array.from({ length: 201 }, (_, n) => credential(`ada-${n}`, ada, { kind: 'personal', createdAt: day(n) })),
+      ...Array.from({ length: 202 }, (_, n) => credential(`ci-${n}`, ci, { createdBy: ada, createdAt: day(n) }))),
+    ...rows('secrets', ...Array.from({ length: 203 }, (_, n) => secret(dev, `REF_${n}`, { sourceId: src!.id, sourceSetBy: ada, sourceSetAt: day(n) }))));
+  const [adas, calls, statements] = await report(ada);
+  assert.deepEqual([calls, statements], [['caller'], 1]);
+  assert.deepEqual([(adas.personalTokens as unknown[]).length, (adas.issuedTokens as unknown[]).length, (adas.references as unknown[]).length], [200, 200, 200]);
+  assert.deepEqual(adas.totals, { issuedTokens: 202, personalTokens: 201, references: 203 });
+  // Each the first 200 in its order: own tokens newest first, issued and references oldest first.
+  assert.equal((adas.personalTokens as { label: string }[])[0]!.label, 'ada-200');
+  assert.equal((adas.issuedTokens as { label: string }[]).at(-1)!.label, 'ci-199');
+  assert.equal((adas.references as { holder: string }[]).at(-1)!.holder, 'market/dev/REF_199');
 });
 
 test("a member's report is for whoever runs the instance: anyone else is refused before any statement", async () => {

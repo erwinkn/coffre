@@ -89,8 +89,8 @@ test('every sealed table has a row that reads back as the vault sealed it', asyn
     [dismissedKeys, { environmentId: environment, key: 'OLD_KEY', dismissedAt: at, dismissedBy: ada, restoredAt: null, restoredBy: null }],
     [environments, { id: parent, projectId: project, slug: 'prod', name: 'Production', createdAt: at, archivedAt: at, parentId: null, owner: null, protected: true, frozenCredentials: ['stripe', 'aws'] }],
     [environments, { id: environment, projectId: project, slug: 'ada', name: 'Ada’s', createdAt: at, archivedAt: null, parentId: parent, owner: ada, protected: false, frozenCredentials: [] }],
-    [secrets, { id: source, projectId: project, environmentId: parent, key: 'STRIPE_KEY', createdAt: at, updatedAt: at, versions: 3, currentVersion: 3, archivedAt: at, folder: 'Payments', sourceId: null, nature: 'sensitive', recipe: 'ecdsa:p-256', pairId: randomUUID(), pairHalf: 'private' }],
-    [secrets, { id: secret, projectId: project, environmentId: environment, key: 'STRIPE_KEY', createdAt: at, updatedAt: at, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: source, nature: null, recipe: null, pairId: null, pairHalf: null }],
+    [secrets, { id: source, projectId: project, environmentId: parent, key: 'STRIPE_KEY', createdAt: at, updatedAt: at, versions: 3, currentVersion: 3, archivedAt: at, folder: 'Payments', sourceId: null, sourceSetAt: null, sourceSetBy: null, nature: 'sensitive', recipe: 'ecdsa:p-256', pairId: randomUUID(), pairHalf: 'private' }],
+    [secrets, { id: secret, projectId: project, environmentId: environment, key: 'STRIPE_KEY', createdAt: at, updatedAt: at, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: source, sourceSetAt: at, sourceSetBy: ada, nature: null, recipe: null, pairId: null, pairHalf: null }],
     [principals, { ...member(ada, 'owner'), scope: '{"projects":"all","environments":{"only":["prod"]}}' }],
     [principals, { ...member(service), frozenAt: at }],
     [grants, { id: randomUUID(), principal: ada, generation: 0, projectId: project, environmentId: null, role: 'contributor', expiresAt: at, grantedAt: at, grantedBy: ada }],
@@ -649,7 +649,7 @@ test('a change that keeps losing answers busy', async () => {
 test('a value is the current version of a secret the same change writes, in an environment it read, or the change is a fault', async () => {
   const [place, id] = [randomUUID(), randomUUID()];
   const environment: Fresh<typeof environments> = { id: place, projectId: randomUUID(), slug: 'prod', name: 'prod', createdAt: at, archivedAt: null, parentId: null, owner: null, protected: false, frozenCredentials: [] };
-  const secret = (versions: number, currentVersion: number | null, nature: Fresh<typeof secrets>['nature'] = currentVersion === null ? null : 'secret'): Fresh<typeof secrets> => ({ id, projectId: environment.projectId, environmentId: place, key: 'A', createdAt: at, updatedAt: at, versions, currentVersion, archivedAt: null, folder: null, sourceId: null, nature, recipe: null, pairId: null, pairHalf: null });
+  const secret = (versions: number, currentVersion: number | null, nature: Fresh<typeof secrets>['nature'] = currentVersion === null ? null : 'secret'): Fresh<typeof secrets> => ({ id, projectId: environment.projectId, environmentId: place, key: 'A', createdAt: at, updatedAt: at, versions, currentVersion, archivedAt: null, folder: null, sourceId: null, sourceSetAt: null, sourceSetBy: null, nature, recipe: null, pairId: null, pairHalf: null });
   const version = (of: string, number: number, plaintext: string | null = null, sensitive = false) => ({ version: { id: randomUUID(), secretId: of, version: number, createdAt: at, firstWrittenAt: at, createdBy: ada, plaintext, sensitive }, text: Buffer.from('x') });
   const here = put(environments, environment);
   const tries: [string, Write[], ReturnType<typeof version>, RegExp][] = [
