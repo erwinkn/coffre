@@ -25,8 +25,11 @@ connection string at hand: the login that owns it, with `CREATEROLE` and
 `CREATEDB`, and not necessarily `SUPERUSER`. On a managed service, that is
 its administrative connection, such as PlanetScale's default role. Give the
 database's direct endpoint (normally port 5432), not a connection pool: the
-logins' connection strings are made from it. Then, from the deployment's
-directory:
+logins' connection strings are made from it. A pooler that stays between
+Hyperdrive and Postgres must keep prepared statements (PgBouncer 1.21 or
+later with `max_prepared_statements`): coffre prepares a use's read by name
+once per connection, and without them every use after a connection's first
+fails. Then, from the deployment's directory:
 
 ```sh
 pnpm exec coffre setup

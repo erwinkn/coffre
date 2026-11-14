@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { KekCancelledError, KekRefusedError, KekUnavailableError } from '@coffre/core/kek';
-import { isUnavailable } from '@coffre/db/dialect';
+import { isUnavailable, isUnreachable } from '@coffre/db/dialect';
 
 import { failureOf } from '../src/failure.ts';
 import { connectVault, serveVault } from '../src/node.ts';
@@ -59,6 +59,11 @@ test("the vault's database not answering crosses the socket as the outage it is,
   const lock = new Error('Failed query: select "principal" … params: fake', { cause: Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }) });
   assert.deepEqual(failureOf(lock), { status: 503, body: { error: lock.message, code: '55P03' } });
   assert.equal(failureOf(new Error('Connection terminated unexpectedly')).body.code, '08006');
+  // A pool with no connection to give is the database busy, and crosses as such: unavailable, and no outage.
+  const full = new Error('Failed query: select 1', { cause: Object.assign(new Error('Timed out while waiting for an open slot in the pool.'), { code: '58000' }) });
+  assert.deepEqual(failureOf(full), { status: 503, body: { error: full.message, code: '53000' } });
+  assert.equal(failureOf(new Error('Failed to acquire a connection from the pool.')).body.code, '53000');
+  assert.deepEqual([isUnavailable({ code: '53000' }), isUnreachable({ code: '53000' })], [true, false]);
   // A bug keeps its code, which the app reads, rather than its words.
   assert.deepEqual(failureOf(Object.assign(new Error('invalid input syntax for type uuid: "connection timeout"'), { code: '22P02' })), {
     status: 500,
