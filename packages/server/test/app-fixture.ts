@@ -12,6 +12,7 @@ import type { PageContext } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime } from '../src/runtime.ts';
 import { requestScope } from '../src/scope.ts';
+import type { WorkloadTransport } from '../src/workloads/transport.ts';
 
 export const PUBLIC_URL = 'https://secrets.acme.example';
 /** The session's cookie, as an HTTPS deployment names it. */
@@ -37,9 +38,12 @@ export type TestApp = {
   close(): Promise<void>;
 };
 
-/** `database`: another than the suite's, by name, for the app's own connection. `auth`: another than coffre's own sign-in. */
-export async function openApp({ database, auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }) }: { database?: string; auth?: Auth } = {}): Promise<TestApp> {
-  const { world, vault } = await openConfiguredVault({ kek: { id: 'app-test', key: Buffer.alloc(32, 9).toString('base64') }, owners: ['root@acme.example'] });
+/**
+ * `database`: another than the suite's, by name, for the app's own connection. `auth`: another than coffre's own sign-in.
+ * `transport`: what the app asks issuers through, in place of the network. `workloads`: the vault's, which takes none unless given.
+ */
+export async function openApp({ database, auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }), transport, workloads }: { database?: string; auth?: Auth; transport?: WorkloadTransport; workloads?: { noReads?: boolean; useOnly?: boolean } } = {}): Promise<TestApp> {
+  const { world, vault } = await openConfiguredVault({ kek: { id: 'app-test', key: Buffer.alloc(32, 9).toString('base64') }, owners: ['root@acme.example'], ...(workloads === undefined ? {} : { workloads }) });
   const url = new URL(APP_URL);
   if (database !== undefined) url.pathname = `/${database}`;
   const app = await openDatabase(url.href);
@@ -76,7 +80,7 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
     auth,
     auditChainKey: Buffer.alloc(32, 3).toString('base64'),
   });
-  const scope = requestScope(createRuntime(config, counted, recorded), () => '192.0.2.7');
+  const scope = requestScope(createRuntime(config, counted, recorded, transport), () => '192.0.2.7');
   return {
     world,
     vault,

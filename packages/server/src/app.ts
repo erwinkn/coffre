@@ -4,6 +4,7 @@ import { isUnreachable } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
 import { ApiError } from './api/errors.ts';
+import { exchangeToken } from './exchange.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
@@ -33,6 +34,8 @@ const PATHS: Record<string, { method: 'GET' | 'POST'; handler: Handler; browserF
   '/api/auth/device/token': { method: 'POST', handler: pollDevice },
   '/api/auth/logout': { method: 'POST', handler: logout },
   '/auth/signout': { method: 'POST', handler: signOut, browserForm: true },
+  // A CI run's exchange (exchange.ts): its platform's ID token, for a five-minute token of its service.
+  '/api/auth/oidc': { method: 'POST', handler: exchangeToken },
 };
 
 /**

@@ -17,15 +17,11 @@ const unserved = <const Key extends string>(key: Key, what: string) =>
 export const unservedRoutes = {
   // Every freeze standing, for the service accounts' pages: freezing and lifting one are served (routes/freezes.ts).
   ...unserved('GET /freezes', 'the freezes standing'),
-  // A member's tokens and trust bindings.
+  // A member's tokens, and a binding's enrollments.
   ...unserved('GET /members/:member/tokens', "a member's tokens"),
   ...unserved('POST /members/:member/tokens', 'issuing a token'),
   ...unserved('DELETE /members/:member/tokens/:id', 'revoking a token'),
   ...unserved('POST /members/:member/tokens/:id/approve', 'approving a token'),
-  ...unserved('GET /members/:member/bindings', "a service account's trust bindings"),
-  ...unserved('POST /members/:member/bindings', 'making a trust binding'),
-  ...unserved('POST /members/:member/bindings/keys', "changing a binding's keys"),
-  ...unserved('DELETE /members/:member/bindings/:id', 'removing a trust binding'),
   ...unserved('GET /members/:member/bindings/:id/enrollments', "a binding's enrollments"),
   ...unserved('POST /members/:member/bindings/:id/enrollments', 'enrolling a workload'),
   ...unserved('POST /members/:member/bindings/:id/enrollments/:enrollment/promote', 'promoting an enrollment'),
