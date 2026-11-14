@@ -95,7 +95,8 @@ async function cost<T>(run: () => Promise<T>): Promise<[T, string[], number]> {
 test("a reveal answers the values the vault opened, and the vault's entry names the request", async () => {
   const [status, body] = await reveal('ada-cli', 'market/prod/DATABASE_URL');
   assert.equal(status, 200, JSON.stringify(body));
-  assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', values: { DATABASE_URL: 'postgres://märkt' }, versions: { DATABASE_URL: 1 }, sensitive: [], useOnly: [], version: null });
+  assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', values: { DATABASE_URL: 'postgres://märkt' }, versions: { DATABASE_URL: 1 }, secrets: body.secrets, sensitive: [], useOnly: [], version: null });
+  assert.match(String((body.secrets as Record<string, unknown>).DATABASE_URL), /^[0-9a-f-]{36}$/);
   assert.match(String(body.operationId), /^[0-9a-f-]{36}$/);
   // The vault's entry names the request by the id the app answered with.
   const [entry] = await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id DESC LIMIT 1`);
@@ -106,25 +107,35 @@ test("a reveal answers the values the vault opened, and the vault's entry names 
   assert.ok(ran!.body.includes('"purpose":"run"'), ran!.body);
 });
 
-test("a reveal says the version each value opened, as the listing numbers its row: a reference's is its source's", async () => {
+test("a reveal says the version each value opened, as the listing numbers and names its row: a reference's is its source's", async () => {
   const write = async (patch: Record<string, unknown>) => (await answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify(patch) }))))[0];
   assert.equal(await write({ LINK: { ref: 'market/prod/DATABASE_URL' } }), 200);
   assert.equal(await write({ DATABASE_URL: 'postgres://v2' }), 200);
   world.memory.reads.clear();
   const [, listed] = await answered(app.request('/api/secrets/market/prod', as('ada-cli')));
-  const rows = listed.keys as { key: string; version: number | null; reference: { version: number | null } | null }[];
+  const rows = listed.keys as { key: string; version: number | null; secret: string | null; reference: { version: number | null; sourceId: string } | null }[];
   const numbered = Object.fromEntries(rows.map((row) => [row.key, row.reference === null ? row.version : row.reference.version]));
   assert.deepEqual([numbered.DATABASE_URL, numbered.LINK], [2, 2]);
+  // Named by the secret its value is held in: a reference by its source.
+  const named = Object.fromEntries(rows.map((row) => [row.key, row.secret]));
+  assert.equal(named.LINK, named.DATABASE_URL);
+  assert.equal(named.LINK, rows.find((row) => row.key === 'LINK')!.reference!.sourceId);
   // One key, and the reference: its source's number, as the page's row shows it.
   const [[status, one], calls, statements] = await cost(() => reveal('ada-cli', 'market/prod/LINK'));
   assert.equal(status, 200, JSON.stringify(one));
-  assert.deepEqual([one.values, one.versions], [{ LINK: 'postgres://v2' }, { LINK: 2 }]);
+  assert.deepEqual([one.values, one.versions, one.secrets], [{ LINK: 'postgres://v2' }, { LINK: 2 }, { LINK: named.DATABASE_URL }]);
   // Said from the vault's one answer: no other call, and no statement of the app's.
   assert.deepEqual([calls, statements], [['use'], 0]);
   // A whole environment: one number for each value it hands, and none for what it leaves out.
   const [, whole] = await reveal('ada-cli', 'market/prod');
   assert.deepEqual(whole.versions, { DATABASE_URL: 2, FLAG: numbered.FLAG, LINK: 2 });
+  assert.deepEqual(whole.secrets, { DATABASE_URL: named.DATABASE_URL, FLAG: named.FLAG, LINK: named.DATABASE_URL });
   assert.deepEqual(Object.keys(whole.versions as object).sort(), Object.keys(whole.values as object).sort());
+  // A fork's inherited key is named by its parent's secret, which its reveal opens.
+  const secretOf = async (path: string, key: string) => ((await answered(app.request(`/api/secrets/${path}`, as('cy-cli'))))[1].keys as { key: string; secret: string | null }[]).find((row) => row.key === key)!.secret;
+  const held = await secretOf('market/staging', 'S_KEY');
+  assert.equal(await secretOf('market/fork', 'S_KEY'), held);
+  assert.deepEqual((await reveal('cy-cli', 'market/fork/S_KEY'))[1].secrets, { S_KEY: held });
 });
 
 test('every answer carries coffre\'s security headers, a refusal\'s too', async () => {

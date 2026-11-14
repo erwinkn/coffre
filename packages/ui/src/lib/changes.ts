@@ -564,8 +564,9 @@ export function saveSecrets(
           reference: null,
           archived: false,
           version: inherited ? null : (entry?.version ?? 0) + 1,
-          // Known once the list is read back: until then, nothing regenerates it.
+          // Known once the list is read back: until then, nothing regenerates it, and no value read is shown.
           versionId: null,
+          secret: null,
           updatedAt: now,
           updatedBy: author,
           generated: generations.get(key) ?? null,
@@ -681,6 +682,7 @@ export function regenerateSecret(
           reference: null,
           version: inherited ? null : (entry.version ?? 0) + 1,
           versionId: null,
+          secret: null,
           updatedAt: now,
           updatedBy: author,
           generated: vars.generated,

@@ -1334,8 +1334,8 @@ function SecretRow({
   const canRead = entry.readable;
   // What a reveal shows: its own version, or, as a reference, its source's.
   const readVersion = reference === null ? entry.version : reference.version;
-  // And where that version is held: a reset, an override or a new reference changes it under the same number.
-  const readFrom = `${inherited ? parent!.from : '.'}:${reference?.source ?? ''}`;
+  // And the secret it is held in: a reset, an override or a new reference changes it, maybe under the same number.
+  const readFrom = entry.secret;
   const holderPath = `${project}/${environment}/${entry.key}`;
   // A plain value is no secret: listed as it is, shown inline and copied with no read.
   const rowPlain = entry.value !== null;
@@ -1391,9 +1391,9 @@ function SecretRow({
   }
 
   async function fetchValue(): Promise<Read> {
-    if (entry.value !== null) return { value: entry.value, version: readVersion };
-    const { values, versions } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
-    return { value: values[entry.key], version: versions[entry.key] };
+    if (entry.value !== null) return { value: entry.value, version: readVersion, from: readFrom };
+    const { values, versions, secrets } = await coffre.secrets.reveal(`${project}/${environment}/${entry.key}`);
+    return { value: values[entry.key], version: versions[entry.key], from: secrets[entry.key] };
   }
 
   function toggleReveal() {

@@ -11,7 +11,7 @@ import {
   valueToEdit,
 } from '../src/lib/row-reads.ts';
 
-const value: Reveal = { value: 'hunter2', version: 1, at: 0 };
+const value: Reveal = { value: 'hunter2', version: 1, from: 'own', at: 0 };
 
 function run(...actions: RowReadsAction[]): RowReads {
   return actions.reduce(rowReads, noReads);
@@ -19,7 +19,7 @@ function run(...actions: RowReadsAction[]): RowReads {
 
 /** What the row passes the eye button: the reveal, while it is the current version. */
 function shownOf(state: RowReads): Reveal | null {
-  return revealIsCurrent(state.reveal, 1) ? state.reveal : null;
+  return revealIsCurrent(state.reveal, 1, 'own') ? state.reveal : null;
 }
 
 test('Copy finishing before Reveal leaves the value shown and Hide enabled', () => {

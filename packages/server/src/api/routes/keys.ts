@@ -107,6 +107,13 @@ type ListedKey = {
   version: number | null;
   /** The id of the version it resolves to, its own or, in a fork, the one it inherits. */
   versionId: string | null;
+  /**
+   * The id of the secret its value is held in: its own, a live reference's
+   * source's, or, in a fork, the parent's it inherits. A reveal names the
+   * same (`secrets`), so a page keeps a value only under the secret it came
+   * from, whatever the number.
+   */
+  secret: string | null;
   /** When the value it reads was written: its current version's, or a live reference's source's. */
   updatedAt: string | null;
   /** Who wrote its own current version; null for a reference. */
@@ -338,6 +345,7 @@ export const keyRoutes = {
           archived: row.archived,
           version: row.currentVersion,
           versionId: row.current?.id ?? null,
+          secret: row.sourceId === null ? row.id : (liveSource(row)?.id ?? null),
           updatedAt: writtenAt(row),
           updatedBy: row.current?.createdBy ?? null,
           generated: made.get(row.id) ?? null,
@@ -370,7 +378,7 @@ export const keyRoutes = {
         const shown = !isRemoved && told(from);
         const listed = {
           ...view(row),
-          ...(shown ? {} : { reference: null, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null }),
+          ...(shown ? {} : { reference: null, version: null, versionId: null, secret: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null }),
           // A removed key resolves to nothing here, and has nothing to regenerate.
           ...(isRemoved ? { generated: null, value: null, sensitivity: null } : {}),
         };
@@ -387,7 +395,7 @@ export const keyRoutes = {
         const from = cut.get(key);
         if (from === undefined || own.has(key)) continue;
         keys.push({
-          key, reference: null, folder: null, archived: false, version: null, versionId: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null, readable: false,
+          key, reference: null, folder: null, archived: false, version: null, versionId: null, secret: null, updatedAt: null, updatedBy: null, generated: null, value: null, sensitivity: null, readable: false,
           parent: { from: from.slug, state: 'removed', changed: false, reset: reset.has(key), held: false },
         });
       }
