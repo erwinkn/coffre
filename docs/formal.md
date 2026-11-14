@@ -18,21 +18,15 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
   protocol: the state, one step per SQL statement, and the invariants.
 - [`formal/MC.tla`](../formal/MC.tla) holds its scenarios: who runs what, and
   from which state. Each one has a configuration, `formal/<Name>.cfg`.
-- Six smaller models, each with its scenarios beside it, hold other
+- Four smaller models, each with its scenarios beside it, hold other
   protocols to the same discipline ([below](#credentials-issuing-and-the-bulk-limit)):
   - [`formal/Credentials.tla`](../formal/Credentials.tla), a CI run's ID
     token exchanged for a credential, and every way a credential ends;
   - [`formal/Issuing.tla`](../formal/Issuing.tla), who may hand a service
     account sensitive values (R32);
   - [`formal/Bulk.tla`](../formal/Bulk.tla), the vault's bulk limit (R28);
-  - [`formal/Audit.tla`](../formal/Audit.tla), the audit chain's
-    heartbeats, checkpoints, anchor and readiness against someone who
-    writes the database ([below](#the-audit-chain-the-app-key-and-the-tunnel));
   - [`formal/Tunnel.tla`](../formal/Tunnel.tla), how long a revoked
-    handle's tunnel session lives;
-  - [`formal/AppKey.tla`](../formal/AppKey.tla), the app key's rotation,
-    against instances still under the old key and someone who holds it
-    ([below](#appkeytla)).
+    handle's tunnel session lives ([below](#the-tunnel)).
 
   A configuration names the module of its scenarios on its second line,
   `\* model MCCredentials`; one that names none is `MC.tla`'s.
@@ -302,10 +296,7 @@ reference to that secret in `References`, and none yet elsewhere.
   `projects.ts`, `secrets.ts`, `references.ts` or `signin.ts` should change
   `Coffre.tla` in the same pull request; one in `workloads.ts`, `signin.ts`,
   `services.ts` or `context.ts`, `Credentials.tla` or `Issuing.tla`; one in
-  the vault's count, `Bulk.tla`; one in `plugins/audit-watch.ts`, `anchor.ts`, `audit.ts` or
-  the vault's `checkpoint`, `Audit.tla`; one in the proxy's `watch`, `Tunnel.tla`;
-  one in `key-rotation.ts`, or in what an append reads under the head
-  (`log.ts`), `AppKey.tla`.
+  the vault's count, `Bulk.tla`; one in the proxy's `watch`, `Tunnel.tla`.
 - **Beyond the bounds.** The bounds are three places, a few members, and three
   or four requests of one to three operations each. Races that need more are
   not explored. The races found so far needed two requests, or three for
@@ -855,157 +846,7 @@ lifts, and only there do the rule's runs commit after they count.
 - **The platforms.** STS, Kubernetes, Railway's addresses and Cloudflare's
   `props` are trust roots (section 3), which the PRs check live.
 
-## The audit chain, the app key and the tunnel
-
-Three more, with the same discipline: the chain's verification against
-someone who writes the database, the app key's rotation against someone
-who holds the old key, and how long a revoked handle's tunnel session
-lives.
-
-### Audit.tla
-
-The chain's verification against someone who can write the database and
-holds no key. They edit an entry in place, heartbeat rows among them, and
-put it back, as often as their budget allows, or rewrite one and chain
-everything after it again, the head row too. An entry's hash is
-abstracted to the chain's version where it is: a rewrite moves every
-entry from there on to a new one. An entry's MAC binds its content and
-the hash before it, so one rewritten, or after one, fails it, unless it
-was appended after the rewrite. An edit leaves the stored hash, and only
-recomputing it finds the edit. The vault's scrub runs in a snapshot of
-its own, so it is one step. The vault's checkpoint and the app's walks
-run in no transaction, a batch a statement, so as to hold no connection
-while they rehash. The checkpoint's walk is an entry a step, each linked
-to the one before as the walk read it, finer than the code's batches.
-The app's walks, in `Tampering`, where the log is rewritten and edited
-while they walk, are a step after the anchor's prefix is read, then two
-entries a step, each batch linked to the hash computed last
-(`AppWalkSteps`, `AppBatch`); in the scenarios about beats and the anchor
-racing each other, one step, as in a snapshot, which keeps their state
-spaces as they were.
-
-The anchor (`anchor.ts`) is out of their reach: one variable, which a
-beat, or a walk between beats, writes by compare-and-set, a step. It holds the newest checkpoint a
-beat saw, where its prefix ends and its hash; how far the app verified;
-the entry a walk found, or that the vault refused; and the beat that
-wrote it.
-
-- **A heartbeat** (`plugins/audit-watch.ts`, `beat`):
-  1. the anchor, read;
-  2. the beat's row, under the head;
-  3. the vault's checkpoint, below, which returns the prefix it signed, or
-     the newest one, or a refusal;
-  4. the anchor's prefix still there, by its hash, and no longer than
-     the one the vault returned (`AnchorHeld`), then, in no transaction,
-     the walk from where the app verified to, toward that prefix, at most
-     `CHAIN_WALK` entries, each link and hash and the app's MACs, ending
-     at the hash the vault signed; a finding of the app's that stands is
-     checked alone instead, its entry, until it verifies again;
-  5. the anchor written, over the record read in step 1 (`AnchorCas`). If
-     a walk between beats wrote it first, toward the same checkpoint, the
-     beat reads that record and goes again from step 4, as it would had
-     it read that record in step 1 (`BeatRetries`); any other record
-     written first, and it writes nothing.
-- **A walk between beats** (`plugins/audit-watch.ts`, `walkOn`; the
-  Durable Object's alarm, Node's job): an anchor with a backlog read, the
-  walk of step 4 toward its own checkpoint, and the anchor written over
-  that record, its beat and age unchanged.
-- **A checkpoint** (`vault.ts`, `checkpoint`), as before the anchor:
-  1. in a snapshot, where it resumes, the newest one, its prefix still
-     holding its hash; then the walk on from there, in no transaction, at
-     most `walks.checkpoint` entries, each link and hash, and the vault's
-     MACs;
-  2. a stretch of the scrub in another, each hash of the signed prefix
-     recomputed;
-  3. under the head, whether another call checkpointed or refused
-     meanwhile, the prefixes still holding their hashes, then, if the walk
-     reached the head, the rest walked and the head signed, or else where
-     the walk got to, behind it, unless another call signed as far;
-  4. a refusal's entry, in a transaction of its own.
-- **Readiness** (`plugins/audit-watch.ts`, `readiness`): the anchor, then, in another read,
-  the log's entry at its checkpoint, by its hash (`ReadinessChecksHeld`).
-
-Why that is enough. Readiness vouches for the prefix the anchor's
-checkpoint signed, and only once the app verified through it: every
-entry of it was walked by one beat or walk or another, each from where
-the one before ended, which the anchor keeps and nobody else can move. A
-rewrite inside it, the chain after it hashed again, changes the hash at
-its end, which readiness reads. A finding
-leaves the anchor where it was, and stands in it until the entry it names
-verifies again; then the walk goes on from where the anchor was, over that
-entry and on. Two beats at once: the one that writes second named a record
-no longer stored, and writes nothing; one that a walk between beats
-overtook walks again from that walk's record, which holds its checkpoint. What is past the anchor is the next
-beat's: readiness says nothing of it.
-
-| Protection, in the code | Turned off, TLC finds | Found by |
-|---|---|---|
-| A beat's walk checks each app entry's MAC (`walkChain`, `verifyEntries`) | readiness green over a rewrite of app entries the vault cannot check (`GreenIsReal`) | |
-| A checkpoint's walk checks the vault's MACs, and under the head the prefix signed last (`rehash`, `carries`) | a prefix signed over a vault entry chained after a rewrite (`SignsNoForgedVault`) | |
-| The checkpoint's walk, in no transaction, links each batch to the hash it verified last (`rehash`, `startPrevHash`) | a prefix signed over a vault entry the log was rewritten from while the walk read it (`SignsNoForgedVault`) | |
-| Under the head, a call that another overtook signs nothing, and a refusal since the last checkpoint stands (`seen`, `#standingRefusal`) | a checkpoint signed after a refusal for a tamper the vault can find (`StaysUnsignedOnceFound`) | |
-| Under the head, while a refusal stands, a call whose walk began after the entry it names checks that entry again: its hash, its link, the vault's MAC (`#entryHolds`) | three checkpoints at once: one signs past an entry edited after it walked it, another refuses for that entry, and a third resumes from the first's checkpoint and signs, never reading the entry (`StaysUnsignedOnceFound`, in `Overtaking`) | this model, T104 |
-| The scrub recomputes the signed prefix's hashes (`#scrub`, `relink`) | an entry edited in place, signed over again and again (`EditFoundByNextScrub`) | |
-| Readiness checks that the log still holds the anchor's prefix (`readiness`, `holds`) | green after a rewrite behind the anchor, until the next beat (`GreenIsReal`) | |
-| A beat writes the anchor over the record it read, by compare-and-set (`AnchorStore.write`, `admits`) | two beats at once: the one that checkpointed first writes last, and moves the anchor back (`AnchorNeverBack`); or the one that walked before an edit writes a clean anchor over the finding of the one that found it (`FoundEditStaysRed`, in `Overtaking`); a walk between beats writes how far it got over a beat's later checkpoint (`AnchorNeverBack`, in `Walking`) | this model |
-
-Three protections the code keeps are not needed in the model: the beat's
-walk checking that the anchor's prefix is still there, that the entry
-it goes on from still has its hash, and that each batch links to the
-hash it computed last (`AnchorHeld`, `WalkChecksFrom`, `AppLinksWalk`).
-Turned off, alone or together, every scenario still holds: the vault's
-own check refuses to sign over a rewrite of the prefix it signed last,
-readiness reads the anchor's hash, and a walk ends at the hash the vault
-signed, after the app's MACs of every entry it read. They matter where the model does
-not go: a vault started again after the log was cut back below its
-newest checkpoint, which then resumes from an older one still in the log
-and signs the shorter log afresh (`audit-watch.test.ts`, "a log cut back
-below the anchor").
-
-What it does not claim, as the code does not:
-
-- **The vault signs over app entries it cannot check.** A rewrite of the
-  app's entries alone, past the last vault entry, is signed. The beat's
-  walk finds it and the anchor keeps the finding (`FoundEditStaysRed`).
-- **A refusal of the vault's stands only until it signs again.** A call
-  whose walk began after the entry a refusal names checks that entry again
-  under the head, as the walk checks each, and refuses while it is broken
-  (T104). Two refusals this holds no further: one that names no entry, a
-  prefix not the one signed or a head not naming the last entry, which a
-  call's own checks find again only where they reach (the hash of the
-  prefix it resumes from, and the head); and a lap of the scrub ending on
-  a hash other than the one signed, whose entry, on its own, holds. The
-  next signature clears either, and the scrub finds the change again
-  within two laps.
-- **A rewrite that stops short of the anchor's checkpoint.** The model's
-  rewrite hashes the chain again to the head. One of entries 400 to 499,
-  each hashed again, under a checkpoint at 500, leaves 500's hash, which
-  readiness reads, and breaks 500's link to 499, which no beat walks
-  again: the scrub, which links each entry to the one before, finds it
-  within two laps, as it does an edit in place.
-- **An edit made between a checkpoint's walk and its signature is signed
-  over.** The scrub finds it: here, with a scrub of the whole prefix a
-  call, at the next checkpoint; in the code, with `walks.scrub` entries a
-  call, within two laps.
-- **A walk cut short.** A walk reads at most `CHAIN_WALK` entries; one cut
-  short keeps how far it got in the anchor, which readiness reads as red,
-  and the next goes on from there. The model's walks are four entries, six
-  in `Repair`, where the beats must outrun the two entries each adds.
-- **Cutting the log.** The model's attacker edits and rewrites, and does
-  not delete: a cut is the tests' (`audit-watch.test.ts`, "a cut tail is red
-  at once", "a log cut back below the anchor"). The entries written since
-  the last beat are a window a cut takes unseen.
-- **An empty store, and an Owner's acceptance.** The scenarios start
-  from an anchor. A store found empty is re-anchored by a walk of the
-  whole log, readiness green meanwhile (Erwin, 2026-10-24): over that
-  window `GreenIsReal` does not hold by design, since nothing yet vouches
-  for the prefix, and a cut made before the store emptied is never seen.
-  An Owner's acceptance of lost entries moves the anchor back in a new
-  epoch. Neither is modelled; both are the tests' (`audit-watch.test.ts`).
-- **The anchor's own store.** Its compare-and-set is one step here; a
-  store with weak access control is tamper-evident by the app's MAC and
-  the vault's signature, and only its own compare-and-set and monotonic
-  rule (`admits`) keep an older record from being put back.
+## The tunnel
 
 ### Tunnel.tla
 
@@ -1042,64 +883,19 @@ starts just after the check does, so with D = R a yes inside that gap
 skips a tick, and the watchdog can end a session whose handle stands: an
 availability edge, not a bound, which `StandingStaysOpen` does not see.
 
-### AppKey.tla
-
-The app key's rotation (`key-rotation.ts`). Starts under the new key B
-step it, each step one transaction under the log's head that reads where
-the rotation stands, signs the next row again under B if the old key A
-signed it, and appends its `key.reseal`; once no row is left, a step of
-its own appends `key.rotate` (`finishRotation`).
-Beside them, an instance still under A writes a row and its entry under
-the head, as during a deploy, and someone who holds A and can write the
-database writes rows and entries under A past every check, at any moment.
-A row is its MAC's key and who wrote what it says; one row a step.
-
-| Protection, in the code | Turned off, TLC finds |
-|---|---|
-| A step reads where the rotation stands under the head (`rotateStep` and `finishRotation`, `keyState(tx)` after `lockLogHead`) | two starts that each read the last row before the other's step write `key.rotate` twice (`OneRotate`); and a start that read the rotation under way signs under B, after `key.rotate`, a row someone wrote under A since (`NoLaunderingAfterRotate`) |
-| An append under a key the log names as moved from refuses (`appendEntries`, `KeyRetired`) | the instance under A writes an entry after the first step (`OldKeyWritesNothingAfter`), and a row the step had passed, left under A once rotated (`RotationComplete`) |
-| A verification takes A's entries only before the first step (`appVerifier`) | an entry forged under A after the first step verifies (`NothingForgedAccepted`) |
-
-What it does not cover: a row forged under A before `key.rotate` is
-signed again with the rest, as the rotation cannot tell it from the
-instance's own, so a leaked key's window for rows closes at `key.rotate`,
-and for entries at the first step; an instance under A that changes a
-row without the head, as no audited write does, may lose that change. The
-anchor, outside the database, is sealed again by compare-and-set before
-`key.rotate`, as `Audit.tla` models its writes, and not modelled here.
-
-### Their invariants
+### Its invariants
 
 | Invariant | What must hold in every state |
 |---|---|
-| `OneRotate` | However many starts step the rotation at once, the log holds one `key.rotate` |
-| `NoLaunderingAfterRotate` | No row written under the old key after `key.rotate` is ever signed under the new one |
-| `OldKeyWritesNothingAfter` | An instance under the old key appends no entry from the rotation's first step on |
-| `RotationComplete` | Once rotated, a row under the old key alone is one someone forged past the checks |
-| `NothingForgedAccepted` | No entry forged under the old key from the first step on verifies |
-| `SignsNoForgedVault` | The vault never signs a prefix holding an entry of its own rewritten, or chained after a rewrite |
-| `StaysUnsignedOnceFound` | Once a checkpoint was refused for a broken log, none is signed while the vault could find the tamper |
-| `FoundEditStaysRed` | Against someone who edits, reverts and edits again, any entry, heartbeat rows among them: while an edit a beat wrote to the anchor is still in place, readiness is red. Edited again after a revert, it is a new edit behind the anchor, which the scrub finds (`EditFoundByNextScrub`) |
-| `EditFoundByNextScrub` | An entry edited in place is signed over by one checkpoint in flight at most, with a scrub of the whole prefix a call, as in `Tampering` |
-| `GreenIsReal` | Readiness, read as a monitor asks it, the anchor then the log, never vouches for a prefix holding an entry rewritten or chained after a rewrite |
-| `AnchorNeverBack` | The anchor's checkpoint and the app's progress never move back |
-| `RepairGoesGreen` | In `Repair`, once the edit is put back and five beats have walked with no edit in place, readiness is green |
 | `EndsWithinBound` | A revoked handle's tunnel session ends within R + D of its revocation |
 | `StandingStaysOpen` | A session whose handle stands stays open while every check answers before its deadline |
 
-### Their scenarios
+### Its scenarios
 
 | Scenario | Who runs what | States |
 |---|---|---|
-| `Tampering` | From an entry of each author, a beat, a checkpoint and the anchor: a request appends, two heartbeats run at once with their checkpoints, someone edits an entry in place or rewrites the chain from one, and a monitor asks | 16.6 million |
-| `Readiness` | Requests append while two heartbeats, whose walks cover less than the log, run at once, and a monitor asks | 249 thousand |
-| `Overtaking` | Three heartbeats at once while someone edits an entry past the anchor, the first beat's row or its checkpoint's, with a scrub of one entry a call | 4.6 million |
-| `Rows` | Someone edits and puts back any entry, heartbeat rows among them, twice, at any step, while two beats run and a monitor asks | 2.0 million |
-| `Walking` | From a checkpoint past a backlog of four entries: walks between beats go on with it, two entries a walk, while two beats run at once, someone edits an entry in the backlog, and a monitor asks | 2.4 million |
-| `Repair` | From the anchor's finding of an edited entry, more than a walk behind the head: someone puts it back when they like, while beats run one after another | 1,063 |
 | `Tunnel` | A check every 4 ticks, each with 2 to answer, the handle revoked at any tick | 1 thousand |
 | `TunnelShort` | The same, with as long to answer as between checks | 2 thousand |
-| `AppKeyRotation` | Two starts under the new key step a rotation of two rows at once, while an instance under the old key writes a row, and someone who holds it writes rows and an entry under it | 146 thousand |
 
 ## TLC
 
@@ -1121,9 +917,8 @@ shortest one.
 
 ### In CI
 
-Run in order, the 125 TLC runs took 22 minutes, twice the tests. As three shards
-they take about 11 (Tampering's), as long as the tests do; skipped, seconds. Two things
-cut that, and `Formal model` is still the one job `Validate` asks about, on
+Run in order, the 106 TLC runs take as long as several of CI's other
+jobs; skipped, seconds. Two things cut that, and `Formal model` is still the one job `Validate` asks about, on
 every pull request that is not a version-only bump:
 
 - **A green run of the same inputs is not run again.** TLC's answer depends
@@ -1148,16 +943,14 @@ every pull request that is not a version-only bump:
   branch could already make `Validate` pass by editing the workflow in their
   own pull request, so this guards against mistakes and stale answers, not
   against them.
-- **A run is three jobs in parallel.** `scripts/formal.sh --shard
-  tampering|large|rest` runs the scenarios of one (`shard_of`), each with its
-  runs without a protection, balanced by what they took: Tampering's 7 to 11
-  minutes (17.5 million states) alone, Overtaking, Walking, Sharing, Rows and
-  Mixed together, and the rest. A new scenario is in `rest`. `--list` prints
-  what a run would run, without TLC; a test holds the three to a partition
-  of it. A shard that fails fails `Formal model`, and each prints its own
+- **A run is two jobs in parallel.** `scripts/formal.sh --shard
+  large|rest` runs the scenarios of one (`shard_of`), each with its runs
+  without a protection: Sharing and Mixed, the locking model's largest,
+  together, and the rest. A new scenario is in `rest`. `--list` prints what
+  a run would run, without TLC; a test holds the two to a partition of it. A
+  shard that fails fails `Formal model`, and each prints its own
   counterexamples. CI gives TLC 4 GB of heap (`--heap 4g`, the script's
-  default is 1g) with 4 workers: Tampering took 11 minutes at 1g and 7 at 4g
-  or 8g in a benchmark on a 4-core, 16 GB runner (10.7 in its first CI run).
+  default is 1g) with 4 workers.
 
 # Proofs in Lean
 

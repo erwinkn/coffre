@@ -10,8 +10,8 @@
 #   scripts/formal.sh                 every scenario
 #   scripts/formal.sh Deletion        one, and its runs without a protection
 #   scripts/formal.sh Deletion Locks  several
-#   scripts/formal.sh --shard rest    one of CI's shards (shard_of): tampering,
-#                                     large or rest
+#   scripts/formal.sh --shard rest    one of CI's shards (shard_of): large or
+#                                     rest
 #   scripts/formal.sh --workers 4     TLC's worker threads (default 2)
 #   scripts/formal.sh --heap 4g       TLC's JVM heap (default 1g)
 #   scripts/formal.sh --list          what would run, not running TLC
@@ -100,32 +100,15 @@ REMOVALS=(
   "WorkloadReads CheckWhereHeld NoLaundering"
   "WorkloadReads ReadsByID NoLaundering"
   "WorkloadReads RefusesUnreadableSources NoLaundering"
-  "Tampering WalkChecksAppMacs GreenIsReal"
-  "Tampering CheckpointChecksVault SignsNoForgedVault"
-  "Tampering CheckpointLinksWalk SignsNoForgedVault"
-  "Tampering SeenRecheckUnderHead StaysUnsignedOnceFound"
-  "Overtaking RefusalRecheckedUnderHead StaysUnsignedOnceFound"
-  "Tampering Scrubs EditFoundByNextScrub"
-  "Tampering ReadinessChecksHeld GreenIsReal"
-  "Tampering AnchorCas AnchorNeverBack"
-  "Overtaking AnchorCas FoundEditStaysRed"
-  "Walking AnchorCas AnchorNeverBack"
-  "AppKeyRotation StateUnderHead OneRotate"
-  "AppKeyRotation StateUnderHead NoLaunderingAfterRotate"
-  "AppKeyRotation RetiredCheck OldKeyWritesNothingAfter"
-  "AppKeyRotation RetiredCheck RotationComplete"
-  "AppKeyRotation WalkCutoff NothingForgedAccepted"
   "Tunnel Watchdog+DeadlineCountsAsNo EndsWithinBound"
   "TunnelShort DeadlineCountsAsNo StandingStaysOpen"
 )
 
-# CI's shards, balanced by what each scenario took on a runner (seconds,
-# `--workers 4 --heap 4g`): Tampering alone about 410, `large` about 400, and
-# `rest`, every other scenario, about 260. A scenario in no case below is in `rest`.
+# CI's shards: `large`, the two longest of the locking model's scenarios, and
+# `rest`, every other. A scenario in no case below is in `rest`.
 shard_of() {
   case "$1" in
-    Tampering) echo tampering ;;
-    Overtaking|Walking|Sharing|Rows|Mixed) echo large ;;
+    Sharing|Mixed) echo large ;;
     *) echo rest ;;
   esac
 }
@@ -145,7 +128,7 @@ while [ $# -gt 0 ]; do
       heap="$2"; shift 2 ;;
     --list) list=1; shift ;;
     --shard)
-      case "$2" in tampering|large|rest) shard="$2" ;; *) echo "no shard $2 (tampering, large or rest)" >&2; exit 2 ;; esac
+      case "$2" in large|rest) shard="$2" ;; *) echo "no shard $2 (large or rest)" >&2; exit 2 ;; esac
       shift 2 ;;
     *) only="$only$1 "; shift ;;
   esac

@@ -111,11 +111,11 @@ test('the shards partition formal.sh and the workflow runs each of them', () => 
     const all = list().stdout.trim().split('\n');
     assert.ok(all.length > 100);
     const matrix = workflow.match(/shard: \[([a-z, ]+)\]/)[1].split(', ');
-    assert.deepEqual(matrix, ['tampering', 'large', 'rest']);
+    assert.deepEqual(matrix, ['large', 'rest']);
     const sharded = matrix.flatMap((shard) => list('--shard', shard).stdout.trim().split('\n'));
     assert.deepEqual([...sharded].sort(), [...all].sort());
-    const tampering = list('--shard', 'tampering').stdout.trim().split('\n');
-    assert.ok(tampering.every((line) => line.split(/\s+/)[1] === 'Tampering'));
+    const large = list('--shard', 'large').stdout.trim().split('\n');
+    assert.ok(large.every((line) => ['Sharing', 'Mixed'].includes(line.split(/\s+/)[1])));
 });
 
 test('formal-key.sh is deterministic, keyed on the models and names the Java', () => {
@@ -125,7 +125,7 @@ test('formal-key.sh is deterministic, keyed on the models and names the Java', (
     assert.equal(first.status, 0, first.stderr);
     assert.equal(key().stdout, first.stdout);
     assert.match(first.stdout, /\nformal-[0-9a-f]{64}\n$/);
-    for (const line of ['formal/Coffre.tla', 'formal/Tampering.cfg', 'scripts/formal.sh', '.github/workflows/validate.yml', 'java.version = ', 'java.vendor = ', 'os.arch = ']) {
+    for (const line of ['formal/Coffre.tla', 'formal/Tunnel.cfg', 'scripts/formal.sh', '.github/workflows/validate.yml', 'java.version = ', 'java.vendor = ', 'os.arch = ']) {
         assert.ok(first.stdout.includes(line), line);
     }
 });

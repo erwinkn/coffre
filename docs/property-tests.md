@@ -17,15 +17,6 @@ depends on it; where it cannot (the RSA and EC keys of the workload-token
 properties, a pool made once a run, and `seal`'s data keys and IVs), it comes
 from the host, and decides no outcome.
 
-The audit target authenticates mixed-author chains with the real MAC and
-hash code, signs and verifies random checkpoints with the real checkpoint
-message and signature verifier, edits every stored field, and tests deletion,
-duplication, swaps, truncation before a retained checkpoint, and signing with
-the wrong author's key. Failure locations name the first broken retained
-entry; a gap names the next entry that exposes it. A standalone valid prefix
-is valid to core's chain verifier. These properties do not claim freshness
-when the log and all its checkpoints are rolled back together.
-
 The access target compares every permission across project and environment
 places with an independent table transcribed from the README's role rules:
 the instance roles inside their scopes, and the project roles of grants. It
