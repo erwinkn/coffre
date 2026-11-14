@@ -99,6 +99,8 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   reference_to_itself: ['conflict', 'a key cannot be a reference to itself'],
   reference_to_reference: ['conflict', 'that is itself a reference: a reference reads a value, so point at its source instead'],
   no_reference: ['not_found', 'that key is no reference'],
+  // Folders of keys (routes/secrets.ts).
+  no_folder: ['not_found', 'no key is filed in that folder there'],
   inherited: ['conflict', 'a fork inherits from it: archive the fork first'],
   parent_archived: ['conflict', 'it inherits from an environment that is archived or deleted: restore that first'],
   too_deep: ['conflict', 'that environment already inherits from three: fork one higher up'],
