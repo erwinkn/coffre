@@ -174,9 +174,10 @@ export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; vou
  * emptied and a plain one's copy cleared, in the change's own statement,
  * however many there are. Its row stays, as the log names it. Each place
  * is a row the decision read, so a place that changed since starts the
- * change over; a version is written only with its secret's row, which
- * moves too, and nothing writes a value in an archived place. How many it
- * erases is the operation's to bound.
+ * change over; and what it erases is the operation's to count beside its
+ * read (`Operation.beside`), which is asked again with the rows, so a
+ * version written meanwhile, in a personal config deleted live, starts it
+ * over too. How many it erases is the operation's to bound.
  */
 export type Erase = { projects?: readonly Row<typeof projects>[]; environments?: readonly Row<typeof environments>[] };
 
@@ -192,9 +193,11 @@ export type Operation<P extends Parts, A, C = undefined> = {
   check?(seen: Seen<P>, unsealed: Unsealed<P>): Promise<C>;
   /**
    * What rides beside the read, no part, by name: each a query of one
-   * jsonb column, `row`, read once with the parts and never again, under no
-   * MAC (`readParts`). For what no row says and no decision of access goes
-   * by: how many versions a deletion would erase.
+   * jsonb column, `row`, read with the parts under no MAC (`readParts`),
+   * and read again with them under the change lock: an answer that differs
+   * then starts the change over, as a row that moved does. For what no row
+   * says and no decision of access goes by: how many versions a deletion
+   * would erase, which a write beside it may add to.
    */
   beside?: Readonly<Record<string, SQL>>;
   /** From the rows read, the time and what `check` found, and nothing else. `unsealed` counts, by part, the rows found that are not the vault's; `beside`, what rode beside them. */
@@ -315,7 +318,8 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
  * milliseconds (none when it found no row, of a part or beside one): a
  * number, which no session's settings read another way. `beside` rides in
  * the same statement and is no part: each a query of one jsonb column,
- * `row`, given back as read, with no token, since no write reads it again.
+ * `row`, given back as read, and its token a hash of it, by which a change
+ * reads it again.
  * No MAC is checked on it here, so whoever asks for one holds it to its
  * own (the log's head, sealed as the signer seals it: caller.ts).
  */
@@ -330,8 +334,8 @@ export async function readParts<P extends Parts, B extends string = never>(
   if (asides.some(([name]) => Object.hasOwn(read, name))) throw new Error('what rides beside a read has a name no part has');
   const arms = [
     ...parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row, ${tokenOf(table)} AS token FROM ${table} WHERE ${where}`),
-    // What rides beside is read once and never again: it has no token.
-    ...asides.map(([name, query]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, aside.row, NULL::text AS token FROM (${query}) aside`),
+    // What rides beside is read again by a hash of what it said, as a version is.
+    ...asides.map(([name, query]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, aside.row, ${besideToken} AS token FROM (${query}) aside`),
   ];
   // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts). Bounded as a
   // change's write is: a lock someone holds on a table it reads makes the call busy, and never holds it, nor the signer's upkeep.
@@ -350,6 +354,7 @@ export async function readParts<P extends Parts, B extends string = never>(
   for (const { part: name, row: wire, token } of found) {
     if (Object.hasOwn(aside, name)) {
       aside[name as B].push(wire);
+      tokens.push(`${name}:${token}`);
       continue;
     }
     const { table } = read[name]!;
@@ -373,6 +378,8 @@ export async function readParts<P extends Parts, B extends string = never>(
 
 /** What a row is read again by: its MAC, or a version's, which has none, a hash of all of it. */
 const tokenOf = (table: Readable) => ('mac' in table ? sql`encode(${table}.mac, 'hex')` : sql`md5(to_jsonb(${table})::text)`);
+/** What an answer beside the parts is read again by: a hash of it. */
+const besideToken = sql`md5(aside.row::text)`;
 
 /**
  * A change's read and its decision, and what it writes held to what it
@@ -500,7 +507,11 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
   const entry = pending(key, plan.entry, dated, rows);
 
   // The same rows, read again by the same conditions: one that changed, went or came since makes the lists differ.
-  const again = sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || ${tokenOf(table)} FROM ${table} WHERE ${where}`), sql` UNION ALL `);
+  const again = sql.join([
+    ...parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || ${tokenOf(table)} FROM ${table} WHERE ${where}`),
+    // And what rode beside them, asked again: a count a write beside it moved makes the lists differ too.
+    ...Object.entries<SQL>(operation.beside ?? {}).map(([name, query]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || ${besideToken} FROM (${query}) aside`),
+  ], sql` UNION ALL `);
   // And in time, for a decision that holds until one: counted from the read, which came before the decision, so never past it.
   const inTime = until === undefined ? sql`` : sql` AND extract(epoch FROM clock_timestamp()) * 1000 < ${readAt! + (until - at)}::float8`;
   const statements: SQL[] = [sql`same AS (SELECT (SELECT coalesce(array_agg(x ORDER BY x COLLATE "C"), '{}') FROM (${again}) seen (x)) = ${sql.param(tokens.sort())}::text[]${inTime} AS ok)`];

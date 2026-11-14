@@ -870,7 +870,9 @@ function placeDelete(input: Presented & PlaceDelete, vault: Deciding): Operation
         path,
         tombstone: mark,
         environments: there === undefined
-          ? seen.places.filter((row) => ofPlace(row) && standing(row) && row.owner === null).map((row) => row.slug).sort()
+          // Every standing one, personal configs too, as 0.14.7 listed them: their values go with it.
+          ? seen.places.filter((row) => ofPlace(row) && standing(row))
+            .map((row) => (row.owner === null ? row.slug : configName(seen.places.find((parent) => parent.id === row.parentId)?.slug ?? '?', row.owner))).sort()
           : personal ? [there.slug] : [there.slug, ...configs.map((row) => configName(there.slug, row.owner!))],
         keys,
         versions,

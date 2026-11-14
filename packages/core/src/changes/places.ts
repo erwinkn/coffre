@@ -192,7 +192,7 @@ export type PlaceDeleted = {
   path: string;
   /** The slug its tombstone keeps: `market~deleted-2026-10-05`. */
   tombstone: string;
-  /** The environments it takes: a project's every one, or the one with its personal configs (`dev@ada@acme.example`). */
+  /** The environments it takes, personal configs too, these by their environment and owner (`dev@ada@acme.example`): a project's every one, or the one with its configs. */
   environments: string[];
   /** The keys named there, which the tombstone keeps, never their values. */
   keys: number;

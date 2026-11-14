@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { after, beforeEach, test } from 'node:test';
 
-import type { PlaceDelete, PlaceDeleted, Presented, UseInput } from '@coffre/core/vault';
+import type { PlaceDelete, PlaceDeleted, Presented, SecretWrite, UseInput } from '@coffre/core/vault';
 import { rowsOf } from '@coffre/db/dialect';
 import { environments, projects, secrets } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
@@ -113,6 +113,9 @@ const reveal = (label: string, place: string, keys: string[], more: Partial<UseI
   return { ...shown(label), project: projectSlug, environment: environmentSlug, mine: false, keys, purpose: 'reveal', upstream: null, ...more };
 };
 const archive = async (table: 'projects' | 'environments', id: string) => amend(world, table, eq(table === 'projects' ? projects.id : environments.id, id), { archivedAt });
+/** Ada's own write to her config of gone's prod, as she makes it: `secret.write`, `mine`. */
+const adaWrites = (keys: { key: string; value: string }[]): Presented & SecretWrite =>
+  ({ ...shown('ada-cli'), op: 'secret.write', project: 'gone', environment: 'prod', mine: true, keys: keys.map((one) => ({ ...one, nature: 'secret' as const })) });
 const answer = <T>(result: { answer: T } | { refused: string }): T => {
   if ('refused' in result) throw new Error(`refused ${result.refused}`);
   return result.answer;
@@ -148,7 +151,8 @@ test('a preview says what deleting would take, as the deletion then does, and ch
   const expected: PlaceDeleted = {
     path: 'gone',
     tombstone: `gone~deleted-${day()}`,
-    environments: ['dev', 'prod'],
+    // Ada's and Cy's configs of prod go with it, by the names a deletion of one says.
+    environments: ['dev', 'prod', 'prod@ada@acme.example', 'prod@cy@acme.example'],
     // API_KEY, DATABASE_URL and PAY in prod, API_KEY and FLAG in dev, LOCAL in Ada's config; five versions in prod and dev, and Ada's.
     keys: 6,
     versions: 6,
@@ -306,16 +310,16 @@ test('a personal config is deleted by its owner, or by whoever manages the envir
   assert.deepEqual((await written()).detail, { path: 'gone/prod@ada@acme.example', tombstone: `prod-p-ada~deleted-${day()}`, keys: 1, versions: 1, grants: 0, references: 0, personal: true });
 });
 
+const ready = async (input: Presented & PlaceDelete) => {
+  const prepared = await prepare(world, OPERATIONS[input.op](input as never, { workloads: world.workloads, owners: world.owners }));
+  assert.ok(!('refused' in prepared));
+  return prepared as Prepared<PlaceDeleted>;
+};
+
 test('a deletion whose rows moved since it read them starts over: a grant set meanwhile is revoked with the rest, and a place restored meanwhile is not erased', async () => {
   await archive('projects', gone.id);
-  const deciding = { workloads: world.workloads, owners: world.owners };
-  const ready = async () => {
-    const prepared = await prepare(world, OPERATIONS['project.delete'](projectDelete('dee-cli') as never, deciding));
-    assert.ok(!('refused' in prepared));
-    return prepared as Prepared<PlaceDeleted>;
-  };
   // A grant on it, set after the deletion read: the write finds the rows moved, and writes nothing.
-  const first = await ready();
+  const first = await ready(projectDelete('dee-cli'));
   await write(world, ...rows('grants', grant(fay, 'viewer', { project: gone })));
   assert.equal(await commit(world, first), false);
   assert.deepEqual(await sealed(gone.id), { versions: 6, sealed: 6 });
@@ -327,7 +331,7 @@ test('a deletion whose rows moved since it read them starts over: a grant set me
   // Restored after the read: nothing is erased, and asked again it is refused.
   await setUp();
   await archive('projects', gone.id);
-  const second = await ready();
+  const second = await ready(projectDelete('dee-cli'));
   await amend(world, 'projects', eq(projects.id, gone.id), { archivedAt: null });
   assert.equal(await commit(world, second), false);
   assert.deepEqual(await vault.change(projectDelete('dee-cli')), { refused: 'not_archived' });
@@ -335,13 +339,27 @@ test('a deletion whose rows moved since it read them starts over: a grant set me
   assert.equal(await slugOf(projects, gone.id), 'gone');
 });
 
+test('a personal config, live as it is deleted, whose owner writes meanwhile: the deletion starts over, and says and erases what is there then', async () => {
+  // Ada's config holds LOCAL, one version. Read for deletion, then she writes LOCAL again and a NEW: no row the deletion read moved, only how many there are.
+  const first = await ready(environmentDelete('ada-cli', 'prod', { mine: true }));
+  assert.deepEqual([first.answer.keys, first.answer.versions], [1, 1]);
+  answer(await vault.change(adaWrites([{ key: 'LOCAL', value: 'ada-local-2' }, { key: 'NEW', value: 'ada-new' }])));
+  assert.equal(await sealedIn(adas.id), 3);
+  assert.equal(await commit(world, first), false, 'the counts it read moved');
+  assert.equal(await sealedIn(adas.id), 3, 'and nothing is erased');
+  // Asked again, it says all three, and erases them.
+  const again = answer(await vault.change(environmentDelete('ada-cli', 'prod', { mine: true })));
+  assert.deepEqual([again.keys, again.versions], [2, 3]);
+  assert.equal(await sealedIn(adas.id), 0);
+});
+
 test(`one deletion erases ${MOST_ERASED} versions at most, and past that erases nothing`, async () => {
   await archive('environments', dev.id);
   // Dev's two versions, and as many more of API_KEY's as make the bound: one more and it is refused.
   const [key] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM secrets WHERE environment_id = ${dev.id} AND key = 'API_KEY'`);
-  const add = async (from: number, to: number) => world.owner.execute(sql`INSERT INTO secret_versions
+  const add = async (from: number, to: number, of = key!.id) => world.owner.execute(sql`INSERT INTO secret_versions
     (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_at, created_by, first_written_at, plaintext, sensitive)
-    SELECT gen_random_uuid(), ${key!.id}, n, 1, ${randomBytes(48)}, ${randomBytes(12)}, ${randomBytes(16)}, ${randomBytes(40)}, 'local', 'k', '1', now(), ${ada}, now(), NULL, false
+    SELECT gen_random_uuid(), ${of}, n, 1, ${randomBytes(48)}, ${randomBytes(12)}, ${randomBytes(16)}, ${randomBytes(40)}, 'local', 'k', '1', now(), ${ada}, now(), NULL, false
     FROM generate_series(${from}::int, ${to}::int) n`);
   await add(100, 100 + MOST_ERASED - 3);
   assert.equal(await sealedIn(dev.id), MOST_ERASED);
@@ -358,4 +376,15 @@ test(`one deletion erases ${MOST_ERASED} versions at most, and past that erases 
   assert.equal(deleted.versions, MOST_ERASED);
   assert.equal(await sealedIn(dev.id), 0);
   console.log(`# ${MOST_ERASED} versions erased in one deletion: ${Math.round(took)} ms`);
+
+  // A live config at the bound, read for deletion, then written to by its owner: one past it, the deletion starts over and is refused.
+  const [local] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM secrets WHERE environment_id = ${adas.id} AND key = 'LOCAL'`);
+  await add(100, 100 + MOST_ERASED - 2, local!.id);
+  assert.equal(await sealedIn(adas.id), MOST_ERASED);
+  const prepared = await ready(environmentDelete('ada-cli', 'prod', { mine: true }));
+  assert.equal(prepared.answer.versions, MOST_ERASED);
+  answer(await vault.change(adaWrites([{ key: 'NEW', value: 'ada-new' }])));
+  assert.equal(await commit(world, prepared), false);
+  assert.deepEqual(await vault.change(environmentDelete('ada-cli', 'prod', { mine: true })), { refused: 'too_large' });
+  assert.equal(await sealedIn(adas.id), MOST_ERASED + 1, 'nothing is erased');
 });
