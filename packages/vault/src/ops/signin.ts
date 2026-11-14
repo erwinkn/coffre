@@ -211,19 +211,19 @@ function asking(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, vault:
 const onSession = (caller: Asking) => caller.holds.credentialScope == null;
 
 /** What the caller holds, but for an instance role whose row was not read: a role with no row is no role. */
-const held = ({ holds }: Asking) => (Object.hasOwn(holds.policy.instanceRoles, holds.role) ? holds : { ...holds, role: 'member' as const });
+export const held = ({ holds }: Asking) => (Object.hasOwn(holds.policy.instanceRoles, holds.role) ? holds : { ...holds, role: 'member' as const });
 
 /** Whether the caller runs the instance (`runsInstance`). */
 const runs = (caller: Asking) => runsInstance(held(caller));
 
 /** The entry's fields a change a caller asks gives the same way. */
-const by = (caller: Asking, shown: Shown) => ({ actor: caller.principal, credential: caller.credential.id, request: shown.request, ip: shown.ip });
+export const by = (caller: Asking, shown: Shown) => ({ actor: caller.principal, credential: caller.credential.id, request: shown.request, ip: shown.ip });
 
 /** `member` if it names a service account, else null. */
 const serviceNamed = (member: string | null) => (member?.startsWith('token:') === true ? member : null);
 
 /** The projects a service account's grants are on, as SQL for `callerParts`: what the caller holds there says whether they manage it. */
-function projectsOf(member: string | null) {
+export function projectsOf(member: string | null) {
   const service = serviceNamed(member);
   return service === null ? NO_PROJECT : sql`(SELECT coalesce(g.project_id, e.project_id) FROM grants g LEFT JOIN environments e ON e.id = g.environment_id WHERE g.principal = ${service})`;
 }
@@ -234,7 +234,7 @@ function projectsOf(member: string | null) {
  * instance's setting of where people set service accounts up. Nothing for
  * a member that is none.
  */
-function serviceParts(member: string | null) {
+export function serviceParts(member: string | null) {
   const service = serviceNamed(member);
   const of = (where: (id: string) => ReturnType<typeof sql>) => (service === null ? sql`false` : where(service));
   return {
@@ -261,7 +261,7 @@ type ServiceSeen = Seen<ReturnType<typeof serviceParts>>;
  * find: a row missing makes it no one's to manage but whoever runs the
  * instance.
  */
-function serviceOf(seen: ServiceSeen, member: string, at: number): ServiceAccount | null {
+export function serviceOf(seen: ServiceSeen, member: string, at: number): ServiceAccount | null {
   const row = seen.account.find((other) => other.id === member);
   if (row === undefined || row.status !== 'active') return null;
   const held: { role: string; place: Place }[] = [];
@@ -281,7 +281,7 @@ function serviceOf(seen: ServiceSeen, member: string, at: number): ServiceAccoun
 }
 
 /** The instance's setting of where people set service accounts up, from its row: none without the row, or with one that does not read as a scope. */
-function settingOf(seen: ServiceSeen): Scope | null {
+export function settingOf(seen: ServiceSeen): Scope | null {
   const [row] = seen.setting;
   if (row === undefined) return null;
   try {
@@ -303,7 +303,7 @@ function settingOf(seen: ServiceSeen): Scope | null {
  * it more easily. A row deleted for the decision is not found this way (see
  * `credentialEnd`).
  */
-function manages(caller: Asking, seen: ServiceSeen, unsealed: Unsealed<ReturnType<typeof serviceParts> & ReturnType<typeof callerParts>>, member: string, at: number): boolean | 'tampered' {
+export function manages(caller: Asking, seen: ServiceSeen, unsealed: Unsealed<ReturnType<typeof serviceParts> & ReturnType<typeof callerParts>>, member: string, at: number): boolean | 'tampered' {
   if (runs(caller)) return true;
   // A credential with a scope manages no service, as 0.14.7 gave a non-person no setting (`serviceSettingFor`): a
   // service's token that holds `grant.manage` would make another's tokens, or a new one of its own past its revocation.
@@ -490,14 +490,14 @@ const SERVICE_MINUTES = 366 * 24 * 60;
 /** Where a fork inherits from, three deep, as a use reads it (use.ts). */
 const MAX_PARENTS = 3;
 /** A place's slug as one is made (`SLUG` in places.ts): a tombstone's `~` names none. */
-const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
+export const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
 /** An environment a handle stands in for, by path: `market/dev`, or `market/dev@me` for its person's personal config of it. */
 const HANDLE_PATH = /^([a-z0-9][a-z0-9-]{0,62})\/([a-z0-9][a-z0-9-]{0,62})(@me)?$/;
 /** Each kind's prefix, which its hint starts with (`tokenHint` in @coffre/core/identity). */
 const PREFIX = { personal: 'coffre_pat_', handle: 'coffre_use_', service: 'coffre_svc_' } as const;
 
 /** A label as 0.14.7 took one, printed in lists and terminals: trimmed, 1 to 120 characters, no control character. */
-const labelled = (value: unknown): value is string => text(value) && value.length <= 120 && value !== '' && value === value.trim() && !/\p{Cc}/u.test(value);
+export const labelled = (value: unknown): value is string => text(value) && value.length <= 120 && value !== '' && value === value.trim() && !/\p{Cc}/u.test(value);
 
 /** What a handle reads and uses, and no more: it writes nothing (0.14.7's `HANDLE_HOLDS`). */
 const HANDLE_HOLDS: RoleDefinition = { name: 'Handle', description: 'Read and use, as its person does.', permissions: ['secret.read', 'secret.use'], protected: ['secret.read', 'secret.use'] };
@@ -510,10 +510,10 @@ const HANDLE_HOLDS: RoleDefinition = { name: 'Handle', description: 'Read and us
 const HANDLE_ROLES: Policy['roles'] = { viewer: HANDLE_HOLDS, contributor: HANDLE_HOLDS };
 
 /** A place asked, by slug, with the role asked there. */
-type Wanted = { project: string; environment: string | null; role: string };
+export type Wanted = { project: string; environment: string | null; role: string };
 
 /** A scope as the app names it, `{ "market/dev": "viewer" }`, copied: 1 to 1,000 places, each a project or one of its environments by slug, and a role's id. */
-function scopeAsked(value: unknown): Wanted[] | undefined {
+export function scopeAsked(value: unknown): Wanted[] | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const entries = Object.entries(value as Record<string, unknown>);
   if (entries.length === 0 || entries.length > MAX_SCOPE_PLACES) return undefined;
@@ -535,7 +535,7 @@ function pathsAsked(value: unknown): { project: string; environment: string; per
 }
 
 /** A grant of a scope, and the place it is on as the caller names it. */
-type Issued = { grant: ScopeGrant; path: string };
+export type Issued = { grant: ScopeGrant; path: string };
 
 /**
  * A scope as the credential's row seals it, which a use reads
@@ -543,7 +543,7 @@ type Issued = { grant: ScopeGrant; path: string };
  * it holds, and, a service's, whether it reads the sensitive values there.
  * 0.14.7's `storedScope`.
  */
-function sealedScope(issued: readonly Issued[]): ScopeGrant[] {
+export function sealedScope(issued: readonly Issued[]): ScopeGrant[] {
   const key = (grant: ScopeGrant) => `${grant.projectId}/${grant.environmentId ?? ''}`;
   return issued
     .map(({ grant }) => grant)
@@ -555,7 +555,7 @@ function sealedScope(issued: readonly Issued[]): ScopeGrant[] {
 }
 
 /** The roles of a project's grants a read found, by id: a role with no row is no role. */
-const definitionsOf = (rows: readonly Row<typeof roles>[]) =>
+export const definitionsOf = (rows: readonly Row<typeof roles>[]) =>
   Object.fromEntries(rows.filter((row) => !row.instance).map((row): [string, RoleDefinition] => [row.id, { name: row.name, description: row.description, permissions: row.permissions as Permission[], protected: row.protected as Permission[] }]));
 
 /**
