@@ -242,7 +242,11 @@ const requests: Record<string, Entry> = {
   'GET /members': { request: () => api('cy-cli', 'GET', '/members'), calls: ['caller'], statements: 1 },
   'GET /members, by a project manager': { request: () => api('bo-cli', 'GET', '/members'), calls: ['caller'], statements: 1 },
   'GET /members?path=': { request: () => api('bo-cli', 'GET', '/members?path=market'), calls: ['caller'], statements: 2 },
+  // Ada manages no access: as one who may set up service accounts, the accounts she manages, weighed in the same statement.
+  'GET /members, by who sets up service accounts': { request: () => api('ada-cli', 'GET', '/members'), calls: ['caller'], statements: 1 },
   'GET /members/:member/access': { request: () => api('cy-cli', 'GET', `/members/${ada}/access`), calls: ['caller'], statements: 1, fixed: true },
+  // Whether Bo manages ci, from its grants and the instance's setting, read with its access.
+  "GET /members/:member/access, by a service account's manager": { request: () => api('bo-cli', 'GET', `/members/${ci}/access`), calls: ['caller'], statements: 1, fixed: true },
   // A member's report, in one statement: what lets them in, what they know, the tokens they issued and their own.
   'GET /members/:member': { request: () => api('cy-cli', 'GET', `/members/${ada}`), calls: ['caller'], statements: 1, fixed: true },
   // Cy's, whose personal tokens and ci's tokens of his grow with the instance below: still one statement and one row.

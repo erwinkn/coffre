@@ -11,8 +11,15 @@ export type AccessChanges = MemberPut | MemberRemove | AccessGrant | RoleEdit | 
 export type AccessAnswers = {
   /** The role and scope they hold now, the scope's projects by id as the row holds them (null is everywhere), and whether they were admitted or brought back. */
   'member.put': Standing & { created: boolean };
-  /** How many grants went with them. */
-  'member.remove': { revoked: number };
+  /**
+   * How many grants went with them (`revoked`), and how many ways in the
+   * removal ended, as they stood when it was made: sign-in accounts it
+   * revoked, and, of their generation, live sessions (browser and CLI),
+   * tokens (every other credential but an MCP connection's) and connected
+   * apps (an MCP connection its client redeemed), which the generation's
+   * move ends.
+   */
+  'member.remove': { revoked: number; sessions: number; tokens: number; identities: number; apps: number };
   /** What became of each place, in the order asked; with `admit`, whether this change admitted the service account. */
   'access.grant': { changes: AccessChange[]; created?: boolean };
   /** The role as it is now: null once deleted. */

@@ -26,7 +26,7 @@ export const SECTIONS = [
     title: 'New deployment',
     entries: [
       { command: 'init', usage: ['init --workers [<dir>]'], about: ['two Cloudflare Workers: the app and its vault'] },
-      { command: 'init', usage: ['init --node [<dir>]'], about: ['a Node server, and its vault beside it'] },
+      { command: 'init', usage: ['init --node [<dir>]'], about: ['a Node server, and its vault beside it: back in 0.16.1, 0.16.0 is Workers only'] },
       {
         command: 'setup',
         usage: ['setup [--reset-passwords] [--rotate-deploy-token] [--json]'],

@@ -13,7 +13,7 @@ import { homedir, hostname } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { init, KINDS, type Kind } from './init.ts';
+import { init, KINDS, UNRELEASED, type Kind } from './init.ts';
 import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks, runsCode } from './github-env.ts';
@@ -1751,19 +1751,17 @@ function plural(count: number, word: string): string {
 /** "2 grants, 1 session, 0 linked accounts, 1 connected app": what a removal ends. */
 function waysIn(
   principalType: 'user' | 'service',
-  // 0.16's removal counts its grants alone so far: the others are null, and not said.
-  counts: { grants: number; sessions: number | null; tokens: number | null; identities: number | null; apps: number | null },
+  counts: { grants: number; sessions: number; tokens: number; identities: number; apps: number },
 ): string {
-  const said = (count: number | null, what: string) => (count === null ? [] : [plural(count, what)]);
   return principalType === 'user'
     ? [
         plural(counts.grants, 'grant'),
-        ...said(counts.sessions, 'session'),
-        ...(counts.tokens !== null && counts.tokens > 0 ? [plural(counts.tokens, 'personal token')] : []),
-        ...said(counts.identities, 'linked account'),
-        ...said(counts.apps, 'connected app'),
+        plural(counts.sessions, 'session'),
+        ...(counts.tokens > 0 ? [plural(counts.tokens, 'personal token')] : []),
+        plural(counts.identities, 'linked account'),
+        plural(counts.apps, 'connected app'),
       ].join(', ')
-    : [plural(counts.grants, 'grant'), ...said(counts.tokens, 'token')].join(', ');
+    : [plural(counts.grants, 'grant'), plural(counts.tokens, 'token')].join(', ');
 }
 
 /**
@@ -2090,6 +2088,8 @@ function initProject(args: string[]): void {
   const kinds = KINDS.filter((kind) => values[kind]);
   if (kinds.length !== 1 || positionals.length > 1) fail('usage: coffre init --workers|--node [<dir>]');
   const kind: Kind = kinds[0];
+  const unreleased = UNRELEASED[kind];
+  if (unreleased !== undefined) fail(unreleased);
   const dir = resolve(positionals[0] ?? '.');
   const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
   const files = attempt(() => init(kind, dir, version));

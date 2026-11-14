@@ -10,7 +10,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { bindings } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
 
-import { commit, prepare } from '../src/change.ts';
+import { CHANGE_LOCK, commit, prepare } from '../src/change.ts';
 import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
@@ -56,6 +56,8 @@ const put = (label: string, who: string, role: string | null = null, scope: unkn
 /** A put's answer: the standing it leaves, and whether it admitted or brought back the member (`created`), or set their role. */
 const as = (created: boolean, role: string, scope: unknown = null) => ({ answer: { role, scope, created } });
 const remove = (label: string, who: string) => asked(label, { op: 'member.remove', principal: who } as never);
+/** A removal's answer: the grants it revoked, and the ways in it ended, none unless said. */
+const removed = (revoked: number, ended: Partial<Record<'sessions' | 'tokens' | 'apps' | 'identities', number>> = {}) => ({ answer: { revoked, sessions: 0, tokens: 0, apps: 0, identities: 0, ...ended } });
 
 const reveal = (label: string): UseInput => ({ ...shown(label), project: 'market', environment: 'prod', mine: false, keys: ['DATABASE_URL'], purpose: 'reveal', upstream: null });
 /** What a use by `label` is answered: the value, or why not. */
@@ -129,7 +131,7 @@ test('an admission is refused to whoever may not make it, and writes nothing', a
 });
 
 test('a service account holds no instance role but member, and one removed comes back by whoever runs the whole instance, whoever removed it', async () => {
-  assert.deepEqual(await remove('ada-cli', api), { answer: { revoked: 0 } });
+  assert.deepEqual(await remove('ada-cli', api), removed(0));
   await nothingWritten(async () => {
     assert.deepEqual(await put('bo-cli', api), { refused: 'no_access' }, 'one who does not run the instance');
     assert.deepEqual(await put('sam-cli', api), { refused: 'no_access' }, 'nor one who runs part of it');
@@ -243,7 +245,7 @@ test('a removed person the deployment names an Owner comes back as one, which on
 
 test('a removal deletes the member\'s grants and moves their generation on, which ends their session within the vault\'s memory', async () => {
   assert.equal(await uses('bo-cli'), 'postgres://market');
-  assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 2 } });
+  assert.deepEqual(await remove('fay-cli', bo), removed(2, { sessions: 1 }));
   assert.deepEqual(await row(bo), { id: bo, status: 'removed', role: 'member', scope: null, generation: 1 });
   assert.equal(await count('grants'), 0);
   const entry = await written();
@@ -255,8 +257,8 @@ test('a removal deletes the member\'s grants and moves their generation on, whic
   world.tick(2000);
   assert.equal(await uses('bo-cli'), 'unauthenticated');
   // An Owner of the whole instance removes another, and anyone who runs it removes themselves.
-  assert.deepEqual(await remove('ada-cli', cy), { answer: { revoked: 0 } });
-  assert.deepEqual(await remove('fay-cli', fay), { answer: { revoked: 0 } });
+  assert.deepEqual(await remove('ada-cli', cy), removed(0, { sessions: 1 }));
+  assert.deepEqual(await remove('fay-cli', fay), removed(0, { sessions: 1 }));
 });
 
 test('a removal revokes the member\'s sign-in accounts, so that back in, they bind them anew: one revoked before is left as it is', async () => {
@@ -279,6 +281,44 @@ test('a removal revokes the member\'s sign-in accounts, so that back in, they bi
   assert.equal((await row(bo))!.generation, 1);
 });
 
+test('a removal says how many ways in it ended, by kind: those of their generation still live, and the sign-in accounts it revoked', async () => {
+  const hour = (hours: number) => new Date(world.now() + hours * 3_600_000);
+  const app = (label: string, more: Parameters<typeof credential>[2] = {}) => credential(label, bo, { kind: 'mcp', client: '{"id":"https://app.example/client.json","host":"app.example","registration":"cimd","scopes":"secrets:read"}', ...more });
+  const connection = app('bo-app');
+  await write(world, ...rows('identities', identity(bo, { email: 'bo@acme.example' }), identity(bo, { revokedAt: new Date(world.now() - 60_000), revokedBy: bo })),
+    ...rows('credentials',
+      // Sessions: Bo's CLI one (beforeEach) and a browser's.
+      credential('bo-browser', bo, { kind: 'browser' }),
+      // Tokens: a personal token and a handle.
+      credential('bo-pat', bo, { kind: 'personal', scope: '[]' }), credential('bo-handle', bo, { kind: 'handle', places: '[]' }),
+      // One connected app: its access token is no app of its own, and a code not yet redeemed is no app yet.
+      connection, app('bo-access', { ancestors: JSON.stringify([connection.id]) }), app('bo-waiting', { challenge: 'x' }),
+      // None of these: revoked, expired, of a generation before.
+      credential('bo-revoked', bo, { kind: 'personal', scope: '[]', revokedAt: hour(-1), revokedBy: bo }), credential('bo-expired', bo, { kind: 'browser', expiresAt: hour(-1) }),
+      credential('bo-before', bo, { generation: -1 }),
+      // Another member's.
+      credential('eve-browser', eve, { kind: 'browser' })));
+  assert.deepEqual(await remove('fay-cli', bo), removed(2, { sessions: 2, tokens: 2, apps: 1, identities: 1 }));
+  // A service account's: its tokens and its workloads' sessions are tokens.
+  await write(world, ...rows('credentials', credential('api-1', api), credential('api-2', api, { kind: 'workload', jkt: 'k', notAfter: hour(1) })));
+  assert.deepEqual(await remove('ada-cli', api), removed(0, { tokens: 2 }));
+});
+
+test('a removal counts what is live as its write runs, behind the change lock: a session that lapsed while it waited starts it over', async () => {
+  await write(world, ...rows('credentials', credential('bo-soon', bo, { kind: 'browser', expiresAt: new Date(Date.now() + 600) })));
+  const deciding = { workloads: world.workloads, owners: world.owners };
+  const prepared = await prepare(world, OPERATIONS['member.remove']({ ...shown('fay-cli'), op: 'member.remove', principal: bo }, deciding));
+  assert.deepEqual('answer' in prepared && prepared.answer, removed(2, { sessions: 2 }).answer);
+  const { landing } = await world.owner.transaction(async (holder) => {
+    await holder.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
+    const landing = commit(world, prepared as never);
+    await new Promise((done) => setTimeout(done, 900));
+    return { landing };
+  });
+  assert.equal(await landing, false, 'its session lapsed behind the lock');
+  assert.deepEqual(await remove('fay-cli', bo), removed(2, { sessions: 1 }));
+});
+
 test('a removal that finds an account of the member\'s it cannot read refuses, and removes nothing', async () => {
   await write(world, ...rows('identities', identity(bo, { email: 'bo@acme.example' })));
   const before = [await members(), await count('grants'), await kept()];
@@ -298,7 +338,7 @@ test('a removal that finds an account of the member\'s it cannot read refuses, a
 test('a grant hidden from a removal and put back once the member is brought back reaches nothing: it is of the generation the removal ended', async () => {
   // The writer the design assumes deletes Bo's grants before the removal, which finds none to drop, and puts them back, MACs and all, after.
   const [{ hidden }] = (await rowsOf<{ hidden: string }>(world.owner, sql`WITH gone AS (DELETE FROM grants WHERE principal = ${bo} RETURNING *) SELECT json_agg(gone)::text AS hidden FROM gone`)) as [{ hidden: string }];
-  assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 0 } });
+  assert.deepEqual(await remove('fay-cli', bo), removed(0, { sessions: 1 }));
   await world.owner.execute(sql`INSERT INTO grants SELECT * FROM json_populate_recordset(NULL::grants, ${hidden}::json)`);
   assert.deepEqual(await put('fay-cli', bo), as(true, 'member'));
   assert.deepEqual(await row(bo), { id: bo, status: 'active', role: 'member', scope: null, generation: 1 });
@@ -315,12 +355,12 @@ test('grants of two memberships before, kept and put back after the second retur
   const putBack = (kept: string) => world.owner.execute(sql`INSERT INTO grants SELECT * FROM json_populate_recordset(NULL::grants, ${kept}::json)`);
   // Generation 0's grants on market and on prod; the writer keeps the one on market.
   const [{ first }] = (await rowsOf<{ first: string }>(world.owner, sql`SELECT json_agg(g)::text AS first FROM grants g WHERE principal = ${bo} AND project_id IS NOT NULL`)) as [{ first: string }];
-  assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 2 } });
+  assert.deepEqual(await remove('fay-cli', bo), removed(2, { sessions: 1 }));
   assert.deepEqual(await put('fay-cli', bo), as(true, 'member'));
   // Generation 1 is given prod, genuinely, and the writer keeps that too.
   await write(world, ...rows('grants', grant(bo, 'developer', { environment: prod }, { generation: 1 })));
   const second = await saved();
-  assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 1 } });
+  assert.deepEqual(await remove('fay-cli', bo), removed(1), 'Bo\'s session is of the generation before');
   assert.deepEqual(await put('fay-cli', bo), as(true, 'member'));
   assert.equal((await row(bo))!.generation, 2);
   await putBack(first);
@@ -341,7 +381,7 @@ test('a removed member whose rows are deleted around the vault is admitted anew 
   // such a member from a newcomer, but its entry says the row it made replaced none, and the signer's
   // mirror holds Bo's removed row. Its credential would have to be put back too, a row put back.
   const signer = await Signer.open({ db: world.db, keys: world.keys, now: world.now, store: memoryStore(), keepUsesDays: 90 });
-  assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 2 } });
+  assert.deepEqual(await remove('fay-cli', bo), removed(2, { sessions: 1 }));
   for (const hash of world.woken.splice(0)) await signer.wake(hash);
   await signer.run(true);
   assert.deepEqual(await signer.take(), []);
@@ -469,7 +509,7 @@ test('a removal beside a new grant of the member\'s starts over, and takes that 
   assert.ok(!('refused' in prepared));
   await write(world, ...rows('grants', grant(bo, 'developer', { project: billing })));
   assert.equal(await commit(world, prepared), false, 'a grant came since its read');
-  assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 3 } });
+  assert.deepEqual(await remove('fay-cli', bo), removed(3, { sessions: 1 }));
   assert.equal(await count('grants'), 0);
 });
 

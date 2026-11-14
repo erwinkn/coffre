@@ -13,6 +13,7 @@ import { ApiError, badRequest, refusal } from '../errors.ts';
 import { formatPath, parsePath, type Path } from '../paths.ts';
 import { route } from '../route.ts';
 import { referenceView, type ReferenceView } from './keys.ts';
+import { manages, managesAny } from './bindings.ts';
 import { tokenScope, tokenView, type TokenView } from './tokens.ts';
 
 /**
@@ -205,7 +206,8 @@ export type MemberStanding = {
 
 /** What removing someone revoked, each way in counted, or null where the change ends them without counting; and their report, null until the offboarding design. */
 export type MemberRemoval = {
-  revoked: { grants: number; sessions: number | null; tokens: number | null; identities: number | null; apps: number | null };
+  /** What the removal ended: their grants, sessions, tokens, sign-in accounts and connected apps. */
+  revoked: WaysIn;
   report: OffboardingReport | null;
 };
 
@@ -304,6 +306,11 @@ function grantView(member: string, grant: GrantRow): MemberGrant {
  */
 const administrator = ({ holds }: Called) => holds.credentialScope == null && administers(holds.role);
 
+/** Whether the caller manages the service account a row read with `accounts` is (`manages`): every one, to whoever runs the instance. */
+const managing = (who: Called, row: MemberRow): boolean =>
+  typeOf(row.id) === 'service' && row.status === 'active'
+  && (runsInstance(who.holds) || (row.account !== null && manages(who, { status: row.status, admittedBy: row.statusChangedBy, setting: row.setting, grants: row.account })));
+
 /** The places of a path a project's access list asks about: the project and its environments, or the one environment. */
 /** Whether the caller can do anything in the project or one of its environments: what `GET /projects` lists them. */
 function reachesAny(who: Called, project: PlaceRow): boolean {
@@ -372,7 +379,8 @@ export const memberRoutes = {
     run: async (ctx, { input }): Promise<{ members: Member[]; removed: RemovedMember[] }> => {
       const who = await ctx.caller();
       const path: Path | undefined = input.path === undefined ? undefined : parsePath(input.path, [1, 2]);
-      if (!administrator(who) && !canAnywhere(who, 'grant.manage')) throw refusal('no_access');
+      // A person who may set up service accounts lists those they manage, and no one else, as 0.14.7 let them.
+      if (!administrator(who) && !canAnywhere(who, 'grant.manage') && !managesAny(who)) throw refusal('no_access');
       const runs = runsInstance(who.holds);
       const reached = projectsReached(who);
       const target = path === undefined ? undefined : await projectNamed(ctx.db, path.project);
@@ -390,15 +398,16 @@ export const memberRoutes = {
         roles: managesPath,
         removed: everyone && runs,
         scopes: runs,
+        ...(runs ? {} : { accounts: { actor: who.principal } }),
         now: new Date(),
       });
       const inPath = (grant: GrantRow) => path?.environment === undefined || grant.environment?.slug === path.environment;
       const listed: Member[] = [];
       for (const row of rows) {
         if (row.status === 'removed') continue;
-        const service = typeOf(row.id) === 'service';
-        const managed = service && runs;
-        const visible = row.grants.filter((grant) => (runs || can(who, 'grant.manage', placeOfGrant(grant))) && inPath(grant)).sort(byPlace);
+        const managed = managing(who, row);
+        // A service account's manager reaches every grant it holds, and sees them all.
+        const visible = row.grants.filter((grant) => (runs || managed || can(who, 'grant.manage', placeOfGrant(grant))) && inPath(grant)).sort(byPlace);
         const scope = standingOf(row);
         const reachesByRole = managesPath && row.roleHolds && roleOf(row) !== 'member' && asked.some((place) => inScope(scope, place));
         if (!everyone && visible.length === 0 && !reachesByRole && !(managed && path === undefined)) continue;
@@ -429,11 +438,10 @@ export const memberRoutes = {
    * included. A key is to rotate when they saw it on or after its value was
    * first written, or wrote that value themselves (`seenBy`). One call to
    * the vault and one statement, from their own rows, which also lists the
-   * service tokens they issued that still work and a person's own tokens,
-   * as their accounts' token lists show them, and the references they made
-   * that still stand, each list 200 at most (`totals` counts them all).
-   * Their connected apps are not read here yet: null, "not listed", which
-   * the client's type allows.
+   * service tokens they issued that still work, a person's own tokens and
+   * connected apps, as their accounts' token lists and Connected apps show
+   * them, and the references they made that still stand, each list of
+   * tokens and references 200 at most (`totals` counts them all).
    */
   ...route('GET /members/:member', {
     run: async (ctx, { params }): Promise<OffboardingReport> => {
@@ -467,7 +475,7 @@ export const memberRoutes = {
           lastUsedAt: token.lastUsedAt,
           scope: tokenScope(token.scope, row.slugs),
         })),
-        apps: null,
+        apps: row.apps,
         // A service account's tokens are on its own page.
         personalTokens: typeOf(principal) === 'user' ? row.tokens.map((token) => tokenView(token, row.slugs)) : [],
         references: row.made.map((made): MadeReference => {
@@ -491,11 +499,15 @@ export const memberRoutes = {
     run: async (ctx, { params }): Promise<MemberAccess> => {
       const principal = memberOf(params.member);
       const who = await ctx.caller();
-      if (!administrator(who) && !canAnywhere(who, 'grant.manage')) throw refusal('no_access');
+      const service = typeOf(principal) === 'service';
+      const lists = administrator(who) || canAnywhere(who, 'grant.manage');
+      if (!lists && !(service && managesAny(who))) throw refusal('no_access');
       const runs = runsInstance(who.holds);
-      const [row] = await members(ctx.db, { member: principal, within: runs ? null : projectsReached(who), listed: 'all', removed: true, scopes: runs, now: new Date() });
+      const [row] = await members(ctx.db, { member: principal, within: runs ? null : projectsReached(who), listed: 'all', removed: true, scopes: runs, ...(service && !runs ? { accounts: { actor: who.principal } } : {}), now: new Date() });
+      const managed = row !== undefined && managing(who, row);
+      // Whoever lists no members sees a service account they manage, and no other: one that is not there, the same.
+      if (!lists && !managed) throw refusal('no_access');
       if (row === undefined) throw new ApiError('not_found', 'no such member');
-      const managed = typeOf(principal) === 'service' && row.status === 'active' && runs;
       return {
         member: principal,
         principalType: typeOf(principal),
@@ -504,7 +516,7 @@ export const memberRoutes = {
         instanceRole: roleOf(row),
         scope: runs ? scopeView(standingOf(row), row.scopeSlugs) : null,
         managed,
-        grants: row.grants.filter((grant) => runs || can(who, 'grant.manage', placeOfGrant(grant))).sort(byPlace).map((grant) => grantView(principal, grant)),
+        grants: row.grants.filter((grant) => runs || managed || can(who, 'grant.manage', placeOfGrant(grant))).sort(byPlace).map((grant) => grantView(principal, grant)),
       };
     },
   }),
@@ -559,16 +571,18 @@ export const memberRoutes = {
 
   /**
    * Remove a member: their grants go, their sign-in accounts are revoked,
-   * and their generation moves on, which ends every session, token and
-   * binding they hold. One change of the vault's. It says how many grants
-   * went; the rest it ends without counting, and those are null. Their
-   * report comes with the offboarding design: null until then.
+   * and their generation moves on, which ends every session, token,
+   * connected app and binding they hold. Whoever runs the instance removes
+   * anyone; a service account's manager removes it too (`managesService`).
+   * One change of the vault's, which says how many of each it ended, as
+   * 0.14.7 did. Their report comes with the offboarding design: null until
+   * then.
    */
   ...route('DELETE /members/:member', {
     run: async (ctx, { params }): Promise<MemberRemoval> => {
       const principal = memberOf(params.member);
-      const { revoked } = await changed(ctx, { op: 'member.remove', principal }, principal);
-      return { revoked: { grants: revoked, sessions: null, tokens: null, identities: null, apps: null }, report: null };
+      const { revoked, ...ended } = await changed(ctx, { op: 'member.remove', principal }, principal);
+      return { revoked: { grants: revoked, ...ended }, report: null };
     },
   }),
 

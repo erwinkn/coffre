@@ -13,6 +13,7 @@ import { eq, sql } from 'drizzle-orm';
 
 import { amend, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, user, write } from '@coffre/vault/testing';
 
+import type { ConnectedApp } from '../src/api/routes/members.ts';
 import { openApp } from './app-fixture.ts';
 
 const app = await openApp();
@@ -131,21 +132,22 @@ test('an Owner of the instance lists everyone and every live grant, with scopes 
 
 test('a manager of a project lists the grants they manage and their members, and no scope; anyone else is refused', async () => {
   const [listed] = await directory('bo-cli');
-  // Ada's grant on billing is not Bo's to see, nor is Dee, who holds market by her role alone, without a path.
-  assert.deepEqual(brief(listed), ['token:ci: member, market=maintainer', `${ada}: member, market=viewer`, `${bo}: member, market=manager`, `${ed}: member, market/dev=viewer`, `${fin}: member, market/dev=viewer`]);
-  assert.deepEqual([listed.members.every((member) => member.scope === null && !member.managed), listed.removed], [true, []]);
+  // Ada's grant on billing is not Bo's to see, nor is Dee, who holds market by her role alone, without a path. Bo manages
+  // access to market, which is all ci holds: he manages ci (`managesService`).
+  assert.deepEqual(brief(listed), ['token:ci: member (managed), market=maintainer', `${ada}: member, market=viewer`, `${bo}: member, market=manager`, `${ed}: member, market/dev=viewer`, `${fin}: member, market/dev=viewer`]);
+  assert.deepEqual([listed.members.every((member) => member.scope === null && member.managed === (member.member === ci)), listed.removed], [true, []]);
 
-  // Ada manages nothing: refused, with no statement.
-  const [answer, refusedCalls, refusedStatements] = await cost(() => call('ada-cli', 'GET', '/members'));
+  // Ada manages no access, and no service account: a person who may set some up lists those she manages, none.
+  assert.deepEqual((await directory('ada-cli'))[0], { members: [], removed: [] });
+  // Cy's token holds nothing of the instance's own, manages no grant and sets up no service account: refused, with no statement.
+  const [answer, refusedCalls, refusedStatements] = await cost(() => call('cy-token', 'GET', '/members'));
   assert.deepEqual([...refused(answer), refusedCalls, refusedStatements], [...NO_ACCESS, ['caller'], 0]);
-  // Cy's token holds nothing of the instance's own, and manages no grant: refused too.
-  assert.deepEqual(refused(await call('cy-token', 'GET', '/members')), NO_ACCESS);
 });
 
 test('an Admin scoped to a project lists everyone, with the grants inside their scope, and no scope or removed member', async () => {
   const [listed] = await directory('al-cli');
   assert.deepEqual(brief(listed), [
-    'token:ci: member, market=maintainer',
+    'token:ci: member (managed), market=maintainer',
     `${ada}: member, market=viewer`,
     `${al}: admin`,
     `${aud}: auditor`,
@@ -163,7 +165,7 @@ test('an Admin scoped to a project lists everyone, with the grants inside their 
 test("a project's access list: its grants, and, to whoever manages access there, who reaches it by their instance role", async () => {
   const [market] = await directory('bo-cli', 'market');
   assert.deepEqual(brief(market), [
-    'token:ci: member, market=maintainer',
+    'token:ci: member (managed), market=maintainer',
     `${ada}: member, market=viewer`,
     `${al}: admin (by role)`,
     `${bo}: member, market=manager`,
@@ -176,8 +178,8 @@ test("a project's access list: its grants, and, to whoever manages access there,
   assert.deepEqual(brief((await directory('fin-cli', 'market'))[0]), []);
   // One environment: its own grants, not the project's, and the roles that reach it.
   assert.deepEqual(brief((await directory('bo-cli', 'market/dev'))[0]), [`${al}: admin (by role)`, `${cy}: owner (by role)`, `${dee}: developer (by role)`, `${ed}: member, market/dev=viewer`, `${fin}: member, market/dev=viewer`]);
-  // Ed manages nothing there.
-  assert.deepEqual(refused(await call('ed-cli', 'GET', '/members?path=market')), NO_ACCESS);
+  // Ed manages no access there, and no service account: none.
+  assert.deepEqual(brief((await directory('ed-cli', 'market'))[0]), []);
   // A project Bo holds nothing in, and one not there, are one answer; to an Owner too.
   for (const [label, path] of [['bo-cli', 'billing'], ['bo-cli', 'nope'], ['cy-cli', 'nope'], ['cy-cli', 'gone~1']] as const) {
     assert.deepEqual(refused(await call(label, 'GET', `/members?path=${encodeURIComponent(path)}`)), NO_ACCESS, `${label} ${path}`);
@@ -213,8 +215,9 @@ test("one member's access: the grants the caller manages, their role, and their 
   const [seen] = await access('bo-cli', 'user:ADA@Acme.example');
   assert.deepEqual([seen.member, seen.scope, seen.grants.map((held) => held.id)], [ada, null, [`${ada}/market`]]);
   assert.deepEqual((await access('fin-cli', ada))[0].grants.map((held) => held.id), [`${ada}/billing/prod`]);
-  // Al's scope, by slug; a service account, managed by whoever runs the instance.
-  assert.deepEqual([(await access('cy-cli', al))[0].scope, (await access('cy-cli', ci))[0].managed, (await access('al-cli', ci))[0].managed], [{ projects: { only: ['market'] }, environments: 'all' }, true, false]);
+  // Al's scope, by slug; a service account, managed by whoever runs the instance, and by Al, who manages access to market,
+  // all it holds; not by Fin, who lists members but holds market/dev alone.
+  assert.deepEqual([(await access('cy-cli', al))[0].scope, (await access('cy-cli', ci))[0].managed, (await access('al-cli', ci))[0].managed, (await access('fin-cli', ci))[0].managed], [{ projects: { only: ['market'] }, environments: 'all' }, true, true, false]);
   // Rex was removed: he holds nothing, whatever his rows say.
   const [rexs] = await access('cy-cli', rex);
   assert.deepEqual([rexs.status, rexs.instanceRole, rexs.grants], ['removed', 'member', []]);
@@ -227,7 +230,8 @@ test("one member's access: the grants the caller manages, their role, and their 
 });
 
 test('removing a member: their grants go, and their sessions end', async () => {
-  assert.deepEqual(await call('cy-cli', 'DELETE', `/members/${ada}`), [200, { revoked: { grants: 2, sessions: null, tokens: null, identities: null, apps: null }, report: null }]);
+  // What went, as the vault's one change counted it: her two grants and her CLI session.
+  assert.deepEqual(await call('cy-cli', 'DELETE', `/members/${ada}`), [200, { revoked: { grants: 2, sessions: 1, tokens: 0, identities: 0, apps: 0 }, report: null }]);
   assert.deepEqual(refused(await call('ada-cli', 'GET', '/me')), [401, 'unauthenticated', 'unauthenticated']);
   const [listed] = await directory('cy-cli');
   assert.deepEqual(listed.removed.map((member) => member.principalId), ['ada@acme.example', 'rex@acme.example']);
@@ -238,6 +242,35 @@ test('removing a member: their grants go, and their sessions end', async () => {
   assert.deepEqual(refused(await call('cy-cli', 'DELETE', '/members/user:nobody@acme.example')), [404, 'not_found', 'not_a_member']);
   assert.deepEqual(refused(await call('cy-cli', 'DELETE', `/members/${cy}`)), [409, 'conflict', 'last_owner']);
   assert.deepEqual(refused(await call('cy-cli', 'DELETE', '/members/user:a%20b')), [400, 'bad_request', undefined]);
+});
+
+test('a person who sets up service accounts lists those they manage, reads their access and removes them, and no one else (0.14.7, D241)', async () => {
+  // Ed views market/dev. Ada views all of market, whose staging is protected: as a person she reads nothing there.
+  await write(world, ...rows('principals', principal('token:dev-reader'), principal('token:prod-reader'), principal('token:market-reader'), principal('token:eds', { statusChangedBy: ed })),
+    ...rows('grants', grant('token:dev-reader', 'viewer', { environment: { id: ids.dev! } }), grant('token:prod-reader', 'viewer', { environment: { id: ids.prod! } }),
+      grant('token:market-reader', 'viewer', { project: { id: ids.market! } })),
+    ...rows('credentials', credential('dev-reader-1', 'token:dev-reader')));
+  const managedBy = async (label: string) => (await directory(label))[0].members.map((member) => `${member.member}${member.managed ? ' (managed)' : ''}: ${member.grants.map((held) => held.id).join(' ')}`.trimEnd());
+  // Ed holds all dev-reader holds, and admitted eds, which holds nothing: his two, and no person.
+  assert.deepEqual(await managedBy('ed-cli'), ['token:dev-reader (managed): token:dev-reader/market/dev', 'token:eds (managed):']);
+  // Ada holds viewer on dev and prod, but not in staging, which a grant on all of market reaches: she does not manage
+  // market-reader, as 0.14.7 weighed it (D241).
+  assert.deepEqual(await managedBy('ada-cli'), ['token:dev-reader (managed): token:dev-reader/market/dev', 'token:prod-reader (managed): token:prod-reader/market/prod']);
+
+  const access = async (label: string, member: string) => call(label, 'GET', `/members/${member}/access`);
+  const [status, seen] = await access('ed-cli', 'token:dev-reader');
+  assert.deepEqual([status, seen.managed, (seen.grants as Grant[]).map((held) => held.id)], [200, true, ['token:dev-reader/market/dev']]);
+  // Not his: another account, a person, one not there, one removed. The same refusal for each.
+  for (const other of ['token:prod-reader', 'token:market-reader', ada, 'token:nobody', rex]) assert.deepEqual(refused(await access('ed-cli', other)), NO_ACCESS, other);
+  assert.deepEqual(refused(await access('ada-cli', 'token:market-reader')), NO_ACCESS);
+  // On a token, nobody manages a service account.
+  assert.deepEqual(refused(await call('cy-token', 'GET', '/members/token:dev-reader/access')), NO_ACCESS);
+
+  // He removes his, which ends its token, and the vault refuses him another.
+  assert.deepEqual(await call('ed-cli', 'DELETE', '/members/token:dev-reader'), [200, { revoked: { grants: 1, sessions: 0, tokens: 1, identities: 0, apps: 0 }, report: null }]);
+  assert.deepEqual(refused(await call('ed-cli', 'DELETE', '/members/token:prod-reader')), NO_ACCESS);
+  assert.deepEqual(refused(await call('ada-cli', 'DELETE', '/members/token:market-reader')), NO_ACCESS);
+  assert.deepEqual(await managedBy('ed-cli'), ['token:eds (managed):']);
 });
 
 test("a person's grants set in one change, each place by path, all or none", async () => {
@@ -363,7 +396,7 @@ test('what is not served yet answers 501', async () => {
 });
 
 type Exposed = { project: string; environment: string; key: string; version: number; how: 'read' | 'wrote'; at: string };
-type Report = Record<string, unknown> & { status: string; exposed: Exposed[]; rotated: number; live: Record<string, number> };
+type Report = Record<string, unknown> & { status: string; exposed: Exposed[]; rotated: number; live: Record<string, number>; apps: ConnectedApp[] };
 const report = async (member: string): Promise<[Report, string[], number]> => {
   const [[status, body], calls, statements] = await cost(() => call('cy-cli', 'GET', `/members/${member}`));
   assert.equal(status, 200, JSON.stringify(body));
@@ -413,13 +446,19 @@ test("a member's report: the keys whose current value they read or wrote, a rest
   assert.deepEqual(rest, {
     principalType: 'user', principalId: 'ada@acme.example', status: 'active', instanceRole: 'member', scope: { projects: 'all', environments: 'all' }, declared: false,
     removedAt: null, removedBy: null, live: { grants: 2, sessions: 1, tokens: 0, identities: 0, apps: 0 }, rotated: 0,
-    issuedTokens: [], apps: null, personalTokens: [], references: [], totals: { issuedTokens: 0, personalTokens: 0, references: 0 }, personal: [{ project: 'market', of: 'prod', slug: 'prod-ada' }],
+    issuedTokens: [], apps: [], personalTokens: [], references: [], totals: { issuedTokens: 0, personalTokens: 0, references: 0 }, personal: [{ project: 'market', of: 'prod', slug: 'prod-ada' }],
   });
-  // Al's scope, by slug. Cy's token is a token, an app connected through MCP an app; he has no personal config.
+  // Al's scope, by slug. Cy's token is a token, an app connected through MCP an app, listed as Connected apps lists it:
+  // its access token is no app of its own, nor is a connection whose code waits. He has no personal config.
   assert.deepEqual((await report(al))[0].scope, { projects: { only: ['market'] }, environments: 'all' });
-  await write(world, ...rows('credentials', credential('cy-app', cy, { kind: 'mcp', client: JSON.stringify({ id: 'https://claude.ai/client.json', host: 'claude.ai', registration: 'cimd', redirectUri: 'https://claude.ai/callback', scopes: ['read'] }) })));
+  const client = JSON.stringify({ id: 'https://claude.ai/client.json', host: 'claude.ai', registration: 'cimd', redirectUri: 'https://claude.ai/callback', scopes: 'read' });
+  const connection = credential('cy-app', cy, { kind: 'mcp', label: 'Claude', client });
+  await write(world, ...rows('credentials', connection, credential('cy-app-access', cy, { kind: 'mcp', client, ancestors: JSON.stringify([connection.id]) }), credential('cy-app-waiting', cy, { kind: 'mcp', client, challenge: 'x' })));
   const [cys] = await report(cy);
   assert.deepEqual([cys.live, cys.personal], [{ grants: 0, sessions: 1, tokens: 1, identities: 0, apps: 1 }, []]);
+  assert.deepEqual(cys.apps.map(({ id, name, host, registration, scopes, lastUsedAt }) => ({ id, name, host, registration, scopes, lastUsedAt })), [
+    { id: connection.id, name: 'Claude', host: 'claude.ai', registration: 'cimd', scopes: ['read'], lastUsedAt: null },
+  ]);
 
   // Dee leaves: what lets her in is gone, what she knows is not. The directory counts it for everyone removed, still in one statement.
   await ok(call('cy-cli', 'DELETE', `/members/${dee}`));
