@@ -17,7 +17,7 @@ import type { Deciding } from '../vault.ts';
 import { managing, NOWHERE, ownsAllAsking, said } from './asking.ts';
 import type { Operations } from './index.ts';
 import { presented, text } from './input.ts';
-import { definitionsOf, held as holding, managesSealed, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
+import { definitionsOf, managesSealed, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
 
 /**
  * The changes of members, grants, roles and the instance's policy
@@ -670,7 +670,7 @@ function settingsEdit(input: Presented & SettingsEdit, vault: Deciding): Operati
 
 /** What the caller holds, every project role as its row says beside their own: whether they give a service account one weighs them all. */
 function withRoles(caller: Asking, defined: readonly Row<typeof roles>[]): Holdings {
-  const own = holding(caller);
+  const own = caller.holds;
   return { ...own, policy: { ...own.policy, roles: { ...definitionsOf(defined), ...own.policy.roles } } };
 }
 

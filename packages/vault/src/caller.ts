@@ -199,12 +199,14 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
   const projectOf = new Map(rows.environments.map((environment) => [environment.id, environment.projectId]));
   const definitions = (instance: boolean) =>
     Object.fromEntries(rows.roles.filter((role) => role.instance === instance).map((role): [string, RoleDefinition] => [role.id, { name: role.name, description: role.description, permissions: role.permissions as Permission[], protected: role.protected as Permission[] }]));
+  const instanceRoles = definitions(true) as Policy['instanceRoles'];
   return {
     principal: principal.id,
     credential,
     workload,
     holds: {
-      role: !service && isInstanceRole(principal.role) ? principal.role : 'member',
+      // A role with no row, or one whose row is not the vault's, is no role: they hold what a member does, and run nothing.
+      role: !service && isInstanceRole(principal.role) && Object.hasOwn(instanceRoles, principal.role) ? principal.role : 'member',
       scope,
       // A grant on an environment names only it: its project is the environment's row's. One on a place this request is not about decides nothing here.
       grants: rows.grants
@@ -213,7 +215,7 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
         .map((grant) => ({ projectId: grant.projectId ?? projectOf.get(grant.environmentId!) ?? null, environmentId: grant.environmentId, role: grant.role })),
       credentialScope,
       // A role with no row is no role: the roles are the rows read, never the ones that ship.
-      policy: { roles: definitions(false), instanceRoles: definitions(true) as Policy['instanceRoles'], protected: rows.environments.filter((environment) => environment.protected).map((environment) => environment.id), protectedIn: {} },
+      policy: { roles: definitions(false), instanceRoles, protected: rows.environments.filter((environment) => environment.protected).map((environment) => environment.id), protectedIn: {} },
       service,
       kind: workload !== null ? 'workload' : service ? 'bearer' : 'person',
     },

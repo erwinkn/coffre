@@ -22,11 +22,8 @@ import { NOWHERE } from './asking.ts';
  */
 export const onSession = (caller: Asking) => caller.holds.credentialScope == null;
 
-/** What the caller holds, but for an instance role whose row was not read: a role with no row is no role. */
-export const held = ({ holds }: Asking) => (Object.hasOwn(holds.policy.instanceRoles, holds.role) ? holds : { ...holds, role: 'member' as const });
-
-/** Whether the caller runs the instance (`runsInstance`). */
-export const runs = (caller: Asking) => runsInstance(held(caller));
+/** Whether the caller runs the instance (`runsInstance`): an instance role with no row is none (`callerOf`). */
+export const runs = (caller: Asking) => runsInstance(caller.holds);
 
 /**
  * A service account: by its id, or as SQL that selects it, a binding's or a
@@ -141,7 +138,7 @@ export function managesSealed(caller: Asking, seen: ServiceSeen, member: string,
   const setting = settingOf(seen);
   if (account === null || setting === null) return false;
   // What its grants' roles hold, from their rows, beside the caller's own.
-  const holds = held(caller);
+  const { holds } = caller;
   const named = Object.fromEntries(seen.heldAs.filter((row) => !row.instance).map((row): [string, RoleDefinition] => [row.id, { name: row.name, description: row.description, permissions: row.permissions as Permission[], protected: row.protected as Permission[] }]));
   return managesService({ ...holds, policy: { ...holds.policy, roles: { ...named, ...holds.policy.roles } } }, setting, caller.principal, account);
 }

@@ -39,10 +39,12 @@ beforeEach(async () => {
   const billing = project('billing');
   market = project('market');
   prod = environment(market, 'prod', { protected: true });
+  const dev = environment(market, 'dev');
   await write(
     world,
     ...rows('projects', market, billing),
-    ...rows('environments', environment(market, 'dev'), prod, environment(billing, 'prod')),
+    // Bo's personal config of dev: his alone, which no change to a role reaches.
+    ...rows('environments', dev, environment(market, 'dev-bo', { parentId: dev.id, owner: bo }), prod, environment(billing, 'prod')),
     ...rows('roles', ...Object.entries(ROLES).map(([id, definition]) => roleRow(false, id, definition)), ...Object.entries(INSTANCE_ROLES).map(([id, definition]) => roleRow(true, id, definition))),
     ...rows('principals', principal(cy, { role: 'owner' }), principal(fay, { role: 'admin' }), principal(al, { role: 'admin', scope: JSON.stringify({ projects: { only: [market.id] }, environments: 'all' }) }), principal(bo), principal(eve), principal(ci)),
     ...rows('policy', instance()),
@@ -184,6 +186,21 @@ test('only an Owner of the whole instance changes or weighs a role; what the vau
   ];
   for (const [method, path, body, status] of bads) assert.equal((await call('cy-cli', method, path, body))[0], status, `${method} ${path} ${JSON.stringify(body)}`);
   assert.equal(app.calls.length, asked);
+});
+
+test('an instance role whose row is gone, or not the vault\'s, is none: its holder runs nothing, reads no settings and edits no role', async () => {
+  // Fay's Admin row edited around the vault, then deleted; Cy's Owner row the same.
+  for (const change of [sql`UPDATE roles SET description = 'Runs it.' WHERE instance AND id = 'admin'`, sql`DELETE FROM roles WHERE instance AND id = 'admin'`]) {
+    await world.owner.execute(change);
+    world.memory.callers.clear();
+    assert.deepEqual(refused(await call('fay-cli', 'GET', '/settings')), NO_ACCESS);
+  }
+  for (const change of [sql`UPDATE roles SET description = 'Everything.' WHERE instance AND id = 'owner'`, sql`DELETE FROM roles WHERE instance AND id = 'owner'`]) {
+    await world.owner.execute(change);
+    world.memory.callers.clear();
+    assert.deepEqual([(await roles('cy-cli')).editable, refused(await call('cy-cli', 'GET', '/settings'))], [false, NO_ACCESS]);
+    assert.deepEqual(refused(await call('cy-cli', 'PUT', '/roles/developer?dryRun=1', narrowed)), NO_ACCESS);
+  }
 });
 
 test("the instance's settings: read by whoever runs it, caller and one statement, and set in one change and no statement", async () => {

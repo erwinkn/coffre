@@ -229,9 +229,18 @@ test("whoever runs the instance ends anyone's credential, a person's or a servic
 
 test('an Owner whose instance role has no row runs nothing: ends nobody else\'s credential', async () => {
   await forged('roles', sql`instance AND id = 'owner'`);
+  // Told so: the app scopes its pages by what the vault decides by, the role a member holds.
+  const roleOf = async () => {
+    world.memory.callers.clear();
+    const answer = await vault.caller(shown('root-cli'));
+    return 'refused' in answer ? answer.refused : answer.holds.role;
+  };
+  assert.equal(await roleOf(), 'member');
   assert.deepEqual(await vault.change(end('root-cli', ids['ada-cli']!)), { refused: 'unknown_credential' });
   assert.deepEqual(await vault.change(end('root-cli', ids['bare-token']!, { member: bare })), { refused: 'unknown_credential' });
   assert.deepEqual(await revoked(), ['ada-ended']);
+  await world.owner.execute(sql`DELETE FROM roles WHERE instance AND id = 'owner'`);
+  assert.equal(await roleOf(), 'member');
 });
 
 test("a service account's tokens are ended by whoever manages it: one who holds all it holds, where the setting lets people; or who admitted it while it holds nothing", async () => {
