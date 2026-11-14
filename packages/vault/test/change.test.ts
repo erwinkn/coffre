@@ -572,7 +572,7 @@ test('a value is the current version of a secret the same change writes, in an e
   const [place, id] = [randomUUID(), randomUUID()];
   const environment: Fresh<typeof environments> = { id: place, projectId: randomUUID(), slug: 'prod', name: 'prod', createdAt: at, archivedAt: null, parentId: null, owner: null, protected: false, frozenCredentials: [] };
   const secret = (versions: number, currentVersion: number | null, nature: Fresh<typeof secrets>['nature'] = currentVersion === null ? null : 'secret'): Fresh<typeof secrets> => ({ id, projectId: environment.projectId, environmentId: place, key: 'A', createdAt: at, updatedAt: at, versions, currentVersion, archivedAt: null, folder: null, sourceId: null, nature, recipe: null, pairId: null, pairHalf: null });
-  const version = (of: string, number: number, plaintext: string | null = null, sensitive = false) => ({ version: { id: randomUUID(), secretId: of, version: number, createdAt: at, createdBy: ada, plaintext, sensitive }, text: Buffer.from('x') });
+  const version = (of: string, number: number, plaintext: string | null = null, sensitive = false) => ({ version: { id: randomUUID(), secretId: of, version: number, createdAt: at, firstWrittenAt: at, createdBy: ada, plaintext, sensitive }, text: Buffer.from('x') });
   const here = put(environments, environment);
   const tries: [string, Write[], ReturnType<typeof version>, RegExp][] = [
     ['no secret written', [here], version(id, 1), /current version of a secret it writes/],

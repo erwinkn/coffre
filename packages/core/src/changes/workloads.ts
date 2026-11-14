@@ -6,12 +6,14 @@ import type { Issued } from './signin.ts';
  * The changes of workloads signing in (`packages/vault/src/ops/workloads.ts`,
  * docs/design/0.16.md, "A workload signing in").
  */
-export type WorkloadChanges = TokenExchange | WorkloadSignin | WorkloadRenew;
+export type WorkloadChanges = TokenExchange | WorkloadSignin | WorkloadRenew | TokenBind | TokenUnbind;
 
 export type WorkloadAnswers = {
   'token.exchange': Exchanged;
   'workload.signin': Session;
   'workload.renew': Renewed;
+  'token.bind': Bound;
+  'token.unbind': { binding: string };
 };
 
 /** The workloads' changes nobody asks: a CI run, or a workload signing in, has no credential yet, only its platform's proof. */
@@ -87,3 +89,69 @@ export type WorkloadRenew = { op: 'workload.renew' };
 
 /** The session's expiry, moved on, or as it was at its hard end. */
 export type Renewed = { expiresAt: string };
+
+/**
+ * A binding to make, as 0.14's `POST /members/:m/bindings` took it, and
+ * checked as it did (`checkBinding`, `checkPolicy`, the profile's rule):
+ *
+ * - `keys`: where its issuer's keys are, the address the app's discovery
+ *   found (a URN profile's, its issuer), which the vault takes on the
+ *   app's word and seals; or the keys themselves, uploaded, a JWKS the
+ *   vault checks and keeps (`uploadedKeys`).
+ * - `policy`: a workload's binding's, null for one a CI run's exchange
+ *   takes (a bearer profile's; under `useOnly`, every binding is a
+ *   workload's). Its `reads` name each environment by path, and its keys
+ *   by name or `"*"`, which the vault finds and seals by id.
+ * - `scope`: what its credentials reach, by path, as a service token's
+ *   (`token.create`); null for what the bindings it replaces reached, of
+ *   what the service still holds, or else all the service holds.
+ * - `replaces`: the live bindings it takes the place of, by id. Those of
+ *   its issuer whose keys are elsewhere go too (`keys_moved`).
+ */
+export type NewBinding = {
+  profile: string;
+  issuer: string | null;
+  claims: Record<string, unknown>;
+  keys: { uri: string } | { jwks: unknown };
+  policy: Record<string, unknown> | null;
+  scope: Record<string, string> | null;
+  label: string | null;
+  replaces: string[];
+};
+
+/**
+ * Trust a workload as a service (`binding`), or give its bindings on an
+ * issuer new keys, uploaded (`keys`): each is replaced by one the same but
+ * for its keys, reaching what it did of what the service still holds.
+ * Whoever manages the service (`managesService`), each grant of the scope
+ * one they could give it and it holds (`issuesCredential`); its sensitive
+ * values only where an Owner of the project binds it (`ownsProject`). A
+ * binding is never edited: a replaced one is revoked, and the credentials
+ * it issued end with it.
+ *
+ * Refused: `unauthenticated` and a stopped caller's words; `no_access`,
+ * for one who does not manage the service, or a place not found or beyond
+ * them; `unknown_principal`, a service that is not active; `tampered`, any
+ * row read that is not the vault's; `invalid`, a role that is none there, a
+ * read outside the scope or of a key the environment does not hold, a
+ * policy its reads break, uploaded keys that are no JWKS, or replaced
+ * bindings that reach nothing the service still holds or a place with two
+ * roles; `no_grants`, a scope with nothing to reach; `not_owner_issued`, a
+ * sensitive key read where no Owner of its project binds; `no_reads`, reads
+ * where the deployment lets none; `unknown_binding`, a binding replaced
+ * that is not live, or no binding on the issuer whose keys are replaced;
+ * `keys_differ`, other bindings on the issuer whose keys are elsewhere,
+ * uploaded on one side; `same_keys`, keys the bindings carry already;
+ * `too_many_bindings`, past `MAX_BINDINGS` live.
+ */
+export type TokenBind = { op: 'token.bind'; member: string } & ({ binding: NewBinding } | { keys: { issuer: string; jwks: unknown } });
+
+/** The bindings made, each with what it reaches by path and role, and the bindings revoked, by id. */
+export type Bound = { bindings: { id: string; scope: Record<string, string> }[]; replaced: string[] };
+
+/**
+ * Remove a binding: whoever manages its service. Its row is revoked, and
+ * the credentials it issued end with it. Refused `unknown_binding` for
+ * one that is not a live binding of the service, and as `token.bind` is.
+ */
+export type TokenUnbind = { op: 'token.unbind'; member: string; binding: string };

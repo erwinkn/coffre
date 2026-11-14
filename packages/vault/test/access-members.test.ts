@@ -117,7 +117,7 @@ test('an admission is refused to whoever may not make it, and writes nothing', a
     assert.deepEqual(await put('sam-cli', user('new')), { refused: 'no_access' }, 'an Admin of one project runs no instance');
     assert.deepEqual(await put('dee-cli', user('new'), 'owner'), { refused: 'no_access' }, 'nor does an Owner of one project');
     assert.deepEqual(await put('ada-pat', user('new')), { refused: 'no_access' }, 'a token runs no instance, whoever made it');
-    assert.deepEqual(await put('bo-cli', 'token:mine'), { refused: 'no_access' }, 'a person who does not run the instance sets up no service account yet');
+    assert.deepEqual(await put('eve-cli', 'token:mine'), { refused: 'no_access' }, 'a person who holds nothing sets up no service account (access-services.test.ts)');
     assert.deepEqual(await put('nobody', user('new')), { refused: 'unauthenticated' });
     assert.deepEqual(await put('ex-cli', user('new')), { refused: 'unauthenticated' });
     assert.deepEqual(await put('ada-cli', user('new'), 'developer', { projects: { only: ['nowhere'] }, environments: 'all' }), { refused: 'no_access' }, 'a scope naming no project there is');

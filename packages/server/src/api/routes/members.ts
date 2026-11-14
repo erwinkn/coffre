@@ -1,9 +1,10 @@
-import { administers, EVERYWHERE, inScope, isScope, runsInstance, type Filter, type InstanceRole, type Permission, type Role, type Scope } from '@coffre/core/access';
-import { roleId, slug } from '@coffre/core/schemas';
+import type { Queryable } from '@coffre/db';
+import { administers, EVERYWHERE, inScope, isScope, normalScope, runsInstance, type Filter, type InstanceRole, type Permission, type Policy, type Role, type RoleDefinition, type Scope } from '@coffre/core/access';
+import { instanceRole, roleId, scopeInput, slug } from '@coffre/core/schemas';
 import type { AccessChange, Called } from '@coffre/core/vault';
 import { z } from 'zod';
 
-import { members, projectNamed, type GrantRow, type MemberRow } from '../../db/queries/members.ts';
+import { members, projectNamed, projectSlugs, type Definition, type GrantRow, type MemberRow } from '../../db/queries/members.ts';
 import type { PlaceRow } from '../../db/queries/places.ts';
 import { can, canAnywhere, permissionsAt, placeOf, projectsReached, type Place } from '../caller.ts';
 import { changed } from '../change.ts';
@@ -104,6 +105,40 @@ function scopeView(scope: Scope, slugs: Record<string, string>): Scope {
 }
 
 const placeOfGrant = (grant: GrantRow): Place => placeOf(grant.project, grant.environment);
+
+/**
+ * Who reads each of these places, by name: the active members whose grants
+ * or instance role hold `secret.read` there, weighed by the rule the vault
+ * decides by (`can`), on what each holds as the vault would read it: their
+ * live grants, and the definitions of the roles they hold, from the rows,
+ * unchecked. A person holds a protected environment's column of their
+ * roles there, a service account the other one; a personal config is read
+ * by its owner alone. What a reference's `readers` show: it decides
+ * nothing, and no credential's scope narrows it. One statement, the grants
+ * on these places' projects alone, however many places.
+ */
+const definitionOf = (row: Definition): RoleDefinition => ({ name: row.name, description: '', permissions: row.permissions as Permission[], protected: row.protected as Permission[] });
+
+export async function readersAt(db: Queryable, who: Called, places: readonly Place[], now: Date): Promise<string[][]> {
+  if (places.length === 0) return [];
+  const rows = await members(db, { within: [...new Set(places.map((place) => place.projectId))], listed: 'held', roles: true, removed: false, scopes: false, now });
+  const holders = rows.map((row) => ({
+    principal: row.id,
+    holds: {
+      role: roleOf(row),
+      scope: standingOf(row),
+      grants: row.grants.map((grant) => ({ projectId: grant.project.id, environmentId: grant.environment?.id ?? null, role: grant.role as Role })),
+      // As the vault's answer about them would carry it: the roles they hold, no other, and every environment the instance protects.
+      policy: {
+        ...who.holds.policy,
+        roles: Object.fromEntries(row.grants.flatMap((grant) => (grant.definition === null ? [] : [[grant.role, definitionOf(grant.definition)]]))),
+        instanceRoles: Object.fromEntries(row.roleDefinition === null ? [] : [[row.role, definitionOf(row.roleDefinition)]]) as Policy['instanceRoles'],
+      },
+      service: typeOf(row.id) === 'service',
+    },
+  }));
+  return places.map((place) => holders.filter((holder) => can(holder, 'secret.read', place)).map((holder) => holder.principal));
+}
 
 /** By project, then environment, the project-wide grant after its environments. */
 function byPlace(a: GrantRow, b: GrantRow): number {
@@ -267,9 +302,45 @@ export const memberRoutes = {
     },
   }),
 
+  /**
+   * Admit a member, bring one back, or set their instance role, as their
+   * row calls for: one change of the vault's (`member.put`), which reads the
+   * row and does whichever it calls for, all under its head, and says which
+   * (`created`). No role keeps an active member's, and admits anyone else as
+   * `member`; a scope comes with a role but `member`, and either filter left
+   * out is `all`. A service account holds no role but `member`, and is made
+   * with its grants (`access`) once who manages one is settled (D239).
+   *
+   *   { "role": "admin", "scope": { "projects": { "only": ["market"] } } }
+   *
+   * No statement, but one, after the change, when the answer keeps a scope
+   * that names projects the body did not: their slugs.
+   */
   ...route('PUT /members/:member', {
-    run: async () => {
-      throw notServed('adding a member or setting their role');
+    input: z.object({ role: instanceRole.optional(), scope: scopeInput.optional(), access: accessPatch.refine((access) => Object.keys(access).length > 0, 'name a place to grant').optional() }).strict(),
+    run: async (ctx, { params, input }) => {
+      const principal = memberOf(params.member);
+      const service = typeOf(principal) === 'service';
+      if (input.access !== undefined) {
+        if (!service || input.role !== undefined || input.scope !== undefined) throw badRequest('access comes with a service account, and no role: a person is given grants once a member');
+        throw notServed('a service account made with its grants');
+      }
+      if (input.scope !== undefined && input.role === undefined) throw badRequest('a scope goes with a role: name the role too');
+      if (input.scope !== undefined && input.role === 'member') throw badRequest('a member holds nothing by their role: it takes no scope');
+      const asked = input.scope === undefined ? null : normalScope({ projects: input.scope.projects ?? 'all', environments: input.scope.environments ?? 'all' });
+      let answer;
+      try {
+        answer = await changed(ctx, { op: 'member.put', principal, role: input.role ?? null, scope: asked }, principal);
+      } catch (error) {
+        // A service account asked a role the vault refuses as it refuses any shape it does not take: said as 0.14.7 said it.
+        if (service && error instanceof ApiError && error.reason === 'invalid') throw new ApiError('conflict', `${principal}: a service account holds project grants only, never an instance role`, 'invalid');
+        throw error;
+      }
+      const { role, scope, created } = answer;
+      // The scope as asked, by slug, when the body named it; the one kept otherwise, whose projects only their ids name.
+      const listed = scope === null || scope.projects === 'all' ? [] : 'only' in scope.projects ? scope.projects.only : scope.projects.except;
+      const shown = role === 'member' || scope === null ? EVERYWHERE : input.role !== undefined ? (asked ?? EVERYWHERE) : scopeView(scope, listed.length === 0 ? {} : await projectSlugs(ctx.db, listed));
+      return { member: principal, instanceRole: role, scope: shown, created };
     },
   }),
 

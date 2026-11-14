@@ -2593,6 +2593,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "first_written_at": {
+          "name": "first_written_at",
+          "type": "timestamp (3) with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
         "plaintext": {
           "name": "plaintext",
           "type": "text",

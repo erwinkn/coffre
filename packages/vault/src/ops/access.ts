@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
 import {
-  allows, definitionProblem, EVERYWHERE, FIXED_ROLES, INSTANCE_ROLES, isBuiltinRole, isInstanceRole, isScope, normalDefinition, normalScope, ownsInstance, PROJECT_ONLY_PERMISSIONS, ROLE_ID, ROLES, runsInstance, unscoped,
-  type Filter, type InstanceRole, type Permission, type RoleDefinition, type Scope,
+  allows, definitionProblem, EVERYWHERE, FIXED_ROLES, givesService, INSTANCE_ROLES, isBuiltinRole, isInstanceRole, isScope, managesService, normalDefinition, normalScope, ownsInstance, PROJECT_ONLY_PERMISSIONS,
+  ROLE_ID, ROLES, setsUpServices, unscoped,
+  type Filter, type Holdings, type InstanceRole, type Permission, type Place, type RoleDefinition, type Scope, type ServiceAccount,
 } from '@coffre/core/access';
 import type { AccessAnswers, AccessChange, AccessChanges, AccessGrant, MemberPut, MemberRemove, Presented, RoleEdit, ScopeInput, SettingsEdit, Standing } from '@coffre/core/vault';
 import { environments, grants, identities, policy, principals, projects, roles } from '@coffre/db/schema';
@@ -13,9 +14,10 @@ import { amended, drop, part, put, type Operation, type Parts, type Refusal, typ
 import type { Said } from '../entry.ts';
 import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
-import { asking, NOWHERE } from './asking.ts';
+import { managing, NOWHERE, ownsAllAsking, said } from './asking.ts';
 import type { Operations } from './index.ts';
 import { presented, text } from './input.ts';
+import { definitionsOf, held as holding, managesSealed, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
 
 /**
  * The changes of members, grants, roles and the instance's policy
@@ -27,15 +29,21 @@ import { presented, text } from './input.ts';
  * all of it. Only an Owner of the whole instance edits roles, and whoever
  * runs the instance its settings. These are 0.14's rules, as they were.
  *
- * Not yet: a person who does not run the instance setting up or removing a
- * service account (`setsUpServices`, `managesService`). That weighs a
- * project's protected environments, which the engine settles first: those
- * paths are refused.
+ * A person who does not run the instance sets up a service account where
+ * they could give it something, gives it what they hold, and removes one
+ * they manage (`setsUpServices`, `givesService`, `managesService`), as 0.14.7
+ * let them: those rules are core's, and the vault adds none. What they weigh
+ * is read with the change, and a row of it the vault did not write refuses
+ * the change, `tampered`: a grant hidden, a role or a place edited, would let
+ * them reach further.
  */
 
 /** A member's id, as the table's checks have it (`principals_id_check`, `principals_user_lowercase`). */
 const PRINCIPAL = /^(user|token):[^\s:]\S*$/;
 const isMember = (value: unknown): value is string => text(value) && PRINCIPAL.test(value) && (!value.startsWith('user:') || value === value.toLowerCase());
+
+/** Every project there is, for `callerParts`: a deleted one's slug holds a `~`. */
+const LIVE_PROJECTS = sql`(SELECT p.id FROM projects p WHERE strpos(p.slug, '~') = 0)`;
 
 /** The most slugs a scope's list names: as many as a credential's scope names places. */
 const MOST_SLUGS = 1000;
@@ -74,22 +82,10 @@ function ownsAll(row: Row<typeof principals>): boolean {
   return row.id.startsWith('user:') && scope !== null && ownsInstance({ role: row.role as InstanceRole, scope });
 }
 
-/** Whether the caller runs the instance by a role whose row was read: a role with no row is no role, as `project.create` takes it. */
-const runs = (caller: Asking) => runsInstance(caller.holds) && Object.hasOwn(caller.holds.policy.instanceRoles, caller.holds.role);
-
-/** Whether the caller is an Owner of the whole instance, on a credential no scope narrows. */
-const ownsAllAsking = (caller: Asking) => caller.holds.credentialScope == null && ownsInstance(caller.holds);
 
 /** Whether the deployment names this person an Owner (`owners`): no change demotes or removes them while it does. */
 const named = (vault: Deciding, principal: string) => vault.owners.some((email) => principal === `user:${email}`);
 
-/** Who asks, or why they are refused (`asking`), and any workload's session, which changes no one's access. */
-function managing(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, vault: Deciding, at: number): Asking | Refusal {
-  const caller = asking(seen, shown, vault, at);
-  // A workload's session changes no one's access, whatever its scope holds, as 0.14's router refused it (docs/design/workload-access.md, D15).
-  if (!('refused' in caller) && caller.workload !== null) return { refused: 'workload_cannot_issue' };
-  return caller;
-}
 
 /**
  * What the log says of one of these changes refused (D236): the member it was
@@ -102,19 +98,6 @@ const deniedTo = <S extends Seen<ReturnType<typeof callerParts>> & { member: Row
     objects: (seen) => [...seen.member.map((row) => `principal:${row.id}`), ...(seen.scoped ?? []).map((project) => `project:${project.id}`)],
   });
 
-/** An entry of these changes: who asked, on what, and what it mentions. */
-function said(action: string, caller: Asking, shown: { request: string | null; ip: string | null }, objects: string[], detail: Record<string, unknown>): Said {
-  return {
-    kept: true,
-    action,
-    actor: caller.principal,
-    credential: caller.credential.id,
-    request: shown.request,
-    ip: shown.ip,
-    objects: [`principal:${caller.principal}`, `credential:${caller.credential.id}`, ...objects],
-    detail,
-  };
-}
 
 /**
  * A member's role and scope as asked, checked before any read: a role is
@@ -178,9 +161,13 @@ const anotherOwner = (seen: readonly Row<typeof principals>[], principal: string
  * of the whole instance sets their own, so an Admin makes another Admin
  * but never widens what they hold themselves; an Owner may step down, but
  * not the last one. A person the deployment names an Owner comes in as
- * one and stays one. A service account holds no role but `member`: 0.14
- * let whoever removed one bring it back too, but only those who run the
- * instance remove one yet.
+ * one and stays one. A service account holds no role but `member`.
+ *
+ * A person who does not run the instance, on a session, sets up a service
+ * account, as `member`, where they could give it something
+ * (`setsUpServices`): every place there is, and the instance's setting,
+ * are read with the change. One removed only its remover brings back, or
+ * whoever runs the instance, as 0.14.7 allowed.
  *
  * A removed member whose row is deleted around the vault looks new, and comes
  * back in generation 0: no row the vault reads says otherwise. Its entry says
@@ -190,11 +177,19 @@ const anotherOwner = (seen: readonly Row<typeof principals>[], principal: string
 function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Parts, AccessAnswers['member.put']> {
   const shown = presented(input);
   const { principal, role, scope } = membership(input);
+  const service = principal.startsWith('token:');
   const read = {
-    ...callerParts(shown.token, NOWHERE),
+    // For a service account, what the caller holds everywhere, and every place there is: where they could give it something.
+    ...callerParts(shown.token, service ? LIVE_PROJECTS : NOWHERE),
     member: part(principals, eq(principals.id, principal)),
     owners: owners(),
     scoped: projectsIn(scope),
+    everyProject: part(projects, service ? sql`strpos(${projects.slug}, '~') = 0` : sql`false`),
+    // Every environment, whatever its row says: one whose protection was edited behind the vault is found unsealed.
+    everyEnvironment: part(environments, service ? sql`strpos(${environments.slug}, '~') = 0` : sql`false`),
+    setting: part(policy, service ? sql`${policy.onlyRow}` : sql`false`),
+    // Every project role: any of them may be what they could give it.
+    defined: part(roles, service ? sql`NOT ${roles.instance}` : sql`false`),
   };
   return {
     read,
@@ -203,7 +198,22 @@ function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Par
     decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
       const caller = managing(seen, shown, vault, at);
       if ('refused' in caller) return caller;
-      if (!runs(caller)) return { refused: 'no_access' };
+      if (!runs(caller)) {
+        // Only a person, on a session (a service account's credentials always have a scope), sets up a service account, as
+        // `member`: what they set up would outlive a credential with a scope.
+        if (!service || (role !== null && role !== 'member') || scope !== null || !onSession(caller)) return { refused: 'no_access' };
+        const places: Place[] = [
+          ...seen.everyProject.map((row) => ({ projectId: row.id })),
+          ...seen.everyEnvironment.map((row) => ({ projectId: row.projectId, environmentId: row.id, environmentSlug: row.slug })),
+        ];
+        if (!setsUpServices(withRoles(caller, seen.defined), settingOf(seen), places)) return { refused: 'no_access' };
+        // One removed, only whoever removed it brings back: never past someone else's removal.
+        const [removed] = seen.member;
+        if (removed?.status === 'removed' && removed.statusChangedBy !== caller.principal) return { refused: 'no_access' };
+        // A row written behind the vault is not a row that is absent: a place's protection edited, a role, the setting. Told
+        // only to whoever may by the rows the vault wrote: anyone else is refused as they would be without it.
+        if (Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
+      }
       // A row the vault did not write is neither someone new nor a member to change: added over it, the write would fail.
       if (unsealed.member > 0) return { refused: 'tampered' };
       if (!principal.startsWith('user:') && role !== null && role !== 'member') return { refused: 'invalid' };
@@ -254,14 +264,19 @@ function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Par
  * signs in as nobody, so revoked, it is free to bind anew when they are
  * let back in. Whoever runs the instance removes a member, and only an
  * Owner of the whole instance an Owner; never the last one, nor one the
- * deployment names.
+ * deployment names. A service account, whoever manages it too
+ * (`managesService`), on a session, as 0.14.7 allowed: what it holds, the
+ * places and roles it holds them as and the instance's setting are read
+ * with the change.
  */
 function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operation<Parts, AccessAnswers['member.remove']> {
   const shown = presented(input);
   const { principal } = input;
   if (!isMember(principal)) throw new TypeError('a member is user:<email> in lowercase or token:<name>');
   const read = {
-    ...callerParts(shown.token, NOWHERE),
+    // For a service account, what the caller holds where it holds something, and what says who manages it.
+    ...callerParts(shown.token, projectsOf(principal)),
+    ...serviceParts(principal),
     member: part(principals, eq(principals.id, principal)),
     owners: owners(),
     held: part(grants, eq(grants.principal, principal)),
@@ -275,7 +290,12 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
     decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
       const caller = managing(seen, shown, vault, at);
       if ('refused' in caller) return caller;
-      if (!runs(caller)) return { refused: 'no_access' };
+      if (!runs(caller)) {
+        if (!principal.startsWith('token:') || !managesSealed(caller, seen, principal, at)) return { refused: 'no_access' };
+        // A row written behind the vault is not a row that is absent: a grant of the service's hidden, its place's protection
+        // edited. Told only to whoever manages it by the rows the vault wrote (`managesSealed`).
+        if (Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
+      }
       const [was] = seen.member;
       if (was === undefined || was.status !== 'active') return { refused: was === undefined ? 'not_a_member' : 'removed' };
       if (was.role === 'owner' && !ownsAllAsking(caller)) return { refused: 'no_access' };
@@ -330,7 +350,7 @@ function aDay(time: string): boolean {
 }
 
 /**
- * A person's grants set at several places, all or none (`access.grant`; a
+ * A member's grants set at several places, all or none (`access.grant`; a
  * change that only takes roles away is logged `access.revoke`, as 0.14 did).
  * At each place the caller manages access (`grant.manage`), and gives no
  * role to themselves; a role is a project role there is, never one that
@@ -339,17 +359,27 @@ function aDay(time: string): boolean {
  * lapsed grant or one of a membership before a removal, is replaced in
  * place, in the member's generation, or dropped.
  *
- * Not yet: a service account's grants, which weigh a project's protected
- * environments through `givesService`; refused.
+ * A service account's, as 0.14.7's `setAccess` set them: where the caller
+ * does not manage access, a person on a session gives it what they could
+ * give it (`givesService`), and takes from it what it holds, of a service
+ * account they manage (`managesService`): they could give it all it holds. With
+ * `admit`, one that is not a member is admitted in the same change, holding
+ * nothing before it, and the caller's to give what they could: by someone
+ * who could set one up (`setsUpServices`), and one removed, by its remover
+ * or whoever runs the instance alone. What these weigh is read with the
+ * change: a row of it the vault did not write refuses it, `tampered`.
  */
 function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation<Parts, AccessAnswers['access.grant']> {
   const shown = presented(input);
   const { principal } = input;
+  const admit = input.admit ?? false;
   const changes = Array.isArray(input.changes) ? [...input.changes] : [];
   const path = (change: Asked) => (change.environment === null ? change.project : `${change.project}/${change.environment}`);
-  if (!isMember(principal) || changes.length === 0 || changes.length > MOST_PLACES || !changes.every(asked) || new Set(changes.map(path)).size !== changes.length) {
-    throw new TypeError('a change of grants names a member, and 1 to 1,000 places by slug, each once, with a project role or null and an ISO 8601 end or null');
+  if (!isMember(principal) || changes.length === 0 || changes.length > MOST_PLACES || !changes.every(asked) || new Set(changes.map(path)).size !== changes.length
+    || typeof admit !== 'boolean' || (admit && !principal.startsWith('token:'))) {
+    throw new TypeError('a change of grants names a member, and 1 to 1,000 places by slug, each once, with a project role or null and an ISO 8601 end or null; admit, of a service account alone');
   }
+  const service = principal.startsWith('token:');
   // A place with no grant yet gets one under an id drawn here: a decision draws nothing.
   const ids = changes.map(() => randomUUID());
   const action = changes.every((change) => change.role === null) ? 'access.revoke' : 'access.grant';
@@ -359,14 +389,26 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
   // Each project and environment pair through the two unique keys, so each is an index lookup.
   const pairs = changes.filter((change) => change.environment !== null);
   const onEnvironments = sql`(SELECT e.id FROM unnest(${sql.param(pairs.map((change) => change.project))}::text[], ${sql.param(pairs.map((change) => change.environment))}::text[]) AS a(project, environment) JOIN projects p ON p.slug = a.project JOIN environments e ON e.project_id = p.id AND e.slug = a.environment)`;
+  // A service account's places weigh too: what the caller holds there says whether they manage it.
+  const weighed = service ? sql`(${named} UNION ${projectsOf(principal)})` : named;
   const read = {
-    ...callerParts(shown.token, named),
+    ...callerParts(shown.token, weighed),
+    // A service account's grants, their places and roles, and the instance's setting (`managesService`); nothing for a person.
+    ...serviceParts(principal),
     member: part(principals, eq(principals.id, principal)),
     project: part(projects, sql`${projects.slug} = ANY(${sql.param([...new Set(changes.map((change) => change.project))])}::text[])`),
     environment: part(environments, sql`${environments.id} IN ${onEnvironments}`),
     // Every row at the places asked, whatever its generation: a place holds one grant a member, and a row left from before is replaced.
-    held: part(grants, sql`${grants.principal} = ${principal} AND (${grants.projectId} IN ${onProjects} OR ${grants.environmentId} IN ${onEnvironments})`),
+    // A service account's every grant, all of which `managesService` weighs, those at the places asked among them.
+    held: part(grants, service
+      ? sql`${grants.principal} = ${principal}`
+      : sql`${grants.principal} = ${principal} AND (${grants.projectId} IN ${onProjects} OR ${grants.environmentId} IN ${onEnvironments})`),
+    // Every environment of the projects weighed, whatever its row says: the caller's read takes those that say they are
+    // protected, and one whose flag was edited behind the vault would be left unseen, where it is found unsealed.
+    beside: part(environments, service ? sql`${environments.projectId} IN ${weighed}` : sql`false`),
     given: part(roles, sql`NOT ${roles.instance} AND ${roles.id} = ANY(${sql.param([...new Set(changes.flatMap((change) => (change.role === null ? [] : [change.role])))])}::text[])`),
+    // For a service account, every project role: those asked, those its grants name, and any a caller who sets one up could give it.
+    defined: part(roles, service ? sql`NOT ${roles.instance}` : sql`false`),
   };
   /** Each place asked, as far as it is there. */
   const placed = (seen: Seen<typeof read>) =>
@@ -383,23 +425,53 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
         ...placed(seen).flatMap(({ project, environment }) => (environment == null ? (project === undefined ? [] : [`project:${project.id}`]) : [`environment:${environment.id}`])),
       ],
     }),
-    decide(seen: Seen<typeof read>, at: number) {
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
       const caller = managing(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       const places = placed(seen);
-      // One answer whether a place is not there or not theirs to manage, and for a service account's grants, not given here yet: none says which.
-      if (!principal.startsWith('user:')) return { refused: 'no_access' };
+      // Whether they manage access at every place asked: else only a person, on a session, gives a service account what they hold.
+      let everywhere = true;
       for (const [i, { project, environment }] of places.entries()) {
-        // A personal config is its owner's alone: nobody is granted it.
+        // A personal config is its owner's alone: nobody is granted it. One answer whether a place is not there or not theirs: none says which.
         if (project === undefined || environment === undefined || environment?.owner != null) return { refused: 'no_access' };
-        const manages = environment === null ? allows(caller.holds, 'grant.manage', { projectId: project.id }) : caller.may('grant.manage', environment);
         // Managing access never reads a value: nobody gives themselves a role, though they may give one up.
-        if (!manages || (principal === caller.principal && changes[i]!.role !== null)) return { refused: 'no_access' };
+        if (principal === caller.principal && changes[i]!.role !== null) return { refused: 'no_access' };
+        if (!(environment === null ? allows(caller.holds, 'grant.manage', { projectId: project.id }) : caller.may('grant.manage', environment))) everywhere = false;
       }
-      // To whoever manages access at every place asked, what 0.14 told them of the member.
+      if (!everywhere && !(service && onSession(caller))) return { refused: 'no_access' };
       const [member] = seen.member;
-      if (member === undefined) return { refused: 'not_a_member' };
-      if (member.status !== 'active') return { refused: 'removed' };
+      const admitting = admit && (member === undefined || member.status === 'removed');
+      // The generation its grants are of: one admitted here is new, or in the one its removal moved on to.
+      const generation = member?.generation ?? 0;
+
+      if (service && (admitting || !everywhere)) {
+        const setting = settingOf(seen);
+        const runner = runs(caller);
+        const holder = withRoles(caller, seen.defined);
+        const where = places.map(({ project, environment }): Place => (environment == null ? { projectId: project!.id } : { projectId: project!.id, environmentId: environment.id, environmentSlug: environment.slug }));
+        // Admitted by a person on a session, who could set one up here; brought back by whoever removed it: never past
+        // someone else's removal. A service account's token that manages access sets up no other: it would outlive it.
+        if (admitting && !runner && (!onSession(caller) || (member !== undefined && member.statusChangedBy !== caller.principal) || !setsUpServices(holder, setting, where))) {
+          return { refused: 'no_access' };
+        }
+        if (!everywhere) {
+          // They manage it: they could give it every grant it holds, the one at a place asked included, so taking one away is
+          // theirs too. One admitted here holds nothing before, and is theirs; one that is not a member, or holds a grant on a
+          // place not found, is nobody's here.
+          const account: ServiceAccount | null = admitting ? { grants: [], admittedBy: caller.principal } : serviceOf(seen, principal, at);
+          if (account === null || !managesService(holder, setting, caller.principal, account)) return { refused: 'no_access' };
+          // And each role asked, where it is asked.
+          if (!changes.every(({ role }, i) => role === null || givesService(holder, setting, role, where[i]!))) return { refused: 'no_access' };
+        }
+      }
+      // A row written behind the vault is not a row that is absent: a grant of the service's hidden, a role or a place's
+      // protection edited. Told only to whoever may by the rows the vault wrote: anyone else is refused as they would be without it.
+      if (service && Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
+      // To whoever may change the member's grants at every place asked, what 0.14 told them of the member.
+      if (!admitting) {
+        if (member === undefined) return { refused: 'not_a_member' };
+        if (member.status !== 'active') return { refused: 'removed' };
+      }
       // Asked of a place they manage, what 0.14 called invalid.
       for (const [i, { role, expiresAt }] of changes.entries()) {
         // An end gone is no end, on a role taken away too: 0.14 refused the whole change.
@@ -411,12 +483,18 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
 
       const now = new Date(at);
       const writes: Write[] = [];
+      if (admitting) {
+        const row: Fresh<typeof principals> = member === undefined
+          ? { id: principal, status: 'active', role: 'member', scope: null, generation: 0, createdAt: now, createdBy: caller.principal, statusChangedAt: now, statusChangedBy: caller.principal, frozenAt: null }
+          : { ...withoutMac(member), status: 'active', role: 'member', scope: null, statusChangedAt: now, statusChangedBy: caller.principal };
+        writes.push(put(principals, row, member ?? null));
+      }
       const lines: Record<string, unknown>[] = [];
       const outcomes = changes.map(({ role, expiresAt }, i): AccessChange => {
         const { project, environment } = places[i] as { project: Row<typeof projects>; environment: Row<typeof environments> | null };
         const was = seen.held.find((row) => row.principal === principal && (environment === null ? row.projectId === project.id : row.environmentId === environment.id));
         // What the member holds there now: a grant of this membership, not lapsed.
-        const current = was !== undefined && was.generation === member.generation && (was.expiresAt === null || was.expiresAt.getTime() > at) ? was : undefined;
+        const current = was !== undefined && was.generation === generation && (was.expiresAt === null || was.expiresAt.getTime() > at) ? was : undefined;
         const ends = expiresAt === null ? null : new Date(Date.parse(expiresAt));
         const place = environment === null ? { project: project.id } : { environment: environment.id };
         if (role === null) {
@@ -426,15 +504,20 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
           return 'revoked';
         }
         if (current !== undefined && current.role === role && current.expiresAt?.getTime() === ends?.getTime()) return 'unchanged';
-        const grant: Fresh<typeof grants> = { id: was?.id ?? ids[i]!, principal, generation: member.generation, projectId: environment === null ? project.id : null, environmentId: environment?.id ?? null, role, expiresAt: ends, grantedAt: now, grantedBy: caller.principal };
+        const grant: Fresh<typeof grants> = { id: was?.id ?? ids[i]!, principal, generation, projectId: environment === null ? project.id : null, environmentId: environment?.id ?? null, role, expiresAt: ends, grantedAt: now, grantedBy: caller.principal };
         writes.push(put(grants, grant, was ?? null));
         lines.push({ ...place, role, expiresAt: ends?.toISOString() ?? null, was: current?.role ?? null });
         return current === undefined ? 'created' : 'updated';
       });
       return {
         writes,
-        entry: said(action, caller, shown, [`principal:${principal}`, ...places.map(({ project, environment }) => (environment === null ? `project:${project!.id}` : `environment:${environment!.id}`))], { member: principal, changes: lines }),
-        answer: { changes: outcomes },
+        entry: said(action, caller, shown, [`principal:${principal}`, ...places.map(({ project, environment }) => (environment === null ? `project:${project!.id}` : `environment:${environment!.id}`))], {
+          member: principal,
+          changes: lines,
+          // Admitted with it: the action 0.14.7 logged apart, in the generation it comes back in.
+          ...(admitting ? { admitted: member === undefined ? 'member.add' : 'member.restore', generation } : {}),
+        }),
+        answer: { changes: outcomes, ...(admit ? { created: admitting } : {}) },
       };
     },
   };
@@ -586,6 +669,12 @@ function settingsEdit(input: Presented & SettingsEdit, vault: Deciding): Operati
       };
     },
   };
+}
+
+/** What the caller holds, every project role as its row says beside their own: whether they give a service account one weighs them all. */
+function withRoles(caller: Asking, defined: readonly Row<typeof roles>[]): Holdings {
+  const own = holding(caller);
+  return { ...own, policy: { ...own.policy, roles: { ...definitionsOf(defined), ...own.policy.roles } } };
 }
 
 /** A row as read, but for its MAC: the engine seals what a change writes. */

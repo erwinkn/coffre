@@ -77,7 +77,7 @@ async function value14(of: Fresh<typeof secrets>, text: string, more: { sensitiv
   const version = of.versions + 1;
   const row = {
     id: crypto.randomUUID(), secretId: of.id, version, envelopeVersion: 1, ...encrypt(Buffer.from(text), ids, dek), wrappedDek: wrapped.bytes, kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion,
-    createdAt: new Date(0), createdBy: ada, plaintext: more.plain ? text : null, sensitive: more.sensitive === true,
+    createdAt: new Date(0), firstWrittenAt: new Date(0), createdBy: ada, plaintext: more.plain ? text : null, sensitive: more.sensitive === true,
   };
   versions.push(row);
   // Its nature as the migration leaves it, from the version's labels.

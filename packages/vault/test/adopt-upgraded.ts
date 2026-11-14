@@ -72,7 +72,12 @@ test('a database upgraded from 0.14 is adopted, then served by the new engine an
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT p.slug || '/' || e.slug AS place FROM environments e JOIN projects p ON p.id = e.project_id WHERE e.protected`), [{ place: 'market/dev' }]);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT name FROM roles WHERE NOT instance AND id = 'viewer'`), [{ name: 'Reader' }]);
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT service_accounts, workloads_frozen_at FROM policy`), [{ service_accounts: '{"projects":"all","environments":{"only":["dev"]}}', workloads_frozen_at: null }]);
-  assert.deepEqual(await rowsOf(vault.owner, sql`SELECT envelope_version AS format, count(*)::int AS n FROM secret_versions GROUP BY 1 ORDER BY 1`), [{ format: 1, n: 1 }, { format: 2, n: 6 }]);
+  assert.deepEqual(await rowsOf(vault.owner, sql`SELECT envelope_version AS format, count(*)::int AS n FROM secret_versions GROUP BY 1 ORDER BY 1`), [{ format: 1, n: 1 }, { format: 2, n: 10 }]);
+  // The adoption wraps each data key again, and leaves a version's ciphertext, IV and tag: 0.14's restores are still told
+  // apart by them, and each version's first date is still the first among its key's versions with its IV and tag.
+  assert.deepEqual(await rowsOf(vault.owner, sql`SELECT v.id FROM secret_versions v
+    WHERE v.first_written_at <> (SELECT min(w.created_at) FROM secret_versions w WHERE w.secret_id = v.secret_id AND w.iv = v.iv AND w.auth_tag = v.auth_tag)`), []);
+  assert.deepEqual(await rowsOf(vault.owner, sql`SELECT count(DISTINCT (ciphertext, iv, auth_tag))::int AS values, count(DISTINCT wrapped_dek)::int AS keys FROM secret_versions v JOIN secrets s ON s.id = v.secret_id WHERE s.key = 'RESTORED'`), [{ values: 2, keys: 4 }]);
   const [{ archive }] = await rowsOf<{ archive: { seq: number } }>(vault.owner, sql`SELECT body::jsonb -> 'detail' -> 'archive' AS archive FROM log WHERE seq = 0`);
   assert.equal(archive.seq, (await rowsOf<{ seq: number }>(vault.owner, sql`SELECT max(seq)::int AS seq FROM audit_archive`))[0]!.seq);
 
