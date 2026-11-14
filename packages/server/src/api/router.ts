@@ -123,7 +123,11 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
 /** Steps 2 and 3: the path's segments and the input checked, then the handler. */
 async function serveRoute(request: Request, url: URL, def: AnyRoute, params: Record<string, string>, ctx: ApiContext): Promise<Response> {
   for (const [name, value] of Object.entries(params)) {
-    if (PARAMS[name] !== undefined && !PARAMS[name].safeParse(value).success) throw badRequest(`"${value}" is not a valid ${name}`);
+    const checked = PARAMS[name]?.safeParse(value);
+    if (checked === undefined) continue;
+    if (!checked.success) throw badRequest(`"${value}" is not a valid ${name}`);
+    // As the route reads it: a row's id in the vault's lowercase.
+    params[name] = checked.data;
   }
   const raw = request.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(request, API_BODY_BYTES, {});
   // An object body naming more than the cap is refused before validation walks every entry.

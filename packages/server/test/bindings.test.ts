@@ -1,7 +1,8 @@
 // A service account's trust bindings over HTTP on the 0.16 contract
 // (docs/design/0.16.md, "A workload signing in"): the list is one call to
 // the vault (`caller`) and one statement; making, re-keying and removing one
-// is one `change` and no statement. The app asks an issuer where its keys
+// is one `change` and no statement, and one `caller` and one statement more
+// before the app asks an issuer anything. The app asks an issuer where its keys
 // are, and words a binding's mistakes, before the vault is asked anything.
 // Who may bind, and what a binding reaches, is the vault's
 // (packages/vault/test/bindings.test.ts); here, what the app does around it.
@@ -95,12 +96,12 @@ const list = (label: string, member = ci) => cost(() => call(label, 'GET', `/mem
 
 type View = { id: string; profile: string; issuer: string; jwksUri: string; keys: unknown; claims: unknown; scope: unknown; policy: unknown; label: string | null; createdAt: string; createdBy: string; lastUsedAt: string | null };
 
-test('a manager makes a binding: its issuer asked where its keys are, then one change; its service\'s list shows it, one caller and one statement', async () => {
+test('a manager makes a binding: weighed as one, its issuer asked where its keys are, then one change; its service\'s list shows it, one caller and one statement', async () => {
   const [[status, body], calls, statements] = await bind('ada-cli', { label: 'pods', scope: { 'market/dev': 'developer' } });
   assert.equal(status, 200, JSON.stringify(body));
   const { binding: made, replaced } = body as { binding: { id: string; scope: unknown }; replaced: string[] };
   assert.deepEqual({ scope: made.scope, replaced }, { scope: { 'market/dev': 'developer' }, replaced: [] });
-  assert.deepEqual([calls, statements], [['change'], 0]);
+  assert.deepEqual([calls, statements], [['caller', 'change'], 1]);
   // The discovery document, once, and never the keys: those are fetched by an exchange.
   assert.deepEqual(fetched, [`${KUBE}/.well-known/openid-configuration`]);
 
@@ -159,7 +160,6 @@ test('a binding is checked before anything is asked: its profile\'s rules, its k
   const cases: [string, Record<string, unknown>][] = [
     ['a claim its profile does not take', { profile: 'github', issuer: null, claims: { nope: 'x' } }],
     ['keys that are no JWKS', { jwks: { keys: [{ kty: 'oct', k: 'c2VjcmV0' }] } }],
-    ['an issuer with no discovery document', { issuer: 'https://elsewhere.acme.example' }],
     ['a policy its profile refuses', { policy: { sessionHours: 1_000 } }],
     // The contract's shape, which the vault takes as a fault, never a refusal: told here first.
     ['a label with a control character', { label: 'pods\nci' }],
@@ -174,7 +174,15 @@ test('a binding is checked before anything is asked: its profile\'s rules, its k
     assert.deepEqual([status, answer.error, calls, statements], [400, 'bad_request', [], 0], what);
     assert.ok(typeof answer.message === 'string' && answer.message.length > 0, what);
   }
-  assert.match(String((await bind('ada-cli', { issuer: 'https://elsewhere.acme.example' }))[0][1].message), /coffre could not use https:\/\/elsewhere\.acme\.example/);
+  // An issuer's discovery, asked once the caller is weighed: a document there is none of, and one whose keys' address is longer than a binding keeps.
+  const [[status, answer], calls, statements] = await bind('ada-cli', { issuer: 'https://elsewhere.acme.example' });
+  assert.deepEqual([status, calls, statements], [400, ['caller'], 1]);
+  assert.match(String(answer.message), /coffre could not use https:\/\/elsewhere\.acme\.example/);
+  const LONG = 'https://long.acme.example';
+  published.set(`${LONG}/.well-known/openid-configuration`, { issuer: LONG, jwks_uri: `${LONG}/${'k'.repeat(2_100)}` });
+  const [long] = await bind('ada-cli', { issuer: LONG });
+  assert.deepEqual(refused(long), [400, 'bad_request', undefined]);
+  assert.match(String(long[1].message), /longer than the 2,048 characters a binding keeps/);
   // The input's own shape, and a member that is no service.
   assert.equal((await bind('ada-cli', { claims: 'x' }))[0][0], 400);
   assert.deepEqual(refused(await call('ada-cli', 'POST', `/members/${ada}/bindings`, { profile: 'custom', issuer: KUBE, claims: POD })), [400, 'bad_request', undefined]);
@@ -188,7 +196,15 @@ test('a preview is not served yet: 501, and nothing asked', async () => {
 });
 
 test("the vault's refusals, in words: who does not manage the service, a role the instance lacks, a service that is not there", async () => {
-  assert.deepEqual(refused((await bind('bo-cli', {}))[0]), [403, 'vault_refused', 'no_access']);
+  // Whoever does not manage the service makes coffre ask no issuer anything: a member with no grant on it, a scoped token, the service itself.
+  for (const label of ['bo-cli', 'root-token', 'ci-cli']) {
+    const [answer, calls, statements] = await bind(label, {});
+    assert.deepEqual([refused(answer), calls, statements, fetched], [[403, 'vault_refused', 'no_access'], ['caller'], 1, []], label);
+  }
+  // Keys it carries are asked of no one: the vault alone weighs who binds.
+  const { publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const [carried, carriedCalls] = await bind('bo-cli', { jwks: { keys: [{ ...publicKey.export({ format: 'jwk' }), kid: 'k1', alg: 'ES256', use: 'sig' }] } });
+  assert.deepEqual([refused(carried), carriedCalls], [[403, 'vault_refused', 'no_access'], ['change']]);
   const [invalid] = await bind('ada-cli', { scope: { 'market/dev': 'nope' } });
   assert.deepEqual(refused(invalid), [409, 'conflict', 'invalid']);
   assert.match(String(invalid[1].message), /^service:ci: a role the instance does not have, a read outside its scope/);
@@ -222,6 +238,36 @@ test('removing a binding is one change; one not live is not found, and whoever d
   assert.deepEqual([status, body, calls, statements], [200, { unbound: true }, ['change'], 0]);
   assert.deepEqual(refused((await remove('ada-cli'))[0]), [404, 'not_found', 'unknown_binding']);
   assert.deepEqual((await list('ada-cli'))[0][1], { bindings: [] });
+});
+
+test('a service named as the vault takes none, or a binding by an id in capitals: the first a 400 with nothing asked, the second the same binding', async () => {
+  const jwks = { keys: [] };
+  for (const member of ['token:a b', 'token::x', 'token:']) {
+    const named = encodeURIComponent(member);
+    for (const [method, path, body] of [['GET', `/members/${named}/bindings`], ['POST', `/members/${named}/bindings`, { profile: 'custom', issuer: KUBE, claims: POD }], ['POST', `/members/${named}/bindings/keys`, { issuer: KUBE, jwks }], ['DELETE', `/members/${named}/bindings/${crypto.randomUUID()}`]] as const) {
+      const [answer, calls, statements] = await cost(() => call('root-cli', method, path, body));
+      assert.deepEqual([refused(answer), calls, statements], [[400, 'bad_request', undefined], [], 0], `${method} ${path}`);
+    }
+  }
+  const [[, first]] = await bind('ada-cli', {});
+  const id = (first as { binding: { id: string } }).binding.id;
+  const [[status, again]] = await bind('ada-cli', { replaces: [id.toUpperCase()] });
+  assert.deepEqual([status, (again as { replaced: string[] }).replaced], [200, [id]]);
+  const next = (again as { binding: { id: string } }).binding.id;
+  assert.deepEqual((await cost(() => call('ada-cli', 'DELETE', `/members/${ci}/bindings/${next.toUpperCase()}`)))[0], [200, { unbound: true }]);
+});
+
+test('a row kept in a shape the vault would not write is listed as best it reads, never as a binding a CI run takes; a place deleted, by its id', async () => {
+  const old = environment({ id: ids.market! }, 'old~deleted-2026-10-05');
+  await write(world, ...rows('environments', old));
+  const scope = JSON.stringify([{ projectId: ids.market, environmentId: old.id, role: 'viewer' }]);
+  const policies = ['{"reads":null}', `{"reads":{"${ids.dev}":null}}`, '{"reads":{"x":{"keys":5}}}', 'not json', '[1]'];
+  await write(world, ...rows('bindings', ...policies.map((policy) => binding(ci, { profile: 'kubernetes', issuer: KUBE, jwksUri: KEYS, claims: JSON.stringify(POD), scope, policy }))));
+  const [[status, body]] = await list('ada-cli');
+  assert.equal(status, 200, JSON.stringify(body));
+  const shown = (body as { bindings: View[] }).bindings;
+  assert.deepEqual(new Set(shown.map((row) => JSON.stringify(row.policy))), new Set(['{"reads":{}}', '{}']));
+  assert.deepEqual(shown[0]!.scope, { [old.id]: 'viewer' });
 });
 
 test('with workloads off, each route says how to turn them on, and asks nothing', async () => {

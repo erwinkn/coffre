@@ -15,7 +15,7 @@ import {
   type WorkloadProfile,
   type WorkloadsConfig,
 } from '@coffre/core/identity';
-import { shownMember, slug } from '@coffre/core/schemas';
+import { rowId, SERVICE_MEMBER, shownMember, slug } from '@coffre/core/schemas';
 import type { Answers, Called, Change } from '@coffre/core/vault';
 import { z } from 'zod';
 
@@ -52,7 +52,7 @@ export type BindingView = {
   claims: BindingClaims;
   /** What the credentials it issues reach, by path and role; null for one that reaches nothing it says. */
   scope: Record<string, string> | null;
-  /** A workload's binding's policy; null for one a CI run's exchange takes. */
+  /** A workload's binding's policy; null for one a CI run's exchange takes; `{}` for one its row keeps unreadable. */
   policy: PolicyView | null;
   label: string | null;
   createdAt: string;
@@ -63,9 +63,9 @@ export type BindingView = {
 /** A binding made or re-keyed: its id, and what it reaches, by path and role, as the vault sealed it. */
 export type BindingMade = { id: string; scope: Record<string, string> };
 
-/** The service a path names: a binding is a service account's, `token:<name>`. */
+/** The service a path names: a binding is a service account's, `token:<name>`, as the vault takes one. */
 function serviceIn(raw: string): string {
-  if (!raw.startsWith('token:') || raw.length > 256 || raw === 'token:') throw badRequest('a trust binding is a service account\'s: name it token:<name>');
+  if (!SERVICE_MEMBER.test(raw) || raw.length > 256) throw badRequest('a trust binding is a service account\'s: name it token:<name>');
   return raw;
 }
 
@@ -89,14 +89,19 @@ async function bindingChange<O extends 'token.bind' | 'token.unbind'>(ctx: ApiCo
   }
 }
 
-/**
- * Whether the caller may list the service's bindings: the service itself,
- * whoever runs the instance, or a person on a session who manages it
- * (`managesService`), weighed as the vault weighs it, on its rows as they
- * stand. A listing; it decides nothing.
- */
+/** Whether the caller may list the service's bindings: the service itself, or whoever manages it (`manages`). A listing; it decides nothing. */
 function lists(who: Called, member: string, found: ServiceBindings | null): boolean {
-  if (who.principal === member || runsInstance(who.holds)) return true;
+  return who.principal === member || manages(who, found);
+}
+
+/**
+ * Whether the caller manages the service, and so may bind it: whoever runs
+ * the instance, or a person on a session who manages it (`managesService`),
+ * weighed as the vault weighs it, on its rows as they stand. It decides
+ * nothing: the vault weighs it again on its own.
+ */
+function manages(who: Called, found: ServiceBindings | null): boolean {
+  if (runsInstance(who.holds)) return true;
   if (!who.principal.startsWith('user:') || who.holds.credentialScope != null || found === null || found.status !== 'active') return false;
   let setting: unknown = null;
   try {
@@ -128,10 +133,26 @@ function parsed<T>(text: string | null, fallback: T): T {
   }
 }
 
+/** A plain object, as JSON keeps one. */
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** A policy's `reads` by path and key name, leaving out an entry the row keeps in another shape. */
+function readsShown(reads: unknown, pathOf: (id: string) => string, keys: Readonly<Record<string, string>>): Record<string, readonly string[] | '*'> {
+  if (!isRecord(reads)) return {};
+  const shown: Record<string, readonly string[] | '*'> = {};
+  for (const [id, read] of Object.entries(reads)) {
+    if (!isRecord(read)) continue;
+    if (read.keys === '*') shown[pathOf(id)] = '*';
+    else if (read.keys === undefined || Array.isArray(read.keys)) shown[pathOf(id)] = (read.keys ?? []).filter((key): key is string => typeof key === 'string').map((key) => keys[key] ?? key).sort();
+  }
+  return shown;
+}
+
 /** A row as its service's page lists it: its places and keys by path and name, as they are named now; one gone, by its id. */
 function view(row: BindingRow, paths: Readonly<Record<string, string>>, keys: Readonly<Record<string, string>>): BindingView {
   const scope = parsed<unknown>(row.scope, null);
-  const policy = parsed<BindingPolicy | null>(row.policy, null);
+  // A policy the row keeps that does not read as one still makes a workload's binding: shown as `{}`, never as none.
+  const policy = row.policy === null ? null : parsed<unknown>(row.policy, {});
   let carried: KeySummary[] | null = null;
   if (row.jwks !== null) {
     try {
@@ -142,11 +163,9 @@ function view(row: BindingRow, paths: Readonly<Record<string, string>>, keys: Re
   }
   const pathOf = (id: string) => paths[id] ?? id;
   let shownPolicy: PolicyView | null = null;
-  if (policy !== null && typeof policy === 'object') {
-    const { reads, ...rest } = policy;
-    shownPolicy = reads === undefined
-      ? rest
-      : { ...rest, reads: Object.fromEntries(Object.entries(reads).map(([id, read]) => [pathOf(id), read.keys === '*' ? '*' : [...(read.keys ?? [])].map((key) => keys[key] ?? key).sort()])) };
+  if (policy !== null) {
+    const { reads, ...rest } = isRecord(policy) ? policy : {};
+    shownPolicy = (reads === undefined ? rest : { ...rest, reads: readsShown(reads, pathOf, keys) }) as PolicyView;
   }
   return {
     id: row.id,
@@ -201,6 +220,17 @@ async function checkedKeys(value: unknown): Promise<void> {
   }
 }
 
+/**
+ * Before the app asks an issuer anything for a binding: whether the caller
+ * manages the service, so that no one else makes coffre fetch a host they
+ * name. One `caller` and one statement, on that path alone; the vault
+ * weighs it again, on its own rows, when it binds.
+ */
+async function mayBind(ctx: ApiContext, member: string): Promise<void> {
+  const who = await ctx.caller();
+  if (!manages(who, await serviceBindings(ctx.db, member, new Date()))) throw refusal('no_access', shownMember(member));
+}
+
 const NO_PREVIEW = new ApiError('not_implemented', "a binding's preview (?dryRun=1) is not served yet: the binding is made, and what it reaches is its answer");
 const dryRun = z.object({ dryRun: z.string().optional() }).passthrough();
 
@@ -226,7 +256,8 @@ export const bindingRoutes = {
    * issuer asked where its keys are (unless it carries them, or its issuer
    * is a URN, which keeps one source of keys), then one `token.bind`. Its
    * answer is the binding's id and what it reaches, and the bindings it
-   * replaced.
+   * replaced. Asking the issuer costs one `caller` and one statement more,
+   * first, which keep it to whoever manages the service (`mayBind`).
    */
   ...route('POST /members/:member/bindings', {
     input: z.object({
@@ -235,7 +266,7 @@ export const bindingRoutes = {
       claims: z.record(z.string(), z.unknown()),
       scope: scopeByPath.optional(),
       label: label.nullable().optional(),
-      replaces: z.array(z.uuid()).max(16).refine((ids) => new Set(ids).size === ids.length, 'each binding replaced once').optional(),
+      replaces: z.array(rowId).max(16).refine((ids) => new Set(ids).size === ids.length, 'each binding replaced once').optional(),
       jwks: jwks.optional(),
       policy: z.record(z.string(), z.unknown()).refine((policy) => policy.reads === undefined || readsByPath.safeParse(policy.reads).success, 'a policy\'s reads name environments by path, and each its keys by name, or "*"').optional(),
     }).strict(),
@@ -263,10 +294,13 @@ export const bindingRoutes = {
       if (uploaded) await checkedKeys(input.jwks);
       let keys: { uri: string } | { jwks: unknown };
       try {
-        // Keys uploaded with it; a URN's, its issuer; else where its issuer's discovery says they are.
-        keys = uploaded
-          ? { jwks: input.jwks }
-          : { uri: Object.hasOwn(PROFILE_URNS, input.profile) ? issuer : await discoverKeys(ctx.transport, issuer, { allowLoopback: workloads.allowLoopback }) };
+        // Keys uploaded with it; a URN's, its issuer; else where its issuer's discovery says they are, asked only for whoever may bind.
+        if (uploaded) keys = { jwks: input.jwks };
+        else if (Object.hasOwn(PROFILE_URNS, input.profile)) keys = { uri: issuer };
+        else {
+          await mayBind(ctx, member);
+          keys = { uri: await discoverKeys(ctx.transport, issuer, { allowLoopback: workloads.allowLoopback }) };
+        }
       } catch (error) {
         if (error instanceof DiscoveryFailed) throw badRequest(`coffre could not use ${issuer}: ${error.message}`);
         throw error;

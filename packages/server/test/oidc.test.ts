@@ -6,7 +6,7 @@
 // what each refusal tells the run, and what each answer costs.
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
-import { after, beforeEach, test } from 'node:test';
+import { after, beforeEach, mock, test } from 'node:test';
 
 import { canonicalClaims, github, signin, type RateLimiter, type WorkloadAlert } from '@coffre/core/identity';
 import { binding, emptyDatabase, environment, grant, instance, principal, project, role, rows, write } from '@coffre/vault/testing';
@@ -42,8 +42,13 @@ const limiter: RateLimiter = {
   },
 };
 const alerts: WorkloadAlert[] = [];
+/** The deployment's alert: kept, and never answered, as one whose hook hangs. */
+const alerted = (alert: WorkloadAlert) => {
+  alerts.push(alert);
+  return new Promise<void>(() => {});
+};
 const providers = [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })];
-const app = await openApp({ auth: signin({ providers, workloads: { limits: { perSource: limiter, total: processLimits().total }, alert: (alert) => void alerts.push(alert) } }), transport, workloads: {} });
+const app = await openApp({ auth: signin({ providers, workloads: { limits: { perSource: limiter, total: processLimits().total }, alert: alerted } }), transport, workloads: {} });
 const { world } = app;
 after(() => app.close());
 
@@ -165,21 +170,30 @@ test("an issuer whose keys cannot be fetched is the app's 503, with when to come
   assert.deepEqual([refused(answer), answer.retryAfter, calls], [[503, 'unavailable', 'issuer_unavailable'], '60', []]);
 });
 
-test("a binding that carries its keys: the app fetches nothing, the vault verifies; an unknown key alerts once an hour", async () => {
+test("a binding that carries its keys: the app fetches nothing, the vault verifies; an unknown key alerts once an hour, waited on 2 s at most, and logs once a minute", async () => {
+  const logged = mock.method(console, 'error', () => {});
+  const refusals = () => logged.mock.calls.filter((call) => (call.arguments[0] as { event?: string } | undefined)?.event === 'workload_exchange_refused').length;
   const carried = binding(DEPLOY, { profile: 'custom', issuer: KUBE, jwksUri: `sha256:${createHash('sha256').update(KUBE_JWKS).digest('hex')}`, jwks: KUBE_JWKS, claims: canonicalClaims({ sub: 'system:serviceaccount:ci:runner' }), scope: VIEWER });
   await write(world, ...rows('bindings', carried));
   const kube = (key: KeyObject, kid: string) => idToken({ iss: KUBE, sub: 'system:serviceaccount:ci:runner' }, { key, kid });
   const [made, calls, statements] = await cost(() => exchange(kube(kube1.privateKey, 'kube-1')));
   assert.deepEqual([made.status, calls, statements, fetched], [200, ['change'], 1, []]);
   const stranger = pair();
+  const started = performance.now();
   const [unknown] = await cost(() => exchange(kube(stranger.privateKey, 'rotated')));
+  const waited = performance.now() - started;
   assert.deepEqual(refused(unknown), [401, 'unauthenticated', 'unknown_signer']);
+  assert.ok(waited >= 1_900 && waited < 4_000, `answered after ${Math.round(waited)} ms`);
   assert.equal(alerts.length, 1);
+  assert.match(alerts[0]!.text, /save its JWKS as keys\.json, then coffre trust deploy --issuer https:\/\/kubernetes\.acme\.example --replace-keys/);
+  assert.equal(refusals(), 1);
   assert.deepEqual({ kind: alerts[0]!.kind, service: alerts[0]!.service, binding: alerts[0]!.binding }, { kind: 'unknown_key', service: DEPLOY, binding: carried.id });
   assert.match(alerts[0]!.text, /names key "rotated", not one uploaded for https:\/\/kubernetes\.acme\.example/);
   // Within the hour, once: the next is refused the same, and says nothing more.
   assert.deepEqual(refused(await exchange(kube(stranger.privateKey, 'rotated'))), [401, 'unauthenticated', 'unknown_signer']);
   assert.equal(alerts.length, 1);
+  assert.equal(refusals(), 1);
+  logged.mock.restore();
 });
 
 test('admission comes first: a limit reached is 429 and a limiter that fails 503, before anything is read; a body past its limit is 400', async () => {

@@ -100,9 +100,10 @@ export async function serviceBindings(db: Queryable, member: string, now: Date):
           'last_used_at', b.last_used_at) ORDER BY b.created_at, b.id), '[]')
         FROM live b) AS bindings,
       (SELECT coalesce(json_object_agg(place.id, place.path), '{}') FROM (
-        SELECT pr.id::text AS id, pr.slug AS path FROM projects pr WHERE pr.id IN (SELECT id FROM named)
+        SELECT pr.id::text AS id, pr.slug AS path FROM projects pr WHERE pr.id IN (SELECT id FROM named) AND strpos(pr.slug, '~') = 0
         UNION ALL
-        SELECT e.id::text, pr.slug || '/' || e.slug FROM environments e JOIN projects pr ON pr.id = e.project_id WHERE e.id IN (SELECT id FROM named)
+        SELECT e.id::text, pr.slug || '/' || e.slug FROM environments e JOIN projects pr ON pr.id = e.project_id
+          WHERE e.id IN (SELECT id FROM named) AND strpos(pr.slug, '~') = 0 AND strpos(e.slug, '~') = 0
       ) place) AS paths,
       (SELECT coalesce(json_object_agg(s.id, s.key), '{}') FROM secrets s WHERE s.id IN (SELECT id FROM named)) AS keys
     FROM member m

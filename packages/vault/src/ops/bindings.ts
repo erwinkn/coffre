@@ -38,6 +38,7 @@ import {
   type CheckedBinding,
   type UploadedKeys,
 } from '@coffre/core/identity';
+import { ROW_ID as UUID, SERVICE_MEMBER as SERVICE } from '@coffre/core/schemas';
 import type { Answers, NewBinding, Presented, TokenBind, TokenUnbind } from '@coffre/core/vault';
 import { bindings, environments, projects, roles, secrets } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
@@ -52,10 +53,6 @@ import { long, presented, text } from './input.ts';
 import { definitionsOf, manages, projectsOf, serviceOf, serviceParts, settingOf } from './services.ts';
 import { by, labelled, scopeAsked, sealedScope, SLUG, type Wanted } from './signin.ts';
 
-/** A binding's id, as the vault draws one. */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-/** A service account, by its member id (`principals_id_check`). */
-const SERVICE = /^token:[^\s:]\S*$/;
 /** The longest issuer or keys' address the contract carries. */
 const MOST_URL = 2048;
 /** A key's name in a binding's `reads`, as 0.14.7 took one. */
