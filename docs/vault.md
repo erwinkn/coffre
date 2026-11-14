@@ -27,15 +27,6 @@ export const coffre = createCoffre((env: Env) => ({
 }));
 ```
 
-On Node, the same line in the configuration object:
-
-```ts
-export const coffre = createCoffre({
-  // …publicUrl, database, vault, auth, auditChainKey, as they are
-  plugins: [vaultKv()],
-});
-```
-
 Then add one route, `app/src/routes/v1.$.ts`, which hands every request
 under `/v1` to coffre, as `api.$.ts` does for `/api`:
 

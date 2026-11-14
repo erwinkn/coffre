@@ -58,47 +58,29 @@ hands it, in practice once per isolate; `coffre.request(env, ctx)` opens the
 invocation's database client, closed once coffre's work for the request is
 done.
 
-A Node deployment is the same idea, as two processes: the same Start app,
-which a server such as srvx runs, and the vault.
+0.16.0 runs on Workers only: a Node deployment stays on 0.14 until Node
+comes back in 0.16.1 ([Node in 0.16.0](design/0.16.md#node-in-0160)). For tests,
+`localVault(config, options)`, from `@coffre/vault/node`, runs the vault in
+the server's process, on the same Postgres database.
 
-```ts
-// app/src/coffre.ts
-import { createCoffre, github, signin } from '@coffre/server/node';
-import { connectVault } from '@coffre/vault/node';
-
-export const coffre = createCoffre({ publicUrl, database: 'postgres://coffre_runtime:…@db:5432/coffre', vault: connectVault('vault.sock'), auth, auditChainKey });
-
-// app/src/server.ts
-coffre.schedule();
-export default { fetch: (request: Request) => handler.fetch(request, { context: coffre.request(request) }) };
-
-// src/vault.ts
-import { serveVault } from '@coffre/vault/node';
-
-await serveVault({ socket: 'vault.sock', database: 'postgres://coffre_vault_runtime:…@db:5432/coffre', kek, owners });
-```
-
-For local development or tests, run one process with
-`vault: await localVault({ database, kek, owners })` in the
-server. `database` is a Postgres URL.
-
-`coffre init --workers` or `coffre init --node` writes such a project:
-[examples/workers](../examples/workers) or [examples/node](../examples/node)
-exactly, including the Workers' `wrangler.jsonc` files (Hyperdrive, the
+`coffre init --workers` writes such a project:
+[examples/workers](../examples/workers) exactly, including the Workers' `wrangler.jsonc` files (Hyperdrive, the
 service binding, the Cron trigger and the UI's static files). Both Workers
 use one Postgres database: `HYPERDRIVE` connects as `coffre_runtime`,
 `VAULT_HYPERDRIVE` as `coffre_vault_runtime`, with caching disabled on both.
+`coffre init --node` writes [examples/node](../examples/node), which waits
+for 0.16.1.
 
 ## Packages
 
 | Package | What | Holds |
 |---|---|---|
 | `@coffre/ui` | the web UI, server-rendered, and its static files | nothing sensitive |
-| `@coffre/server` | `/api`, sign-in, the heartbeat, the queries; hands pages to the UI | sessions, the app login |
+| `@coffre/server` | `/api`, sign-in, the pages' queries; hands pages to the UI | the app key, the app's login, which only reads |
 | `@coffre/db` | the Drizzle schema for Postgres, its migrations and migrator, the dialect helpers, the connections, Hyperdrive's included | |
-| `@coffre/vault` | wraps and unwraps data keys, decides who may, logs every use | the keys, the vault login |
+| `@coffre/vault` | decides every use and change, writes every row and the log's entries; the signer | the keys, the vault login, the signer's storage |
 | `@coffre/client` | the typed API client, the API's types printed from the server's routes | |
-| `@coffre/core` | what the others share: access rules, envelope encryption, vault key providers, the audit chain, identity and sign-in, and `Vault`, the contract between server and vault | |
+| `@coffre/core` | what the others share: access rules, envelope encryption, vault key providers, the log's entries and proofs, identity and sign-in, and `Vault`, the contract between server and vault | |
 | `@coffre/cli` | `init`, `login`, secrets, audit; built on the client | a CLI session |
 
 A package imports another by name, never by a relative path (a lint rule
@@ -116,12 +98,11 @@ one package is seen by the others without a build. Builds leave it off.
 | Entry point | What a deployment calls |
 |---|---|
 | `@coffre/server/cloudflare` | `createCoffre(env => ({ database, …config }))` → `{ request(env, ctx), scheduled }`; `postgres(env.HYPERDRIVE)` |
-| `@coffre/server/node` | `createCoffre({ database, …config })` → `{ request(request), schedule() }`; `migrate(url)` |
 | `@coffre/server/start` | `coffreMiddleware`, for the app's `createStart(() => ({ requestMiddleware: [coffreMiddleware, …] }))` |
 | `@coffre/server/routes` | `api`, `auth`, `livez`, `readyz`, `plugin`, route options for file routes |
 | `@coffre/server/plugins/vault-kv` | `vaultKv()`, a plugin for `plugins: […]`: a read-only Vault KV v2 API at `/v1` ([vault.md](vault.md), [design/plugins.md](design/plugins.md)) |
 | `@coffre/server` (both) | `signin`, `github`, `google`, `microsoft`, `oidc`, `cloudflareAccess`, `SigninError`; `githubActions`, `vercel`, `railway`, `cloudflareWorkers`, `SyncConfigError`, `SyncProviderError`; and the config types, `SigninProvider` and `SyncProvider` among them |
-| `@coffre/vault/cloudflare` | `vault(env => config)`, the RPC Worker's default export; `postgres(env.VAULT_HYPERDRIVE)` |
+| `@coffre/vault/cloudflare` | `vault(env => config)`, the RPC Worker's default export; `postgres(env.VAULT_HYPERDRIVE)`; `CoffreSigner`, the signer's Durable Object, which the vault Worker exports |
 | `@coffre/vault` (both) | `awsKms`, `KekUnavailableError`, `KekRefusedError`, `KekBadClaimError`, and the config types, `KekProvider` among them |
 | `@coffre/vault/node` | `serveVault({ socket, database, …config })`, `connectVault(socket)`, `localVault({ database, …config })` |
 | `@coffre/ui` | each layout's and page's route options, `shell`, `solo`, `projects` and the like; `createRouter(routeTree)`; `<CoffreProvider>`, `useCoffre()`; `CoffreContext` |
@@ -131,11 +112,12 @@ one package is seen by the others without a build. Builds leave it off.
 | `@coffre/client` | `createClient({ url, headers?, transport? })` |
 
 Where `config` is, for the server, `{ publicUrl, vault, auth, auditChainKey,
-previousAuditChainKeys?, rotateAfterDays? }` (the app keys `auditChainKey`
-replaced, which verify the log from before each rotation; the days a value may go unchanged before the UI and
+rotateAfterDays? }` (`auditChainKey` is the app key: 0.16's app signs no
+entry and derives from it only the keys of its sign-in state and Access
+sessions, [The server](design/0.16.md#the-server); the days a value may go unchanged before the UI and
 `coffre list` flag it for rotation: 365 if left out, `null` for none)
 and, for the vault, `{ database, kek, previousKeks?, owners,
-signingKey?, bulkLimit? }`, a vault key being a local key or `awsKms(…)`
+signingKey?, bulkLimit?, memorySeconds?, outageSeconds?, workloads?, log?, alert? }`, a vault key being a local key or `awsKms(…)`
 ([keys.md](keys.md)). The vault derives its signing key from a local vault key;
 `signingKey` is required only with a vault key a key service holds.
 Each is checked when the deployment starts, and a bad value (a 31-byte key,
@@ -147,13 +129,11 @@ deployment's pipeline ([expand, then contract](#expand-then-contract)). A
 deployment pins `@coffre/cli` with its other coffre packages, and in its
 directory `coffre migrate` applies the migrations that CLI carries, which
 are the pinned version's: it refuses to run as another version, or on a
-database a newer coffre migrated, and asks no instance. Anywhere else, it
-migrates an instance's database, and first asks the instance which version
-it runs (`/me`, to admins and owners of the whole instance only), refusing unless the CLI is
-that version. `coffre-server migrate`, the server's own command, stays for
-a Node deployment's own pipeline. A Worker has no files, so the migrations each version ships are compiled into
-`@coffre/db/schema-version` from their journals: `/me` reports how many the
-database has applied of those.
+database a newer coffre migrated, and asks no instance; anywhere else it
+refuses. `coffre-server migrate [database-url]`, the server's own command,
+migrates from a URL. A Worker has no files, so the migrations each version
+ships are compiled into `@coffre/db/schema-version` from their journals,
+which the app holds the database to ([expand, then contract](#expand-then-contract)).
 
 ## The UI
 
@@ -176,10 +156,7 @@ app/src/coffre.ts             export const coffre = createCoffre(env => ({ publi
 
 **A request.** The Worker's `fetch` hands Start's handler the request with
 coffre in its context: `coffre.request(env, ctx)`, the invocation's
-database and vault. On Node, the server entry does the same with
-`coffre.request(request)`, and srvx runs it; the entry serves the static
-files itself, kept for good, as srvx's own static serving sets no
-headers.
+database and vault.
 Start runs coffre's middleware first, for every request: it mints the
 response's nonce, builds the visitor's API client, an in-process call with
 their credential, reads the visitor's preferences from their cookies, and
@@ -259,12 +236,6 @@ drill, which run the built app under `wrangler dev`, put an entry of their
 own in front of it that reads such a body before answering. coffre itself
 never does.
 
-**On Node**, the same build, without Cloudflare's plugin:
-`app/dist/server/server.js`, whose `fetch` srvx runs, and `app/dist/client`,
-which the server entry serves itself, through srvx's static middleware, with
-the headers that middleware has no option for. One copy of coffre's code
-serves both the server and its pages.
-
 Pages get their data through `@coffre/client`, the same client the CLI uses,
 never by reaching into the services. The client takes a transport: HTTP in the
 browser and the CLI, and during server rendering an in-process call to the
@@ -322,7 +293,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | approve or deny a `coffre login` device code | `GET` / `POST /api/device-logins/:code {"approve": true}` |
 | what an MCP client asking to connect is and wants, and the person's answer | `GET /api/oauth/authorizations?client_id=…`, `POST /api/oauth/authorizations {"request": {…}, "approve": true, "scopes": ["read"]}` |
 | the MCP clients I connected, and disconnecting one | `GET /api/apps`, `DELETE /api/apps/:id` |
-| the audit log, and verifying it | `GET /api/audit?path=market/prod/DATABASE_URL` → `{entries, more}`, `GET /api/audit/verification` |
+| the audit log, each entry it shows proved to the signed head; the vault's keys and their checks, for `coffre verify keys` | `GET /api/audit?path=market/prod/DATABASE_URL`, `GET /api/audit/keys` |
 
 Three conventions carry it:
 
@@ -367,36 +338,20 @@ change there, in process, as the person with the connection attached
 (design/mcp.md, section 7).
 
 The server is one table keyed by method and route, each entry giving its input
-schema, the permission it needs and its handler. `@coffre/client` is typed
-from the same table by inference (`coffre.secrets.set('market/prod', {…})`),
-so the two cannot drift, and the UI calls it like any other client.
+schema and its handler. `@coffre/client`'s types are generated from the same
+table (`pnpm --filter @coffre/client generate`), and a test fails while they
+differ, so the two cannot drift; the UI calls it like any other client.
 
 Each segment names one level, so `/api/secrets/market/prod/versions` is a
 secret named `versions`, and its history is one level further down. Where a
 literal and a name could both fit a path, the literal wins among the routes
 that take the request's method.
 
-Behind it, a request asks the vault once who the caller is to this instance:
-whether they are still a member, and the grants they hold
-(`vault.access`). Every permission check after that is a plain function,
-`can()`, over that answer, and a path resolves to its project, environment
-and secret in one read.
-
-A read of values (`POST /api/reveals`, the credential proxy's) asks
-nothing first when the app kept the vault's last answer about the caller
-(`Accesses`, `packages/server/src/accesses.ts`): it decides on that one,
-and its one vault call, the unwrap, names it (`accessRevision`). The vault
-opens the values only while that is still its answer, under the reader's
-row and the head, and refuses `access_changed` otherwise, reading nothing
-and logging no read (with a key service, the intent it logged is closed,
-each key refused). A read that answers or refuses without opening a value
-asks first, and a request whose kept answer is not the vault's now starts
-over, asking. So a read on a kept answer is answered and logged exactly as
-one that asked: one vault call, not two, and three, once, after the
-caller's access or the policy changed. An app of 0.14.1 keeps only the
-answers of a vault that names them (`Access.revision`); one older than
-that names nothing back from an unwrap, and the app asks before it
-answers.
+Behind it, the app decides nothing. A page read asks the vault once who
+the caller is and what they hold (`caller`), shared by every call of one
+render, and scopes its queries by the answer; a reveal or a change is one
+vault call, which decides on rows whose MAC it checked. [The
+server](design/0.16.md#the-server) gives a request's path and what each costs.
 
 ### Generated values
 
@@ -413,15 +368,15 @@ The client makes the value, with Web Crypto's CSPRNG, and sends it with its
 recipe: `coffre set market/prod/SESSION_SECRET --generate bytes:32:hex`, or
 the Generate dialog of a secret's value field. The server makes no value. It
 checks that the recipe reads, stores it, written canonical
-(`bytes:32:base62` for `BYTES:32`), beside the version it made
-(`secret_versions.recipe`), and says it back in the listing as the key's
+(`bytes:32:base62` for `BYTES:32`), on the secret's row (`secrets.recipe`),
+and says it back in the listing as the key's
 `generated`, and in its version history. Regenerate, `coffre regenerate
 market/prod/SESSION_SECRET` or the row's menu, makes the next value by it, in
 the environment it is asked of, and nobody sees either. It addresses keys by
 name, so each value it sends says the version it `replaces`, by the
 `versionId` the listing gave it (unique, as a version number is not), and the
 server refuses the whole write (409) unless every key resolves to that
-version now, checked again under the log's head: renamed, archived, typed
+version now, checked again in the vault's change: renamed, archived, typed
 over or regenerated meanwhile, by anyone, here or in a parent.
 In a fork, a key it inherits lists the recipe of the parent's value it
 reads, to a reader of that parent, as its version; regenerating it writes
@@ -434,107 +389,47 @@ with the recipe it had.
 A key pair is two keys, written in one patch, each naming both:
 `"generated": {"recipe": "ecdsa:p-256", "pair": {"private": "JWT_PRIVATE_KEY",
 "public": "JWT_PUBLIC_KEY"}}` on each. Half a pair, or halves that disagree,
-are refused (400). The two versions share a fresh `pair_id`, each with its
-`pair_half`, and a listing names a key's pair only while the other key's
-current version is the other half of the same pair. Typing over, archiving or
+are refused (400). The two keys' rows share a fresh `pair_id`, each with its
+`pair_half`. Typing over, archiving or
 rolling back either half leaves both without a recipe until the pair is made
 again; renaming one keeps it, as a rename moves no value.
 
-A recipe is no secret: the listing, the version history and its write's
-audit entry name it. It is as trustworthy as the database that holds it, and
-someone who writes there around coffre could weaken one, as the versions'
-erase-only trigger keeps coffre's own logins from doing. So Regenerate says
-the recipe: the page asks with it, and `coffre regenerate` prints the one it
+A recipe is no secret: the listing names it. It is on the secret's row,
+under the vault's MAC, so a database writer cannot weaken one unseen; still,
+Regenerate says the recipe: the page asks with it, and `coffre regenerate` prints the one it
 used.
 
 ## The vault
 
 The app decides **who** someone is. The vault decides **what** they may
-decrypt. The vault never sees a cookie, an OAuth flow or a session; the app
-passes it a claim:
+do. The vault never sees a cookie, an OAuth flow or a session; the app
+passes it what the request showed (`Presented`: the credential's SHA-256,
+the request's id and address), and the vault finds the caller itself.
 
-```ts
-await vault.unwrap({
-  principal: 'user:dev@acme.example',
-  purpose: 'reveal', // or 'run', 'compare'
-  requestId,
-  operationId,
-  items: [{ secretVersionId }],
-});
-// { ok: true, keys: [...] }
-// { ok: false, refusal: { code: 'no_grant', message: '...' } }
-```
-
-The app names stored versions; the vault reads each one's wrapped key, and
-the secret it belongs to, from the database itself, so the app cannot claim
-a version is something it is not. Before it unwraps anything, the vault
-checks that the principal is still a member and their row is the one it
-wrote, that an unexpired grant covers that environment for reading, and that
-the principal is under the bulk limit. A data key opens only for the secret
-it was wrapped for, so a wrapped key copied onto another secret's row is
-refused as `bad_claim`. The vault logs the attempt either way. A batch is all
-or nothing: fifty keys for one `coffre run` are one decision and one
-refusal.
-
-The code lives in `packages/vault`: one `Vault` interface, one
-implementation, and a Drizzle store over the shared database. The schemas
-and migrations live in `@coffre/db`. Postgres row locks serialize decisions
-that change the same member, so separate vault instances share membership
-generations; one member's reads share their row, and wait only for such a
-change, and the bulk count holds under the log's head. The interface:
+The interface is `Vault` in `@coffre/core/vault`, six calls:
 
 | Call | Does |
 |---|---|
-| `unwrap`, `wrap`, `rewrap` | data keys, for a principal whose grants cover the secret, or, `via` a reference, the holder's environment |
-| `reference`, `endReferences` | make references, each a `reference.create` entry of its own, which every read through one is checked against; end them, each a `reference.end` naming it ([design](design/environments.md#references)) |
-| `access(principal)` | one principal's status, instance role and grants, their rows checked, and the answer's `revision`; the app asks once per request, except a read on an answer it kept, which the unwrap checks; and it makes someone the deployment names an Owner when they own nothing |
-| `setAccess` | several places for one principal, all or nothing (`PATCH /api/access/<member>`) |
-| `admit`, `remove` | add or restore a member, or remove one and revoke every grant; both answer the member's generation |
-| `checkpoint` | sign the shared log up to its last entry, in an entry of the vault's, and check every member's row |
-| `about` | what only its configuration says: the public keys checkpoints verify under, and the Owners the deployment names (`owners`), which Users marks; and `rootAdmins`, always empty, for an app of 0.5 during a deploy, until 0.7 |
-| `verifyLog` | check the vault's MACs over the prefix the app verified (asked with no head, the whole chain too), every checkpoint, and replay members and grants |
+| `use` | open values: a reveal, `coffre run`, an export, a proxied request |
+| `peek` | what a use would open, by version, opening nothing (`GET …/version`) |
+| `caller` | who the caller is and what they hold, for a page to scope its queries; with `head`, the log's head under the vault's MAC |
+| `change` | every write: values, places, members, grants, credentials, settings |
+| `weigh` | what a change would do, without doing it (`?dryRun=1`) |
+| `about` | its configuration alone: its vault keys by provider and ID, and its signing keys' checks (`GET /api/audit/keys`) |
 
 Every argument and result is plain data, and a refusal is a value, not a
-thrown error, so the same interface works across a process boundary. The app
-turns a refusal into a 403 `vault_refused` carrying the vault's code
-(`removed`, `no_grant`, `expired`, ...), or a 403 `bulk_limit`. The vault
-logs what it refuses; the app adds its own entry, with code `vault_<code>`,
-only where the refusal is part of something larger it was doing, a write
-or requested grants.
+thrown error, so the same interface works across a process boundary. The
+app words a refusal as [The server](design/0.16.md#the-server) tabulates: 403
+`vault_refused` carrying the vault's word in most cases. [What became of
+0.14's calls](design/0.16.md#operations) maps the old interface to this one.
 
-**The vault key is checked before it is used.** Each vault key gets a check value, a
-known value wrapped under it the first time the vault uses it, kept in a
-`key.check` entry of the log. Before its first key operation, each vault
-process opens it again; a vault key with no check value yet is first tried on a
-few stored keys it wrapped. A vault key that opens neither is not the one that
-wrapped the data: every read and write is refused as `wrong_kek` (a 503),
-naming the provider and key id, and the next checkpoint is refused, so
-`/readyz` turns red. A key service that cannot answer is not a verdict; the
-next call asks again. With a local vault key, the vault knows sooner: its keys
-come from the vault key, so a wrong one holds none of those its entries were
-written under: the vault writes nothing at all, and can check no member's
-row, so every member's request answers 503.
-[restore.md](restore.md#if-the-vault-key-is-wrong) shows what an operator sees.
-
-The vault owns everything that decides access: the vault key,
-grants (`(principal, place) → role`, one per member per place, with an
-optional expiry), principal status (active or removed) and instance role,
-the Owners its deployment names (`owners`, from its configuration),
-and its log entries.
-Whether a caller is still in, and what they may do, comes only from
-`vault.access`. `can()` stays a plain function over the grants that call
-returned.
-
-**Lists are reads.** The Users page, `coffre access`, a project's Access tab
-and a member's page read `vault_members` and `vault_grants` directly, with
-the app's sessions and sign-in accounts, in one query: a list is a display,
-not a decision. The app cannot check the vault's MAC over a member's row,
-so a row changed around the vault lists as stored; the vault refuses it at
-its first use. Every scheduled checkpoint has the vault check every row
-too, and log a `vault.tampered` for each one it finds changed. A list marks
-a member whose newest such finding is newer than the vault's newest change
-to what they hold, and shows them holding nothing, until an owner removes
-them, which starts them over.
+The vault writes every row, and puts a MAC on each one that turns into
+access; the app's login only reads ([Four rules](design/0.16.md#four-rules)). So the
+Users page, a project's Access tab and a member's page read the rows
+directly, scoped by the caller's answer: a list is a display, not a
+decision. The app cannot check a row's MAC, so a row changed around the
+vault lists as stored; the vault refuses it at its first use, and the
+signer finds it within about a minute ([What it promises](design/0.16.md#what-it-promises)).
 
 ### Transports
 
@@ -543,16 +438,12 @@ them, which starts them over.
   service binding. Each call opens the shared Postgres database through
   `VAULT_HYPERDRIVE`, using the vault's login: one connection, which its
   queries take turns on, closed when the call is done. No database
-  connection lives across requests.
-- **Node, its own process** (`serveVault` and `connectVault`): the vault
-  opens the same Postgres database as the app, through its own login, and
-  answers on a Unix socket. The socket is its authentication: a file made
-  `0660`, which only the vault's user and a group it shares with the server
-  may open. Each call is one HTTP POST over the socket, `/<method>` with
-  the arguments as a JSON array. The process facing the network holds no vault key.
-- **Node, in process** (`localVault`): for tests and local development.
-  Both components use one Postgres database. Each call's arguments and results
-  go through JSON as over RPC, so nothing that only works in-process gets in.
+  connection lives across requests. The signer is a Durable Object of the
+  vault's Worker (`SIGNER`, `CoffreSigner`), whose storage holds what the
+  database is held to.
+- **In process** (`localVault`): for tests. Each call's arguments and
+  results go through JSON as over RPC, so nothing that only works
+  in-process gets in.
 - **Locally**, `pnpm dev` runs the vault as an auxiliary Worker of the
   app's `vite dev`, and conformance runs both with `wrangler dev`, the app
   as Vite built it. Either way the app's `VAULT` binding reaches it as in
@@ -563,233 +454,48 @@ them, which starts them over.
 | | App (Worker `coffre`) | Vault (Worker `coffre-vault`) |
 |---|---|---|
 | Config | `auditChainKey`, `auth` (sign-in or Access settings), `rotateAfterDays` | `kek`, `previousKeks`, `owners`, `bulkLimit`; `signingKey` with a KMS key |
-| Tables it writes | projects, environments, ciphertext and wrapped keys, the directory, sessions; app entries in `audit_log` | `vault_members`, `vault_grants`; vault entries in `audit_log` |
-| Connection | `coffre_runtime`, through `HYPERDRIVE` or a Node Postgres URL | `coffre_vault_runtime`, through `VAULT_HYPERDRIVE` or a Node Postgres URL |
+| Tables it writes | none: its login only reads | every other table, the log's entries into `log_pending`; the signer moves them into `log` and writes the tiles and the head |
+| Connection | `coffre_runtime`, through `HYPERDRIVE` | `coffre_vault_runtime`, through `VAULT_HYPERDRIVE` |
 
 Both connections reach the same database. Each Worker gets only its own
-configuration secrets. Neither stores the vault key or the app key in the database.
-The database's grants protect members and grants from the app's login;
-row-level security protects each author's entries from the other's login.
-The owner can bypass those restrictions, but cannot forge an entry's MAC
-without its author's key.
+configuration secrets. Neither stores the vault key or the app key in the
+database. The owner can bypass the logins' grants, but cannot forge a row's
+MAC without the vault's key, and what the vault sealed and a writer put
+back is held to the signer's copy ([What it promises](design/0.16.md#what-it-promises)).
 
 ### Transactions
 
-No app transaction stays open across a vault call. A write asks the vault to
-wrap its new data keys first, outside any transaction, then stores the
-versions and its `secret.write` entries together in one short transaction
-that checks nothing changed meanwhile, and starts again, under a new
-operation id, if something did. A reveal needs no app transaction at all: the
-vault has committed its `secret.read` entry before it returns a key. A wrap
-whose write then failed stays in the log, under an operation no
-`secret.write` shares; it records the attempt, not a value stored.
-
-The vault locks affected members before the shared audit head. Its member
-and grant changes commit with their audit entries. With a local vault key, a read
-is one short transaction, decided once under the member's row and the head.
-With AWS KMS, the intent commits first; the member
-row stays locked across the KMS calls, which settle within five seconds,
-shared with the member's other reads but not with a change to them,
-the head is taken only once they have, and the decision is made again under it;
-and each key's outcome is logged: the keys of a place that came out alike in
-one entry, each its item of the intent. Removal waits for a read already in
-flight; the next read is refused before KMS is called. A read asked while a
-removal waits queues behind it, so a steady stream of reads never holds a
-removal off. Each statement of a read's decision runs at most three
-seconds, a wait for a lock included, then fails as unavailable: a
-statement, not a lock timeout, since a waiter for the log's head waits
-again on each new version of it. A read's whole call, its retries, a
-refusal's entries, the record of a vault key's check and a key service's
-intent included, is due five seconds after its key decision starts, once
-it has read the versions it opens (with a key service,
-plus the service's own five-second budget, which it spends from the same
-deadline): each statement of a transaction it starts runs at most what was
-left when the transaction began, and past the deadline the call starts
-nothing more and fails as unavailable. Only settling the vault's keys after
-a rotation, and converting a 0.4 instance's grants, each once, are not
-bound by it. At most sixteen
-reads wait for the head at once, each holding one of its places in line,
-an advisory lock tried and never waited for; the next is refused at once,
-as unavailable (55P03), and holds no connection while it would have
-waited. A caller hears 503 with `Retry-After`, never tens of seconds later.
-A change waits up to fifteen seconds for each lock, and so does the entry
-of a change's refusal.
+No app transaction stays open across a vault call, and the app writes
+nothing. A change is one vault call: it reads the rows it decides on,
+checks their MACs, and writes the rows and their entry in one statement; a
+row that moved since the read starts it over. A use takes no lock
+([Operations](design/0.16.md#operations)).
 
 ### The bulk limit
 
-At most `bulkLimit` distinct data keys unwrapped per principal in any rolling window,
+At most `bulkLimit` distinct keys used per principal in a sliding window,
 `{ count: 1000, windowMinutes: 15 }` by default: a thousand different secrets, which no
 person or pipeline reads in a quarter of an hour, while a script pulling every
 value it can reach stops within seconds. A key counts once in the window however
-often it is read, and whatever its version: a 50-key run is 50, though it is one
-entry in the log, and the same run again adds nothing, as it exposes nothing new.
-Tools that export one environment on every command never trip it. A refusal is
-logged and answers 403 `bulk_limit`; the principal reads new keys again as the
-window rolls on.
+often it is read, so a 50-key run is 50, and the same run again adds nothing.
+A refusal answers 403 `bulk_limit`; the principal reads new keys again as the
+window rolls on. The vault counts from `exposures`, one row per principal and
+key with when they last saw it, and the requests in flight when the cap is
+reached may overshoot it ([What it promises](design/0.16.md#what-it-promises),
+relaxation 3).
 
-The vault counts the keys its allowed `secret.read` entries released in the
-window, under the log's head, in the statement that reads the rest of the
-decision (with KMS, again in the one that takes the head): a read of one key
-names it in `secret_id`, a read of several at one place lists each in its
-`secrets`. It reads them from `vault_releases`, a row per principal and key
-with when it was last released, which the database keeps from the log: a
-trigger on `audit_log`, in the transaction of each such entry, upserts a row
-for each key it names (an entry that names none, which only a forged one is,
-counts as a key of its own). No login writes the table; the trigger's function
-runs as its owner. Only the key is indexed, so a read moves its keys' times on
-in place (a HOT update) and leaves the table a row a key. Each checkpoint
-forgets the rows released over a day and an hour before
-(`prune_vault_releases`, 0.14.5): a day is the longest window
-`bulkLimit` takes, and the hour covers the database's clock stepping back
-between a prune and a later count. The function keeps the day and an hour
-in its own SQL, so no login forgets a release a window counts. So the
-count reads a row for each key the reader was released in the last day,
-whatever their history and however often they read the same keys: about 25 pages of the database for the
-whole decision's statement, on a log of ten thousand entries as on one of a
-million. Before 0.14.4 it read every entry the reader ever made (the window's
-bound, `clock_timestamp()`, is volatile, so no index could use it): a busy
-service's reads cost a second of the database's time each.
+### The log
 
-### One log, two authors
-
-Both authors append `coffre.audit.v2` entries to `audit_log`, sharing one
-`audit_chain_head`. Each entry has an `author` (`app` or `vault`), a MAC
-under a key derived from that author's configuration key, and a public
-SHA-256 hash over its fields and MAC. The app derives its MAC key from
-`auditChainKey`; the vault derives its own from its signing key, which
-comes from its vault key unless it is given one. Neither can authenticate the
-other's entries alone. One action crosses over: since 0.14.5 the vault
-appends the credential proxy's `credential.use` beside its read, from a
-record the app hands it. Its MAC vouches for the actor, the time and that
-the vault released the keys; where they went, the credential and its host
-in its metadata, and its place, are the app's word, as they were when the
-app wrote the entry. An entry names the key it was MACed under. A vault
-whose vault key was rotated verifies its earlier entries by the key of the vault key it
-keeps in `previousKeks`, but only those before the rotation: at its first
-call under the new vault key, the vault seals every member row again under the new
-key and writes a `key.rotate` entry, and from there its keys only move
-forward. A key it replaced counts for no entry, row or checkpoint after
-that, and a vault still running with it writes nothing more
-([keys.md](keys.md#a-local-key)).
-
-An append locks the head, reads the database clock, and refuses a head that
-does not name the last entry or is behind one the process remembers. A new
-head is remembered only after commit. Postgres forbids both runtime logins
-from changing or deleting entries and permits each to append only as its
-own author. The owner can lift the triggers and bypass row-level security;
-the MACs still expose changes made without the keys.
-
-Every five minutes the Cron trigger runs the scheduled job. Core asks the
-vault to checkpoint the log, below, and forgets spent tokens. The vault reads the log itself: from its newest checkpoint, it
-checks that the prefix that checkpoint signed is still there, its hash
-where it was and every entry of it, by one count of the log's index;
-recomputes the chain since, every hash from content and its own entries
-by their MACs; and signs the log up to its last entry with Ed25519, in an
-`audit.checkpoint` entry of its own. A call with nothing new returns the
-last checkpoint. The walk takes neither the log's lock nor a transaction:
-it reads a batch a statement, each linked to the hash it verified last,
-so writes never wait for it and no connection is held while it rehashes,
-and only the entries appended meanwhile are walked under the lock. The
-same checkpoint checks every member's row, as `access` would, and logs a
-`vault.tampered` for each one changed around the vault.
-
-**The tally.** A walk from the first entry gathers more than a head
-hash: the vault's keys in the order the log moved through them, the key
-batches still under way, who is a member and what they hold, each
-member's newest access entry, and the first fault that leaves the chain
-whole. The checkpoint's entry keeps all of it beside the signature, as of
-the prefix it signs: its tally. So the next checkpoint, and every
-verification, start from the newest tally and read only what came since,
-and lose none of the checks a walk from the first entry makes. Members
-and grants change far less often than every five minutes: they are kept
-whole in the first checkpoint after they change, and the others name that
-one, by its digest. The tally is under the vault's MAC like the rest of
-its entry, and pinned by the chain after it.
-
-Say the newest checkpoint is entry 9,412, signing entries 0 to 9,411, and
-the log has reached 9,430. The next beat checks that entry 9,411 still
-has the hash the checkpoint signed and that 9,412 entries come before it;
-rehashes 9,412 to 9,430, checking the vault's MACs and replaying the two
-grants among them onto the tally's members; and signs 0 to 9,430. Twenty
-entries, however long the log.
-
-A walk is bounded: no more than 10,000 entries a call. A log longer than
-that since its newest tally, as one is when 0.10.1 first checkpoints a
-log whose checkpoints kept none, is signed a walk a call, behind its
-head, until the checkpoints catch up; until then `/readyz` stays red,
-since no checkpoint covers the newest beat.
-
-**The past, rehashed.** Starting from the tally, nothing reads what a
-checkpoint signed again. Every entry of it was checked when the
-checkpoint signed it, and its hash pins it since: a rewrite chained again
-changes the hash the next checkpoint finds, and a cut changes the count.
-What it leaves is an entry edited in place, its stored hash left as it
-was. So each checkpoint also rehashes 100 entries of the past, a hash an
-entry and nothing else, some 6 ms of a cold Worker's CPU, in laps: a lap
-runs from the first entry to the prefix the newest checkpoint signed when
-it began, and the next to the prefix signed then. Where a lap stands, and
-where it ends, is kept in the checkpoint it signs. An entry edited in
-place is refused within two laps at most, each the length of the log when
-it began over 100 beats, however fast the log grows meanwhile; from then
-on every verification says so, by the refused checkpoint, though none
-reads that far back itself. The refusal stands, through refusals of other
-kinds after it, until a checkpoint is signed, which takes the check that
-found it running again and passing. A rehash the database fails leaves
-the lap where it was and the checkpoint is signed all the same, with a
-warning in the app's log, unless such a refusal stands.
-
-`GET /api/audit/verification` (those who read the whole log), which the
-audit page calls on every visit, checks the log from where the last checks
-left off. The app walks the chain, every link and hash and its own MACs,
-from the older of the anchor's `verified` and the newest checkpoint's
-prefix, to the head; then hands the vault the head it reached, and the
-vault reads its own entries since its newest checkpoint: each by its MAC,
-every checkpoint among them against the prefix it signed, the key batches
-accounted for, and member and grant changes replayed onto the tally, then
-compared with the rows. The links are the app's to recompute, as it just
-has through that head; the vault confirms its snapshot still holds the
-head, and asked with no head, it recomputes the chain itself. Everything
-before is pinned by the hash the newest checkpoint signed, which the vault
-finds where it was, and is whole, by one count. A grant inserted by the
-owner without a matching vault entry is detected by replay. The answer is
-the entry verified through, or the entry where it breaks and whose check
-found it, and the entries the check did not reach, if the checkpoints are
-catching up. On Equisafe's log of 7,000 entries this took 1.2 seconds of a
-Worker's CPU, from the first entry; it now reads five minutes of the log.
-
-`coffre verify log`, and the audit page's "Verify whole log", walk the log
-from its first entry, as the tallies take on trust: a stretch a request,
-`GET /api/audit/verification?from=start`, then `from=` each stretch's
-`next`. A stretch ends at the furthest checkpoint 10,000 entries reach,
-the newest once within reach, and the vault's walk must come to the tally
-that checkpoint keeps; the last runs from the newest to the head, as the
-page's check does. So each tally is checked against the log before it,
-and a tally a holder of the vault's key rewrote is found, as is anything
-the past holds that a walk from the first entry would find.
-
-**One entry per human action.** A read is the vault's `secret.read`, one
-per place it read at (and per outcome, where a refused or failed call's keys
-came out differently), with its purpose (`reveal`, `run`, `compare`,
-`copy`). A read of one secret names it as any entry does; a read of
-several lists them in `secrets`, each with its id, path and version, so a
-machine polling an environment of a hundred keys every 15 minutes writes
-one entry per poll, not a hundred. The place is the environment read and,
-through a reference, the holder's too: a run of `market/prod` that reads
-three values through references into `shared/prod` is two entries, one
-for each environment the values came from. `GET /api/audit` gives a read
-of several as one entry with its `secrets` (each key and version), and a
-filter on a secret (`path=market/prod/DATABASE_URL`) finds the reads that
-list it. A page, and each batch of a verification, holds no more than 8 MiB
-of what its entries list (`BATCH_BYTES`), so a page of reads of thousands
-of secrets each comes back short of its `limit`, with `more` saying to page
-back. Entries written before 0.7.0, one per secret, read and verify as
-they always did. A
-write is the app's `secret.write`, naming the vault's `key.wrap` by
-`related_seq`; access and membership changes are the vault's
-(`access.grant`, `access.revoke`, `member.*`), and the app keeps no copy.
-One operation id ties together everything one action did. Sign-ins, tokens,
-the vault's key operations and the heartbeat are detail: in the log and its
-chain, but left out of `GET /api/audit` unless `detail=1`.
+Every entry is the vault's, each under its MAC: a change's, in the
+statement that writes its rows, and a use's, into `log_pending`. About a
+second later the signer, outside the database, numbers them into `log` and
+signs the heads of two Merkle trees (RFC 9162), one of changes, kept for
+good, one of uses, which age out ([How long the log is
+kept](design/0.16.md#how-long-the-log-is-kept)); each minute it holds every access row
+to its own copy of the row's MAC and alerts on what differs. `GET
+/api/audit` proves each entry it shows to the head the vault vouches for.
+0.14's history is kept as `audit_archive`, which the pages do not show
+([The log](design/0.16.md#data-structures)).
 
 ### What the vault stops
 
@@ -805,16 +511,13 @@ chain, but left out of `GET /api/audit` unless `detail=1`.
 - **Someone removed getting back in.** An offboarding bug leaves a session
   alive; the vault refuses the principal, which only it can restore.
 - **A copy of the database.** It holds no vault key.
-- **Rewritten log entries without the author's key.** Their MACs fail, even
-  if the owner rebuilds the public chain.
-- **Access granted around the vault.** Each member's row carries the vault's
-  MAC over the row and every grant they hold, and names the newest log entry
-  that changed them. A grant written straight into the database fails the
-  MAC; an old row put back names an entry the log has moved past. Either way
-  the vault refuses the member as `tampered` at their next request, logs a
-  `vault.tampered`, and the next checkpoint finds it even if they never ask.
-  An owner removes them to start them over. A decision seals only the grants
-  it decided, so one written while it runs is refused, not sealed in.
+- **Rewritten log entries without the vault's key.** One not signed yet
+  fails its MAC, and a signed one its tree's proof.
+- **Access granted around the vault.** Every row that turns into access
+  carries the vault's MAC. A grant written straight into the database fails
+  it, and the vault refuses to decide on it (`tampered`). A genuine old row
+  put back is honoured until the signer, holding its own copy of every
+  such MAC, alerts within about a minute ([What it promises](design/0.16.md#what-it-promises)).
 
 What it does not stop: an app fully taken over can act as anyone who already
 has access. The vault makes that loud rather than impossible: the key never
@@ -827,43 +530,11 @@ sign-in. The rest of what coffre does not stop is under [Limits](#limits).
 
 ### Sign-in rows
 
-The app authenticates each identity, credential and device authorization
-before using it. A database writer cannot mint a session or edit its
-authority without the app's key. Each row has a 32-byte `auth_mac`, an
-HMAC-SHA-256 under HKDF-SHA-256 of `auditChainKey`, with empty salt and the
-purpose `coffre/signin-rows/v1`. The message is a JSON tuple beginning with
-`coffre.auth.v1` and the table name, followed by these fields in order:
-
-| Table | Authenticated fields |
-|---|---|
-| `identities` | id, provider, issuer hash, subject, principal type and id, generation, revoked at |
-| `credentials` | id, token hash, kind, principal type and id, generation, identity id, expires at, revoked at |
-| `device_authorizations` | id, device code hash, user code, decision, decided at, principal type and id, generation, expires at, consumed at |
-| `service_bindings` | id, principal, generation, profile, issuer, JWKS URL, claims, revoked at |
-| `oauth_clients` | id, name, redirect URIs, revoked at |
-| `mcp_connections` | id, principal, generation, client id, client name, client host, registration, scopes, redirect URI, code hash, code challenge, code expires at, refresh hash, previous refresh hash, expires at, revoked at |
-
-Dates are integer milliseconds, bytes are hex, and null is distinct from
-any value. Row IDs and the device's short user code bind the MAC to the
-target an approval or revocation selects. `decided_at` is covered because
-clearing it would allow another decision. Display labels, email addresses
-and last-use telemetry do not grant access and are outside the MAC.
-
-Every state change checks the old MAC and writes the new one with the
-change, conditional on the old MAC still matching. Listings check the rows
-too, including revoked identities that could otherwise disappear from an
-account-binding check. A failed MAC refuses the operation and reports
-`auth_row_tampered` to the process log, with only the table and row ID.
-
-The baseline requires issuer hashes, generations and MACs. Pending and
-denied device requests have no principal and use generation zero; an
-approval carries its member's generation. A credential's linked identity
-must belong to the same member and generation, enforced by a foreign key.
-
-Changing `auditChainKey` invalidates these rows too, unless a rotation
-signs them again under the new key ([above](#one-log-two-authors)): it does
-so for every table here and `enrollments`, and signs out browser and CLI
-sessions. A MAC proves a row genuine, not current: see [Limits](#limits).
+Sign-in's rows (`identities`, `credentials`, `bindings`, `device_logins`,
+`enrollment_codes`, `oauth_clients`) are the vault's, each under its MAC
+like every row that turns into access ([Tables](design/0.16.md#tables)). The app key
+signs none of them: the app derives from it only the keys that seal its
+sign-in state and its Access sessions, so a lost app key costs a sign-in.
 
 ### Trust bindings
 
@@ -889,7 +560,7 @@ minutes (below).
   github.com's and gitlab.com's issuers force their profiles.
 - **Discovery.** Making a binding asks the issuer's discovery document where
   its keys are. The transport follows no redirect and stops after 5 seconds
-  and 64 KiB. On Node it connects only to public addresses. The binding
+  and 64 KiB. The binding
   keeps the keys' URL under its MAC.
 - **Immutability.** Only a binding's label, last use and revocation ever
   change. Any other change is a new binding, which replaces the old one.
@@ -902,39 +573,15 @@ minutes (below).
   binding it had.
 
 **The exchange.** `POST /api/auth/oidc {"service": "token:api-deploy",
-"token": "<JWT>"}` answers `{"token": "coffre_svc_…", "expiresAt": "…"}`, in
-this order, so that a stranger costs one bounded read at most:
-
-1. **Admission**: the deployment's two limiters, per source address and in
-   total, then the body, read only to 16 KiB. A limiter that fails refuses.
-   Cloudflare counts per location and a Node process per process, so these
-   bound a flood per location or process, not across the deployment.
-2. **The token's shape**: a compact JWS of at most 8 KiB, `iss` and `sub`
-   nonempty strings, `exp` and `iat` numbers.
-3. **The bindings**: one read of the service's live bindings on the token's
-   issuer, in its current generation, without tombstones.
-4. **The token**, by jose, under the issuer's keys: RS256 or ES256 only,
-   nothing taken from the header but `alg` and `kid`, the audience this
-   instance's public URL alone, `exp`, `nbf` and `iat` within 30 seconds,
-   `iat` at most an hour old; then the claims of one binding, exactly.
-5. **Unspent**: a read of the token's signing input's SHA-256.
-6. **The member**: one `vault.access`, outside any transaction.
-7. **Commit**, holding the log's head: the member and the binding again,
-   the times again, at most 60 credentials a minute per binding, the token
-   spent (its hash's primary key decides a race), the credential issued,
-   and `token.exchange` logged with the run the issuer asserts.
-
-A token no binding can take costs its admission and step 3's one read,
-through `service_bindings_principal_idx` on the service and issuer: no
-other query, no transaction, no vault call, no fetch. The database's
-migrations are asked only of a token some binding might take.
-`workload-exchange.test.ts` counts the statements that reach Postgres.
-
-A refusal answers 401 with a reason a CI user can act on, 429, or 503 when
-the issuer cannot be asked, and stays out of the audit log: anyone can mint
-a genuine token. Each isolate keeps the issuers' keys it fetched, settled
-values only, for ten minutes; a key it lacks fetches them again once a
-minute at most.
+"token": "<JWT>"}` answers `{"token": "coffre_svc_…", "expiresAt": "…"}`
+(`packages/server/src/exchange.ts`; [Operations](design/0.16.md#operations), "A
+workload signing in"). The app admits the request through the deployment's
+two limiters, reads the service's live bindings on the token's issuer in
+one statement, so that a token no binding can take costs that read and no
+vault call, and checks the signature under the binding's keys; the vault's
+`token.exchange` change decides, spends the token and issues the
+credential. A refusal answers 401 with a reason a CI user can act on, 429,
+or 503 when the issuer cannot be asked.
 
 **The credential** is a service credential like any other, whose
 `created_by` names its binding, `binding:<id>`. Its MAC is of its own kind
@@ -946,9 +593,8 @@ credentials are kept, since the runtime logins delete nothing; a CI run
 adds two small rows.
 
 **Which run did what.** Every entry a request on such a credential writes
-names it, as `credentialId` in its metadata: the app's own, and the
-vault's, through a `credentialId` in its calls' correlation that it copies
-and never decides on. The exchange's entry names the same credential, with
+names it, as `credentialId` in its metadata, which the vault copies from
+its call's correlation and never decides on. The exchange's entry names the same credential, with
 the run's claims. A credential an entry acts on (one a sign-in opens, a
 token issued, a session revoked) is its `targetCredentialId`, so revoking
 another run's credential is the caller's act, never that run's. So a secret read leads back to its run in one indexed
@@ -971,72 +617,26 @@ archived: an environment under an archived project is deleted alone only
 once it is archived too. `coffre projects delete market`
 shows what it would take; with `--apply` it deletes:
 
-- **Erased:** every version's ciphertext and wrapped data key, emptied in
-  place. Without its wrapped key a value opens for no vault key, and the
-  vault skips an erased version when it tries a new vault key on stored
-  keys.
-- **Refused:** the vault reads, in each key decision, whether the place's
-  slug or its project's is a tombstone's, and refuses it as `deleted` before
-  any grant is asked: an unwrap, a wrap or a rewrap, whoever asks and
-  whatever grant, on the project, the environment or the instance, would
-  cover it. The rule holds even for a value the erase had missed.
-- **Revoked:** every grant on the place, lapsed ones too, by the vault, one
-  `setAccess` per member, each an `access.revoke` under the deletion's
-  operation id.
-- **Ended:** every live reference into the place from elsewhere, and out of
-  it, by the vault, as `broken`: nothing reads through a tombstone, or
-  holds one. The preview names them.
-- **Kept, names only:** the place's row, its keys' rows and its versions'
-  rows (number, author, time, the vault key's id), because the log names
-  them, and its entries reference them `ON DELETE RESTRICT`. The place is
-  renamed `market~deleted-2026-10-05` (then `-2`, `-3` the same day): no
-  live slug has a `~`, so the old one is free, a new `market` is never taken
-  for the old one in the log, and every listing, archived ones included,
-  leaves out a slug with a `~`. `GET /api/audit?path=market~deleted-2026-10-05`
-  still reads its entries.
-- **Logged:** the app's `project.delete` or `environment.delete`, with what it
-  erased and revoked. The log verifies after, as before.
-
-The vault's revocations commit first, outside any app transaction, then
-the app erases, renames and logs in one transaction under the log's head.
-There it checks the place is still archived and holds no grant: a place
-restored meanwhile is kept, unerased, and a grant set meanwhile is left
-for the next attempt, each refused with a 409. Each step does only what is
-left, so a deletion cut off or refused between them finishes when asked
-again. Once it commits, the vault grants nothing there: `setAccess` reads
-the place under the same head and refuses a grant on a tombstone as
-`deleted`, though not a revocation. A key decision checks the place again
-under the head, just before it appends its entries, so a read checked
-before the deletion and logged after it releases nothing. A rename, an
-archive or a restore resolves its path again under the head too: the
-router's resolution came before the transaction, and an update by id
-would give a tombstone a live slug back. The rule itself, a `~` in the slug, is
-one predicate, `isTombstone` in `@coffre/core/schemas`, and `tombstone()` in
-`@coffre/db/dialect` for SQL. Backups taken
-before still hold the encrypted values, and restoring one brings them back
-with the vault key ([restore.md](restore.md)).
-
-A version is immutable but for this. The app has `UPDATE` on `ciphertext`
-and `wrapped_dek` alone, and a trigger refuses any change to a version but
-emptying both, for every login, so no value is rewritten in place. The slug
-checks admit a tombstone's.
+One vault change, `project.delete` or `environment.delete`, by an Admin or
+Owner of the whole instance, does it all: every version under the place
+has its ciphertext and wrapped data key emptied, so it opens under no vault
+key; the grants on it go; references into and out of it end. Its row, its
+keys' and its versions' stay, names and dates only, since the log names
+them, and the place takes a tombstone's slug, `market~deleted-2026-11-14`,
+which no use, change, grant or reference reaches, its old slug free.
+Backups taken before still hold the encrypted values, and restoring one
+brings them back with the vault key ([restore.md](restore.md)). [A place
+deleted for good](design/0.16.md#operations) has the rest, and its bound.
 
 ## Databases
 
 The app database is Postgres, deployed, in tests, in local development and
 in conformance; it is the only engine.
 
-Every query lives in one module, `packages/server/src/db/queries.ts`, and the
-rest of the server writes no SQL (lint keeps `drizzle-orm` inside it and
-`packages/db/src/`, and the vault's own store). There are named
-reads, one per shape of data the server needs (the caller, a path, an
-environment's secrets, the members, a page of the log), each
-returning everything its callers use in one statement. There are also four
-generic writes (insert, insert if absent, upsert, update) and a row lock.
-Writes do not check first and do not read back. A unique constraint answers
-"is this slug taken". An update that matches the old value answers "was it
-still there": `{ id, revokedAt: null }` changes one row or none. Row locks are
-kept for real races (the audit head, offboarding against sign-in, version counters), and each one says which race it guards.
+The app writes nothing, and its queries are the pages' reads, in
+`packages/server/src/db/queries/`, each scoped by the vault's answer about
+the caller; the vault's are its own. Lint keeps `drizzle-orm` inside those,
+`packages/db/src/` and the vault.
 
 The database comes from its URL: `postgres://` or `postgresql://` opens
 postgres.js (`packages/db/src/connect.ts`); any other scheme is refused. The Worker builds its Postgres database from the Hyperdrive pool
@@ -1088,17 +688,14 @@ queries reach the database:
 - **Schema and migrations.** `pgTable` defines the schema, and its
   migration tree is under `packages/db/src/migrations/postgres`, from a
   single baseline. Generated tables sit inside a template in
-  `packages/db/src/baseline/` that adds the first audit rows and the
-  Postgres runtime roles. Until the first deployment, `pnpm db:generate`
-  regenerates the baseline rather than adding migrations. Tests catch a
-  schema or template that no longer matches its migration. Encrypted bytes
+  `packages/db/src/baseline/` that adds the Postgres runtime roles. Tests
+  catch a schema or template that no longer matches its migration. Encrypted bytes
   use `bytea`.
 - **Ids come from the application.** Writes know their keys before insertion
   and do not read them back.
 - **Named operations.** Insert if absent, upsert, row locks, rows changed,
   recognising a duplicate key, the clock and reading a condition stay in
   `dialect.ts`. Services contain no database branches.
-- **Locks.** The audit chain locks a permanent head row with `FOR UPDATE`.
 - **Shared constraints.** Active identities use a unique index on a generated
   column that holds the subject only while the identity is not revoked.
   Emails are stored lowercase. No query filters on a JSON field.
@@ -1107,9 +704,8 @@ The restricted runtime logins are `coffre_runtime` and
 `coffre_vault_runtime`. `pnpm test:schema` checks both logins, including
 which author each may append as.
 
-D1 is not a fit for the app database: it has no interactive transactions, and
-the audit chain reads the previous hash, computes the next in JavaScript, then
-writes. Drizzle's D1 transactions send `BEGIN`, which D1 rejects. Both
+D1 is not a fit for the app database: it has no interactive transactions,
+and Drizzle's D1 transactions send `BEGIN`, which D1 rejects. Both
 Workers use Postgres.
 
 ### Expand, then contract
@@ -1144,81 +740,21 @@ from npm as `coffre init` writes a deployment, and lets its own conformance
 boot it, with the database migrated by the change's migrations instead of
 the release's. A synthetic destructive migration on top must then fail it,
 so that the check is known to be able to. CI runs it on every change; it
-was off for 0.4.0, which had no earlier release on its schema.
+was off for 0.4.0, which had no earlier release on its schema, and is off
+again for 0.16.0, which upgrades 0.14 in place and offline ([Upgrade from
+0.14](design/0.16.md#upgrade-from-014)).
 
 ## Limits
 
 Each limit is stated here once; the other documents link to it.
 
-- **Whoever controls the database can rewind it.** Restoring an older copy
-  of the whole database, or cutting its newest entries and putting the head
-  back, leaves a log that verifies: every entry kept is genuine, and nothing
-  in the database can show that newer ones existed. Two things notice: an
-  app or vault process that ran across the rewind, which refuses to append
-  behind the head it remembers, and, with AWS KMS, CloudTrail, whose Decrypts
-  then have no entries. Restarting both processes after a restore is what
-  makes a deliberate rewind work ([restore.md](restore.md)).
-- **A cut in the middle of the log is found at the next checkpoint, and an
-  edit in place within a lap of the past, not at once.** Say Ada was
-  removed at entry 812, and the database's owner deletes 812 and puts back
-  Ada's row from before. Her row and the entries that remain agree, so the
-  vault lets her in. Within five minutes the next checkpoint counts one
-  entry fewer than the prefix it starts from, finds where, refuses to sign
-  and turns `/readyz` red; every verification says the same. If the owner
-  edits 812 in place instead, so that it is no longer about Ada, every
-  entry is there and the hash the last checkpoint signed stays:
-  checkpoints and verifications start from the newest tally and read
-  nothing before it, so the log as it now is verifies no better. The
-  checkpoint whose stretch of the past holds 812 rehashes it and refuses,
-  and the audit page shows it broken from then on: within two laps of 100
-  entries a beat at most, a lap about 6 hours for a log of 7,000 entries,
-  and 3½ days for 100,000. `coffre verify log` finds it at once; run it on a schedule
-  to bound the window.
-
-  Everything else is found at the next checkpoint, within five minutes:
-  - an entry cut from the middle;
-  - a rewrite chained again, whether resealed or not;
-  - the prefix the last checkpoint signed gone;
-  - anything after the last checkpoint.
-- **A check costs what was written since the last beat, and the walk from
-  the first entry what the log holds.** Measured on Node with a small
-  Postgres: the page's check of a log of 100,000 entries took 6 seconds of
-  CPU from the first entry, and takes some 10 milliseconds from the newest
-  tally; a beat, with its 100 entries of the past, about 15. `coffre
-  verify log` still reads everything, 10,000 entries a request, about 200
-  milliseconds of a Worker's CPU each. A team's instance writes some 600
-  entries a day of heartbeats and checkpoints alone, plus its own work.
-- **Catching up and the walk from the first entry take a Worker's paid
-  plan.** A call walks up to 10,000 entries: about a second of a cold
-  isolate's CPU, where the Free plan allows 10 milliseconds. That is the
-  first beats after an upgrade from 0.10.0, each stretch of `coffre verify
-  log`, and a stretch between two checkpoints more than 10,000 entries
-  apart, which only checkpoints stopped for a while leave: a stretch ends
-  at a checkpoint, however far. On the Free plan the catch-up does not
-  slow down, it stops: each beat is cut off before it signs anything, the
-  next starts over, and `/readyz` stays red. Move a deployment whose log
-  is past a few hundred entries to a paid plan before upgrading. Even a
-  beat with nothing to catch up, its walk of five minutes of the log, the
-  heartbeat, the checkpoint and its 100 entries of the past, takes some
-  10 ms of CPU on Node, an estimated 25 on a Worker by the incident's
-  ratio: more than the Free plan allows, as 0.10.0's beat already did, and
-  the page's check about the same. Run 0.10.1 on a paid plan. Until the checkpoints catch up, the walk
-  from the first entry ends short of the head and says so (`remaining`),
-  and `coffre verify log` exits 3 rather than call the log verified.
-- **No rolling back across a tally's version.** A release that changes
-  what a checkpoint's tally keeps writes a new version of it; a release
-  rolled back to refuses the checkpoints that keep a version it does not
-  know, and every check with them. 0.10.1 writes the first.
-- **A change of access writes every member and grant into the log once.**
-  The first checkpoint after it keeps them whole, and the others name it:
-  an instance with thousands of grants, changed every few minutes, grows
-  its log by their size each time.
-- **Key operations' identities are checked against those still under way.**
-  The walk from the first entry used to refuse a key operation's identity
-  seen twice anywhere in the log. A tally keeps the batches still open, not
-  every identity that ever closed, so a repeat is found among those open
-  and those since the tally. A closed batch takes no more outcomes either
-  way: each outcome names its intent's entry.
+- **What a writer of the database can do, and how soon it is found,** is
+  [What it promises](design/0.16.md#what-it-promises): a forged row is never honoured;
+  a genuine old row put back, or an entry not yet signed edited, is found
+  within about a minute, and coffre keeps serving; a signed entry edited is
+  found by the signer's re-check of a slice of the log each minute, or by a
+  page that shows it. What to do once the signer's storage is lost is
+  [still to design](design/0.16.md#still-to-design).
 - **What only KMS gives.** With a local vault key, whoever holds the vault's
   configuration and a copy of the database holds every value, and nothing
   outside coffre records either being used. AWS KMS adds a second record
@@ -1229,18 +765,11 @@ Each limit is stated here once; the other documents link to it.
 - **A vault key cannot be retired yet.** A new vault key wraps new versions only; every
   older version still needs the vault key that wrapped it, configured in
   `previousKeks` and escrowed, until a rewrap command exists.
-- **A holder of an author's key can forge that author's entries.** A copied
-  database alone cannot. With a local vault key, the vault's key comes from the
-  vault key: whoever holds it, and can write the database, can forge the vault's
-  entries and member rows, grants included, besides reading every value.
-- **A replaced vault key stays configured to verify the past, and can't vouch for
-  anything after the rotation.** What the vault wrote under the key an old
-  vault key stands for verifies only while that vault key is in `previousKeks`, and
-  `coffre verify log` walks the log from its first entry. After the
-  rotation, nothing under its keys counts, so a vault key replaced because it
-  leaked forges nothing new; what was forged with it before verifies like
-  the rest. The app key, `APP_KEY`, and with KMS the vault's
-  `signingKey`, cannot be changed at all.
+- **A holder of the vault's signing key can forge its rows and entries.** A
+  copied database alone cannot. With a local vault key, the signing key
+  comes from the vault key: whoever holds it, and can write the database,
+  can forge members and grants, besides reading every value.
+- **The app key cannot be rotated yet** ([still to design](design/0.16.md#still-to-design)).
 - **A MAC proves a row is genuine, not current.** Putting back a genuine old
-  sign-in row can undo one sign-out until the session's own expiry; a
-  member's removal still ends it, through the generation.
+  sign-in row can undo one sign-out until the signer's alert, within about a
+  minute; a member's removal still ends it, through the generation.

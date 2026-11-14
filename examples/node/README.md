@@ -1,5 +1,10 @@
 # coffre on Node
 
+coffre 0.16.0 ships for Cloudflare Workers only: `@coffre/server` exports
+no `./node`, so this deployment stays on 0.14 until Node comes back in
+0.16.1 ([Node in 0.16.0](https://github.com/erwinkn/coffre/blob/main/docs/design/0.16.md#node-in-0160)).
+What follows is 0.14's.
+
 Two processes, configured in code:
 
 - `app/`, the server: the API, sign-in, the pages and a job every five
@@ -86,8 +91,9 @@ Then sign in at `PUBLIC_URL` as the Owner, the first time, and from a terminal:
 coffre login https://secrets.example.com
 ```
 
-Point a monitor at `<PUBLIC_URL>/readyz`: it turns red when the audit log
-stops taking writes or the vault stops checkpointing it.
+Point a monitor at `<PUBLIC_URL>/readyz`: it turns red while the database
+lacks this version's migrations. The signer's alerts are the vault's
+`alert` setting.
 
 Everything coffre keeps is in the database: secrets, members, grants and
 the audit log. Back it up as one, keep the escrowed keys apart from it, and
