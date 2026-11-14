@@ -30,7 +30,8 @@ export function readCookie(request: Request, name: string): string | null {
  * which config allows on loopback only, cannot use the prefix.
  */
 export function sessionCookieName(auth: AuthConfig): string {
-  return auth.mode === 'signin' && auth.signin.publicUrl.startsWith('https:')
+  // Behind Access every request is HTTPS.
+  return auth.mode === 'cloudflare' || auth.signin.publicUrl.startsWith('https:')
     ? '__Host-coffre_session'
     : 'coffre_session';
 }
@@ -39,9 +40,13 @@ export function sessionCookieName(auth: AuthConfig): string {
  * The browser's session, from its cookie in signin mode. Never a personal
  * token: that is a bearer token, sent in a header, and what trusts the
  * cookie (pages, linking an account, approving a sign-in) trusts a person
- * at their browser, which a token planted in the cookie is not.
+ * at their browser, which a token planted in the cookie is not. Behind
+ * Access, none: a session there counts only with the assertion it was
+ * signed in for, which `admit` checks (behind-access.ts), and reaches the
+ * API from there.
  */
 export function sessionCookie(request: Request, auth: AuthConfig): string | null {
+  if (auth.mode === 'cloudflare') return null;
   const token = readCookie(request, sessionCookieName(auth));
   return token === null || tokenKind(token) === 'personal' ? null : token;
 }

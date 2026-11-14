@@ -4,6 +4,7 @@ import { isUnreachable } from '@coffre/db/dialect';
 import { migrated } from '@coffre/db/schema-version';
 
 import { ApiError } from './api/errors.ts';
+import { admit, type Admission } from './behind-access.ts';
 import { exchangeToken } from './exchange.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
@@ -13,8 +14,11 @@ import type { CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
 import { describeSignin, finishSignin, logout, pollDevice, PROVIDER_PATH, signOut, startDevice, startSignin } from './signin.ts';
 
-/** `track`: work the response must not cut short, which the platform keeps the request alive for (`requestScope`). */
-type Handler = (request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void) => Promise<Response>;
+/**
+ * `track`: work the response must not cut short, which the platform keeps the request alive for (`requestScope`).
+ * `access`: behind Cloudflare Access, the session the request was admitted with (`admit`).
+ */
+type Handler = (request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void, access: Admission | undefined) => Promise<Response>;
 
 /**
  * Exact paths outside the API's route table, and the one method each
@@ -50,21 +54,36 @@ const PATHS: Record<string, { method: 'GET' | 'POST'; handler: Handler; browserF
   '/mcp': { method: 'POST', handler: mcpEndpoint },
 };
 
+/** What answers with no session, behind Access too: health, and how this instance signs people in, which tells whether Access sent an assertion. */
+const UNCHECKED = new Set(['/livez', '/readyz', '/api/auth']);
+
+/** Behind Access, whether a request to this path is checked against its assertion first (`admit`). */
+export function checked(runtime: CoffreRuntime, pathname: string): boolean {
+  return runtime.auth.mode === 'cloudflare' && !UNCHECKED.has(pathname);
+}
+
 /**
  * coffre's own paths: health, sign-in and the API. Null for any other, a page's,
- * which the deployment's Start app renders.
+ * which the deployment's Start app renders. `access`: the session `respond`
+ * admitted the request with, behind Access. A route asked without it is
+ * checked here, and its response sets the check's cookies.
  */
-export async function coffreRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): Promise<Response | null> {
+export async function coffreRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}, access?: Admission): Promise<Response | null> {
   const { pathname } = new URL(request.url);
+  if (access === undefined && checked(runtime, pathname)) {
+    const admitted = await admit(request, runtime, sourceIp);
+    const response = await coffreRoute(request, runtime, sourceIp, track, admitted);
+    return response === null ? null : withCookies(response, admitted.cookies);
+  }
   const exact = PATHS[pathname];
   if (exact !== undefined) {
     // HEAD is GET without the body, which the platform drops: what a monitor asks /livez and /readyz.
     const method = request.method === 'HEAD' && exact.method === 'GET' ? 'GET' : request.method;
     if (method !== exact.method) return methodNotAllowed([exact.method]);
     if (exact.browserForm && !isSameOrigin(request, runtime.publicUrl)) return errorResponse(new ApiError('cross_origin', 'this must be sent from coffre itself'));
-    return exact.handler(request, runtime, sourceIp, track);
+    return exact.handler(request, runtime, sourceIp, track, access);
   }
-  if (pathname === '/api' || pathname.startsWith('/api/')) return fetchApi(request, runtime, { sourceIp });
+  if (pathname === '/api' || pathname.startsWith('/api/')) return fetchApi(request, runtime, { sourceIp, access });
   // A provider's round trip: leaving for it, and back.
   const provider = PROVIDER_PATH.exec(pathname);
   if (provider !== null) {
@@ -78,30 +97,50 @@ export async function coffreRoute(request: Request, runtime: CoffreRuntime, sour
 /** What a page renders with: this response's nonce, the API as the visitor, and how they have the pages drawn. */
 export type PageContext = { cspNonce: string; client: CoffreClient; preferences: Preferences };
 
+/** A response with these cookies set on it: a copy, when the platform made its headers immutable. */
+function withCookies(response: Response, cookies: readonly string[]): Response {
+  if (cookies.length === 0) return response;
+  let answer = response;
+  try {
+    for (const cookie of cookies) answer.headers.append('set-cookie', cookie);
+  } catch {
+    answer = new Response(response.body, response);
+    for (const cookie of cookies) answer.headers.append('set-cookie', cookie);
+  }
+  return answer;
+}
+
 /**
  * One request, whatever answers it, a page or one of coffre's routes: it
  * gets a fresh nonce, the visitor's API client and their preferences to
  * render with, and coffre's security headers on whatever comes back.
  * `sourceIp` is the platform's to vouch for: Cloudflare's header on
- * Workers, the socket's address on Node.
+ * Workers, the socket's address on Node. Behind Access, the request is
+ * first checked against its assertion (`admit`), once: its page's client
+ * and the route `render` asks (`access`) use the session it was admitted
+ * with, and the response sets the check's cookies.
  */
 export async function respond(
   request: Request,
   runtime: CoffreRuntime,
   sourceIp: string | null,
-  render: (context: PageContext) => Promise<Response>,
+  render: (context: PageContext, access: Admission | undefined) => Promise<Response>,
 ): Promise<Response> {
   const nonce = cspNonce();
   let response: Response;
+  let access: Admission | undefined;
   try {
     const { pathname } = new URL(request.url);
     const open = SERVED_WHILE_MIGRATING.has(pathname) || (await schemaReady(runtime));
+    if (open && checked(runtime, pathname)) access = await admit(request, runtime, sourceIp);
     response = open
-      ? await render({ cspNonce: nonce, client: pageClient(request, runtime, sourceIp), preferences: preferencesIn(request.headers.get('cookie')) })
+      ? await render({ cspNonce: nonce, client: pageClient(request, runtime, sourceIp, access), preferences: preferencesIn(request.headers.get('cookie')) }, access)
       : migrating(request);
   } catch (error) {
     response = errorResponse(error);
   }
+  // Read once the render is done: a call of its may have found the session gone (`ended`).
+  if (access !== undefined) response = withCookies(response, access.cookies);
   const auth = runtime.auth;
   const options = {
     nonce,

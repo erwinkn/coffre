@@ -1,4 +1,4 @@
-import { deriveKey } from '@coffre/core/identity';
+import { AccessIdentityVerifier, deriveKey } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
@@ -27,6 +27,13 @@ export type CoffreRuntime = {
    */
   signinKey: Buffer;
   /**
+   * Behind Cloudflare Access: the verifier of its assertions, which keeps
+   * the team's keys it fetched, and the key the cookie that ties a session
+   * to its Access subject is sealed under (`behind-access.ts`). Null with
+   * coffre's own sign-in.
+   */
+  access: { verifier: AccessIdentityVerifier; key: Buffer } | null;
+  /**
    * How the app asks an issuer for its discovery document and its keys, for
    * a binding made and a CI run's token (`workloads/transport.ts`): the
    * public `fetch` on Workers.
@@ -45,7 +52,7 @@ export type CoffreRuntime = {
  * What a configuration knows of its database, for as long as it lives.
  * Settled values, never a pending read (AGENTS.md, "What an isolate keeps").
  */
-const known = new WeakMap<ResolvedConfig, Pick<CoffreRuntime, 'schema' | 'signinKey'>>();
+const known = new WeakMap<ResolvedConfig, Pick<CoffreRuntime, 'schema' | 'signinKey' | 'access'>>();
 
 /**
  * The app around a database: once per invocation on Workers, whose
@@ -53,6 +60,11 @@ const known = new WeakMap<ResolvedConfig, Pick<CoffreRuntime, 'schema' | 'signin
  */
 export function createRuntime(config: ResolvedConfig, db: Database, vault: Vault, platform: Pick<CoffreRuntime, 'transport' | 'gates'>): CoffreRuntime {
   let kept = known.get(config);
-  if (kept === undefined) known.set(config, (kept = { schema: { migrated: false }, signinKey: deriveKey(config.auditChainKey, 'signin-state/v1') }));
+  if (kept === undefined) {
+    const { auth } = config;
+    // The keys come through the app's transport: the same limits as an issuer's, and on Node, public addresses only.
+    const access = auth.mode === 'cloudflare' ? { verifier: new AccessIdentityVerifier(auth.access, { json: (url) => platform.transport.json(url) }), key: deriveKey(config.auditChainKey, 'access-session/v1') } : null;
+    known.set(config, (kept = { schema: { migrated: false }, signinKey: deriveKey(config.auditChainKey, 'signin-state/v1'), access }));
+  }
   return { db, vault, auth: config.auth, publicUrl: config.publicUrl, rotateAfterDays: config.rotateAfterDays, transport: platform.transport, gates: platform.gates, ...kept };
 }

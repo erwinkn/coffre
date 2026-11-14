@@ -9,7 +9,7 @@ import { createDatabase, type Database } from '@coffre/db';
 import { checkDatabaseUrl, postgresClient } from '@coffre/db/connect';
 import { APP_URL, openConfiguredVault, type TestVault } from '@coffre/vault/testing';
 
-import type { PageContext } from '../src/app.ts';
+import type { PageContext } from '../src/scope.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime } from '../src/runtime.ts';
 import type { Gates } from '../src/gate.ts';
@@ -122,7 +122,8 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
     sent,
     request(path, init) {
       const request = new Request(`${PUBLIC_URL}${path}`, init);
-      return scope.respond(request, () => scope.route(request));
+      // As Start answers it: the middleware, then the route it hands the context on to.
+      return scope.respond(request, (page) => page.coffre.route(request));
     },
     render(init, page) {
       return scope.respond(new Request(`${PUBLIC_URL}/projects`, init), async (context) => Response.json(await page(context)));

@@ -6,7 +6,8 @@ import { callerOf } from './api/context.ts';
 import { ApiError } from './api/errors.ts';
 import { serveApi } from './api/router.ts';
 import { bearerToken, presented, sessionCookie, sessionCookieName } from './auth.ts';
-import { errorResponse } from './http.ts';
+import { BROWSERS_ONLY, machineCredential, unregisteredMe, type Admission } from './behind-access.ts';
+import { errorResponse, jsonResponse } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { dpopToken, provenSession, SessionRefused, sessionStopped } from './sessions.ts';
 
@@ -17,8 +18,18 @@ import { dpopToken, provenSession, SessionRefused, sessionStopped } from './sess
  */
 export type ApiCredential = { token: string; ambient: boolean };
 
-/** The credential an API call carries: the CLI and service tokens send a bearer token, and the browser the cookie its sign-in set. */
-export function apiCredential(request: Request, auth: AuthConfig): ApiCredential | null {
+/**
+ * The credential an API call carries: the CLI and service tokens send a
+ * bearer token, and the browser the cookie its sign-in set. Behind Access,
+ * only the browser's session the check admitted it with (`admit`): a bearer
+ * token or a workload's DPoP session is refused, until the CLI and machines
+ * are served there.
+ */
+export function apiCredential(request: Request, auth: AuthConfig, access?: Admission): ApiCredential | null {
+  if (auth.mode === 'cloudflare') {
+    if (machineCredential(request) !== null) throw new ApiError('unauthenticated', BROWSERS_ONLY);
+    return access?.session == null ? null : { token: access.session, ambient: true };
+  }
   const header = bearerToken(request);
   if (header !== null) return { token: header, ambient: false };
   const cookie = sessionCookie(request, auth);
@@ -57,22 +68,26 @@ type AskCaller = (shown: Presented) => Promise<Called>;
  * every answer then carries the gate's nonce, for the next proof. And a
  * handle reaches the credential proxy alone.
  */
-export async function fetchApi(request: Request, runtime: CoffreRuntime, options: { sourceIp: string | null; caller?: AskCaller; page?: Request }): Promise<Response> {
+export async function fetchApi(request: Request, runtime: CoffreRuntime, options: { sourceIp: string | null; caller?: AskCaller; page?: Request; access?: Admission }): Promise<Response> {
+  const { access } = options;
   let nonce: string | null = null;
   let response: Response;
   try {
-    // Behind Access a request carries Access's assertion, which is no credential of the vault's (docs/design/0.16.md, "Still to design").
-    if (runtime.auth.mode === 'cloudflare') throw new ApiError('not_implemented', 'coffre behind Cloudflare Access is not served yet');
+    // Behind Access a workload's session is a machine's credential, which `apiCredential` refuses before its row is read or its gate asked.
+    const session = runtime.auth.mode === 'cloudflare' ? null : dpopToken(request);
     let shown: Presented;
     let crossSite = false;
-    const session = dpopToken(request);
     if (session !== null) {
       const proven = await provenSession(request, runtime, session);
       nonce = proven.nonce;
       shown = presented(session, options.sourceIp, proven.proof);
     } else {
-      const credential = apiCredential(request, runtime.auth);
-      if (credential === null) throw new ApiError('unauthenticated', 'sign in first');
+      const credential = apiCredential(request, runtime.auth, access);
+      if (credential === null) {
+        if (access?.unregistered == null) throw new ApiError('unauthenticated', access?.why ?? 'sign in first');
+        if (request.method === 'GET' && new URL(request.url).pathname === '/api/me') return jsonResponse(unregisteredMe(access.unregistered));
+        throw new ApiError('registration_required', access.why);
+      }
       if (credential.ambient && !SAFE_METHODS.has(request.method) && !isSameOrigin(request, runtime.publicUrl)) {
         throw new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself');
       }
@@ -108,7 +123,10 @@ export async function fetchApi(request: Request, runtime: CoffreRuntime, options
     // A session the gate took and the vault then stopped is answered as 0.14.7 answered its workload.
     response = error instanceof SessionRefused ? error.response : errorResponse(nonce === null ? error : sessionStopped(error, options.sourceIp));
   }
-  return nonce === null ? response : withNonce(response, nonce);
+  if (nonce !== null) return withNonce(response, nonce);
+  // Behind Access, a session the vault no longer finds: the browser signs in again on its next request.
+  if (response.status === 401 && access?.session != null) access.ended();
+  return response;
 }
 
 /** An answer to a workload, with the nonce its next proof signs: a response of its own, since another's headers may be immutable. */
@@ -143,14 +161,16 @@ export function pageCredential(page: Request, auth: AuthConfig): Record<string, 
  *
  * The render is one request: the vault is asked who its caller is once, by
  * the first call that needs to know, and the answer is every call's.
+ * Behind Access, its calls carry the session the page's request was
+ * admitted with, as its own route would.
  */
-export function pageClient(page: Request, runtime: CoffreRuntime, sourceIp: string | null): CoffreClient {
+export function pageClient(page: Request, runtime: CoffreRuntime, sourceIp: string | null, access?: Admission): CoffreClient {
   const credential = pageCredential(page, runtime.auth);
   let asked: Promise<Called> | undefined;
   const caller: AskCaller = (shown) => (asked ??= callerOf(runtime.vault, shown));
   return createClient({
     url: new URL(page.url).origin,
     headers: () => credential,
-    transport: (request) => fetchApi(request, runtime, { sourceIp, caller, page }),
+    transport: (request) => fetchApi(request, runtime, { sourceIp, caller, page, access }),
   });
 }
