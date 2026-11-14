@@ -1,7 +1,7 @@
 # @coffre/core
 
 What coffre's other packages share: access rules, envelope encryption, the
-key-encryption keys (a local key, or AWS KMS), the audit chain, identity and
+key-encryption keys (a local key, or AWS KMS), the log's entries and proofs, identity and
 sign-in, and `Vault`, the contract between the server and the vault.
 
 A deployment does not import it. `@coffre/server` and `@coffre/vault`

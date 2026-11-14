@@ -24,8 +24,8 @@ database's logins, and `coffre keys` makes the keys alone
 ([deploy.md](deploy.md#the-database-and-its-keys-for-either-deployment)).
 It costs nothing and adds no latency. It is also where the vault's signing
 key comes from: the vault derives it from the vault key, with HKDF-SHA-256 under a
-label no other use of the vault key shares, and that key MACs the vault's log
-entries, seals member rows and signs checkpoints. So the vault has one key to keep, not two.
+label no other use of the vault key shares, and that key puts the vault's MAC
+on every row that turns into access and on each of its log's entries. So the vault has one key to keep, not two.
 
 Whoever holds the vault key and a copy of the database holds every value, and
 nothing outside coffre records the use of either. Whoever holds it and can
@@ -45,14 +45,13 @@ previousKeks: [{ id: env.OLD_VAULT_KEY_ID, key: env.OLD_VAULT_KEY }], // vault-2
 New values are wrapped under the new vault key. At its first call, the vault
 moves to the key it derives from the new vault key: it seals every member row
 again under it, and writes a `key.rotate` entry, its first under that key.
-Entries and checkpoints name the key they were signed under. The old vault key
+The old vault key
 still opens what it wrapped, and still verifies what the vault wrote before
 the rotation, so it stays configured for good: without it, the old entries no
-longer verify, `coffre verify log` fails, and so does a checkpoint that
-starts from a tally written under it.
+longer verify.
 
 A replaced vault key stays configured to verify the past, and can't vouch for
-anything after the rotation. An entry, a member row or a checkpoint under
+anything after the rotation. An entry or a member row under
 its keys after that point fails verification, so a vault key replaced because it
 leaked forges nothing from then on. What was forged with it before the
 rotation verifies like the rest; that is the leak's window. A vault still
