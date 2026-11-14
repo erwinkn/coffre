@@ -18,7 +18,8 @@ export type Check = (typeof CHECKS)[number][0];
 export const VERIFY_USAGE = `usage: coffre verify instance | keys | log | backup <dump>
 
 ${CHECKS.map(([name, what]) => `  ${name.padEnd(10)}${what}`).join('\n')}
-  backup    a dump coffre backup made, restored into an empty database
+  backup    a dump coffre backup made, restored into an empty database;
+            not in 0.16 yet
 
 On a terminal, \`coffre verify\` alone asks which. \`coffre verify <check> --help\`
 says more about each.`;
