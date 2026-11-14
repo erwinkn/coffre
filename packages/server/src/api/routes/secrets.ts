@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 
 import { environmentPath, personalOf, secretKey, slug } from '@coffre/core/schemas';
-import type { Nature } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { ApiError, badRequest, refusal } from '../errors.ts';
@@ -104,12 +103,12 @@ export const secretRoutes = {
    * Write values in one environment: `{ "KEY": "value" }`, or
    * `{ "KEY": { "value", "sensitivity": "sensitive" } }` to say who sees
    * it. One call to the vault, which decides and writes all of them or
-   * none.
+   * none, and says each one's sensitivity as written: a bare value is
+   * sensitive over a sensitive one, and a secret otherwise (`secret.write`).
    *
    * Not served yet, each refused as a 400 by the input's shape or below:
    * archiving a key (`null`), a generated value, a reference, a nature
-   * changed in place, a dry run, and `dev@me`. A bare value is written as
-   * a secret: keeping the nature its key has comes with the nature change.
+   * changed in place, a dry run, and `dev@me`.
    */
   ...route('PATCH /secrets/:project/:environment', {
     input: z.record(secretKey, z.union([secretValue, z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']) }).strict()])).refine((patch) => Object.keys(patch).length > 0, 'name at least one key'),
@@ -117,12 +116,11 @@ export const secretRoutes = {
     run: async (ctx, { params, input }) => {
       const { environment, mine } = environmentOf(params.environment);
       if (mine) throw new ApiError('not_implemented', `a write to ${params.project}/${params.environment}, your personal config, is not served yet`);
-      const values = Object.entries(input).map(([key, written]) => (typeof written === 'string' ? { key, value: written, nature: 'secret' as Nature } : { key, value: written.value, nature: written.sensitivity as Nature }));
+      const values = Object.entries(input).map(([key, written]) => (typeof written === 'string' ? { key, value: written } : { key, value: written.value, nature: written.sensitivity }));
       const answer = await ctx.vault.change({ ...ctx.shown, op: 'secret.write', project: params.project, environment, keys: values });
       if ('refused' in answer) throw refusal(answer.refused, `${params.project}/${params.environment}`);
-      const keys: Record<string, { version: number; sensitivity: Nature }> = Object.create(null);
-      for (const { key, nature } of values) keys[key] = { version: answer.answer.versions[key]!, sensitivity: nature };
-      return { operationId: ctx.shown.request, keys: { ...keys } };
+      // As entries: a key named __proto__ is a key like any other.
+      return { operationId: ctx.shown.request, keys: Object.fromEntries(Object.entries(answer.answer.keys).map(([key, { version, nature }]) => [key, { version, sensitivity: nature }])) };
     },
   }),
 };

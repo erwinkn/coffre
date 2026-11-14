@@ -280,6 +280,12 @@ test('what a database writer does to a value or a place is not honoured', async 
   assert.equal(await got(ask('dee', 'market/prod', ['FLAG'])), 'no_access');
 });
 
+test('a version is given only as the nature its secret\'s row says: one that disagrees is no value of it, a reference\'s source included', async () => {
+  // Rows under the vault's MAC that no change writes so: a secret said sensitive, a sensitive value said a secret, a reference's source said plain.
+  for (const [of, nature] of [[w.database, 'sensitive'], [w.stripe, 'secret'], [w.token, 'plain']] as const) await amend(vault, 'secrets', sql`id = ${of.id}`, { nature });
+  assert.deepEqual(await got(ask('ada', 'market/prod', ['DATABASE_URL', 'STRIPE_KEY', 'LINK', 'FLAG'])), { DATABASE_URL: 'refused: unreadable', STRIPE_KEY: 'refused: unreadable', LINK: 'refused: unreadable', FLAG: 'on' });
+});
+
 test('within its memory a use reads nothing again, counted from the read; within a minute it logs nothing again, but for another purpose', async () => {
   const asked = ask('ada', 'market/prod', ['FLAG']);
   assert.deepEqual(await got(asked), { FLAG: 'on' });

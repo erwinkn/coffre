@@ -42,7 +42,7 @@ export default {
     const shown = { token: Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(bearer))).toString('hex'), proof: null, request: crypto.randomUUID(), ip: request.headers.get('cf-connecting-ip') };
     try {
       const answer = request.method === 'PATCH'
-        ? await env.VAULT.change({ ...shown, op: 'secret.write', project, environment, keys: Object.entries(values!).map(([key, value]) => ({ key, value, nature: 'secret' as const })) })
+        ? await env.VAULT.change({ ...shown, op: 'secret.write', project, environment, keys: Object.entries(values!).map(([key, value]) => ({ key, value })) })
         : await env.VAULT.use({ ...shown, project, environment, mine: false, keys: keys ?? null, purpose: 'reveal', upstream: null });
       return Response.json(answer, { status: !('refused' in answer) ? 200 : answer.refused === 'unauthenticated' ? 401 : 403 });
     } catch (error) {

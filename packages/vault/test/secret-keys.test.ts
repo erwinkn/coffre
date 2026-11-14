@@ -72,18 +72,18 @@ const nothing = async (before: number[]) => assert.deepEqual([await count('log_p
 
 test('a key archived serves nothing and keeps its versions; brought back, it serves its value again', async () => {
   const versions = await count('secret_versions');
-  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'DATABASE_URL', archived: true }])), { answer: { versions: {} } });
+  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'DATABASE_URL', archived: true }])), { answer: { keys: {} } });
   assert.deepEqual(await lines(), [{ key: 'DATABASE_URL', archived: true }]);
   assert.deepEqual([await key('DATABASE_URL'), await count('secret_versions')], [{ archived: true, folder: null, versions: 1 }, versions]);
   assert.deepEqual(await given(['DATABASE_URL']), ['unknown_key']);
 
-  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'DATABASE_URL', archived: false }])), { answer: { versions: {} } });
+  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'DATABASE_URL', archived: false }])), { answer: { keys: {} } });
   assert.deepEqual(await lines(), [{ key: 'DATABASE_URL', archived: false }]);
   assert.deepEqual(await given(['DATABASE_URL']), ['postgres://prod']);
 
   // Archived already, a key is not archived again: the entry has no line for it, and nothing is written.
   const entries = await count('log_pending');
-  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'OLD', archived: true }, { key: 'DATABASE_URL', archived: true }])), { answer: { versions: {} } });
+  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'OLD', archived: true }, { key: 'DATABASE_URL', archived: true }])), { answer: { keys: {} } });
   assert.deepEqual([await lines(), await count('log_pending')], [[{ key: 'DATABASE_URL', archived: true }], entries + 1]);
   const [entry] = [await written()];
   assert.deepEqual(entry.rows.filter(({ was, now }) => was !== now).length, 1, 'one row replaced');
@@ -111,11 +111,11 @@ test('a value is written over an archived key only as it is brought back, which 
     [dee, { project: 'market', environment: 'prod', refused: 'no_access' }],
   ]);
 
-  assert.deepEqual(await vault.change(writing('cy-cli', [{ key: 'DATABASE_URL', archived: true }])), { answer: { versions: {} } });
+  assert.deepEqual(await vault.change(writing('cy-cli', [{ key: 'DATABASE_URL', archived: true }])), { answer: { keys: {} } });
   // Nor does a key with a value come back to one who archives it and does not read it.
   assert.deepEqual(await vault.change(writing('cy-cli', [{ key: 'DATABASE_URL', archived: false }])), { refused: 'no_access' });
   assert.deepEqual(await key('DATABASE_URL'), { archived: true, folder: null, versions: 1 });
-  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'OLD', value: 'back', nature: 'secret', archived: false }])), { answer: { versions: { OLD: 1 } } });
+  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'OLD', value: 'back', nature: 'secret', archived: false }])), { answer: { keys: { OLD: { version: 1, nature: 'secret' } } } });
   assert.deepEqual(await lines(), [{ key: 'OLD', version: 1, nature: 'secret', archived: false }]);
   assert.deepEqual(await given(['OLD']), ['back']);
 });
@@ -182,7 +182,7 @@ test('a reference held where nothing reads it any more stops no archive, and one
 });
 
 test('a key is filed in a folder, and taken out, by whoever writes it, archived or not; a key made is made in one', async () => {
-  assert.deepEqual(await vault.change(writing('bo-cli', [{ key: 'DATABASE_URL', folder: 'db' }, { key: 'OLD', folder: 'db' }, { key: 'NEW', value: 'v', nature: 'plain', folder: 'api keys' }])), { answer: { versions: { NEW: 1 } } });
+  assert.deepEqual(await vault.change(writing('bo-cli', [{ key: 'DATABASE_URL', folder: 'db' }, { key: 'OLD', folder: 'db' }, { key: 'NEW', value: 'v', nature: 'plain', folder: 'api keys' }])), { answer: { keys: { NEW: { version: 1, nature: 'plain' } } } });
   assert.deepEqual(await lines(), [{ key: 'DATABASE_URL', folder: 'db' }, { key: 'OLD', folder: 'db' }, { key: 'NEW', version: 1, nature: 'plain', made: true, folder: 'api keys' }]);
   assert.deepEqual([await key('DATABASE_URL'), await key('OLD'), await key('NEW')], [{ archived: false, folder: 'db', versions: 1 }, { archived: true, folder: 'db', versions: 0 }, { archived: false, folder: 'api keys', versions: 1 }]);
   // Filed, an archived key keeps the date it was archived on.
@@ -205,7 +205,7 @@ test('a key is filed in a folder, and taken out, by whoever writes it, archived 
 test('an item that is not what the contract says is a fault, before any read', async () => {
   const bad: unknown[][] = [
     [{ key: 'A' }], [{ key: 'A', archived: true, value: 'x', nature: 'secret' }], [{ key: 'A', archived: 'yes' }], [{ key: 'A', nature: 'secret', archived: true }],
-    [{ key: 'A', value: 'x' }], [{ key: 'A', value: 'x', nature: 'hidden' }],
+    [{ key: 'A', value: 'x', nature: 'hidden' }],
     ...['', ' db', 'db ', 'a/b', 'a\nb', 'x'.repeat(65), '\u00a0db', '\u{1f5c2}'.repeat(33), 7, '\ud83d'].map((folder) => [{ key: 'A', folder }]),
   ];
   for (const keys of bad) await assert.rejects(vault.change(writing('ada-cli', keys as KeyWrite[])), TypeError, JSON.stringify(keys).slice(0, 80));

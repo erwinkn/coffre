@@ -2,8 +2,8 @@
 export type SecretsChanges = SecretWrite;
 
 export type SecretsAnswers = {
-  /** The version each key given a value is at now. */
-  'secret.write': { versions: Record<string, number> };
+  /** Each key given a value: the version it is at now, and the nature it was written as. */
+  'secret.write': { keys: Record<string, { version: number; nature: Nature }> };
 };
 
 /** How a value is kept: a secret, a sensitive one that no person is handed back, or a plain one that whoever lists its environment sees. */
@@ -12,8 +12,12 @@ export type Nature = 'secret' | 'sensitive' | 'plain';
 /**
  * What a write does to one key of its environment, one thing or several:
  *
- * - `value`, with its `nature`: the key's next version, the key made if
- *   the environment has none by that name.
+ * - `value`: the key's next version, the key made if the environment has
+ *   none by that name. Its `nature` as given, or, given none, the key's
+ *   own kept, or, where the environment holds none, the one it inherits,
+ *   and both for an archived key brought back: sensitive stays sensitive, and anything else is written a secret, a
+ *   plain one's and one inherited from nowhere included. A reference's is
+ *   its source's.
  * - `archived`: true archives the key, false brings it back. A key is
  *   archived with no value written.
  * - `folder`: the folder it is listed in, null for none.
@@ -21,7 +25,7 @@ export type Nature = 'secret' | 'sensitive' | 'plain';
  * A key that gets no value is one the environment holds.
  */
 export type KeyWrite = { key: string; archived?: boolean; folder?: string | null } & (
-  | { value: string; nature: Nature }
+  | { value: string; nature?: Nature }
   | { value?: undefined; nature?: undefined }
 );
 
