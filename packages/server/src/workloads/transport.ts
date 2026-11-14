@@ -1,3 +1,5 @@
+import type { StsTransport } from './aws.ts';
+
 /**
  * How coffre fetches what an issuer publishes for its bindings: its
  * discovery document, then its keys (docs/design/oidc.md, section 4). One
@@ -12,6 +14,8 @@
 export type WorkloadTransport = {
   /** GET a JSON document, or throw `FetchRefused` saying why. */
   json(url: URL): Promise<unknown>;
+  /** How an `aws` proof is sent to STS (`workloads/aws.ts`): the standard `fetch`, `stsFetch()`, unless a test fakes STS. */
+  sts?: StsTransport;
 };
 
 /** Everything, from DNS to the last byte. */
