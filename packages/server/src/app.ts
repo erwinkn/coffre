@@ -47,6 +47,9 @@ const PATHS: Record<string, { method: 'GET' | 'POST'; handler: Handler; browserF
   // A workload's sign-in and renewal (exchange.ts): its platform's proof, for a session bound to its key; then that session moved on.
   '/api/auth/workload': { method: 'POST', handler: signInWorkload },
   '/api/auth/workload/renew': { method: 'POST', handler: renewWorkload },
+  // Narrowing one is not built (docs/design/0.16.md, "A workload signing in"): said so, as 0.14.7's stub said it, where a
+  // missing route would tell `@coffre/client`'s `narrow()` its URL is wrong.
+  '/api/auth/workload/narrow': { method: 'POST', handler: async () => errorResponse(new ApiError('not_implemented', 'narrowing a session is not served yet')) },
   // MCP's OAuth (mcp/http.ts): the metadata clients read first, then the token, registration and revocation endpoints;
   // and the endpoint its access tokens are for (mcp/endpoint.ts).
   '/.well-known/oauth-protected-resource': { method: 'GET', handler: protectedResource },
