@@ -104,6 +104,8 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   reference_to_itself: ['conflict', 'a key cannot be a reference to itself'],
   reference_to_reference: ['conflict', 'that is itself a reference: a reference reads a value, so point at its source instead'],
   no_reference: ['not_found', 'that key is no reference'],
+  // A regenerate's (routes/secrets.ts), as 0.14.7 answered it.
+  stale: ['conflict', 'it changed since it was listed: written, rolled back, regenerated, renamed, archived or made a reference meanwhile. Nothing was written'],
   // A key renamed (routes/secrets.ts).
   duplicate_key: ['conflict', 'the environment holds a key of that name already, archived or not'],
   duplicate_key_below: ['conflict', 'an environment that inherits this one holds a key of that name of its own: rename or archive that one first'],

@@ -173,7 +173,10 @@ unsupported diff select full validation.
   sequential and reset per test. Templates and clones are removed after the run.
   `COFFRE_TEST_DATABASE` sets the scratch name prefix; a random suffix isolates
   simultaneous runs and other checkouts sharing compose Postgres. `pnpm test:schema`
-  still recreates the exact database it names. Needs Postgres.
+  still recreates the exact database it names. Needs Postgres. While 0.16 is
+  moved in, it runs every test file but those `packages/server/tsconfig.json`
+  excludes, 0.14's that do not build yet (`scripts/test-files.mjs`), which
+  `pnpm typecheck` skips too: each area's move takes its files off the list.
 - `pnpm test:schema` verifies both runtime logins' privileges. It also runs the
   full migration as a non-superuser owner in a disposable Postgres cluster,
   checks TLS trust and hostname verification, and runs `coffre setup` against

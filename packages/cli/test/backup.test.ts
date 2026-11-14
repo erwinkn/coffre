@@ -2,7 +2,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,8 +26,10 @@ const backupLogin = (database: string) => url('coffre_backup_login:local-backup-
 
 // PostgreSQL's own tools, which the commands run: of the server's major version, as a deployment's pipeline has them.
 const tools = spawnSync('pg_restore', ['--version'], { encoding: 'utf8' });
+// Every case on a database backs up and restores 0.14's tables, which 0.16 refuses until they are moved (`notIn016` in src/main.ts).
+const NOT_IN_016: string | false = 'coffre backup, restore and verify backup are not in 0.16 yet';
 const postgres = {
-  skip: tools.status !== 0 ? 'needs pg_dump and pg_restore on PATH' : false,
+  skip: NOT_IN_016 || (tools.status !== 0 ? 'needs pg_dump and pg_restore on PATH' : false),
 };
 
 // --- without a database --------------------------------------------------------------
@@ -54,6 +56,34 @@ test('rows hold when every table has the rows backed up, and each difference is 
       error.message === "3 tables differ: public.extra, which the backup does not hold; public.projects's 2 rows are not those backed up; public.secrets is missing",
   );
   assert.throws(() => rowsVerdict({ tables }, { tables: { ...tables, 'public.secrets': { rows: 4, digest: '9' } } }), /one table differs: public.secrets has 4 rows, and the backup 5/);
+});
+
+test('0.16 refuses backup, restore and verify backup at once: exit 1, its reason, stdin never read, no file written; their help says so', async () => {
+  const here = mkdtempSync(join(tmpdir(), 'coffre-refused-'));
+  try {
+    for (const [words, args] of [
+      ['backup', ['backup', 'x.dump']],
+      ['restore', ['restore', 'x.dump', '--keys']],
+      ['verify backup', ['verify', 'backup', 'x.dump', '--keys']],
+    ] as const) {
+      // stdin stays open: a command that waited for its connection string would hang until killed.
+      const child = spawn(process.execPath, ['--conditions=coffre:source', main, ...args], { cwd: here, stdio: ['pipe', 'pipe', 'pipe'] });
+      const killer = setTimeout(() => child.kill(), 20_000);
+      let stderr = '';
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+      const code = await new Promise<number | null>((resolve) => child.on('close', resolve));
+      clearTimeout(killer);
+      child.stdin.destroy();
+      assert.equal(code, 1, `coffre ${words}: ${stderr}`);
+      assert.equal(stderr, `coffre: coffre ${words} is not in 0.16 yet: it reads 0.14's audit log and envelopes, which a 0.16 database does not hold\n`);
+      assert.deepEqual(readdirSync(here), [], `coffre ${words} wrote nothing`);
+      const help = spawnSync(process.execPath, ['--conditions=coffre:source', main, ...words.split(' '), '--help'], { cwd: here, encoding: 'utf8' });
+      assert.equal(help.status, 0, help.stderr);
+      assert.match(help.stdout, /^usage: coffre .+\n\nNot in 0\.16 yet: /);
+    }
+  } finally {
+    rmSync(here, { recursive: true, force: true });
+  }
 });
 
 // --- against Postgres -----------------------------------------------------------------

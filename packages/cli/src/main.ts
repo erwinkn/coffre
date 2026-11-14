@@ -33,7 +33,7 @@ import { serve } from './serve.ts';
 import { CheckFailed, memberOf, parse, UsageError } from './manage.ts';
 import { cliVersion } from './version.ts';
 import { interval, replaceFile, watch } from './watch.ts';
-import { BACKUP_USAGE, RESTORE_USAGE, VERIFY_BACKUP_USAGE } from './backup-help.ts';
+import { BACKUP_USAGE, NOT_IN_016, RESTORE_USAGE, VERIFY_BACKUP_USAGE } from './backup-help.ts';
 import { KEYS_USAGE, INSTANCE_USAGE, pickCheck, verifyInstance, verifyKeys, VERIFY_USAGE } from './verify/index.ts';
 import {
   choose,
@@ -202,6 +202,11 @@ function shown(directory: string): string {
 function fail(message: string): never {
   process.stderr.write(`coffre: ${message}\n`);
   process.exit(1);
+}
+
+/** `coffre backup`, `restore` and `verify backup`, refused until they are moved (`NOT_IN_016`). */
+function notIn016(command: string): never {
+  fail(`coffre ${command} is ${NOT_IN_016}`);
 }
 
 function attempt<T>(step: () => T): T {
@@ -2026,8 +2031,7 @@ async function verify(args: string[]): Promise<void> {
       if (more.length > 0) fail('usage: coffre verify log');
       return verifyLog();
     case 'backup':
-      // Its own chunk, as restore's: the database driver loads only for it.
-      return (await import('./restore.ts')).verifyBackup(more);
+      return notIn016('verify backup');
     default:
       process.stderr.write(`coffre: no check named ${check}\n${VERIFY_USAGE}\n`);
       process.exit(2);
@@ -2109,8 +2113,8 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   setup: async (args) => (await import('./setup.ts')).setup(args),
   update: async (args) => (await import('./update.ts')).update(args),
   migrate: async (args) => (await import('./migrate.ts')).migrate(args),
-  backup: async (args) => (await import('./backup.ts')).backup(args),
-  restore: async (args) => (await import('./restore.ts')).restore(args),
+  backup: () => notIn016('backup'),
+  restore: () => notIn016('restore'),
   login,
   logout,
   whoami,
