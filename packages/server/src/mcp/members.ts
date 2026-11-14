@@ -263,9 +263,9 @@ const SET_ACCESS = changeTool({
 
 /**
  * Admitting a member. A service account is set up by whoever `GET /me`
- * says may (`setsUpServices`): until the instance's policy row is served,
- * that is whoever runs the instance alone, where 0.14.7 also let a person
- * the policy allowed (docs/mcp.md, "What 0.16 does not do yet").
+ * says may (`setsUpServices`): whoever runs the instance, or a person the
+ * instance's setting lets give one something, as 0.14.7 let them; the
+ * vault decides it on Approve.
  */
 const ADMIT = changeTool({
   name: 'admit_member',

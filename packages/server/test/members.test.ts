@@ -11,7 +11,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { secrets } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
 
-import { amend, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, user, write } from '@coffre/vault/testing';
+import { amend, credential, emptyDatabase, environment, grant, identity, instance, principal, project, role, rows, secret, user, write } from '@coffre/vault/testing';
 
 import type { ConnectedApp } from '../src/api/routes/members.ts';
 import { openApp } from './app-fixture.ts';
@@ -271,6 +271,77 @@ test('a person who sets up service accounts lists those they manage, reads their
   assert.deepEqual(refused(await call('ed-cli', 'DELETE', '/members/token:prod-reader')), NO_ACCESS);
   assert.deepEqual(refused(await call('ada-cli', 'DELETE', '/members/token:market-reader')), NO_ACCESS);
   assert.deepEqual(await managedBy('ed-cli'), ['token:eds (managed):']);
+});
+
+test("`GET /me` says who sets up service accounts, as the instance's setting lets them, and the setting by slug, as 0.14.7 did: one `caller` and one statement", async () => {
+  await write(world, ...rows('credentials', credential('ci-cli', ci), credential('aud-cli', aud)));
+  const me = async (label: string) => {
+    const [[status, body], calls, statements] = await cost(() => call(label, 'GET', '/me'));
+    assert.deepEqual([status, calls, statements], [200, ['caller'], 1], JSON.stringify(body));
+    return [body.setsUpServices, body.serviceSetup];
+  };
+  const everywhere = { projects: 'all', environments: 'all' };
+  // As it ships, everywhere: Ada views market and billing/prod, so she gives viewer there; Cy runs the instance.
+  assert.deepEqual(await me('ada-cli'), [true, everywhere]);
+  assert.deepEqual(await me('cy-cli'), [true, everywhere]);
+  // Dee holds no grant, so the vault names no project role of hers: she gives viewer by her Developer role all the same.
+  assert.deepEqual(await me('dee-cli'), [true, everywhere]);
+  // Aud's role holds nothing, and Gus's one grant is on a deleted project: neither has anything to give.
+  assert.deepEqual(await me('aud-cli'), [false, everywhere]);
+  assert.deepEqual(await me('gus-cli'), [false, everywhere]);
+  // On a token with a scope, Cy sets none up; a service account sets none up, and is told no setting.
+  assert.deepEqual(await me('cy-token'), [false, everywhere]);
+  assert.deepEqual(await me('ci-cli'), [false, null]);
+
+  // All but market: Ada still gives viewer at billing/prod; Ed views market/dev alone. Each is told the projects they reach.
+  assert.equal((await call('cy-cli', 'PUT', '/settings', { serviceAccounts: { projects: { except: ['market'] } } }))[0], 200);
+  assert.deepEqual(await me('ada-cli'), [true, { projects: { except: ['market'] }, environments: 'all' }]);
+  assert.deepEqual(await me('ed-cli'), [false, { projects: { except: ['market'] }, environments: 'all' }]);
+  // A setting that names billing alone is told to Ed, who does not reach it, as naming none of his.
+  assert.equal((await call('cy-cli', 'PUT', '/settings', { serviceAccounts: { projects: { only: ['billing'] } } }))[0], 200);
+  assert.deepEqual(await me('ed-cli'), [false, { projects: { only: [] }, environments: 'all' }]);
+  // Nowhere: nobody who only holds access sets one up; whoever manages access somewhere still does, as the vault lets them.
+  assert.equal((await call('cy-cli', 'PUT', '/settings', { serviceAccounts: { projects: { only: [] } } }))[0], 200);
+  assert.deepEqual((await me('ada-cli'))[0], false);
+  assert.deepEqual((await me('bo-cli'))[0], true);
+  assert.deepEqual(refused(await call('ada-cli', 'PUT', '/members/token:hers', { access: { 'billing/prod': 'viewer' } })), NO_ACCESS);
+});
+
+test("the Owner the deployment names stays one: removing or demoting them is 409 `configured_owner` (0.14.7's admin-api and instance-roles)", async () => {
+  const root = 'user:root@acme.example';
+  await write(world, ...rows('principals', principal(root, { role: 'owner' })));
+  assert.deepEqual(refused(await call('cy-cli', 'DELETE', `/members/${root}`)), [409, 'conflict', 'configured_owner']);
+  for (const body of [{ role: 'admin' }, { role: 'member' }, { role: 'owner', scope: { projects: { only: ['market'] } } }]) {
+    assert.deepEqual(refused(await call('cy-cli', 'PUT', `/members/${root}`, body)), [409, 'conflict', 'configured_owner'], JSON.stringify(body));
+  }
+  // Still the Owner of everything; asked to stay one, nothing moves.
+  const everywhere = { projects: 'all', environments: 'all' };
+  assert.deepEqual(await call('cy-cli', 'PUT', `/members/${root}`, { role: 'owner' }), [200, { member: root, instanceRole: 'owner', scope: everywhere, created: false }]);
+});
+
+test('an email is one member however it is cased, accents included, and is otherwise kept as written: no Unicode normalization (0.14.7)', async () => {
+  const everywhere = { projects: 'all', environments: 'all' };
+  const put = (member: string) => call('cy-cli', 'PUT', `/members/${encodeURIComponent(member)}`, {});
+  assert.deepEqual(await put('user:Émile@Acme.example'), [200, { member: 'user:émile@acme.example', instanceRole: 'member', scope: everywhere, created: true }]);
+  assert.deepEqual(await put('user:ÉMILE@acme.EXAMPLE'), [200, { member: 'user:émile@acme.example', instanceRole: 'member', scope: everywhere, created: false }]);
+  // An e and a combining acute accent read the same, and are another member: the email is folded in case alone.
+  const decomposed = 'user:e\u0301mile@acme.example';
+  assert.deepEqual((await put('user:E\u0301MILE@acme.example'))[1], { member: decomposed, instanceRole: 'member', scope: everywhere, created: true });
+  const stored = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM principals WHERE id LIKE '%mile@acme.example' ORDER BY id`);
+  assert.deepEqual(stored.map((row) => row.id).sort(), [decomposed, 'user:émile@acme.example'].sort());
+});
+
+test("a member whose sign-in account's row was edited behind the vault is not removed, `tampered`; an Owner still takes away every grant and role they hold (U1)", async () => {
+  await write(world, ...rows('identities', identity(al, { email: 'al@acme.example' })));
+  await world.owner.execute(sql`UPDATE identities SET email = 'eve@acme.example' WHERE principal = ${al}`);
+  assert.deepEqual(refused(await call('cy-cli', 'DELETE', `/members/${al}`)), [500, 'tampered', 'tampered']);
+  // Al is an Admin of market: demoted, and given a grant only to see it taken away, he holds nothing, and is a member still.
+  assert.deepEqual((await call('cy-cli', 'PUT', `/members/${al}`, { role: 'member' }))[1], { member: al, instanceRole: 'member', scope: { projects: 'all', environments: 'all' }, created: false });
+  assert.deepEqual((await call('cy-cli', 'PATCH', `/access/${al}`, { market: 'viewer' }))[1], { changes: { market: 'created' } });
+  assert.deepEqual((await call('cy-cli', 'PATCH', `/access/${al}`, { market: null }))[1], { changes: { market: 'revoked' } });
+  const [, mine] = await call('al-cli', 'GET', '/me');
+  assert.deepEqual([mine.instanceRole, mine.environments], ['member', []]);
+  assert.deepEqual((await call('cy-cli', 'GET', `/members/${al}/access`))[1].grants, []);
 });
 
 test("a person's grants set in one change, each place by path, all or none", async () => {
