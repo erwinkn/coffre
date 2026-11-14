@@ -299,11 +299,11 @@ function copied(
     const secret = drawn(seed, `secret ${key}`);
     const row = { id: secret, projectId: place.id, environmentId: made.id, key, createdAt: now, updatedAt: now, archivedAt: null, folder: asked.folder, recipe: null, pairId: null, pairHalf: null };
     if ((copy.references || kept) && refers) {
-      writes.push(put(secrets, { ...row, versions: 0, currentVersion: null, sourceId: held.id, nature: null }));
+      writes.push(put(secrets, { ...row, versions: 0, currentVersion: null, sourceId: held.id, sourceSetAt: now, sourceSetBy: caller.principal, nature: null }));
       lines.push({ key, secret, refers: held.id, ...(asked.folder === null ? {} : { folder: asked.folder }) });
       forked.references += 1;
     } else {
-      writes.push(put(secrets, { ...row, versions: 1, currentVersion: 1, sourceId: null, nature }));
+      writes.push(put(secrets, { ...row, versions: 1, currentVersion: 1, sourceId: null, sourceSetAt: null, sourceSetBy: null, nature }));
       // Kept as it was, and opened and sealed again by the engine: nobody else holds it. Its first date is its source's, as a
       // restore's is: its forker did not write it (the member report's `created_at = first_written_at`), and never saw it.
       values.push({ version: { id: drawn(seed, `version ${key}`), secretId: secret, version: 1, createdAt: now, createdBy: caller.principal, sensitive: nature === 'sensitive', firstWrittenAt: version.firstWrittenAt, plaintext: nature === 'plain' ? version.plaintext : null }, copy: version });
@@ -886,7 +886,7 @@ function placeDelete(input: Presented & PlaceDelete, vault: Deciding): Operation
         writes: [
           ...(there === undefined ? [amended(projects, place, { slug: mark })] : marks.map(({ row, slug }) => amended(environments, row, { slug }))),
           ...doomed.map((grant) => drop(grants, grant)),
-          ...ended.map((holder) => amended(secrets, holder, { sourceId: null, updatedAt: new Date(at) })),
+          ...ended.map((holder) => amended(secrets, holder, { sourceId: null, sourceSetAt: null, sourceSetBy: null, updatedAt: new Date(at) })),
         ],
         erase: there === undefined ? { projects: [place] } : { environments: gone },
         entry: {

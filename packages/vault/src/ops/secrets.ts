@@ -428,7 +428,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         if (inherit === undefined && down === null && was?.archivedAt != null && (value !== undefined || restore !== undefined || ref !== undefined) && archived !== false) return { refused: 'archived' };
         const archiving = inherit ?? (down === null ? archived : false);
         const ids = fresh.get(key)!;
-        const { mac: _, ...kept } = was ?? { mac: null, id: ids.secret, projectId: place.id, environmentId: environment.id, key, createdAt: now, updatedAt: now, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: null, nature: null, recipe: null, pairId: null, pairHalf: null };
+        const { mac: _, ...kept } = was ?? { mac: null, id: ids.secret, projectId: place.id, environmentId: environment.id, key, createdAt: now, updatedAt: now, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: null, sourceSetAt: null, sourceSetBy: null, nature: null, recipe: null, pairId: null, pairHalf: null };
         let secret: Fresh<typeof secrets> = { ...kept, archivedAt: archiving === undefined ? kept.archivedAt : archiving ? (kept.archivedAt ?? now) : null, folder: folder === undefined ? kept.folder : folder };
         const line: Record<string, unknown> = { key, secret: secret.id };
         if (value !== undefined || restore !== undefined) {
@@ -454,7 +454,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           const version = kept.versions + 1;
           // Typed or restored, it has no recipe for Regenerate, and is in no pair; generated, the recipe it was made by, and its half of its pair.
           const pair = generated?.pair === undefined ? null : { id: pairs.get(generated.pair.private)!, half: key === generated.pair.private ? 'private' : 'public' };
-          secret = { ...secret, versions: version, currentVersion: version, updatedAt: now, sourceId: null, nature, recipe: generated?.recipe ?? null, pairId: pair?.id ?? null, pairHalf: pair?.half ?? null };
+          secret = { ...secret, versions: version, currentVersion: version, updatedAt: now, sourceId: null, sourceSetAt: null, sourceSetBy: null, nature, recipe: generated?.recipe ?? null, pairId: pair?.id ?? null, pairHalf: pair?.half ?? null };
           const row = { id: ids.version, secretId: secret.id, version, createdAt: now, createdBy: caller.principal, sensitive: nature === 'sensitive' };
           sealed.push(from === undefined
             ? { version: { ...row, firstWrittenAt: now, plaintext: nature === 'plain' ? value! : null }, text: Buffer.from(value!) }
@@ -469,8 +469,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         const target = ref === undefined ? undefined : targets.get(key)!.row;
         // A key that reads that source already is left as it is.
         if (target !== undefined && kept.sourceId !== target.id) {
-          // Its own value, if any, is history: the key has none now, and reads the source's.
-          secret = { ...secret, updatedAt: now, sourceId: target.id, currentVersion: null, nature: null, recipe: null, pairId: null, pairHalf: null };
+          // Its own value, if any, is history: the key has none now, and reads the source's. Who pointed it, and when, go with it.
+          secret = { ...secret, updatedAt: now, sourceId: target.id, sourceSetAt: now, sourceSetBy: caller.principal, currentVersion: null, nature: null, recipe: null, pairId: null, pairHalf: null };
           // `refers`: the secret it reads from now on; `source`, the one it read until now.
           Object.assign(line, { refers: target.id }, was === null ? { made: true } : {}, was?.sourceId == null ? {} : { source: was.sourceId });
           referring.add(key);
@@ -877,7 +877,7 @@ function referenceBreak(input: Presented & ReferenceBreak, vault: Deciding): Ope
       if (holder.sourceId === null) return { refused: 'no_reference' };
       const where = from && seen.sourcePlace.find((row) => row.id === from.environmentId);
       return {
-        writes: [amended(secrets, holder, { sourceId: null, updatedAt: new Date(at) })],
+        writes: [amended(secrets, holder, { sourceId: null, sourceSetAt: null, sourceSetBy: null, updatedAt: new Date(at) })],
         entry: {
           kept: true,
           action: 'reference.break',

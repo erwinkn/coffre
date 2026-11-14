@@ -27,8 +27,10 @@ export function environment(of: { id: string }, slug: string, more: Partial<Fres
   return { id: randomUUID(), projectId: of.id, slug, name: slug, createdAt: at, archivedAt: null, parentId: null, owner: null, protected: false, frozenCredentials: [], ...more };
 }
 
+/** A secret's row; a reference (`sourceId`) is pointed by root at `at`, unless `more` says who and when. */
 export function secret(of: { id: string; projectId: string }, key: string, more: Partial<Fresh<typeof secrets>> = {}): Fresh<typeof secrets> {
-  return { id: randomUUID(), projectId: of.projectId, environmentId: of.id, key, createdAt: at, updatedAt: at, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: null, nature: null, recipe: null, pairId: null, pairHalf: null, ...more };
+  const pointed = more.sourceId == null ? { sourceSetAt: null, sourceSetBy: null } : { sourceSetAt: at, sourceSetBy: root };
+  return { id: randomUUID(), projectId: of.projectId, environmentId: of.id, key, createdAt: at, updatedAt: at, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: null, ...pointed, nature: null, recipe: null, pairId: null, pairHalf: null, ...more };
 }
 
 export function principal(id: string, more: Partial<Fresh<typeof principals>> = {}): Fresh<typeof principals> {

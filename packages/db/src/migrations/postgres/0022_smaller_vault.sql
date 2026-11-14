@@ -62,12 +62,13 @@ $$;
 
 -- A reference, as 0.14 reads one: a secret with no value of its own is its newest reference that the vault sealed
 -- (`reference.create`, which names the holder and the source), and that reference is live while no `reference.end`
--- names it. A newer one that ended leaves no older one standing.
-ALTER TABLE secrets ADD COLUMN source_id uuid;
+-- names it. A newer one that ended leaves no older one standing. Who made it and when are its row's, as 0.14 listed
+-- them: who pointed the secret at its source, whom the member report lists it under (resolved as a member below).
+ALTER TABLE secrets ADD COLUMN source_id uuid, ADD COLUMN source_set_at timestamp(3) with time zone, ADD COLUMN source_set_by text;
 --> statement-breakpoint
-UPDATE secrets AS holder SET source_id = newest.source_id
+UPDATE secrets AS holder SET source_id = newest.source_id, source_set_at = newest.created_at, source_set_by = newest.created_by
   FROM (
-    SELECT DISTINCT ON (reference.secret_id) reference.secret_id, reference.created_seq, source.id AS source_id
+    SELECT DISTINCT ON (reference.secret_id) reference.secret_id, reference.created_seq, reference.created_at, reference.created_by, source.id AS source_id
       FROM secret_references reference
       JOIN audit_log seal ON seal.seq = reference.created_seq AND seal.author = 'vault' AND seal.action = 'reference.create' AND seal.decision = 'allow'
        AND seal.project_id IS NOT NULL AND seal.environment_id IS NOT NULL
@@ -285,6 +286,7 @@ DROP INDEX secrets_lookup_idx, secret_versions_secret_idx;
 ALTER TABLE secrets
     ADD CONSTRAINT secrets_versions_check CHECK (versions >= 0 AND (current_version IS NULL OR (current_version = versions AND versions > 0))),
     ADD CONSTRAINT secrets_source_check CHECK (source_id IS NULL OR (source_id <> id AND current_version IS NULL)),
+    ADD CONSTRAINT secrets_source_set_check CHECK ((source_set_at IS NULL) = (source_id IS NULL) AND (source_set_by IS NULL) = (source_id IS NULL)),
     ADD CONSTRAINT secrets_nature_check CHECK ((nature IS NULL) = (current_version IS NULL) AND (nature IS NULL OR nature IN ('plain', 'secret', 'sensitive'))),
     ADD CONSTRAINT secrets_recipe_check CHECK ((recipe IS NULL AND pair_id IS NULL) OR current_version IS NOT NULL),
     ADD CONSTRAINT secrets_pair_check CHECK ((pair_id IS NULL) = (pair_half IS NULL) AND (pair_half IS NULL OR pair_half IN ('private', 'public'))),
@@ -480,6 +482,9 @@ $$;
 --> statement-breakpoint
 UPDATE secret_versions SET created_by = pg_temp.member_014(created_by)
  WHERE pg_temp.member_014(created_by) <> created_by;
+--> statement-breakpoint
+UPDATE secrets SET source_set_by = pg_temp.member_014(source_set_by)
+ WHERE pg_temp.member_014(source_set_by) <> source_set_by;
 --> statement-breakpoint
 UPDATE dismissed_keys SET dismissed_by = pg_temp.member_014(dismissed_by), restored_by = pg_temp.member_014(restored_by)
  WHERE pg_temp.member_014(dismissed_by) <> dismissed_by OR pg_temp.member_014(restored_by) IS DISTINCT FROM restored_by;

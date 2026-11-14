@@ -228,15 +228,16 @@ const SEED = `
       vouched(66, 'policy.change', { policy: { roles: { viewer: { name: 'Reader', description: 'Read and use secret values.', permissions: ['secret.read', 'secret.use'], protected: ['secret.use'] } }, instanceRoles: {}, protected: [{ projectId: id(1), environmentId: id(12), at: T0 }] } }),
       vouched(67, 'settings.change', { serviceAccounts: { projects: 'all', environments: { only: ['dev'] } } }),
     ].join(',\n    ')};
-  INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by) VALUES
-    (${u(201)}, ${u(2)}, ${u(21)}, ${u(103)}, ${u(1)}, ${u(11)}, ${u(101)}, 10, '${ADA}'),
-    (${u(202)}, ${u(2)}, ${u(21)}, ${u(104)}, ${u(1)}, ${u(11)}, ${u(102)}, 11, '${ADA}'),
-    (${u(203)}, ${u(2)}, ${u(21)}, ${u(105)}, ${u(1)}, ${u(11)}, ${u(101)}, 13, '${ADA}'),
-    (${u(204)}, ${u(2)}, ${u(21)}, ${u(106)}, ${u(1)}, ${u(11)}, ${u(102)}, 14, '${ADA}'),
-    (${u(205)}, ${u(2)}, ${u(21)}, ${u(107)}, ${u(1)}, ${u(11)}, ${u(101)}, 16, '${ADA}'),
-    (${u(206)}, ${u(2)}, ${u(21)}, ${u(108)}, ${u(1)}, ${u(11)}, ${u(101)}, 17, '${ADA}'),
-    (${u(207)}, ${u(2)}, ${u(21)}, ${u(108)}, ${u(1)}, ${u(11)}, ${u(102)}, 18, '${ADA}'),
-    (${u(208)}, ${u(2)}, ${u(21)}, ${u(109)}, ${u(1)}, ${u(11)}, ${u(101)}, 25, '${ADA}');
+  -- Who made each, and when: 0.14.7's app wrote a bare id, and the upgrade names the member, as for every other column.
+  INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by, created_at) VALUES
+    (${u(201)}, ${u(2)}, ${u(21)}, ${u(103)}, ${u(1)}, ${u(11)}, ${u(101)}, 10, 'ada@acme.example', ${stamp(T0 + 5 * day + 123)}),
+    (${u(202)}, ${u(2)}, ${u(21)}, ${u(104)}, ${u(1)}, ${u(11)}, ${u(102)}, 11, '${ADA}', now()),
+    (${u(203)}, ${u(2)}, ${u(21)}, ${u(105)}, ${u(1)}, ${u(11)}, ${u(101)}, 13, '${ADA}', now()),
+    (${u(204)}, ${u(2)}, ${u(21)}, ${u(106)}, ${u(1)}, ${u(11)}, ${u(102)}, 14, '${ADA}', now()),
+    (${u(205)}, ${u(2)}, ${u(21)}, ${u(107)}, ${u(1)}, ${u(11)}, ${u(101)}, 16, 'BO@acme.example', ${stamp(T0 + 6 * day)}),
+    (${u(206)}, ${u(2)}, ${u(21)}, ${u(108)}, ${u(1)}, ${u(11)}, ${u(101)}, 17, '${ADA}', now()),
+    (${u(207)}, ${u(2)}, ${u(21)}, ${u(108)}, ${u(1)}, ${u(11)}, ${u(102)}, 18, '${ADA}', now()),
+    (${u(208)}, ${u(2)}, ${u(21)}, ${u(109)}, ${u(1)}, ${u(11)}, ${u(101)}, 25, '${ADA}', now());
   INSERT INTO identities (id, provider, auth_mac, subject, issuer_hash, generation, principal, email, created_by, revoked_at, revoked_by) VALUES
     (${u(601)}, 'github', ${h(4)}, '1001', 'x', 0, '${ADA}', 'ada@acme.example', 'ada@acme.example', NULL, NULL),
     (${u(602)}, 'github', ${h(4)}, '1002', 'x', 0, '${BO}', 'bo@acme.example', 'bo@acme.example', now(), 'ada@acme.example'),
@@ -372,6 +373,11 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
       // Version 2 was replaced by the reference, and the reference ended: no value, and the next version is 3.
       { key: 'VALUE_THEN_ENDED_REFERENCE', source_id: null, versions: 2, current_version: null },
       { key: 'VALUE_THEN_REFERENCE', source_id: id(101), versions: 1, current_version: null },
+    ]);
+    // A live reference keeps who made it and when, to the millisecond, as the member it is now; nothing else has either.
+    assert.deepEqual(await rows(`SELECT key, source_set_by, (extract(epoch FROM source_set_at) * 1000)::float8 AS source_set_at FROM secrets WHERE source_set_by IS NOT NULL OR source_set_at IS NOT NULL ORDER BY key`), [
+      { key: 'DATABASE_URL', source_set_by: ADA, source_set_at: T0 + 5 * day + 123 },
+      { key: 'VALUE_THEN_REFERENCE', source_set_by: BO, source_set_at: T0 + 6 * day },
     ]);
     assert.equal(await count('secret_versions'), 11);
     assert.deepEqual(await rows(`SELECT s.key, v.id FROM secrets s JOIN secret_versions v ON v.secret_id = s.id AND v.version = s.current_version ORDER BY s.key, s.id`), [

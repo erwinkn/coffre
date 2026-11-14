@@ -208,6 +208,35 @@ test('a reference is broken by whoever writes its key or manages access where it
   assert.equal((await held('NEW'))!.source_id, null);
 });
 
+test('who pointed a reference, and when, is its row\'s: set as it is made, moved as it is pointed again, cleared with it, and under its MAC', async () => {
+  const pointed = async (key: string) =>
+    (await rowsOf<{ by: string | null; at: number | null }>(world.owner, sql`SELECT source_set_by AS by, (extract(epoch FROM source_set_at) * 1000)::bigint AS at FROM secrets WHERE environment_id = ${prod.id} AND key = ${key}`))
+      .map(({ by, at }) => ({ by, at: at === null ? null : Number(at) }))[0];
+  const made = world.now();
+  assert.ok('answer' in await vault.change(writing('ada-cli', { NEW: 'billing/prod/STRIPE_KEY', DATABASE_URL: 'billing/prod/FLAG' })));
+  assert.deepEqual(await pointed('NEW'), { by: ada, at: made });
+  assert.deepEqual(await pointed('DATABASE_URL'), { by: ada, at: made }, 'a key with a value of its own, made a reference');
+  // Pointed elsewhere by someone else: theirs now. Pointed again at the source it reads: left as it is.
+  world.tick(60_000);
+  assert.ok('answer' in await vault.change(writing('cy-cli', { NEW: 'billing/prod/FLAG', DATABASE_URL: 'billing/prod/FLAG' })));
+  assert.deepEqual(await pointed('NEW'), { by: cy, at: made + 60_000 });
+  assert.deepEqual(await pointed('DATABASE_URL'), { by: ada, at: made });
+  // A value of its own written over it, or the reference broken, ends it, and who made it with it.
+  assert.ok('answer' in await vault.change(writing('ada-cli', { NEW: { value: 'own' } })));
+  assert.deepEqual(await pointed('NEW'), { by: null, at: null });
+  assert.ok('answer' in await vault.change(breaking('ada-cli', 'DATABASE_URL')));
+  assert.deepEqual(await pointed('DATABASE_URL'), { by: null, at: null });
+
+  // Who made it, edited behind the vault: the row is not the vault's, so a use finds no such key, and a change is told so.
+  assert.deepEqual(await given('bo-cli', ['LINK']), [[1, 'sk_live']]);
+  await world.owner.execute(sql`UPDATE secrets SET source_set_by = ${bo} WHERE id = ${link.id}`);
+  world.memory.reads.clear();
+  assert.deepEqual(await given('bo-cli', ['LINK']), ['unknown_key']);
+  assert.deepEqual(await vault.change(breaking('ada-cli', 'LINK')), { refused: 'unreadable' });
+  await world.owner.execute(sql`UPDATE secrets SET source_set_by = ${ada}, source_set_at = now() WHERE id = ${link.id}`);
+  assert.deepEqual(await vault.change(breaking('ada-cli', 'LINK')), { refused: 'unreadable' }, 'nor the date');
+});
+
 test('a reference is broken by nobody else, and a key that is none is told only to its writer', async () => {
   const before = await kept();
   assert.deepEqual(await vault.change(breaking('bo-cli', 'LINK')), { refused: 'no_access' }, 'a viewer of both ends');

@@ -367,7 +367,7 @@ export const secretRoutes = {
    * whoever manages access in its source's project; one call to the vault,
    * which decides (`reference.break`). Answered with what it read, by the
    * source's rows: `(gone)` where the vault does not see them. Who made the
-   * reference, and when, is the log's, read with the references' list.
+   * reference, and when, go with it: the log keeps them, and who broke it.
    */
   ...route('DELETE /secrets/:project/:environment/:key/reference', {
     run: async (ctx, { params }) => {

@@ -2795,6 +2795,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "source_set_at": {
+          "name": "source_set_at",
+          "type": "timestamp (3) with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_set_by": {
+          "name": "source_set_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "nature": {
           "name": "nature",
           "type": "text",
@@ -2926,6 +2938,10 @@
         "secrets_source_check": {
           "name": "secrets_source_check",
           "value": "\"secrets\".\"source_id\" IS NULL OR (\"secrets\".\"source_id\" <> \"secrets\".\"id\" AND \"secrets\".\"current_version\" IS NULL)"
+        },
+        "secrets_source_set_check": {
+          "name": "secrets_source_set_check",
+          "value": "(\"secrets\".\"source_set_at\" IS NULL) = (\"secrets\".\"source_id\" IS NULL) AND (\"secrets\".\"source_set_by\" IS NULL) = (\"secrets\".\"source_id\" IS NULL)"
         },
         "secrets_nature_check": {
           "name": "secrets_nature_check",

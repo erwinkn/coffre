@@ -55,7 +55,7 @@ beforeEach(async () => {
     ...rows('projects', market, billing),
     ...rows('environments', prod, staging, dev, old, adas, billed, stale),
     ...rows('secrets',
-      a, b, value(world, secret(prod, 'S'), 's', { sensitive: true }), c, secret(prod, 'E'), secret(prod, 'R', { sourceId: a.id, folder: 'links' }),
+      a, b, value(world, secret(prod, 'S'), 's', { sensitive: true }), c, secret(prod, 'E'), secret(prod, 'R', { sourceId: a.id, folder: 'links', sourceSetBy: cy, sourceSetAt: new Date('2026-11-01T08:00:00Z') }),
       value(world, secret(staging, 'A'), 'sa'), value(world, secret(staging, 'Y'), 'y'), value(world, secret(staging, 'Z'), 'z', { plain: true }),
       value(world, secret(dev, 'A'), 'da'), value(world, secret(dev, 'D'), 'd'), value(world, secret(dev, 'S', { archivedAt: new Date(0) }), 'ds'),
       own, o,
@@ -121,7 +121,7 @@ test("an environment's keys: no value but a plain one's, each key readable as 0.
   // A reference: its source, read live, as old as the version it reads.
   // Its source by its id too, which a value written over it says it replaces (`replaces: { source }`).
   const [held] = await rowsOf<{ source: string }>(world.owner, sql`SELECT source_id::text AS source FROM secrets WHERE key = 'R'`);
-  assert.deepEqual({ ...r!.reference, id: undefined }, { id: undefined, holder: 'market/prod/R', source: 'market/prod/A', sourceId: held!.source, state: 'live', version: 1, createdBy: null, createdAt: null, endedBy: null, endedAt: null, canOpenSource: true });
+  assert.deepEqual({ ...r!.reference, id: undefined }, { id: undefined, holder: 'market/prod/R', source: 'market/prod/A', sourceId: held!.source, state: 'live', version: 1, createdBy: cy, createdAt: '2026-11-01T08:00:00.000Z', endedBy: null, endedAt: null, canOpenSource: true });
   assert.equal(r!.updatedAt, a!.updatedAt);
   assert.deepEqual([listed.permissions, listed.parents, listed.personal, listed.protected, listed.unprotectable, listed.loosenable, listed.rotateAfterDays], [['secret.read'], [], null, false, false, false, 365]);
 

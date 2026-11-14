@@ -81,9 +81,12 @@ export type ReferenceView = {
   state: ReferenceState;
   /** The source's current version, while it reads. */
   version: number | null;
-  /** No row keeps who made a reference, when, or who ended it: null, where 0.14 answered them. */
-  createdBy: null;
-  createdAt: null;
+  /**
+   * Who pointed it at its source, and when: its row's, under the vault's MAC. An ended reference is none, its row
+   * keeps no source, so nothing says who ended one: null, where 0.14 answered them, and the log has it.
+   */
+  createdBy: string | null;
+  createdAt: string | null;
   endedBy: null;
   endedAt: null;
 };
@@ -201,7 +204,7 @@ function stateOf(places: { projects: ReadonlyMap<string, ProjectRow>; environmen
   return 'live';
 }
 
-function referenceView(places: Parameters<typeof stateOf>[0], holder: SecretRow, source: SecretRow | undefined): ReferenceView {
+export function referenceView(places: Parameters<typeof stateOf>[0], holder: SecretRow, source: SecretRow | undefined): ReferenceView {
   const state = stateOf(places, holder, source);
   return {
     id: holder.id,
@@ -209,8 +212,8 @@ function referenceView(places: Parameters<typeof stateOf>[0], holder: SecretRow,
     source: source === undefined ? '?' : pathIn(places, source),
     state,
     version: state === 'live' ? source!.currentVersion : null,
-    createdBy: null,
-    createdAt: null,
+    createdBy: holder.sourceSetBy,
+    createdAt: holder.sourceSetAt,
     endedBy: null,
     endedAt: null,
   };
