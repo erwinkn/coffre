@@ -556,11 +556,15 @@ test('what answers an outage is looked for when the database fails: rows that ag
     assert.equal(await got(late), 'unauthenticated');
   }
 
-  // The refusal itself is not remembered: what is given right after it is used at once.
+  // The refusal itself is not remembered: what is given right after it, in the same millisecond, is used at once, and
+  // its rows are kept, for an outage too.
   const dees = ask('dee', 'market/prod', ['FLAG'], { purpose: 'use' });
   assert.equal(await got(dees), 'no_access');
   await write(vault, ...rows('grants', grant(dee, 'viewer', { project: w.market })));
   assert.deepEqual(await got(dees), { FLAG: 'on' });
+  down = unreachable();
+  assert.deepEqual(await got(dees), { FLAG: 'on' });
+  down.back();
 });
 
 test('an outage answers for its own length, whatever the memory\'s, and nothing the bulk cap has refused since', async () => {
@@ -605,6 +609,14 @@ test('with no outage length set, and for a failure that is no outage, a use fail
   down = unreachable({ writes: true });
   await assert.rejects(use(vault, proxied), REFUSED);
   down.back();
+
+  // With none set, a use whose write gave up is not remembered either, as ever: the next one reads again.
+  Object.assign(vault, { memory: memoryOf(2) });
+  vault.tick(60_000);
+  down = unreachable({ writes: true, failure: { code: '55P03' } });
+  await assert.rejects(use(vault, proxied), Busy);
+  down.back();
+  assert.equal(vault.memory.reads.size, 0);
 
   // An outage length set. A statement Postgres refuses as written is a bug; one that gave up behind a lock, or ran
   // past its bound, is the database busy, which whoever holds a credential can make it. Neither is an outage: the use

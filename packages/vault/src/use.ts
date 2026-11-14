@@ -176,7 +176,8 @@ function remember(memory: Memory, ask: Ask, found: Read, at: number): void {
  * again, and is given what has changed since. Where an outage may be
  * answered from memory, when it was refused is kept, for as long: a use
  * that read before then and answers after would otherwise put its rows
- * back, and an outage be answered from them.
+ * back, and an outage be answered from them. Whatever was refused, a token
+ * that is no credential's too: a credential's row may be what is gone.
  */
 function refused(memory: Memory, ask: Ask, at: number): void {
   const shape = shapeOfAsk(ask);
@@ -470,10 +471,10 @@ export async function peek(vault: Serving, ask: Ask): Promise<Peeked | Refusal> 
  * past the bulk cap. The decision is made again as of now, so a credential
  * that expires in the outage stops.
  *
- * Only rows the database has not answered past: a read that answers takes
- * their place whatever becomes of its use, so a use whose read answered
- * and whose write did not fails as the database did, and what it read
- * stands. What an outage cannot see is what the rows do not hold: a change
+ * Only rows the database has not answered past: where outages are
+ * answered, a read that answers takes their place whatever becomes of its
+ * use, so a use whose read answered and whose write did not fails as the
+ * database did, and what it read stands. What an outage cannot see is what the rows do not hold: a change
  * since they were read, `outageSeconds` ago at most, or one made through an
  * instance that still reaches the database. Any other use fails with the
  * database, as does every change.
@@ -492,7 +493,8 @@ export async function use(vault: Serving, ask: Ask): Promise<Answer | Refusal> {
     if (found !== undefined) return await answer(vault, ask, found);
     const rows = await read(vault, ask);
     memory.downAt = -Infinity;
-    remember(memory, ask, rows, now);
+    // Ahead of its answer only where an outage could be answered from the older rows: else kept once answered, as ever.
+    if (memory.outageSeconds > 0) remember(memory, ask, rows, now);
     return await answer(vault, ask, rows);
   } catch (error) {
     if (error instanceof KekUnavailableError || !isUnreachable(error)) throw error;
