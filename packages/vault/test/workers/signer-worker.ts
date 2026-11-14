@@ -3,7 +3,7 @@
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { postgres } from '@coffre/db/hyperdrive';
 
-import { signerObject, signerOf, type SignerNamespace } from '../../src/cloudflare-signer.ts';
+import { SIGNER, signerObject, signerOf, type SignerNamespace } from '../../src/cloudflare-signer.ts';
 import { storeOf } from '../../src/signer-host.ts';
 
 type Env = { HYPERDRIVE: { connectionString: string }; SIGNING_KEY: string; ALERT_URL: string; SIGNER: SignerNamespace };
@@ -39,7 +39,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const { method, hash } = (await request.json()) as { method: 'wake' | 'status' | 'refusedStep'; hash?: string };
     try {
-      const signer = signerOf(env.SIGNER);
+      const signer = signerOf(env.SIGNER, SIGNER);
       if (method === 'status') return Response.json({ ok: true, result: await signer.status() });
       if (method === 'refusedStep') return Response.json({ ok: true, result: await (signer as unknown as CoffreSigner).refusedStep() });
       await signer.wake(Buffer.from(hash!, 'hex'));

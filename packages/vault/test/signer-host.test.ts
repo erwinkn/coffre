@@ -13,7 +13,7 @@ import { ADOPT_AGAIN_MS, ALERT_MS, CHECK_MS, KEEP, SignerHost, storeOf, STOPPED_
 import { adopt, adopted } from '../src/adopt.ts';
 import { openLocalVault } from '../src/local.ts';
 import { Signer } from '../src/signer.ts';
-import { emptyDatabase, memoryStore, objectStorage, openTestVault } from './database.ts';
+import { backupOf, emptyDatabase, memoryStore, objectStorage, openTestVault } from './database.ts';
 import { principal, tokenOf, user } from './world.ts';
 
 /**
@@ -782,26 +782,129 @@ test("a head the database's writer planted is no word of the vault's: a signer w
   assert.deepEqual(await signin('root@acme.example'), { refused: 'adopting' });
 });
 
-test("a signer whose storage was lost takes the database as it stands, and says so: once, in the log and in `status`, kept across a restart", async (t) => {
+const seqs = async () => (await rowsOf<{ seq: number }>(vault.owner, sql`SELECT seq::int FROM log ORDER BY seq`)).map(({ seq }) => seq);
+const head = async () => (await rowsOf<{ size: number; keptSize: number; agingFrom: number }>(vault.owner, sql`SELECT size::int, kept_size::int AS "keptSize", aging_from::int AS "agingFrom" FROM log_head`))[0]!;
+/** 0 to n - 1: a log with no hole. */
+const upTo = (n: number) => Array.from({ length: n }, (_, i) => i);
+
+test("a database restored before a signer whose storage is new: it goes on from the database's head, signs what waited at the backup, and finds nothing", async (t) => {
   assert.equal(await host.adopt(), true);
   await member(ada, 'member');
   await minute();
-  // A new storage, before the same database: the object's class renamed, say.
+  // A change committed and not yet signed when the backup is taken: in the backup, waiting.
+  await member(bo, 'member');
+  const restore = await backupOf(vault.owner);
+  await told();
+  await member(cy, 'member');
+  await minute();
+  await restore();
+  // Deployed under a new name: the signer's storage is new.
   storage = objectStorage();
   host = start();
   const logged = t.mock.method(console, 'error', () => {});
   assert.equal(await host.adopt(), true);
-  const said = /^the signer's storage was empty: it took the database as it stands, a log begun that it did not sign \(docs\/design\/0\.16\.md, "Losing the signer's storage"\)$/;
-  assert.deepEqual(logged.mock.calls.map(({ arguments: [text] }) => String(text).replace(/^coffre: /, '')).filter((text) => said.test(text)).length, 1);
+  const said = /^the signer's storage was empty: it took the database as it stands, a log begun that it did not sign, from its head \(docs\/design\/0\.16\.md, "Losing the signer's storage"\)$/;
+  assert.equal(logged.mock.calls.map(({ arguments: [text] }) => String(text).replace(/^coffre: /, '')).filter((text) => said.test(text)).length, 1);
   const { took } = await host.status();
   assert.equal(took!.at, vault.now());
-  assert.match(took!.said, said);
-  // Its yes is on disk: a host that starts again over the storage answers it, and says nothing more.
-  vault.tick(CHECK_MS);
+  // What waited is the next entry after the head, and the next change after it: no hole, nothing numbered again.
+  assert.deepEqual([await seqs(), await actions('log_pending')], [upTo(3), []]);
+  await member(cy, 'owner');
+  await minute();
+  await minute();
+  assert.deepEqual([await seqs(), await head(), alerts, (await host.status()).standing], [upTo(4), { size: 4, keptSize: 4, agingFrom: 0 }, [], []]);
+  // On disk: a host that starts again over the storage goes on, and says nothing more.
   host = start();
   assert.equal(await host.adopt(), true);
   assert.deepEqual([(await host.status()).took, logged.mock.callCount()], [took, 1]);
   assert.ok('answer' in (await signin('root@acme.example')));
+});
+
+test('a backup restored under the signer that went on past it: what it finds stands; deployed under a new name, the new signer goes on with none', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  assert.equal(await host.adopt(), true);
+  await member(ada, 'member');
+  await minute();
+  const restore = await backupOf(vault.owner);
+  await member(bo, 'member');
+  await member(cy, 'member');
+  await minute();
+  await restore();
+  await minute();
+  assert.deepEqual(new Set(alerts.flatMap((alert) => alert.findings.map(({ found, of }) => `${found} ${of}`))), new Set([`row ${named(bo)}`, `row ${named(cy)}`, 'cut kept', `row ${JSON.stringify(['log_head'])}`]));
+  await member(ada, 'owner');
+  await minute();
+  assert.ok((await host.status()).standing.some(({ of }) => of === named(bo)), 'the rows put back stand for good');
+  // The same backup again, under a signer of a new name.
+  await restore();
+  storage = objectStorage();
+  host = start();
+  alerts = [];
+  assert.equal(await host.adopt(), true);
+  await member(ada, 'owner');
+  await minute();
+  await minute();
+  assert.deepEqual([await seqs(), alerts, (await host.status()).standing], [upTo(3), [], []]);
+});
+
+test('going back to 0.14 and upgrading again: the database shows no log, which the signer that signed one never adopts, and one of a new name does', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  assert.equal(await host.adopt(), true);
+  await member(ada, 'member');
+  await minute();
+  // 0.14's backup restored, then upgraded again: no log, no roles, no policy.
+  await emptyDatabase(vault.owner);
+  host = start();
+  await host.adopt();
+  assert.deepEqual([await actions('log_pending'), await count('policy'), await signin('root@acme.example')], [[], 0, { refused: 'adopting' }]);
+  storage = objectStorage();
+  host = start();
+  alerts = [];
+  assert.equal(await host.adopt(), true);
+  await minute();
+  assert.deepEqual([await actions('log'), alerts], [['vault.adopt'], []]);
+  assert.ok('answer' in (await signin('root@acme.example')));
+});
+
+test('a log whose oldest uses were pruned is gone on from, from the tiles above them', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  assert.equal(await host.adopt(), true);
+  await wait(...Array.from({ length: 600 }, (_, i) => reading(`KEY_${i}`)));
+  await told();
+  vault.tick(TICK_MS);
+  await fire();
+  vault.tick(91 * 24 * 60 * 60_000);
+  await minute();
+  assert.deepEqual(await head(), { size: 601, keptSize: 1, agingFrom: 512 });
+  storage = objectStorage();
+  host = start();
+  alerts = [];
+  assert.equal(await host.adopt(), true);
+  await wait(reading('KEY_NEW'));
+  await minute();
+  await minute();
+  assert.deepEqual([await head(), alerts], [{ size: 602, keptSize: 1, agingFrom: 512 }, []]);
+});
+
+test('a restored log that does not reach its head, or a head that is not the vault\'s, is not gone on from: the signer says no, and why', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  assert.equal(await host.adopt(), true);
+  await member(ada, 'member');
+  await member(bo, 'member');
+  await minute();
+  // An entry gone from the middle of the log.
+  await vault.owner.execute(sql`DELETE FROM log WHERE seq = 1`);
+  storage = objectStorage();
+  host = start();
+  assert.equal(await host.adopt(), false);
+  assert.match((await host.status()).adoption!.error, /^the database's log is begun, and its signer has signed none of it: its log does not reach its head$/);
+  // The head's MAC broken.
+  await vault.owner.execute(sql`UPDATE log_head SET mac = decode(repeat('00', 36), 'hex')`);
+  vault.tick(ADOPT_AGAIN_MS);
+  assert.equal(await host.adopt(), false);
+  const { adopted: yes, adoption } = await host.status();
+  assert.equal(yes, false);
+  assert.match(adoption!.error, /its head is not the vault's$/);
 });
 
 test("a log emptied, the policy and roles with it, before a signer whose storage was lost: adopted again with the Owner planted, and said", async (t) => {

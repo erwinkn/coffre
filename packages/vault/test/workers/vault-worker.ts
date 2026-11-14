@@ -3,7 +3,7 @@
 // (POST), a peek (PUT), a write (PATCH), a sign-in (`/signin`) and `about`
 // (GET /about), as the app's routes do them: the token hashed, never looked
 // up, and the vault called over a service binding. `/signer` asks the signer
-// how it stands.
+// how it stands: the one the vault calls, or the object its body names.
 import type { Account, Vault as Contract } from '@coffre/core/vault';
 
 import { createDatabase } from '@coffre/db';
@@ -11,7 +11,7 @@ import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { sql } from 'drizzle-orm';
 
 import { CoffreSigner as Signer, postgres, vault } from '../../src/cloudflare.ts';
-import { signerOf, type SignerNamespace } from '../../src/cloudflare-signer.ts';
+import { SIGNER, signerOf, type SignerNamespace } from '../../src/cloudflare-signer.ts';
 
 /** The vault's signer, as it exports it, counting how often the vault asked whether the database is adopted. */
 export class CoffreSigner extends Signer {
@@ -25,12 +25,13 @@ export class CoffreSigner extends Signer {
   }
 }
 
-type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY_ID: string; VAULT_KEY: string; SIGNING_KEY?: string; VAULT: Contract; SIGNER: SignerNamespace };
+type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY_ID: string; VAULT_KEY: string; SIGNING_KEY?: string; SIGNER_NAME?: string; VAULT: Contract; SIGNER: SignerNamespace };
 
 export const Vault = vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },
   ...(env.SIGNING_KEY === undefined ? {} : { signingKey: env.SIGNING_KEY }),
+  ...(env.SIGNER_NAME === undefined ? {} : { signerName: env.SIGNER_NAME }),
   owners: ['root@acme.example'],
 }));
 
@@ -52,7 +53,8 @@ export default {
     // The vault's configuration, as GET /audit/keys asks it: no token, and nothing read.
     if (new URL(request.url).pathname === '/about') return Response.json(await env.VAULT.about());
     if (new URL(request.url).pathname === '/signer') {
-      const signer = signerOf(env.SIGNER);
+      const { name } = (await request.json()) as { name?: string };
+      const signer = signerOf(env.SIGNER, name ?? env.SIGNER_NAME ?? SIGNER);
       return Response.json({ ...(await signer.status()), asked: await (signer as unknown as CoffreSigner).asked() });
     }
     const bearer = /^Bearer (\S+)$/.exec(request.headers.get('authorization') ?? '')?.[1];

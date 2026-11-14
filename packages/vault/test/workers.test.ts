@@ -39,7 +39,7 @@ async function instance(): Promise<void> {
 }
 
 /** A fresh isolate of the vault Worker and its signer, over the suite's database through the vault's login. */
-const freshVault = (database: string, more?: { signer?: boolean }) => vaultWorker(database, { id: 'vault-workers-test', key: VAULT_KEY }, more);
+const freshVault = (database: string, more?: { signer?: boolean; signerName?: string }) => vaultWorker(database, { id: 'vault-workers-test', key: VAULT_KEY }, more);
 
 const count = async (table: 'log' | 'log_pending') => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM ${sql.identifier(table)}`))[0]!.n;
 const reads = async () => (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log WHERE NOT kept ORDER BY seq`)).map(({ body }) => JSON.parse(body) as { action: string; actor: string; detail: { keys: { key: string }[] } });
@@ -124,6 +124,34 @@ test('a refusal crosses the binding as an answer, and writes nothing', { timeout
     assert.deepEqual([elsewhere.status, elsewhere.body], [403, { refused: 'no_access' }]);
     // The entries the instance was written with, signed before the first call was answered (`adopt` in signer-host.ts), and none more.
     assert.deepEqual([await count('log'), await count('log_pending')], [written, 0]);
+  } finally {
+    await vault.stop();
+  }
+});
+
+test("a database restored, deployed with a new `signerName`: the vault calls that object, which goes on from the database's head; the one named before is left", { timeout: 120_000 }, async () => {
+  await instance();
+  const before = await freshVault(VAULT_URL);
+  try {
+    assert.equal((await before.write('bo-cli', 'market/prod', { KEY_0: 'before the backup' })).status, 200);
+    await until(async () => (await count('log_pending')) === 0, 15_000, 'the signer has taken every entry');
+  } finally {
+    await before.stop();
+  }
+  const size = await count('log');
+  // An isolate whose storage is new, as a restore over the same deployment under a new name.
+  const vault = await freshVault(VAULT_URL, { signerName: 'signer-restored-2026-11-14' });
+  try {
+    const done = await vault.write('bo-cli', 'market/prod', { KEY_0: 'after the restore' });
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    await until(async () => (await count('log_pending')) === 0, 15_000, 'the signer has taken every entry');
+    const seqs = (await rowsOf<{ seq: number }>(world.owner, sql`SELECT seq::int FROM log ORDER BY seq`)).map(({ seq }) => seq);
+    assert.deepEqual(seqs, Array.from({ length: size + 1 }, (_, i) => i));
+    const named = await vault.status();
+    assert.deepEqual([named.adopted, named.standing, named.asked > 0], [true, [], true]);
+    assert.match(named.took!.said, /a log begun that it did not sign, from its head/);
+    const left = await vault.status('signer');
+    assert.deepEqual([left.adopted, left.asked], [false, 0]);
   } finally {
     await vault.stop();
   }
