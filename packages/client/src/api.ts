@@ -1060,8 +1060,23 @@ export type Api = {
     };
   };
   "GET /workloads/lookup": {
-    input: undefined;
-    output: never;
+    input: {
+      github?: string;
+      gitlab?: string;
+      gitlabUrl?: string;
+    };
+    output: {
+      github: string;
+      repositoryId: string;
+      ownerId: string;
+    } | {
+      github: string;
+      ownerId: string;
+    } | {
+      gitlab: string;
+      projectId: string;
+      namespaceId: string;
+    };
   };
   "GET /sessions": {
     input: undefined;
@@ -1316,7 +1331,22 @@ export type Api = {
   };
   "GET /workloads/repositories": {
     input: undefined;
-    output: never;
+    output: {
+      app: {
+        name: string;
+        installUrl: string;
+      };
+      installations: string[];
+      repositories: {
+        github: string;
+        repositoryId: string;
+        ownerId: string;
+        private: boolean;
+      }[];
+      truncated: boolean;
+    } | {
+      app: null;
+    };
   };
   "GET /personal/:project": {
     input: undefined;
@@ -2288,4 +2318,17 @@ export type TokenRow = {
   session?: {
     bindingId: string | null;
   };
+};
+
+export type WorkloadIds = {
+  github: string;
+  repositoryId: string;
+  ownerId: string;
+} | {
+  github: string;
+  ownerId: string;
+} | {
+  gitlab: string;
+  projectId: string;
+  namespaceId: string;
 };

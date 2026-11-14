@@ -23,9 +23,6 @@ export const unservedRoutes = {
   ...unserved('GET /members/:member/bindings/:id/enrollments', "a binding's enrollments"),
   ...unserved('POST /members/:member/bindings/:id/enrollments', 'enrolling a workload'),
   ...unserved('POST /members/:member/bindings/:id/enrollments/:enrollment/promote', 'promoting an enrollment'),
-  // A GitHub or GitLab repository looked up for a binding, and those the deployment's GitHub App is installed on.
-  ...unserved('GET /workloads/lookup', 'looking up a repository'),
-  ...unserved('GET /workloads/repositories', "the GitHub App's repositories"),
   // What `coffre verify keys` checks an escrowed key against: the log's page is served (routes/audit.ts).
   // 0.14's material, its `key.check` entries and the app key's fingerprint, is gone: comes with the vault's `about` (Settings).
   ...unserved('GET /audit/keys', "the keys' public material, which comes with `about` (Settings),"),

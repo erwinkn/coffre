@@ -50,6 +50,7 @@ export type {
   SessionRow,
   SetResult,
   TokenRow,
+  WorkloadIds,
 } from './api.ts';
 
 export { ageInDays, olderThan } from './age.ts';

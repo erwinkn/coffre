@@ -70,7 +70,7 @@ function serviceIn(raw: string): string {
 }
 
 /** The deployment's workloads, or the 404 that says how to turn them on. */
-function workloadsOf(ctx: ApiContext): WorkloadsConfig {
+export function workloadsOf(ctx: ApiContext): WorkloadsConfig {
   const workloads = ctx.auth.mode === 'signin' ? ctx.auth.signin.workloads : null;
   if (workloads === null) throw notFound('this instance trusts no workloads: its configuration turns them on, signin({ workloads: { limits } })');
   return workloads;

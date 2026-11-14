@@ -900,11 +900,16 @@ export function givesService(holder: Holdings, setting: ServiceSetting | null, r
   return protectedWithin(policy, place).every((there) => inEnvironments.every((permission) => allows(holder, permission, there)));
 }
 
-/** Whether `holder` gives a service account anything anywhere among `places`: whether they set any up. */
+/**
+ * Whether `holder` gives a service account anything anywhere among
+ * `places`: whether they set any up. Where they manage access, they give
+ * any role; elsewhere, one of those `holder.policy` defines, which must
+ * then be every role, not only those they hold.
+ */
 export function setsUpServices(holder: Holdings, setting: ServiceSetting | null, places: readonly Place[]): boolean {
   if (runsInstance(holder)) return true;
   const roles = Object.keys((holder.policy ?? DEFAULT_POLICY).roles);
-  return places.some((place) => roles.some((role) => givesService(holder, setting, role, place)));
+  return places.some((place) => mayManageAccess(holder, place) || roles.some((role) => givesService(holder, setting, role, place)));
 }
 
 /** A service account as `managesService` weighs it: its live grants, where they are, and who admitted it. */

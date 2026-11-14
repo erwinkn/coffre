@@ -43,7 +43,7 @@ export function getCalls({ places, secrets, members, services }: Subjects): GetC
     'GET /members/:member/tokens': services.map((member) => ({ params: { member } })),
     'GET /members/:member/bindings': services.map((member) => ({ params: { member } })),
     'GET /members/:member/bindings/:id/enrollments': services.map((member) => ({ params: { member, id: '00000000-0000-4000-8000-000000000000' } })),
-    'GET /workloads/lookup': [{ params: {} }],
+    'GET /workloads/lookup': [{ params: {}, input: { github: 'acme/api' } }],
     'GET /workloads/repositories': [{ params: {} }],
     'GET /freezes': [{ params: {} }],
     'GET /roles': [{ params: {} }],
