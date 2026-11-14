@@ -5,7 +5,7 @@ import { z } from 'zod';
 
 import { members, projectNamed, type GrantRow, type MemberRow } from '../../db/queries/members.ts';
 import type { PlaceRow } from '../../db/queries/places.ts';
-import { can, canAnywhere, placeOf, projectsReached, type Place } from '../caller.ts';
+import { can, canAnywhere, permissionsAt, placeOf, projectsReached, type Place } from '../caller.ts';
 import { changed } from '../change.ts';
 import { ApiError, badRequest, refusal } from '../errors.ts';
 import { formatPath, parsePath, type Path } from '../paths.ts';
@@ -137,6 +137,11 @@ function grantView(member: string, grant: GrantRow): MemberGrant {
 const administrator = ({ holds }: Called) => holds.credentialScope == null && administers(holds.role);
 
 /** The places of a path a project's access list asks about: the project and its environments, or the one environment. */
+/** Whether the caller can do anything in the project or one of its environments: what `GET /projects` lists them. */
+function reachesAny(who: Called, project: PlaceRow): boolean {
+  return [placeOf(project, null), ...project.environments.map((environment) => placeOf(project, environment))].some((place) => permissionsAt(who, place).length > 0);
+}
+
 function placesIn(project: PlaceRow, environment: string | undefined): Place[] {
   return [
     ...(environment === undefined ? [placeOf(project, null)] : []),
@@ -173,7 +178,7 @@ export const memberRoutes = {
    * first.
    */
   ...route('GET /members', {
-    input: z.object({ path: z.string().max(200).optional() }),
+    input: z.object({ path: z.string().max(200).refine((path) => !path.includes('\0') && wellFormed(path), 'a path is well-formed text, with no NUL').optional() }),
     run: async (ctx, { input }) => {
       const who = await ctx.caller();
       const path: Path | undefined = input.path === undefined ? undefined : parsePath(input.path, [1, 2]);
@@ -181,8 +186,9 @@ export const memberRoutes = {
       const runs = runsInstance(who.holds);
       const reached = projectsReached(who);
       const target = path === undefined ? undefined : await projectNamed(ctx.db, path.project);
-      // A project not there and one the caller reaches nothing in are one answer, as everywhere else.
-      if (target === null || (target !== undefined && reached !== null && !reached.includes(target.id))) throw refusal('no_access', input.path);
+      // A project not there and one the caller can do nothing in are one answer, as `GET /projects` tells them apart: the
+      // filter above is broad (an Admin scoped to all but `hidden` gets null), so what they hold there decides.
+      if (target === null || (target !== undefined && !runs && !reachesAny(who, target))) throw refusal('no_access', input.path);
       const everyone = path === undefined && administrator(who);
       const asked = target === undefined ? [] : placesIn(target, path?.environment);
       // Who reaches the path by their instance role is shown to whoever manages access there.

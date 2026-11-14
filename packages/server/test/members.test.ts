@@ -183,6 +183,16 @@ test("a project's access list: its grants, and, to whoever manages access there,
   // An Owner sees billing's, with Ada's grant on its prod, and no one past its lapsed grant.
   // An Owner sees billing's: Ada's grant on its prod, and those whose role reaches it, not Al, whose scope is market; no one by a lapsed grant.
   assert.deepEqual(brief((await directory('cy-cli', 'billing'))[0]), [`${ada}: member, billing/prod=viewer`, `${cy}: owner (by role)`, `${dee}: developer (by role)`, `${fin}: member, billing=manager`]);
+  // Max, an Admin scoped to every project but billing: billing is as absent to him as one not there, its environments too.
+  const max = user('max');
+  await write(world, ...rows('principals', principal(max, { role: 'admin', scope: JSON.stringify({ projects: { except: [ids.billing] }, environments: 'all' }) })), ...rows('credentials', credential('max-cli', max)));
+  for (const path of ['billing', 'billing/prod', 'nope']) assert.deepEqual(refused(await call('max-cli', 'GET', `/members?path=${encodeURIComponent(path)}`)), NO_ACCESS, `max ${path}`);
+  assert.deepEqual(brief((await directory('max-cli', 'market/dev'))[0]), [`${al}: admin (by role)`, `${cy}: owner (by role)`, `${dee}: developer (by role)`, `${ed}: member, market/dev=viewer`, `${fin}: member, market/dev=viewer`, `${max}: admin (by role)`]);
+  // A path no slug can be is told before any statement: a NUL, which Postgres refuses in text.
+  for (const bad of ['market%00', 'market%2Fdev%00']) {
+    const [answer, , statements] = await cost(() => call('cy-cli', 'GET', `/members?path=${bad}`));
+    assert.deepEqual([...refused(answer), statements], [400, 'bad_request', undefined, 0], bad);
+  }
 });
 
 test("one member's access: the grants the caller manages, their role, and their scope to whoever runs the instance; one call to the vault and one statement", async () => {
