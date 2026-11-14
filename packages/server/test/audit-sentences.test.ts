@@ -106,6 +106,7 @@ async function seed() {
     ...rows('environments', environment(market, 'prod'), environment(market, 'dev'), environment(billing, 'prod')),
     ...rows('roles',
       role(false, 'viewer', ['secret.read'], []),
+      role(false, 'developer', ['secret.read', 'secret.write'], []),
       role(true, 'owner', ['secret.read', 'secret.use', 'secret.write', 'secret.archive', 'environment.manage', 'project.manage', 'grant.manage', 'audit.read']),
       role(true, 'auditor', ['audit.read']),
       role(true, 'member', [])),
@@ -336,6 +337,9 @@ test('what an entry says follows what its detail recorded, not what was asked', 
     ['PATCH', `/access/${ed}`, { 'market/dev': null, 'market/prod': 'viewer' }],
     ['PATCH', `/access/${ed}`, { 'market/dev': 'viewer', 'market/prod': null }],
     ['PATCH', `/access/${ed}`, { 'market/dev': 'viewer' }],
+    // Changes that differ, given or taken, are not the first's at other places.
+    ['PATCH', `/access/${ed}`, { 'market/dev': 'developer', 'market/prod': 'viewer' }],
+    ['PATCH', `/access/${ed}`, { 'market/dev': null, 'market/prod': null }],
     // Dismissals: twice, then one brought back and another dismissed at once.
     ['PATCH', '/projects/market/dev/dismissals', { X: true }],
     ['PATCH', '/projects/market/dev/dismissals', { X: true }],
@@ -347,6 +351,9 @@ test('what an entry says follows what its detail recorded, not what was asked', 
   await keys({ key: 'A', folder: 'two' }, { key: 'B', value: 'b2' });
   await keys({ key: 'A', folder: 'three' }, { key: 'B', folder: 'three' });
   await ok('cy-cli', 'PATCH', '/secrets/market/dev/A', { key: 'Z' });
+  // Refusals record neither a folder's new name nor a freeze's target.
+  assert.equal((await call('ada-cli', 'PATCH', '/folders/apps', { name: 'tools' }))[0], 403);
+  assert.equal((await call('ada-cli', 'POST', '/freezes', { target: 'instance', reason: 'drill' }))[0], 403);
   await sign();
   assert.deepEqual((await logged()).reverse().map((entry) => `${entry.action}: ${said(entry)}`), [
     'secret.write: added market/dev: 2 secrets',
@@ -357,6 +364,8 @@ test('what an entry says follows what its detail recorded, not what was asked', 
     'access.grant: took viewer on market/dev from ed@acme.example',
     'access.grant: gave ed@acme.example viewer on market/dev, and 1 other change',
     'access.grant: left the access of ed@acme.example on market/dev as it was',
+    'access.grant: gave ed@acme.example developer on market/dev, was viewer, and 1 other change',
+    'access.revoke: took developer on market/dev from ed@acme.example, and 1 other change',
     'missing.dismiss: dismissed X in market/dev as not needed',
     'missing.dismiss: left the missing keys of market/dev as they were',
     'missing.dismiss: dismissed Y in market/dev as not needed, and restored X to the missing keys',
@@ -364,6 +373,8 @@ test('what an entry says follows what its detail recorded, not what was asked', 
     'secret.write: changed market/dev: 2 secrets',
     'secret.write: moved market/dev: 2 secrets to the folder three',
     'secret.rename: renamed market/dev/A to Z',
+    'folder.refile: tried to refile a folder: no access',
+    'workload.freeze: tried to freeze workloads: no access',
   ]);
 });
 

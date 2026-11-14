@@ -276,11 +276,11 @@ const accessSentence: Template = {
   },
 };
 
-/** The changes after a grant's first: "on 2 other places" where each did the same, given or taken; else "2 other changes". */
+/** The changes after a grant's first: "on 2 other places" where each gave or took what the first did; else "2 other changes". */
 function others(entry: AuditEntry): Part[] {
   const [first, ...rest] = changesOf(entry);
   if (first === undefined || rest.length === 0) return [];
-  const same = rest.every((line) => (line.role === null) === (first.role === null));
+  const same = rest.every((line) => (['role', 'was', 'expiresAt'] as const).every((field) => text(line[field]) === text(first[field])));
   return [same ? `, and on ${plural(rest.length, 'other place')}` : `, and ${plural(rest.length, 'other change')}`];
 }
 
@@ -302,7 +302,9 @@ const rekeyed = ({ entry }: Facts) => entry.metadata.reason === 'keys_replaced';
 
 /** What a freeze is on: the whole instance, a service account's workloads, a binding's or a session. */
 function frozen({ entry }: Facts): Part[] {
-  const target = text(entry.metadata.target) ?? '';
+  const target = text(entry.metadata.target);
+  // A refusal records no target.
+  if (target === null) return ['workloads'];
   if (target === 'instance') return ['every workload'];
   if (target.startsWith('token:')) return ['the workloads of ', { member: target }];
   return [target.startsWith('binding:') ? 'the workloads of a trust binding of ' : 'a workload session of ', ...subject(entry)];
@@ -382,11 +384,11 @@ const TEMPLATES: Record<LogAction, Template> = {
   'project.restore': plainly('project', 'restored', 'restore'),
   'project.delete': plainly('project', 'deleted', 'delete'),
   'project.move': { ...plainly('project', 'moved', 'move'), then: ({ entry }) => intoFolder(entry.metadata.to) },
-  // A folder renamed, or emptied: every project filed there.
+  // A folder renamed, or emptied: every project filed there. A refusal records neither.
   'folder.refile': {
     did: ({ entry }) => (text(entry.metadata.to) === null ? 'emptied' : 'renamed'),
-    tried: ({ entry }) => (text(entry.metadata.to) === null ? 'empty' : 'rename'),
-    what: ({ entry }) => [`the folder ${text(entry.metadata.folder) ?? ''}`],
+    tried: ({ entry }) => (!('to' in entry.metadata) ? 'refile' : text(entry.metadata.to) === null ? 'empty' : 'rename'),
+    what: ({ entry }) => [text(entry.metadata.folder) === null ? 'a folder' : `the folder ${text(entry.metadata.folder)}`],
     then: ({ entry }) => [...(text(entry.metadata.to) === null ? [] : [` to ${text(entry.metadata.to)}`]), `, ${plural(list(entry.metadata.projects).length, 'project')}`],
   },
   'environment.create': created('environment'),
