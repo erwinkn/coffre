@@ -270,3 +270,47 @@ test("a presigned URL lasts no longer than its credential's end, the vault's wor
   later();
   assert.equal((await failed(await asHandle(PRESIGN)))[0], 401);
 });
+
+test("a raw message signs nothing once its credential has ended, though it came within the minute: a handle's end, a session's hard end, a session above it's", async () => {
+  const body = Buffer.alloc(64 * 1024, 'r');
+  const digest = createHash('sha256').update(body).digest('hex');
+  const signature = createHmac('sha256', WEBHOOK_SECRET).update(body).digest('hex');
+  /** The body in halves, the second once `until` has passed. */
+  const slow = (until: number) => {
+    let sent = 0;
+    return new ReadableStream<Uint8Array>({
+      pull: async (out) => {
+        if (sent === body.length) return out.close();
+        if (sent > 0) while (Date.now() <= until) await new Promise((resolve) => setTimeout(resolve, 25));
+        out.enqueue(new Uint8Array(body.subarray(sent, sent + body.length / 2)));
+        sent += body.length / 2;
+      },
+    }, { highWaterMark: 0 });
+  };
+  const headers = { 'content-type': 'application/octet-stream', 'content-length': String(body.length), 'content-digest': contentDigest(digest) };
+  const ask = async (who: Held | 'handle', bytes: BodyInit) => {
+    if (who === 'handle') return app.request('/use/market/prod?sign=sumsub-key', { method: 'POST', headers: { authorization: `Bearer ${handle}`, ...headers }, body: bytes, duplex: 'half' } as RequestInit);
+    const proof = await createProof(who.key, { method: 'POST', url: `${PUBLIC_URL}/use?sign=sumsub-key`, token: who.token, nonce: await held(DEPLOY).nonce(), content: { headers: { 'content-digest': headers['content-digest'] }, body: digest } });
+    return app.request('/use?sign=sumsub-key', { method: 'POST', headers: { authorization: `DPoP ${who.token}`, dpop: proof, ...headers }, body: bytes, duplex: 'half' } as RequestInit);
+  };
+  const ending = async (end: number, who: Held | 'handle', label: string) => {
+    later();
+    // Whole before the end: signed.
+    assert.equal((await json(await ask(who, new Uint8Array(body)))).signature, signature, label);
+    later();
+    // Its second half past the end: opened in time, and signed by nothing.
+    const [late, calls] = await cost(() => ask(who, slow(end)));
+    const text = await late.clone().text();
+    assert.deepEqual([...(await failed(late)), calls], [503, 'late', ['use']], `${label}: ${text}`);
+    assert.ok(!text.includes(signature), label);
+  };
+  const end = () => Date.now() + 1_500;
+  const handleEnd = end();
+  await amend(world, 'credentials', sql`id = ${handleId}`, { expiresAt: new Date(handleEnd) });
+  await ending(handleEnd, 'handle', 'a handle');
+  const briefEnd = end();
+  await ending(briefEnd, await sessionOf({ notAfter: new Date(briefEnd) }), "a session's hard end");
+  const aboveEnd = end();
+  await amend(world, 'credentials', sql`id = ${deploy.id}`, { notAfter: new Date(aboveEnd) });
+  await ending(aboveEnd, await sessionOf({ ancestors: JSON.stringify([deploy.id]) }), 'a session above it');
+});

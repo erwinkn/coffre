@@ -1537,7 +1537,7 @@ run` calls the same `credential(name).verify` from
   may. The signature answers only once the body ended at its length and
   matched its digest; otherwise 400, and no signature. A body still coming
   when its values lapse (`cacheSeconds` from when the vault was asked, 60 s under
-  `cacheSeconds: 0`)
+  `cacheSeconds: 0`; on 0.16, 60 s from the use) or its credential ends
   answers 503 `late`, so a handle revoked during an upload signs nothing
   past that window. Opened, logged and limited as a JSON sign.
 - **Opened as a credential's values are, logged once a minute.** A

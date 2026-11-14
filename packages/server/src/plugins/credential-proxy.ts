@@ -1174,7 +1174,7 @@ async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User
   if (message === null) return failure(400, 'sign a message given as base64url');
   if (message.byteLength > MAX_MESSAGE_BYTES) return failure(413, `a message to sign as JSON is ${sized(MAX_MESSAGE_BYTES)} at most; a longer one to an hmac() signer whose maxBytes takes it goes raw, its bytes as the body: POST ?sign=${name}, Content-Type: application/octet-stream`);
   if (message.byteLength > longest(signer)) return failure(413, `${name} signs a message of ${sized(longest(signer))} at most${signer.kind === 'hmac' ? ': its hmac()\'s maxBytes takes a longer one' : ''}`);
-  if (signer.kind === 'hmac') return answer({ signature: await hmacSign(await hmacSecret(coffre, proxy, path, who, name, signer), message, { encoding: signer.encoding, prefix: signer.prefix ?? '' }) });
+  if (signer.kind === 'hmac') return answer({ signature: await hmacSign((await hmacSecret(coffre, proxy, path, who, name, signer)).secret, message, { encoding: signer.encoding, prefix: signer.prefix ?? '' }) });
   const { values, environment } = await used(coffre, proxy, path, who, name, [signer.key]);
   try {
     return answer({ signature: base64url(await signWith(values[signer.key]!, message)) });
@@ -1197,7 +1197,7 @@ async function verify(coffre: PluginContext, proxy: Proxy, path: string, who: Us
   const most = Math.min(longest(verifier), MAX_MESSAGE_BYTES);
   if (message.byteLength > most) return failure(413, `${name} checks a message of ${sized(most)} at most${most < MAX_MESSAGE_BYTES ? ": its hmac()'s maxBytes takes a longer one" : ''}`);
   if (typeof asked.signature !== 'string') return failure(400, 'verify a signature given as a string, as its header carried it');
-  return answer({ valid: await hmacVerify(await hmacSecret(coffre, proxy, path, who, name, verifier), message, asked.signature, { encoding: verifier.encoding, prefix: verifier.prefix ?? '' }) });
+  return answer({ valid: await hmacVerify((await hmacSecret(coffre, proxy, path, who, name, verifier)).secret, message, asked.signature, { encoding: verifier.encoding, prefix: verifier.prefix ?? '' }) });
 }
 
 /** AES-GCM's IV and tag, the only lengths a cipher takes: a random 96-bit IV, the full 128-bit tag. */
@@ -1242,7 +1242,7 @@ async function crypt(coffre: PluginContext, proxy: Proxy, path: string, who: Use
   }
 }
 
-/** How long a raw message's body may take to come once its secret is opened: a handle revoked while it uploads signs nothing past it. */
+/** How long a raw message's body may take to come once its secret is opened: a handle revoked while it uploads signs nothing past it, and nothing signs past the credential's end. */
 const RAW_LATE_MS = 60_000;
 
 /**
@@ -1254,7 +1254,8 @@ const RAW_LATE_MS = 60_000;
  * secret. A workload's proof signs the SHA-256 its `Content-Digest`
  * declares, which the bytes are held to as they pass (`declaredBody`). The
  * signature answers once the body ended at its length and matched its
- * digest, within `RAW_LATE_MS` of the use: later is 503 `late`.
+ * digest, within `RAW_LATE_MS` of the use and before the caller's
+ * credential ends (the use's `expiresAt`): later is 503 `late`.
  */
 async function signRaw(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null): Promise<Response> {
   const name = new URL(request.url).searchParams.get('sign') ?? '';
@@ -1280,12 +1281,13 @@ async function signRaw(request: Request, coffre: PluginContext, proxy: Proxy, pa
   return asCaller(request, coffre, path, { place: path, ...body, ...countsOf(name, signer.limit) }, async (who, at) => {
     // The header that binds the body is one the proof signs, as through a credential (`workloadForward`).
     if (typeof who !== 'string' && digest !== null && length > 0 && who.hdr !== null && !who.hdr.includes('content-digest')) return failure(400, 'content-digest says what binds the body, so the proof signs it: name it in hdr');
-    const secret = await hmacSecret(coffre, proxy, at, who, name, signer);
-    const by = Date.now() + RAW_LATE_MS;
+    const { secret, expiresAt } = await hmacSecret(coffre, proxy, at, who, name, signer);
+    // The credential's end bounds the upload as the minute does: a handle that expires mid-body signs nothing.
+    const by = Math.min(Date.now() + RAW_LATE_MS, Date.parse(expiresAt));
     const mac = hmacParts(secret, { encoding: signer.encoding, prefix: signer.prefix ?? '' });
     const refused = await fed(request.body, length, digest, (part) => mac.update(part));
     if (refused !== null) return failure(400, refused);
-    if (Date.now() > by) return failure(503, `${name}: the message came after its values may be used; send it again`, 'late');
+    if (Date.now() >= by) return failure(503, `${name}: the message came after its values may be used; send it again`, 'late');
     return answer({ signature: mac.signature() });
   });
 }
@@ -1354,15 +1356,15 @@ function messageOf(given: unknown): Uint8Array<ArrayBuffer> | null {
   return Buffer.from(given, 'base64url');
 }
 
-/** An HMAC signer's or verifier's secret, opened for the caller by one use. */
-async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, hmac: Hmac): Promise<Uint8Array<ArrayBuffer>> {
-  const { values } = await used(coffre, proxy, path, who, name, [hmac.key]);
+/** An HMAC signer's or verifier's secret, opened for the caller by one use, and when the caller's credential ends. */
+async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, hmac: Hmac): Promise<{ secret: Uint8Array<ArrayBuffer>; expiresAt: string }> {
+  const { values, expiresAt } = await used(coffre, proxy, path, who, name, [hmac.key]);
   // WebCrypto takes no empty HMAC key: said as what is wrong with the value, not the platform's error.
   if (values[hmac.key] === '') throw new CoffreError(409, 'conflict', `${path}'s ${hmac.key} is empty, and ${name} signs and checks nothing with an empty secret`);
   const secret = keyBytes(values[hmac.key]!, hmac.keyEncoding);
   // What is wrong with the value is said, never the value: no key half read from it signs anything.
   if (secret === null) throw new CoffreError(409, 'conflict', `${path}'s ${hmac.key} is no ${hmac.keyEncoding} key, which ${name} reads it as: ${hmac.keyEncoding === 'hex' ? 'an even number of hex digits' : `${hmac.keyEncoding}'s alphabet alone, its padding right, no prefix or space`}`);
-  return secret;
+  return { secret, expiresAt };
 }
 
 /**
