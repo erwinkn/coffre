@@ -143,6 +143,26 @@ test('a role an Owner makes, granted, refused deletion while any grant names it,
   await nothingWritten(async () => assert.deepEqual(await vault.change<'access.grant'>({ ...shown('fay-cli'), op: 'access.grant', principal: eve, changes: [{ project: 'billing', environment: null, role: 'release', expiresAt: null }] }), { refused: 'invalid' }));
 });
 
+test('a role that does not ship is defined only while no grant names it: one hidden from its deletion and put back refuses it, and gives nothing meanwhile', async () => {
+  assert.deepEqual(await edit('ada-cli', { role: 'release', definition: release, was: null }), { answer: { role: release } });
+  assert.deepEqual(await vault.change<'access.grant'>({ ...shown('fay-cli'), op: 'access.grant', principal: bo, changes: [{ project: 'billing', environment: null, role: 'release', expiresAt: null }] }), { answer: { changes: ['created'] } });
+  // A writer hides Bo's grant, Ada deletes the role, and the writer puts the grant back.
+  await world.owner.execute(sql`DELETE FROM grants WHERE principal = ${bo} AND role = 'release'`);
+  assert.deepEqual(await edit('ada-cli', { role: 'release', definition: null, was: release }), { answer: { role: null } });
+  await write(world, ...rows('grants', grant(bo, 'release', { project: billing })));
+  // Defining the role again would give it back to Bo: refused, as a deletion is.
+  await nothingWritten(async () => assert.deepEqual(await edit('ada-cli', { role: 'release', definition: release, was: null }), { refused: 'role_granted' }));
+  const [refused] = await refusals();
+  assert.deepEqual([refused!.action, refused!.detail], ['policy.change', { refused: 'role_granted' }]);
+  // Meanwhile it names no role, gives nothing and breaks nothing: Bo reads market's prod by his grant on market.
+  assert.equal(await reveals('bo-cli'), 'postgres://market');
+  // With no grant naming it, it is defined; and a role that ships, put back, never asks.
+  await world.owner.execute(sql`DELETE FROM grants WHERE principal = ${bo} AND role = 'release'`);
+  assert.deepEqual(await edit('ada-cli', { role: 'release', definition: release, was: null }), { answer: { role: release } });
+  await world.owner.execute(sql`DELETE FROM roles WHERE NOT instance AND id = 'viewer'`);
+  assert.deepEqual(await edit('ada-cli', { role: 'viewer', definition: null, was: null }), { answer: { role: normalDefinition(ROLES.viewer) } });
+});
+
 test('a role granted on an environment takes nothing only a project has; one granted on projects alone does', async () => {
   const wider: RoleDefinition = { ...normalDefinition(ROLES.viewer), permissions: ['secret.read', 'secret.use', 'environment.manage'] };
   await nothingWritten(async () => assert.deepEqual(await edit('ada-cli', { role: 'viewer', definition: wider, was: normalDefinition(ROLES.viewer) }), { refused: 'invalid' }));
