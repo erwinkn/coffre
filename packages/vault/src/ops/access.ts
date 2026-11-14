@@ -406,10 +406,11 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
       if (member.status !== 'active') return { refused: 'removed' };
       // Asked of a place they manage, what 0.14 called invalid.
       for (const [i, { role, expiresAt }] of changes.entries()) {
+        // An end gone is no end, on a role taken away too: 0.14 refused the whole change.
+        if (expiresAt !== null && Date.parse(expiresAt) <= at) return { refused: 'invalid' };
         if (role === null) continue;
         const definition = seen.given.find((row) => !row.instance && row.id === role);
         if (definition === undefined || (places[i]!.environment !== null && definition.permissions.some((permission) => PROJECT_ONLY_PERMISSIONS.includes(permission as Permission)))) return { refused: 'invalid' };
-        if (expiresAt !== null && Date.parse(expiresAt) <= at) return { refused: 'invalid' };
       }
 
       const now = new Date(at);

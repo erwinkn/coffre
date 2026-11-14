@@ -163,11 +163,28 @@ test('only who manages access at each place changes grants there, and nobody giv
   assert.deepEqual(await set('eve-cli', bo, { project: 'market', role: 'viewer' }), { refused: 'no_access' }, 'and with it the access they managed');
 });
 
+test('what the caller held once, or holds by a role whose row is gone, manages nothing', async () => {
+  // Eve held Admin on billing until a second ago; Old held it on market in generation 0, before the removal they came back from.
+  await world.owner.execute(sql`DELETE FROM grants WHERE id IN (${lapsed.id}, ${stale.id})`);
+  await write(world, ...rows('grants', grant(eve, 'admin', { project: billing }, { expiresAt: new Date(world.now() - 1000) }), grant(old, 'admin', { project: market })));
+  await nothingWritten(async () => {
+    assert.deepEqual(await set('eve-cli', bo, { project: 'billing', role: 'viewer' }), { refused: 'no_access' }, 'a lapsed grant');
+    assert.deepEqual(await set('old-cli', bo, { project: 'market', role: 'viewer' }), { refused: 'no_access' }, 'a grant of an earlier generation');
+  });
+  assert.deepEqual(await set('ada-cli', eve, { project: 'market', role: 'admin' }), { answer: { changes: ['created'] } });
+  assert.deepEqual(await set('eve-cli', bo, { project: 'market', role: 'viewer' }), { answer: { changes: ['updated'] } });
+  // The role that gave Eve grant.manage, gone: she holds a name, and no permission.
+  await world.owner.execute(sql`DELETE FROM roles WHERE NOT instance AND id = 'admin'`);
+  await nothingWritten(async () => assert.deepEqual(await set('eve-cli', bo, { project: 'market', role: 'developer' }), { refused: 'no_access' }));
+});
+
 test('a grant asked of a place it cannot be: no role by that id, a project\'s on an environment, an end gone, a personal config, a place of another project', async () => {
   await nothingWritten(async () => {
     assert.deepEqual(await set('fay-cli', eve, { project: 'market', role: 'nope' }), { refused: 'invalid' });
     assert.deepEqual(await set('fay-cli', eve, { project: 'market', environment: 'prod', role: 'admin' }), { refused: 'invalid' }, 'grant.manage holds on a project alone');
     assert.deepEqual(await set('fay-cli', eve, { project: 'market', role: 'viewer', expiresAt: new Date(world.now()).toISOString() }), { refused: 'invalid' });
+    assert.deepEqual(await set('fay-cli', bo, { project: 'market', role: null, expiresAt: '2020-01-01T00:00:00Z' }, { project: 'billing', role: 'viewer' }), { refused: 'invalid' },
+      'an end gone on a role taken away refuses the role given beside it');
     assert.deepEqual(await set('fay-cli', eve, { project: 'market', environment: 'ada-dev', role: 'viewer' }), { refused: 'no_access' }, 'Ada\'s personal config');
     assert.deepEqual(await set('fay-cli', eve, { project: 'billing', environment: 'dev', role: 'viewer' }), { refused: 'no_access' }, 'dev is market\'s');
     // What 0.14 told whoever manages access there of the member.
