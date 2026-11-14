@@ -44,16 +44,22 @@ export type Nature = 'secret' | 'sensitive' | 'plain';
  * - `archived`: true archives the key, false brings it back. A key is
  *   archived with no value written.
  * - `folder`: the folder it is listed in, null for none.
+ * - `inherit`, alone: in a fork, true resets the key to what a parent
+ *   passes down, its own row archived with its history, and false makes
+ *   its own value serve over that again. Either takes `secret.write`, as
+ *   writing over a parent's does, and false `secret.read` too: the value
+ *   serves again. A key no parent passes down is `not_inherited`.
  *
  * A key that gets neither a value nor a reference is one the environment
- * holds.
+ * holds. In a fork, a key reset to what it inherits is written over as if
+ * it were live: it overrides its parent's again, as 0.14's did.
  */
-export type KeyWrite = { key: string; archived?: boolean; folder?: string | null } & (
+export type KeyWrite = { key: string; archived?: boolean; folder?: string | null; inherit?: undefined } & (
   | { value: string; nature?: Nature; ref?: undefined; restore?: undefined }
   | { restore: number; value?: undefined; nature?: undefined; ref?: undefined }
   | { ref: SecretPath; value?: undefined; nature?: undefined; restore?: undefined }
   | { value?: undefined; nature?: undefined; ref?: undefined; restore?: undefined }
-);
+) | { key: string; inherit: boolean; archived?: undefined; folder?: undefined; value?: undefined; nature?: undefined; ref?: undefined; restore?: undefined };
 
 /**
  * Write keys in one environment, all of them or none. 1 to 2,000 keys,
@@ -62,11 +68,23 @@ export type KeyWrite = { key: string; archived?: boolean; folder?: string | null
  * of one write 1 MiB of UTF-8 in all, each version restored counted as the most a value weighs, 192 KiB (so 5 at most), since its size is known only once the vault reads it; a version restored a positive integer; a reference's source named by slugs and its key's name; a folder 1 to 64 UTF-16 units, with no slash or control character
  * and nothing `trim` removes at either end (`folderName`). Past any of these
  * the call is a fault, not a refusal: the app checks them first.
+ *
+ * In a personal config (`mine`), its owner alone writes, a person
+ * (`not_a_person` to a service account), while they read or use the
+ * environment it is a config of, and as far as their credential's scope
+ * does there; no grant or role reaches it. It holds no reference, and a
+ * value written there with no nature over a plain one stays plain: nobody
+ * but its owner lists it. A write that gives a key a value makes the
+ * config where they have none, as an environment of three parents at most
+ * (`too_deep`); anything else asked of a config not there is asked of a
+ * key not there.
  */
 export type SecretWrite = {
   op: 'secret.write';
   project: string;
   environment: string;
+  /** In the caller's personal config of `environment` (`dev@me`), made by this write if they have none and it gives a key a value. */
+  mine?: boolean;
   keys: KeyWrite[];
 };
 
@@ -82,6 +100,8 @@ export type SecretRefile = {
   op: 'secret.refile';
   project: string;
   environment: string;
+  /** In the caller's personal config of `environment` (`dev@me`). */
+  mine?: boolean;
   folder: string;
   to: string | null;
 };
