@@ -438,6 +438,16 @@ export type Api = {
       };
     };
     output: {
+      issuer: string;
+      jwksUri: string;
+      keys: {
+        kid: string | null;
+        alg: "ES256" | "RS256";
+        thumbprint: string;
+      }[];
+      replaces: string[];
+      withheld: string[];
+    } | {
       bindings: {
         id: string;
         scope: {
