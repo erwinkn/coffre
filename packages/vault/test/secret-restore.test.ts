@@ -130,6 +130,38 @@ test('a key made a reference is restored from its own history: the reference end
   assert.deepEqual((entry.detail as { keys: object[] }).keys, [{ key: 'STRIPE_KEY', secret: ids.STRIPE_KEY, version: 4, nature: 'sensitive', restored: 2, source: ids.SOURCE }]);
 });
 
+test('a key with no value of its own goes by its newest version\'s label, which its encryption holds: relabelled, the restore is refused', async () => {
+  // ACCOUNT: plain at 1, sensitive at 2, then a reference to billing's SOURCE, a secret: its row says no nature now.
+  await typed('ACCOUNT', 'acct_2', 'sensitive');
+  const source = { project: 'billing', environment: 'prod', key: 'SOURCE' };
+  assert.ok(!('refused' in (await vault.change(writing('ada-cli', [{ key: 'ACCOUNT', ref: source }])))));
+  // Version 2's row said not sensitive behind the vault, so that version 1 would come back plain. It does not open as that.
+  await world.owner.execute(sql`UPDATE secret_versions SET sensitive = false WHERE secret_id = ${ids.ACCOUNT!} AND version = 2`);
+  const before = await counts();
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'ACCOUNT', 1)), { refused: 'unreadable' });
+  assert.deepEqual(await counts(), before);
+  // As it was, the restore is sensitive; and so once the reference is broken, when the key's row says no nature either.
+  await world.owner.execute(sql`UPDATE secret_versions SET sensitive = true WHERE secret_id = ${ids.ACCOUNT!} AND version = 2`);
+  assert.ok(!('refused' in (await vault.change({ ...shown('ada-cli'), op: 'reference.break', project: 'market', environment: 'prod', key: 'ACCOUNT' }))));
+  assert.deepEqual([(await rowOf('ACCOUNT')).nature, (await rowOf('ACCOUNT')).current, (await rowOf('ACCOUNT')).source], [null, null, null]);
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'ACCOUNT', 1)), { answer: { keys: { ACCOUNT: { version: 3, nature: 'sensitive' } } } });
+  // Restoring the newest itself opens it as the copy: no second opening, and the same refusal relabelled.
+  assert.ok(!('refused' in (await vault.change(writing('ada-cli', [{ key: 'ACCOUNT', ref: source }])))));
+  await world.owner.execute(sql`UPDATE secret_versions SET sensitive = false WHERE secret_id = ${ids.ACCOUNT!} AND version = 3`);
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'ACCOUNT', 3)), { refused: 'unreadable' });
+});
+
+test('a version restored counts as the most a value weighs against a write\'s 1 MiB, checked before anything is read', async () => {
+  // 5 restores fit, 192 KiB each: the keys are not there, which the vault finds only once it reads.
+  const keys = (count: number) => Array.from({ length: count }, (_, at) => ({ key: `K${at}`, restore: 1 }));
+  assert.deepEqual(await vault.change(writing('ada-cli', keys(5))), { refused: 'unknown_key' });
+  await assert.rejects(vault.change(writing('ada-cli', keys(6))), TypeError);
+  // One restore and 832 KiB typed is 1 MiB; one byte more is past it.
+  const full = Array.from({ length: 13 }, (_, at) => ({ key: `V${at}`, value: 'x'.repeat(65_536) }));
+  assert.ok(!('refused' in (await vault.change(writing('ada-cli', [...full, { key: 'DATABASE_URL', restore: 1 }])))));
+  await assert.rejects(vault.change(writing('ada-cli', [...full, { key: 'ONE', value: 'x' }, { key: 'DATABASE_URL', restore: 1 }])), TypeError);
+});
+
 test('a generated value restored comes back typed: no recipe, in no pair', async () => {
   await amend(world, 'secrets', eq(secrets.id, ids.DATABASE_URL!), { recipe: 'bytes:32:hex', pairId: crypto.randomUUID(), pairHalf: 'private' });
   assert.ok(!('refused' in (await vault.change(restoring('ada-cli', 'DATABASE_URL', 1)))));

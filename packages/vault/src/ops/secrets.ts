@@ -17,6 +17,8 @@ import { KEY, presented, text } from './input.ts';
 const VALUE_LENGTH = 64 * 1024;
 const MOST_KEYS = 2000;
 const WRITE_BYTES = 1024 * 1024;
+/** The most a value weighs in UTF-8, 3 bytes a UTF-16 unit: what a version restored counts for, which is read only after the count. */
+const VALUE_BYTES = 3 * VALUE_LENGTH;
 const NATURES = ['secret', 'sensitive', 'plain'];
 /** The most a version's number is, as Postgres keeps it. */
 const MOST_VERSION = 2 ** 31 - 1;
@@ -29,7 +31,7 @@ const written = (value: unknown): value is string => typeof value === 'string' &
 /** A folder as the app's routes have it (`folderName`), within the table's check: 1 to 64 UTF-16 units, no slash or control character, nothing `trim` takes away. */
 const filed = (value: unknown) => value === null || (typeof value === 'string' && wellFormed(value) && value.length >= 1 && value.length <= 64 && !/[/\p{Cc}]/u.test(value) && value === value.trim());
 
-const wrong = () => new TypeError('a write names a place by its slugs and 1 to 2,000 keys, each once, with a value of well-formed text, 64 Ki characters at most and 1 MiB in all, and its nature if any, a version to restore, or a reference to a key by its slugs and name, an archiving or a folder');
+const wrong = () => new TypeError('a write names a place by its slugs and 1 to 2,000 keys, each once, with a value of well-formed text, 64 Ki characters at most and 1 MiB in all, a version restored counted as 192 KiB, the most a value weighs, and its nature if any, a version to restore, or a reference to a key by its slugs and name, an archiving or a folder');
 
 /** A key named where it is held: its project's and environment's slugs, and its name. */
 const located = (path: unknown): path is SecretPath =>
@@ -68,8 +70,9 @@ function valid(item: KeyWrite): boolean {
  * kept, as its version's row labels it, which its opening holds that row
  * to; and sensitive while the key is, as a value written with no nature
  * finds it (below), or while its newest version's row says its value was:
- * a key made a reference keeps that, with no MAC, which only ever makes a
- * restore stricter. A value written again as sensitive is a new value to
+ * a key made a reference keeps that, with no MAC, so the engine opens that
+ * version as labelled before the write (`vouched`), and one relabelled
+ * refuses the restore, `unreadable`. A value written again as sensitive is a new value to
  * the vault: an older version of the same text comes back as it was kept,
  * where 0.14 knew it by its ciphertext. Its first date is its source's.
  * Made by a recipe or in a pair, it comes back as typed: Regenerate would
@@ -104,7 +107,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
   const { project: projectSlug, environment: environmentSlug, keys } = input;
   const items = Array.isArray(keys) ? [...keys] : [];
   if (!text(projectSlug) || !text(environmentSlug) || items.length === 0 || items.length > MOST_KEYS || !items.every(valid) || new Set(items.map((item) => item.key)).size !== items.length
-    || items.reduce((sum, item) => sum + Buffer.byteLength(item.value ?? ''), 0) > WRITE_BYTES) {
+    || items.reduce((sum, item) => sum + (item.restore === undefined ? Buffer.byteLength(item.value ?? '') : VALUE_BYTES), 0) > WRITE_BYTES) {
     throw wrong();
   }
   // A key the environment does not have yet is made under an id drawn here: a decision draws nothing.
@@ -220,6 +223,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       };
       const writes: Write[] = [];
       const sealed: Value[] = [];
+      const vouched: Row<typeof secretVersions>[] = [];
       const lines: Record<string, unknown>[] = [];
       const leaves = new Map<string, Fresh<typeof secrets>>();
       const answered: [string, { version: number; nature: Nature }][] = [];
@@ -246,7 +250,11 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           const current = asked !== undefined ? [] : was === null ? [passedDown(key)] : was.archivedAt === null ? [kept] : [kept, passedDown(key)];
           const natures = current.map((row) => (row == null || row.sourceId === null ? row : sources.get(row.sourceId)));
           if (natures.includes(undefined)) return { refused: 'unreadable' };
-          const sticks = natures.some((row) => row?.nature === 'sensitive') || newest?.sensitive === true;
+          // The key's newest value, whose nature its sealed row says while that is its value. Once it holds none of its own (made a
+          // reference, or one broken), only the version's row says it, under no MAC: its encryption is held to it (`vouched`).
+          const unsaid = restore !== undefined && kept.currentVersion !== kept.versions ? newest : undefined;
+          if (unsaid !== undefined && unsaid !== from) vouched.push(unsaid);
+          const sticks = natures.some((row) => row?.nature === 'sensitive') || unsaid?.sensitive === true;
           const nature: Nature = asked ?? (sticks ? 'sensitive' : from === undefined ? 'secret' : natureOf(from));
           const version = kept.versions + 1;
           // Typed or restored, not generated: no recipe for Regenerate, and in no pair.
@@ -310,6 +318,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       return {
         writes,
         values: sealed,
+        vouched,
         entry: {
           kept: true,
           action: 'secret.write',

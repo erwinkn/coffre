@@ -30,9 +30,10 @@ import { contextOf, natureOf } from './value.ts';
  * row: with fewer rows it refuses, or allows less.
  *
  * One table is read that carries no MAC: the versions of values, for a
- * change that copies one (`Value`). A version's encryption names what it is,
- * so its row is held to that when it is opened, before anything is written,
- * and the write reads it again, as any row, by a hash of all of it.
+ * change that copies one (`Value`) or goes by one's label (`vouched`). A
+ * version's encryption names what it is, so its row is held to that when it
+ * is opened, before anything is written, and the write reads it again, as
+ * any row, by a hash of all of it.
  *
  * So what an operation says is what it reads and how it decides. Reading
  * again, comparing, writing, sealing each row and logging what it replaced
@@ -153,8 +154,11 @@ export type Denied = Omit<Said, 'kept' | 'actor'> & { actor: string };
  * starts within `until - at` of the read, by the database's clock at both
  * ends, which the vault's need not agree with; and otherwise the change
  * starts over, as behind a row that changed, and is decided at a later time.
+ * `vouched` are versions the change read whose label its decision went by:
+ * the engine opens each as its row labels it, as a copy's, before anything
+ * is written, and one that does not open refuses the change, `unreadable`.
  */
-export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; once?: Buffer; used?: Row<typeof bindings>; until?: number; entry: Said; answer: A };
+export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; vouched?: readonly Row<typeof secretVersions>[]; once?: Buffer; used?: Row<typeof bindings>; until?: number; entry: Said; answer: A };
 
 export type Operation<P extends Parts, A, C = undefined> = {
   read: P;
@@ -379,6 +383,24 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
     for (const [row, of] of read) if (of === name) return row as Fresh<T>;
     return undefined;
   };
+  /** A version this change read, opened as its own rows say, as a use opens it: its secret's and its environment's, which this change read. Undefined for one that is not what it says. */
+  const opened = async (copy: Row<typeof secretVersions>): Promise<Buffer | undefined> => {
+    const of = copied.has(copy) ? rowOf(secrets, { id: copy.secretId }) : undefined;
+    const where = of && rowOf(environments, { id: of.environmentId });
+    if (of === undefined || where === undefined) throw new Error('a change opens a version it read, of a secret and in an environment it read');
+    try {
+      return await open(copy, contextOf(of, copy, where.owner), vault.keks);
+    } catch (error) {
+      // A key service that cannot answer is an outage. Anything else is a row that is not what it says: relabelled, moved, erased.
+      if (error instanceof KekUnavailableError) throw error;
+      return undefined;
+    }
+  };
+  for (const row of plan.vouched ?? []) {
+    const text = await opened(row);
+    if (text === undefined) return refuse({ refused: 'unreadable' });
+    text.fill(0);
+  }
   for (const value of plan.values ?? []) {
     const { version, copy } = value;
     // Sealed under what its secret's row and its environment's say, as this change leaves them: a use opens it by the same rows.
@@ -391,17 +413,8 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
     if (held.nature !== natureOf(version)) throw new Error(`a value sealed as ${natureOf(version)} is the current version of a secret whose row says ${held.nature}`);
     let text = value.text;
     if (copy !== undefined) {
-      // Opened as its own rows say, as a use opens it: its secret's and its environment's, which this change read.
-      const of = copied.has(copy) ? rowOf(secrets, { id: copy.secretId }) : undefined;
-      const where = of && rowOf(environments, { id: of.environmentId });
-      if (of === undefined || where === undefined) throw new Error('a change copies a version it read, of a secret and in an environment it read');
-      try {
-        text = await open(copy, contextOf(of, copy, where.owner), vault.keks);
-      } catch (error) {
-        // A key service that cannot answer is an outage. Anything else is a row that is not what it says: relabelled, moved, erased.
-        if (error instanceof KekUnavailableError) throw error;
-        return refuse({ refused: 'unreadable' });
-      }
+      text = await opened(copy);
+      if (text === undefined) return refuse({ refused: 'unreadable' });
     }
     try {
       if (version.plaintext !== null && version.plaintext !== text!.toString('utf8')) {

@@ -59,7 +59,7 @@ export type KeyWrite = { key: string; archived?: boolean; folder?: string | null
  * Write keys in one environment, all of them or none. 1 to 2,000 keys,
  * each once and named as a key is (`[A-Za-z_][A-Za-z0-9_]{0,127}`); a value
  * is well-formed text with no NUL, 64 Ki characters at most, and the values
- * of one write 1 MiB of UTF-8 in all; a version restored a positive integer; a reference's source named by slugs and its key's name; a folder 1 to 64 UTF-16 units, with no slash or control character
+ * of one write 1 MiB of UTF-8 in all, each version restored counted as the most a value weighs, 192 KiB (so 5 at most), since its size is known only once the vault reads it; a version restored a positive integer; a reference's source named by slugs and its key's name; a folder 1 to 64 UTF-16 units, with no slash or control character
  * and nothing `trim` removes at either end (`folderName`). Past any of these
  * the call is a fault, not a refusal: the app checks them first.
  */
