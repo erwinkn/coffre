@@ -244,7 +244,7 @@ unsupported diff select full validation.
   jar once, checked against its pinned SHA-256. A change to the locks a flow
   takes, or what it re-checks under the head, changes the model too. CI skips
   it when the model's inputs are unchanged (`scripts/formal-key.sh`), and
-  otherwise runs it as three shards (`scripts/formal.sh --shard`;
+  otherwise runs it as two shards (`scripts/formal.sh --shard`;
   `docs/formal.md`, "In CI").
 - `pnpm formal:lean` checks the Lean proofs in `formal/lean` (`docs/formal.md`,
   "Proofs in Lean") and holds their model to `@coffre/core/access`, the
