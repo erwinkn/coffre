@@ -105,13 +105,16 @@ const ADA = 'user:ada@acme.example';
 const BO = 'user:bo@acme.example';
 const API = 'token:api';
 const CI = 'token:ci';
+// Removed twice and brought back: generation 2, which the grant carried over takes.
+const CY = 'user:cy@acme.example';
 // Projects 1 and 2; environments 11 (market/prod), 12 (market/dev), 21 (billing/prod); secrets 101 and 102 in market/prod, 103 to 109 in billing/prod.
 const SEED = `
   INSERT INTO vault_members (principal, status, owner, role, scope, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac) VALUES
     ('${ADA}', 'active', true, NULL, NULL, 0, ${T0}, 'system:setup', ${T0}, 'system:setup', 1, ${h(9)}),
     ('${BO}', 'removed', false, 'member', NULL, 1, ${T0 + 1}, '${ADA}', ${T0 + 5 * day + 123}, '${ADA}', 2, ${h(9)}),
     ('${API}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 3, ${h(9)}),
-    ('${CI}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 4, ${h(9)});
+    ('${CI}', 'active', false, 'member', NULL, 0, ${T0}, '${ADA}', ${T0}, '${ADA}', 4, ${h(9)}),
+    ('${CY}', 'active', false, 'member', NULL, 2, ${T0}, '${ADA}', ${T0 + 9}, '${ADA}', 5, ${h(9)});
   INSERT INTO projects (id, slug, name) VALUES (${u(1)}, 'market', 'Market'), (${u(2)}, 'billing', 'Billing');
   INSERT INTO environments (id, project_id, slug, name) VALUES (${u(11)}, ${u(1)}, 'prod', 'Production'), (${u(12)}, ${u(1)}, 'dev', 'Development'), (${u(21)}, ${u(2)}, 'prod', 'Production');
   INSERT INTO secrets (id, project_id, environment_id, key, current_version) VALUES
@@ -138,7 +141,8 @@ const SEED = `
   INSERT INTO dismissed_keys (environment_id, key, dismissed_by) VALUES (${u(12)}, 'STRIPE_KEY', '${ADA}');
   INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, expires_at, granted_at, granted_by) VALUES
     ('${ADA}', ${u(1)}, NULL, NULL, 'maintainer', NULL, ${T0 + 7}, 'system:setup'),
-    ('${API}', NULL, ${u(11)}, NULL, 'viewer', ${T0 + 400 * day + 1}, ${T0 + 8}, '${ADA}');
+    ('${API}', NULL, ${u(11)}, NULL, 'viewer', ${T0 + 400 * day + 1}, ${T0 + 8}, '${ADA}'),
+    ('${CY}', NULL, ${u(12)}, NULL, 'viewer', NULL, ${T0 + 10}, '${ADA}');
   INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES
     ${[
       // References: 10 seals billing/DATABASE_URL, live; 11 seals OLD_REFERENCE, which 12 ends; FORGED_REFERENCE's row points at 13, which seals nothing.
@@ -247,7 +251,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
 
   // Online, it changes nothing: the migration is one transaction.
   await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /still online.*Set coffre_runtime, coffre_vault_runtime NOLOGIN/.test(String((error as { cause?: unknown }).cause ?? error)));
-  assert.equal(await count('vault_members'), 4);
+  assert.equal(await count('vault_members'), 5);
 
   // A session a runtime login still holds refuses it too.
   const held = await session(urlOf(UPGRADED, { name: 'coffre_runtime', password: 'local-runtime-only' }));
@@ -270,7 +274,7 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
   await db.query(`INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES ${entry(70, 'vault', 'system:vault', 'vault.tampered', { decision: 'deny', code: 'mac', subject: BO })}`);
   await assert.rejects(migrateDatabase(urlOf(UPGRADED)), (error: Error) => /that report stands/.test(String((error as { cause?: unknown }).cause ?? error)) && String((error as { cause?: unknown }).cause).includes(BO));
   await db.query(`INSERT INTO audit_log (${ENTRY_COLUMNS}) VALUES ${entry(71, 'vault', ADA, 'member.remove', { subject: BO })}`);
-  assert.equal(await count('vault_members'), 4);
+  assert.equal(await count('vault_members'), 5);
   const archived = await count('audit_log');
 
   await migrateDatabase(urlOf(UPGRADED));
@@ -285,20 +289,22 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
         { id: CI, status: 'active', role: 'member', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
         { id: ADA, status: 'active', role: 'admin', generation: 0, status_changed_at: T0, frozen: false, mac: 0 },
         { id: BO, status: 'removed', role: 'member', generation: 1, status_changed_at: T0 + 5 * day + 123, frozen: false, mac: 0 },
+        { id: CY, status: 'active', role: 'member', generation: 2, status_changed_at: T0 + 9, frozen: false, mac: 0 },
       ],
     );
   });
 
-  await t.test('grants: each gets an id, and keeps its place and its end', async () => {
-    const found = await rows(`SELECT id, principal, project_id, environment_id, role, expires_at, granted_at FROM grants ORDER BY principal`);
+  await t.test('grants: each gets an id, keeps its place and its end, and is of the generation its member is in', async () => {
+    const found = await rows(`SELECT id, principal, generation, project_id, environment_id, role, expires_at, granted_at FROM grants ORDER BY principal`);
     assert.deepEqual(
       found.map((row) => ({ ...row, id: typeof row.id, expires_at: row.expires_at === null ? null : ms(row.expires_at), granted_at: ms(row.granted_at) })),
       [
-        { id: 'string', principal: API, project_id: null, environment_id: id(11), role: 'viewer', expires_at: T0 + 400 * day + 1, granted_at: T0 + 8 },
-        { id: 'string', principal: ADA, project_id: id(1), environment_id: null, role: 'maintainer', expires_at: null, granted_at: T0 + 7 },
+        { id: 'string', principal: API, generation: 0, project_id: null, environment_id: id(11), role: 'viewer', expires_at: T0 + 400 * day + 1, granted_at: T0 + 8 },
+        { id: 'string', principal: ADA, generation: 0, project_id: id(1), environment_id: null, role: 'maintainer', expires_at: null, granted_at: T0 + 7 },
+        { id: 'string', principal: CY, generation: 2, project_id: null, environment_id: id(12), role: 'viewer', expires_at: null, granted_at: T0 + 10 },
       ],
     );
-    assert.notEqual(found[0]!.id, found[1]!.id);
+    assert.equal(new Set(found.map((row) => row.id)).size, 3);
   });
 
   await t.test('secrets: a live reference is its holder\'s source, and a secret with no value of its own gets none back', async () => {

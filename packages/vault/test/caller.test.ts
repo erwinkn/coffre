@@ -180,13 +180,19 @@ test('within the memory a call reads nothing again, counted from the read; a ses
 
 test('a row written behind the vault is no row: a grant made up holds nothing, and an edited session is nobody', async () => {
   // A grant inserted with no MAC of the vault's, and one of hers given another role.
-  await vault.owner.execute(sql`INSERT INTO grants (id, principal, project_id, role, granted_at, granted_by, mac) VALUES (gen_random_uuid(), ${ada}, ${w.billing.id}, 'viewer', now(), ${ada}, decode(repeat('00', 36), 'hex'))`);
+  await vault.owner.execute(sql`INSERT INTO grants (id, principal, project_id, role, generation, granted_at, granted_by, mac) VALUES (gen_random_uuid(), ${ada}, ${w.billing.id}, 'viewer', 0, now(), ${ada}, decode(repeat('00', 36), 'hex'))`);
   assert.deepEqual((await who('ada')).holds.grants, [{ projectId: w.market.id, environmentId: null, role: 'viewer' }]);
   vault.memory = memoryOf(2);
   await vault.owner.execute(sql`UPDATE grants SET role = 'unused' WHERE principal = ${ada} AND project_id = ${w.market.id}`);
   assert.deepEqual((await who('ada')).holds.grants, []);
+  // A grant from before a removal is of another generation than its member: genuine, and dead.
+  await amend(vault, 'principals', sql`id = ${bo}`, { generation: 1 });
+  await amend(vault, 'credentials', sql`label = 'bo'`, { generation: 1 });
+  vault.memory = memoryOf(2);
+  assert.deepEqual((await who('bo')).holds.grants, []);
   // A session moved to another member: its MAC is not the vault's.
   await vault.owner.execute(sql`UPDATE credentials SET principal = ${cy} WHERE label = 'bo'`);
+  vault.memory = memoryOf(2);
   assert.equal(await refused('bo'), 'unauthenticated');
 });
 
