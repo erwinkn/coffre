@@ -8,8 +8,8 @@ first live instance.
 
 - **The product works end to end:** the API, the CLI, the web UI, coffre's own
   sign-in, offboarding, and conformance for every deployment.
-- **It is packages** (phase 2): `coffre init --workers` or `--node` writes a
-  deployment, and `coffre setup` prepares its database and keys in one go
+- **It is packages** (phase 2): `coffre init --workers` writes a
+  deployment (`--node` too, which waits for 0.16.1), and `coffre setup` prepares its database and keys in one go
   ([deploy.md](deploy.md)). Releases are on npm, published from a version
   tag with provenance.
 - **One database** (#22 to #46, designed in
@@ -45,12 +45,14 @@ first live instance.
    PlanetScale branch is part of phase 3's exit.
 3. **Rotation that can retire a key.** Parked under [Later](#later): the
    rewrap command.
-4. **A heartbeat someone hears.** Readiness tolerates one late or missed Cron
-   run (11 minutes), and turns red on a stopped log, an unsigned checkpoint,
-   a cut in the log or a wrong vault key. Attaching an external monitor to
-   `/readyz` is part of phase 3's setup.
-5. **Checkpoints off the box.** Parked under [Later](#later), with the other
-   defences against the database's owner.
+4. **A signer someone hears.** 0.16's signer alerts within about a minute
+   on an access row added, deleted or put back from an older copy, and on a
+   log cut or edited; it revokes nothing ([design](design/0.16.md#what-it-promises));
+   what `/readyz` says of it is [still to design](design/0.16.md#still-to-design).
+   Attaching an external monitor is part of phase 3's setup.
+5. **The log's head off the box.** Done in 0.16: the signer keeps it, and
+   its copy of every access row's MAC, outside the database
+   ([design](design/0.16.md#four-rules)).
 6. **Backups.** PlanetScale's point-in-time recovery, part of phase 3.
 7. **Guard main.** Still open, and only a setting: `main` is unprotected.
    `.github/workflows/validate.yml` runs the whole suite on every pull
@@ -75,7 +77,8 @@ Done. coffre is eight packages a deployment imports and configures in code
   [architecture.md](architecture.md#the-ui);
 - Postgres through Drizzle;
 - the vault, `@coffre/vault`, which holds the vault key and decides access, as a
-  Worker behind a service binding or a Node process behind a Unix socket;
+  Worker behind a service binding (a Node process behind a Unix socket
+  again from 0.16.1);
 - `coffre init`, whose output is `examples/workers` and `examples/node`, a
   test diffing the two, and `coffre-conformance`, which holds every
   deployment to what it must never do ([conformance.md](conformance.md)).
@@ -146,14 +149,12 @@ build plan are in [design/workload-access.md](design/workload-access.md).
   under the current vault key, leaving the ciphertext alone, so an old or leaked
   vault key can be retired, and data written under a local key can move to KMS
   ([keys.md](keys.md#moving-from-a-local-key)).
-- **Defences against the database's owner**, should the threat model need
-  them ([the limits](architecture.md#limits)): witnesses, where each CLI and
-  browser remembers the newest entry it saw and checks the log still holds
-  it; checkpoints copied off the box behind a retention lock; and each
-  member's state under the checkpoint's signature, so a cut the checkpoint
-  covers is refused at use rather than found at the next one.
-- **Changing the app's key**, and with KMS the vault's signing key: neither
-  can change today, since what each signed verifies only under it.
+- **Defences against the database's owner** beyond 0.16's signer, should
+  the threat model need them ([the limits](architecture.md#limits)):
+  witnesses, where each CLI and browser remembers the newest entry it saw
+  and checks the log still holds it.
+- **Changing the app's key**, which signs nothing in 0.16
+  ([still to design](design/0.16.md#still-to-design)), and with KMS the vault's signing key.
 - **The current-version pointer**, a
   schema tidy-up from the storage review
   ([design, plan step 11](design/single-database.md#implementation-plan)).

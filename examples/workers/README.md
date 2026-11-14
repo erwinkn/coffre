@@ -54,8 +54,9 @@ that the app, which faces the network, never holds what decrypts a value:
 - `VAULT_KEY`, the vault key, decrypts every value, and the vault derives
   from it the key it signs its records with. Lose it, and every value is
   lost.
-- `APP_KEY`, the app key, signs the app's log entries, sessions and tokens.
-  Lose it, and everyone is signed out and the log stops verifying.
+- `APP_KEY`, the app key, seals the app's sign-in state and its Cloudflare
+  Access sessions. Lose it, and people sign in again; nothing stored
+  depends on it.
 - `VAULT_KEY_ID`, the vault ID, names the vault key. It is not secret.
 
 To do the same by hand, see
@@ -122,8 +123,9 @@ sets: `CLOUDFLARE_API_TOKEN`, a token that may deploy the Workers;
 administrator's URL, which only its migrate step sees
 ([deploy.md](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md#deploys-on-every-push)).
 
-Point a monitor at `<PUBLIC_URL>/readyz`: it turns red when the audit log
-stops taking writes or the vault stops checkpointing it.
+Point a monitor at `<PUBLIC_URL>/readyz`: it turns red while the database
+lacks this version's migrations. The signer's alerts are the vault's
+`alert` setting.
 
 Everything coffre keeps is in the database: secrets, members, grants and
 the audit log. Back it up as one, keep the escrowed keys apart from it, and

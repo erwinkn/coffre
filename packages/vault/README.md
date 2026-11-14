@@ -1,9 +1,10 @@
 # @coffre/vault
 
-coffre's vault: the keys and who holds what. It decides every read and
-write of a key and appends to the shared audit log as `vault`. It runs as a
-Worker beside the app's Worker, or as its own process on Node. Both use
-one Postgres database, each through its own restricted login:
+coffre's vault: the keys and who holds what. It decides every use and
+change, writes every row and the log's entries, and runs the signer, which
+signs the log and holds the database to its own copy of every access row's
+MAC. It runs as a Worker beside the app's Worker. Both use one Postgres
+database, each through its own restricted login:
 
 ```ts
 import { postgres, vault } from '@coffre/vault/cloudflare';
@@ -15,9 +16,9 @@ export default vault((env) => ({
 }));
 ```
 
-On Node, `serveVault({ socket, database, … })` from `@coffre/vault/node`,
-with the vault's Postgres URL. Only `coffre_vault_runtime` may write members
-and grants; the app uses `coffre_runtime`. See the
+The vault's Worker also exports `CoffreSigner`, the signer's Durable
+Object. Only `coffre_vault_runtime` writes; the app's `coffre_runtime`
+only reads. See the
 [deploy guide](https://github.com/erwinkn/coffre/blob/main/docs/deploy.md)
 for the logins and both Hyperdrive configs.
 
