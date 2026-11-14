@@ -2,6 +2,7 @@
 // sends and is answered, through JSON on the way as over any transport.
 // use.test.ts holds what a use decides; this holds what crosses.
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { after, beforeEach, test } from 'node:test';
 import { inspect } from 'node:util';
 
@@ -14,6 +15,7 @@ import { resolveVaultConfig } from '../src/config.ts';
 import { openLocalVault } from '../src/local.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
+import { signerOf } from './testing.ts';
 import { credential, environment, grant, principal, project, role, rows, secret, tokenOf, user, value, write } from './world.ts';
 
 // The keys a deployment's configuration makes, for the vault that writes the instance and the one under test.
@@ -126,6 +128,59 @@ test('the vault runs as its configuration says: its memory, and what it takes of
   assert.deepEqual([told.memory.seconds, told.memory.outageSeconds, told.workloads, told.cap], [0, 330, { noReads: false, useOnly: true }, { count: 5, windowMs: 60_000 }]);
   for (const memorySeconds of [-1, 601, Number.NaN]) assert.throws(() => resolveVaultConfig({ ...config, memorySeconds }), /memorySeconds/);
   for (const outageSeconds of [-1, 3601, Number.NaN]) assert.throws(() => resolveVaultConfig({ ...config, outageSeconds }), /outageSeconds/);
+});
+
+test("0.9's people is refused at configuration, saying what to do instead", () => {
+  const config = { kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') }, owners: ['root@acme.example'], people: 'stand-ins' } as never;
+  assert.throws(() => resolveVaultConfig(config), /^Error: people is gone in 0\.10 \(it was "stand-ins"\).*mark the keys no person may read sensitive/);
+});
+
+test('the database holds no key: not the KEK, the signing key or a key derived from it, raw or in any encoding', async () => {
+  // A local KEK alone, whose key the vault derives its own from, and one given its own signing key.
+  for (const given of [{}, { signingKey: randomBytes(32).toString('base64') }]) {
+    const kek = randomBytes(32);
+    const resolved = resolveVaultConfig({ kek: { id: 'scanned', key: kek.toString('base64') }, owners: ['root@acme.example'], ...given });
+    const keyed = prepareVault(resolved);
+    const scanned = await openTestVault({ ...keyed, now: world.now });
+    try {
+      await emptyDatabase(scanned.owner);
+      const market = project('market');
+      const prod = environment(market, 'prod');
+      await write(scanned, ...rows('projects', market), ...rows('environments', prod), ...rows('roles', role(false, 'developer', ['secret.read', 'secret.write'])),
+        ...rows('principals', principal(ada)), ...rows('grants', grant(ada, 'developer', { project: market })), ...rows('credentials', credential('ada-cli', ada)));
+      // The vault's own work: a write, a read, and the signer's checkpoint over them.
+      const scannedVault = openLocalVault(scanned.db, keyed, { wake: scanned.wake, now: scanned.now });
+      const shown = { token: tokenOf('ada-cli').toString('hex'), proof: null, request: 'req-1', ip: '192.0.2.7' };
+      assert.ok(!('refused' in (await scannedVault.change({ ...shown, op: 'secret.write', project: 'market', environment: 'prod', keys: [{ key: 'API_KEY', value: 'sk_scanned', nature: 'secret' }] }))));
+      assert.ok(!('refused' in (await scannedVault.use({ ...reveal('ada-cli', ['API_KEY']) }))));
+      await (await signerOf(scanned)).sign(true);
+
+      // Every row of every table, the app's and the vault's.
+      const tables = await rowsOf<{ schema: string; name: string }>(scanned.owner, sql`SELECT table_schema AS schema, table_name AS name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema')`);
+      const values: Buffer[] = [];
+      for (const { schema, name } of tables) {
+        for (const row of await rowsOf<Record<string, unknown>>(scanned.owner, sql`SELECT * FROM ${sql.identifier(schema)}.${sql.identifier(name)}`)) {
+          for (const value of Object.values(row)) {
+            values.push(value instanceof Uint8Array ? Buffer.from(value) : Buffer.from(value instanceof Date ? value.toISOString() : typeof value === 'object' ? JSON.stringify(value) : String(value)));
+          }
+        }
+      }
+      const dump = Buffer.concat(values);
+      assert.ok(dump.includes(Buffer.from(ada)) && dump.includes(Buffer.from('API_KEY')), 'the dump is real');
+      const [signed] = await rowsOf<{ n: number }>(scanned.owner, sql`SELECT count(*)::int AS n FROM log`);
+      assert.ok(signed!.n > 0, 'the signer signed');
+
+      const [seed] = resolved.signingKeys;
+      const [key] = keyed.keys;
+      for (const [what, raw] of [['the KEK', kek], ['the signing key', Buffer.from(seed!)], ["the rows' MAC key", key!.rows], ["the entries' MAC key", key!.entries]] as const) {
+        for (const form of [raw, ...(['base64', 'base64url', 'hex'] as const).map((encoding) => Buffer.from(raw.toString(encoding)))]) {
+          assert.equal(dump.includes(form), false, `the database holds ${what}`);
+        }
+      }
+    } finally {
+      await scanned.close();
+    }
+  }
 });
 
 test('a wake-up that fails costs the caller nothing: the entry is written, and the value given', async (t) => {
