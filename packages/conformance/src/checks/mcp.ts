@@ -342,11 +342,13 @@ export async function mcpRead(deployment: Deployment, people: People, canaries: 
     return connections.size > 0;
   }, PUBLISHED_SECONDS).catch(() => undefined);
   expect(connections.size === 1, 'the connection is not in the log under its client', connections.size);
-  const mine = entries.filter((entry) => (entry.metadata.client === clientId && entry.action !== 'mcp.connect' && entry.action !== 'mcp.token') || connections.has(entry.metadata.via));
+  // Registering the client and connecting it log under the client: those are the connection's, not the calls'.
+  const own = new Set(['oauth.register', 'mcp.connect', 'mcp.token']);
+  const mine = entries.filter((entry) => (entry.metadata.client === clientId && !own.has(entry.action)) || connections.has(entry.metadata.via));
   expect(mine.length === 0, 'a read-only tools/call left an entry under the client', mine.map((entry) => entry.action));
   // The page lists only what the signer has published; an entry the calls wrote may still wait in `log_pending`.
   const waiting = (await using(deployment.database(), logBodies)).filter((body) =>
-    (body.detail.client === clientId && body.action !== 'mcp.connect' && body.action !== 'mcp.token') || connections.has(body.detail.via));
+    (body.detail.client === clientId && !own.has(body.action)) || connections.has(body.detail.via));
   expect(waiting.length === 0, 'a read-only tools/call left an entry under the client, signed or waiting to be', waiting.map((body) => body.action));
   return `on 2026-07-28 and 2025-11-25, the Read tools as the reader: ${DEV} listed, ${PROD} refused, no value in any answer; headers held to the body; no entry for the calls, which read names alone`;
 }
