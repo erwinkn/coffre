@@ -144,3 +144,21 @@ docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d existing \
 NODE_EXTRA_CA_CERTS="$scratch/server.crt" COFFRE_RUNTIME_ROLE=coffre_runtime \
     DATABASE_URL="postgresql://coffre_runtime:local-runtime-only@localhost:$port/existing?sslrootcert=system&sslmode=verify-full" \
     pnpm --filter @coffre/db run db:verify:runtime
+
+# A write granted on any relation in the schema fails it, a partitioned table's parent included: the grant
+# writes its partitions, which carry none of their own.
+docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres -d existing <<'SQL'
+CREATE TABLE public.reporting_parts (n integer) PARTITION BY RANGE (n);
+CREATE TABLE public.reporting_parts_low PARTITION OF public.reporting_parts FOR VALUES FROM (0) TO (100);
+GRANT INSERT ON public.reporting_parts TO coffre_app;
+SQL
+if NODE_EXTRA_CA_CERTS="$scratch/server.crt" COFFRE_RUNTIME_ROLE=coffre_runtime \
+    DATABASE_URL="postgresql://coffre_runtime:local-runtime-only@localhost:$port/existing?sslrootcert=system&sslmode=verify-full" \
+    pnpm --filter @coffre/db run db:verify:runtime >"$scratch/partitioned.log" 2>&1; then
+    echo 'runtime verification accepted a write on a partitioned table' >&2
+    exit 1
+fi
+if ! grep -Fq 'reporting_parts' "$scratch/partitioned.log"; then
+    cat "$scratch/partitioned.log" >&2
+    exit 1
+fi

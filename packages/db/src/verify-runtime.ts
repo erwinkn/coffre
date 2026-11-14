@@ -62,7 +62,8 @@ try {
 
   // In 0.16 the app's login only reads: coffre's tables, and which migrations ran (docs/design/0.16.md, "Four rules").
   // It must read each of coffre's tables and write none in the schema: another role's table there may stay
-  // unreadable to it (0022 leaves those alone), but never writable.
+  // unreadable to it (0022 leaves those alone), but never writable, whatever its kind: a write granted on a
+  // partitioned table's parent writes its partitions, and one on a view or a foreign table writes through it.
   const tables = Object.values(schema).filter((value) => is(value, Table)).map((table) => getTableName(table as Table));
   const privileges = await client.unsafe<{
     database_create: boolean;
@@ -86,7 +87,7 @@ try {
             )::text[] AS unreadable,
             ARRAY(
               SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-               WHERE n.nspname = 'public' AND c.relkind IN ('r', 'S')
+               WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
                  AND (CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(current_user, c.oid, 'USAGE, UPDATE')
                       ELSE has_table_privilege(current_user, c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
                         OR has_any_column_privilege(current_user, c.oid, 'INSERT, UPDATE, REFERENCES') END)
