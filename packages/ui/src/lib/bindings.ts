@@ -1,4 +1,5 @@
 import { CoffreError, type BindingPlan, type BindingView } from '@coffre/client';
+import { credentialScopeInWords } from '@coffre/core/access';
 import { claimValues, fullRef, githubReusable, githubWorkflow, gitlabProject, type BearerProfile, type BindingClaims } from '@coffre/core/workloads';
 
 /**
@@ -28,6 +29,11 @@ export function summary(binding: Pick<BindingView, 'profile' | 'issuer' | 'claim
     return { title: `GitLab project ${claims.project_id}`, detail: `${claimValues(binding.claims.pipeline_source).join(', ')} at ${claims.ref_type} ${claims.ref}` };
   }
   return { title: issuerName(binding.issuer), detail: `sub ${claims.sub}` };
+}
+
+/** What a binding's credentials reach, in words; a null scope, one 0.4 made and never sealed, reaches nothing. */
+export function reached(scope: BindingView['scope']): string {
+  return credentialScopeInWords(scope ?? {});
 }
 
 /** An issuer as a title: its host, when it is a URL; a binding that carries its keys may name any string. */

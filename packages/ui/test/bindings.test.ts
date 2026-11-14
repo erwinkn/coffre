@@ -18,6 +18,7 @@ import {
   lookupFailure,
   lookupOf,
   planned,
+  reached,
   summary,
   type Form,
   type GitHubIds,
@@ -185,6 +186,12 @@ test('a binding reads in a line: what it trusts, and at which ref', () => {
   assert.deepEqual(summary({ profile: 'custom', issuer: 'kapsule:fr-par', claims: { sub: 'x' } }), { title: 'kapsule:fr-par', detail: 'sub x' });
   assert.equal(keysOf({ jwksUri: 'https://idp.acme.example/keys', keys: null }), 'https://idp.acme.example/keys');
   assert.equal(keysOf({ jwksUri: 'sha256:00', keys: [{ kid: 'k8s', alg: 'RS256', thumbprint: 't1' }, { kid: null, alg: 'ES256', thumbprint: 't2' }] }), 'Uploaded: k8s (RS256), t2 (ES256)');
+});
+
+test('a binding with no scope, one 0.4 made and never sealed, reads as reaching nothing, as its exchange gives', () => {
+  assert.equal(reached(null), 'nothing');
+  assert.equal(reached({}), 'nothing');
+  assert.equal(reached({ 'market/dev': 'developer', 'market/prod': 'viewer' }), 'developer on market/dev; viewer on market/prod');
 });
 
 test("the Trust dialog leaves a binding's scope to the server until the person chooses: one that replaces others reaches what they did, and the picker says so", () => {

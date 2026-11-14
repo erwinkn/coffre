@@ -101,6 +101,10 @@
   environment is answered as one whose environment is gone (409), no
   longer told to run `coffre run` again: 0.16 upgrades only from 0.14.7,
   and a handle lasts a week at most.
+- **A binding with no scope says it reaches nothing.** One of 0.4 never
+  sealed, which the upgrade carries as it is, issues credentials that
+  reach nothing; `coffre trust` and the service page said "all its
+  account holds", as the Trust dialog did of one it replaces.
 - **The vault is told of workloads too.** It decides each CI run's
   sign-in now, on its own configuration: a deployment that trusts
   workloads adds `workloads: {}` to `vault(env => …)` in
