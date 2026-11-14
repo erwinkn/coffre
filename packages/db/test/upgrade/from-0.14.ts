@@ -199,7 +199,10 @@ const SEED = `
     (${u(208)}, ${u(2)}, ${u(21)}, ${u(109)}, ${u(1)}, ${u(11)}, ${u(101)}, 25, '${ADA}');
   INSERT INTO identities (id, provider, auth_mac, subject, issuer_hash, generation, principal, email, created_by, revoked_at) VALUES
     (${u(601)}, 'github', ${h(4)}, '1001', 'x', 0, '${ADA}', 'ada@acme.example', 'system:setup', NULL),
-    (${u(602)}, 'github', ${h(4)}, '1002', 'x', 0, '${BO}', 'bo@acme.example', '${ADA}', now());
+    (${u(602)}, 'github', ${h(4)}, '1002', 'x', 0, '${BO}', 'bo@acme.example', '${ADA}', now()),
+    -- Cy's account from before his last removal, which 0.14's second transaction never revoked, and the one he signs in with now.
+    (${u(603)}, 'github', ${h(4)}, '1003', 'x', 1, '${CY}', 'cy@acme.example', '${CY}', NULL),
+    (${u(604)}, 'github', ${h(4)}, '1004', 'x', 2, '${CY}', 'cy@acme.example', '${CY}', NULL);
   INSERT INTO service_bindings (id, auth_mac, principal, generation, profile, issuer, jwks_uri, claims, created_by) VALUES
     (${u(301)}, ${h(4)}, '${API}', 0, 'kubernetes', 'https://k8s.example', 'sha256:00', '{}', '${ADA}'),
     (${u(302)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', '${ADA}'),
@@ -360,7 +363,13 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
     ]);
     assert.deepEqual(await rows(`SELECT hash = ${h(91)} AS recent FROM spent_id_tokens`), [{ recent: true }]);
     assert.equal(await count('device_logins'), 0);
-    assert.equal(await count('identities'), 2);
+    // An account of a generation before its member's is revoked: it would hold its subject for good.
+    assert.deepEqual(await rows(`SELECT subject, revoked_at IS NOT NULL AS revoked, revoked_by FROM identities ORDER BY subject`), [
+      { subject: '1001', revoked: false, revoked_by: null },
+      { subject: '1002', revoked: true, revoked_by: null },
+      { subject: '1003', revoked: true, revoked_by: 'system:signin' },
+      { subject: '1004', revoked: false, revoked_by: null },
+    ]);
     assert.equal(await count('oauth_clients'), 1);
     assert.equal(await count('dismissed_keys'), 1);
   });

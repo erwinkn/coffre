@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Answers, Asked, SigninChanges } from '@coffre/core/vault';
-import { credentials, identities, principals } from '@coffre/db/schema';
+import { credentials, identities, policy, principals } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
 import { amended, part, put, type Operation, type Parts, type Seen, type Unsealed, type Write } from '../change.ts';
@@ -54,10 +54,15 @@ function signin(input: Asked<'signin'>, vault: Deciding): Operation<Parts, Answe
     // The accounts of those the emails name, revoked ones too: one revoked behind the vault is still found, and is not the vault's.
     theirs: part(identities, sql`${identities.principal} = ANY(${sql.param(named)}::text[])`),
     replaced: part(credentials, replaces === null ? sql`false` : sql`${credentials.tokenHash} = decode(${replaces}, 'hex')`),
+    // The instance's one row, which the vault's adoption of the database writes: nobody signs in to one it has not adopted.
+    instance: part(policy, sql`${policy.onlyRow}`),
   };
   return {
     read,
     decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+      // Every other change is asked by a caller, whose rows the adoption sealed. This one is asked by nobody, and makes an
+      // Owner from nothing: on a database not adopted yet it would begin the log, and the adoption would never run.
+      if (seen.instance.length === 0) return { refused: 'adopting' };
       // A row written behind the vault is not a row that is absent: an account that is not the vault's is not a new
       // one, nor its member nobody.
       if (unsealed.account + unsealed.holder > 0) return { refused: 'tampered' };

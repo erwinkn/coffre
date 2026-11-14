@@ -15,7 +15,7 @@ import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
 import { Signer } from '../src/signer.ts';
 import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
-import { amend, credential, identity, principal, role, rows, tokenOf, user, write } from './world.ts';
+import { amend, credential, identity, instance, principal, role, rows, tokenOf, user, write } from './world.ts';
 
 const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
@@ -40,6 +40,7 @@ beforeEach(async () => {
   bos = identity(bo, { provider: 'github', issuerHash: GITHUB, subject: 'gh-bo', email: 'bo@old.example' });
   await write(
     world,
+    ...rows('policy', instance()),
     ...rows('roles', role(true, 'owner', ['secret.read']), role(true, 'member', [])),
     ...rows('principals', principal(ada), principal(bo), principal(cy, { status: 'removed', generation: 1 }), principal(dee, { generation: 1 })),
     // Dee's account from before her removal: of a generation that is gone.
@@ -88,7 +89,8 @@ test('a new account is bound to the member its email names, who signs in: two ro
   assert.deepEqual({ ...entry.detail, identity: undefined }, { kind: 'browser', verified: 'app', provider: 'github', issuer: GITHUB, subject: 'gh-ada', emails: ['ada@acme.example', 'ada@home.example'], bound: 'ada@acme.example', identity: undefined });
   assert.ok(entry.objects.includes(`principal:${ada}`) && entry.objects.includes(`credential:${done.answer.credential}`), entry.objects.join());
   const tables = entry.rows.map(({ row, was, now }) => `${(JSON.parse(row) as string[])[0]} ${was === null ? 'made' : was === now ? 'read' : 'replaced'}`).sort();
-  assert.deepEqual(tables, ['credentials made', 'identities made', 'principals read']);
+  // Decided on her member's row and the instance's, which says the vault adopted this database.
+  assert.deepEqual(tables, ['credentials made', 'identities made', 'policy read', 'principals read']);
   assert.equal(world.woken.length, 1);
   assert.deepEqual(await checked(), []);
 });
@@ -177,7 +179,7 @@ test('an Owner the configuration names is a member whatever the rows say: made o
   assert.equal(await who('root-web', owned), 'user:root@acme.example owner browser');
   let entry = (await entries()).at(-1)!;
   assert.deepEqual([entry.kept, entry.detail.owner, entry.detail.bound], [true, 'made', 'root@acme.example']);
-  assert.deepEqual(entry.rows.map(({ row, was }) => `${(JSON.parse(row) as string[])[0]} ${was === null ? 'made' : 'replaced'}`).sort(), ['credentials made', 'identities made', 'principals made']);
+  assert.deepEqual(entry.rows.map(({ row, was, now }) => `${(JSON.parse(row) as string[])[0]} ${was === null ? 'made' : was === now ? 'read' : 'replaced'}`).sort(), ['credentials made', 'identities made', 'policy read', 'principals made']);
   // Signing in again changes nothing of their row.
   await owned.change(signin(github('gh-root', 'root@acme.example'), 'root-web-2'));
   entry = (await entries()).at(-1)!;
@@ -205,6 +207,17 @@ test('an Owner the configuration names is a member whatever the rows say: made o
   assert.ok(!('refused' in await owned.change(signin(github('gh-cy', 'cy@acme.example'), 'cy-web'))));
   assert.deepEqual([await standing(cy), await who('cy-web', owned), await who('cy-cli', owned)], [{ status: 'active', role: 'owner', scope: null, by: 'system:vault', generation: 1 }, `${cy} owner browser`, 'unauthenticated']);
   assert.deepEqual(await checked(), []);
+});
+
+test('nobody signs in to a database the vault has not adopted: not an Owner its configuration names, whom it would make from nothing', async () => {
+  const before = (await entries()).length;
+  // The instance's row as the upgrade leaves it, under no MAC; then none at all, as a new database has.
+  await world.owner.execute(sql`UPDATE policy SET mac = '\\x'`);
+  assert.deepEqual(await owned.change(signin(github('gh-root', 'root@acme.example'), 'root-web')), { refused: 'adopting' });
+  assert.deepEqual(await vault.change(signin(github('gh-bo'), 'bo-web-2')), { refused: 'adopting' });
+  await world.owner.execute(sql`DELETE FROM policy`);
+  assert.deepEqual(await owned.change(signin(github('gh-root', 'root@acme.example'), 'root-web')), { refused: 'adopting' });
+  assert.deepEqual([(await entries()).length, (await rowsOf(world.owner, sql`SELECT 1 FROM principals WHERE id = 'user:root@acme.example'`)).length, world.woken.length], [before, 0, 0]);
 });
 
 test('two sign-ins of one new account side by side bind it once: the second starts over, and finds it bound', async () => {
@@ -245,6 +258,8 @@ test('a sign-in that is not what the contract says is a fault, before anything i
     { account: { ...github('gh-ada'), emails: 'ada@acme.example' as never } }, { account: null as never },
     { session: { token: 'abc', minutes: 60, label: null } }, { session: { token: token.toUpperCase(), minutes: 60, label: null } }, { session: { token, minutes: 0, label: null } }, { session: { token, minutes: 7 * 24 * 60 + 1, label: null } },
     { session: { token, minutes: 1.5, label: null } }, { session: { token, minutes: 60, label: 7 as never } }, { replaces: 'abc' }, { replaces: token }, { ip: 7 as never },
+    // Half of a surrogate pair, which JSON carries and Postgres refuses: told before anything is read.
+    { account: github('gh-\ud800') }, { session: { token, minutes: 60, label: 'Fire\udfffox' } }, { request: '\ud800' },
   ];
   for (const more of wrong) await assert.rejects(vault.change({ ...ok, ...more }), TypeError, JSON.stringify(more).slice(0, 80));
   assert.equal(await who('ada-web'), 'unauthenticated');
