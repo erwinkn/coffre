@@ -13,7 +13,7 @@ import { credential, emptyDatabase, environment, grant, identity, instance, prin
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 
-import { ApiError } from '../src/api/errors.ts';
+import { ApiError, UNAVAILABLE } from '../src/api/errors.ts';
 import { TOOL_BY_NAME, type Tool } from '../src/mcp/tools.ts';
 import { app, callRaw, calls, client, connect, envelope, fromPage, raw, RESOURCE, sent, type Result } from './mcp-fixture.ts';
 
@@ -270,7 +270,14 @@ test("a fault in a tool is JSON-RPC's internal error, with the details in the se
       throw error;
     },
   });
-  const tools = { test_tampered: new ApiError('tampered', 'a row of market/prod failed'), test_bug: new Error('market/prod exploded'), test_refused: new ApiError('conflict', 'not now') };
+  // A connection lost mid-call, as node-postgres throws it: what the API answers 503 `unavailable`.
+  const lost = Object.assign(new Error('terminating connection due to administrator command'), { code: '08006' });
+  const tools = {
+    test_tampered: new ApiError('tampered', 'a row of market/prod failed'),
+    test_bug: new Error('market/prod exploded'),
+    test_refused: new ApiError('conflict', 'not now'),
+    test_outage: lost,
+  };
   for (const [name, error] of Object.entries(tools)) TOOL_BY_NAME.set(name, throwing(name, error));
   try {
     for (const name of ['test_tampered', 'test_bug']) {
@@ -280,6 +287,9 @@ test("a fault in a tool is JSON-RPC's internal error, with the details in the se
     assert.equal(report.mock.callCount(), 2);
     const refused = await callRaw(token, 'test_refused', {});
     assert.deepEqual([refused.status, refused.body.result!.isError, refused.body.result!.content[0]!.text], [200, true, 'not now']);
+    // An outage is no fault of coffre's: the tool's error, to try again in a moment, as v0.14.7 answered it.
+    const outage = await callRaw(token, 'test_outage', {});
+    assert.deepEqual([outage.status, outage.body.result!.isError, outage.body.result!.content[0]!.text], [200, true, UNAVAILABLE]);
   } finally {
     for (const name of Object.keys(tools)) TOOL_BY_NAME.delete(name);
   }

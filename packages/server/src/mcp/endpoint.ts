@@ -7,6 +7,7 @@
 // is first (`caller`): nothing here runs for a request without a good one.
 import { MCP_SCOPE_INFO, scopeString, type McpScope } from '@coffre/core/mcp';
 import { tokenKind } from '@coffre/core/identity';
+import { isUnavailable } from '@coffre/db/dialect';
 import { z } from 'zod';
 
 import type { ApiContext } from '../api/context.ts';
@@ -339,9 +340,13 @@ async function call(runtime: CoffreRuntime, connection: Connection, message: Mes
   }
 }
 
-/** What the API answered a tool's call with, when it refused it or could not answer; null for a bug, or a row the vault did not write. */
+/**
+ * What the API answered a tool's call with, when it refused it or could not answer; null for a bug, or a row the vault
+ * did not write. A handler called in-process throws what the router would have mapped: the database or the vault's
+ * transport not answering among it, which is the tool's error, to try again, as the API's 503 `unavailable` is.
+ */
 function refusalOf(error: unknown): { message: string; reason: string | undefined } | null {
-  if (!(error instanceof ApiError) && !(error instanceof z.ZodError)) return null;
+  if (!(error instanceof ApiError) && !(error instanceof z.ZodError) && !isUnavailable(error)) return null;
   const { status, body } = toErrorBody(error);
   if (status >= 500 && status !== 501 && status !== 503) return null;
   return { message: body.message, reason: body.reason };
