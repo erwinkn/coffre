@@ -241,13 +241,13 @@ test('a personal config is a person\'s, of an environment they read or use, one 
   assert.deepEqual(await vault.change(mine('bo-cli', 'orphan')), { refused: 'broken_chain' });
   assert.deepEqual(await vault.change(mine('bo-cli', 'prod', { project: 'shelved' })), { refused: 'no_access' });
   assert.deepEqual(await counts(), before);
-  // A personal config is named by the environment it is of: logged once a minute for each who stands.
+  // A personal config is named by the environment it is of, the page its maker was on: logged once a minute for each who stands.
   const of = [`project:${market.id}`, `environment:${prod.id}`];
   assert.deepEqual(await denied(), [
-    ['environment.create', bo, { project: 'market', parent: 'prod', refused: 'exists' }, of],
-    ['environment.create', ada, { project: 'market', parent: 'prod', refused: 'exists' }, of],
-    ['environment.create', api, { project: 'market', parent: 'prod', refused: 'not_a_person' }, of],
-    ['environment.create', eve, { project: 'market', parent: 'prod', refused: 'no_access' }, of],
+    ['environment.create', bo, { project: 'market', environment: 'prod', refused: 'exists' }, of],
+    ['environment.create', ada, { project: 'market', environment: 'prod', refused: 'exists' }, of],
+    ['environment.create', api, { project: 'market', environment: 'prod', refused: 'not_a_person' }, of],
+    ['environment.create', eve, { project: 'market', environment: 'prod', refused: 'no_access' }, of],
   ]);
   // A viewer of one protected environment reads it: a personal config takes nothing more. It is protected through its environment, not by its own row.
   const hers = answered(await vault.change(mine('eve-cli', 'guarded')));
