@@ -14,8 +14,9 @@ export type Nature = 'secret' | 'sensitive' | 'plain';
  *
  * - `value`: the key's next version, the key made if the environment has
  *   none by that name. Its `nature` as given, or, given none, the key's
- *   own kept: sensitive stays sensitive, and anything else is written a
- *   secret, a new key's value and a plain one's included. A reference's is
+ *   own kept, or, where the environment holds none, the one it inherits:
+ *   sensitive stays sensitive, and anything else is written a secret, a
+ *   plain one's and one inherited from nowhere included. A reference's is
  *   its source's.
  * - `archived`: true archives the key, false brings it back. A key is
  *   archived with no value written.

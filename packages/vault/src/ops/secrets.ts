@@ -2,12 +2,12 @@ import { randomUUID } from 'node:crypto';
 
 import type { Permission } from '@coffre/core/access';
 import type { Answers, KeyWrite, Nature, Presented, SecretsChanges, SecretWrite } from '@coffre/core/vault';
-import { environments, projects, secrets } from '@coffre/db/schema';
+import { dismissedKeys, environments, projects, secrets } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, live, refusedTo } from '../caller.ts';
 import { part, put, type Operation, type Parts, type Seen, type Value, type Write } from '../change.ts';
-import type { Fresh } from '../rows.ts';
+import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
 import { KEY, presented, text } from './input.ts';
@@ -17,6 +17,8 @@ const VALUE_LENGTH = 64 * 1024;
 const MOST_KEYS = 2000;
 const WRITE_BYTES = 1024 * 1024;
 const NATURES = ['secret', 'sensitive', 'plain'];
+/** How many environments a key is inherited through, as a use reads them (use.ts). */
+const MAX_PARENTS = 3;
 
 /** Text as Postgres stores it and a reader gets it back: no NUL, no half of a surrogate pair. */
 const wellFormed = (value: string) => !value.includes('\0') && Buffer.from(value).toString() === value;
@@ -51,10 +53,12 @@ function valid(item: KeyWrite): boolean {
  * A value written with no nature is never looser than the key's value was,
  * as its sealed row says (0.14.7's `bareLevel`): sensitive stays sensitive,
  * and anything else is a secret, a plain value's included, since plain is
- * kept only where a write says so; a new key's value is a secret. A
- * reference's is its source's, whose row the reference cannot be without:
- * one the vault does not see refuses the write, `unreadable`, rather than
- * guess.
+ * kept only where a write says so. A key the environment does not hold
+ * yet is what it inherits, as a use finds it (use.ts): the nearest parent's
+ * key by that name, unless a fork on the way dismissed it; a key inherited
+ * from nowhere is a secret. A reference's is its source's, whose row the
+ * reference cannot be without. A row the vault does not see, a source or a
+ * parent, refuses the write, `unreadable`, rather than guess.
  */
 function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation<Parts, Answers['secret.write']> {
   const shown = presented(input);
@@ -76,6 +80,11 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
 
   const project = sql`(SELECT p.id FROM projects p WHERE p.slug = ${projectSlug})`;
   const here = sql`(SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${environmentSlug})`;
+  // The environment and those it inherits from, for a bare value only: what it is written over may be a parent's.
+  const chain = sql`(WITH RECURSIVE chain (id, parent_id, depth) AS (
+    SELECT e.id, e.parent_id, 0 FROM environments e WHERE ${bare.length > 0 ? sql`true` : sql`false`} AND e.id = ${here}
+    UNION SELECT e.id, e.parent_id, chain.depth + 1 FROM environments e JOIN chain ON e.id = chain.parent_id WHERE chain.depth < ${MAX_PARENTS}
+  ) SELECT id FROM chain)`;
   // The references that read a key this write archives, from wherever they are held.
   const readers = sql`(SELECT r.id FROM secrets r WHERE r.source_id IN (SELECT s.id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(archiving)}::text[])))`;
   const read = {
@@ -83,8 +92,12 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
     project: part(projects, sql`${projects.slug} = ${projectSlug}`),
     environment: part(environments, sql`${environments.projectId} = ${project} AND ${environments.slug} = ${environmentSlug}`),
     secret: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} = ${here} AND ${secrets.key} = ANY(${sql.param(items.map((item) => item.key))}::text[])`),
-    // What a key written with no nature refers to, if it is a reference: its value's nature is the source's.
-    source: part(secrets, sql`${secrets.id} IN (SELECT s.source_id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(bare)}::text[]))`),
+    parent: part(environments, sql`${environments.id} IN ${chain} AND ${environments.id} <> ${here}`),
+    // What a key written with no nature is now where the environment holds none: a parent's, unless dismissed on the way.
+    inherited: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} IN ${chain} AND ${secrets.environmentId} <> ${here} AND ${secrets.key} = ANY(${sql.param(bare)}::text[])`),
+    dismissed: part(dismissedKeys, sql`${dismissedKeys.environmentId} IN ${chain} AND ${dismissedKeys.key} = ANY(${sql.param(bare)}::text[])`),
+    // What a key written with no nature refers to, its own or the one it inherits, if a reference: its value's nature is the source's.
+    source: part(secrets, sql`${secrets.id} IN (SELECT s.source_id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id IN ${chain} AND s.key = ANY(${sql.param(bare)}::text[]))`),
     reader: part(secrets, sql`${secrets.id} IN ${readers}`),
     readerPlace: part(environments, sql`${environments.id} IN (SELECT r.environment_id FROM secrets r WHERE r.id IN ${readers})`),
     readerProject: part(projects, sql`${projects.id} IN (SELECT r.project_id FROM secrets r WHERE r.id IN ${readers})`),
@@ -103,7 +116,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         return [...(place === undefined ? [] : [`project:${place.id}`]), ...(environment === undefined ? [] : [`environment:${environment.id}`])];
       },
     }),
-    decide(seen: Seen<typeof read>, at: number) {
+    decide(seen: Seen<typeof read>, at: number, unsealed) {
       const caller = callerFrom(seen, shown, vault.workloads, at);
       if (caller === null) return { refused: 'unauthenticated' };
       if (caller.workload?.stop != null) return { refused: caller.workload.stop };
@@ -116,6 +129,23 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       const now = new Date(at);
       const held = new Map(seen.secret.map((row) => [row.key, row]));
       const sources = new Map(seen.source.map((row) => [row.id, row]));
+      const parents = new Map(seen.parent.map((row) => [row.id, row]));
+      const inherited = new Map(seen.inherited.filter((row) => row.archivedAt === null).map((row) => [`${row.environmentId} ${row.key}`, row]));
+      const dismissed = new Set(seen.dismissed.filter((row) => row.restoredAt === null).map((row) => `${row.environmentId} ${row.key}`));
+      // A parent, a key or a dismissal edited behind the vault may be what decides a nature: none is guessed.
+      const blind = unsealed.parent + unsealed.inherited + unsealed.dismissed > 0;
+      /** The key a key the environment does not hold reads, as a use finds it: null for none, undefined for one the vault cannot tell. */
+      const passedDown = (key: string): Row<typeof secrets> | null | undefined => {
+        if (blind) return undefined;
+        for (let layer = environment, depth = 0; !dismissed.has(`${layer.id} ${key}`) && layer.parentId !== null; depth += 1) {
+          const parent = parents.get(layer.parentId);
+          if (parent === undefined || parent.projectId !== place.id || depth >= MAX_PARENTS) return undefined;
+          const row = inherited.get(`${parent.id} ${key}`);
+          if (row !== undefined) return row;
+          layer = parent;
+        }
+        return null;
+      };
       const writes: Write[] = [];
       const sealed: Value[] = [];
       const lines: Record<string, unknown>[] = [];
@@ -132,9 +162,10 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         let secret: Fresh<typeof secrets> = { ...kept, archivedAt: archived === undefined ? kept.archivedAt : archived ? (kept.archivedAt ?? now) : null, folder: folder === undefined ? kept.folder : folder };
         const line: Record<string, unknown> = { key, secret: secret.id };
         if (value !== undefined) {
-          // What the key's value is now, its own or its source's: a source is never deleted while referred to.
-          const source = kept.sourceId === null ? kept : sources.get(kept.sourceId);
-          if (asked === undefined && source === undefined) return { refused: 'unreadable' };
+          // What the key's value is now: its own, or what it inherits, and either one's source's: a source is never deleted while referred to.
+          const current = asked !== undefined ? null : was === null ? passedDown(key) : kept;
+          const source = current == null || current.sourceId === null ? current : sources.get(current.sourceId);
+          if (source === undefined) return { refused: 'unreadable' };
           const nature = asked ?? (source?.nature === 'sensitive' ? 'sensitive' : 'secret');
           const version = kept.versions + 1;
           // Typed, not generated: no recipe for Regenerate, and in no pair.

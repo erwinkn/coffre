@@ -18,7 +18,7 @@ import { entryOf } from '../src/entry.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
 import { openLocalVault } from '../src/local.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
-import { amend, binding, credential, environment, grant, instance, principal, project, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
+import { amend, binding, credential, dismissed, environment, grant, instance, principal, project, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
 
 const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
@@ -240,6 +240,36 @@ test('a value written with no nature keeps a sensitive key sensitive and makes a
   assert.deepEqual(await vault.change(bare(['LINKED'])), { refused: 'unreadable' });
   assert.deepEqual(await count('secret_versions'), before[1]);
   assert.deepEqual(await vault.change(writing('ada-cli', { LINKED: ['said sensitive', 'sensitive'] })), { answer: { keys: { LINKED: { version: 1, nature: 'sensitive' } } } });
+});
+
+test('a value written with no nature over a key the environment inherits is as sensitive as what it read there, the nearest parent\'s unless a fork dismissed it', async () => {
+  const prod = { id: url.environmentId, projectId: market.id };
+  const fork = environment(market, 'fork', { parentId: prod.id });
+  const twig = environment(market, 'twig', { parentId: fork.id });
+  const signing = value(world, secret(elsewhere, 'SIGNING'), 'sig', { sensitive: true });
+  await write(world, ...rows('environments', fork, twig),
+    ...rows('secrets', value(world, secret(prod, 'TOKEN'), 't', { sensitive: true }), value(world, secret(prod, 'FLAG'), 'on', { plain: true }), signing, secret(prod, 'SIGNING', { sourceId: signing.id }),
+      // A fork's own key is the nearest; one it dismissed, and one archived, are not read in it.
+      value(world, secret(prod, 'NEAREST'), 'n', { sensitive: true }), value(world, secret(fork, 'NEAREST'), 'f'), value(world, secret(prod, 'SKIPPED'), 's', { sensitive: true }),
+      value(world, secret(prod, 'SHELVED', { archivedAt: new Date(Date.UTC(2026, 10, 1)) }), 'a', { sensitive: true }), value(world, secret(prod, 'LATER'), 'l', { sensitive: true })),
+    ...rows('dismissedKeys', dismissed(fork, 'SKIPPED')));
+  const inTwig = (keys: string[]): Presented & SecretWrite => ({ ...shown('ada-cli'), op: 'secret.write', project: 'market', environment: 'twig', keys: keys.map((key) => ({ key, value: `bare ${key}` })) });
+  assert.deepEqual(await vault.use({ ...reveal('ada-cli', ['TOKEN', 'SIGNING', 'NEAREST', 'SKIPPED']), environment: 'twig' }).then((answer) => 'refused' in answer ? answer : answer.values.map((item) => ('refused' in item ? item.refused : item.value.toString()))),
+    ['sensitive', 'sensitive', 'f', 'unknown_key']);
+  assert.deepEqual(await vault.change(inTwig(['TOKEN', 'SIGNING', 'FLAG', 'NEAREST', 'SKIPPED', 'SHELVED', 'NEW'])), { answer: { keys: {
+    TOKEN: { version: 1, nature: 'sensitive' }, SIGNING: { version: 1, nature: 'sensitive' }, FLAG: { version: 1, nature: 'secret' },
+    NEAREST: { version: 1, nature: 'secret' }, SKIPPED: { version: 1, nature: 'secret' }, SHELVED: { version: 1, nature: 'secret' }, NEW: { version: 1, nature: 'secret' },
+  } } });
+  world.tick(2000);
+  // Written over, a sensitive value is still handed to no person.
+  assert.deepEqual(await vault.use({ ...reveal('ada-cli', ['TOKEN', 'SIGNING']), environment: 'twig' }).then((answer) => 'refused' in answer ? answer : answer.values.map((item) => ('refused' in item ? item.refused : item.value.toString()))), ['sensitive', 'sensitive']);
+
+  // A parent's key edited behind the vault does not say what it was: the value is not written without a nature.
+  await world.owner.execute(sql`UPDATE secrets SET folder = 'moved' WHERE environment_id = ${prod.id} AND key = 'LATER'`);
+  const before = [await count('log_pending'), await count('secret_versions')];
+  assert.deepEqual(await vault.change(inTwig(['LATER'])), { refused: 'unreadable' });
+  assert.deepEqual(await count('secret_versions'), before[1]);
+  assert.deepEqual(await vault.change({ ...inTwig([]), keys: [{ key: 'LATER', value: 'said', nature: 'sensitive' }] }), { answer: { keys: { LATER: { version: 1, nature: 'sensitive' } } } });
 });
 
 test('two writes of one key decided on the same rows are two versions, one after the other: the second starts over, and leaves nothing of its first try', async () => {
