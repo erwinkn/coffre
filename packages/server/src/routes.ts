@@ -32,7 +32,7 @@ export const api = route;
 export const auth = route;
 /** `/livez`: whether the process answers. */
 export const livez = route;
-/** `/readyz`: whether coffre can take writes, the audit log's heartbeat and checkpoint. */
+/** `/readyz`: whether coffre reaches its database, and the database has every migration this version ships. */
 export const readyz = route;
 /** `/mcp`: the MCP endpoint, for clients a person connected (docs/mcp.md). */
 export const mcp = route;

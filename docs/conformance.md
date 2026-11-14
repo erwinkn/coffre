@@ -187,9 +187,7 @@ can leave the whole page past it, and a pruning committed in between can
 leave the older head counting aging entries it removed), and `audit page proofs` that the page is sent
 with them rendered, each row's proof in `data-proof`, at least one proven
 and none failed (it asks again while every row is past the head, for the
-same race). `coffre verify
---full` reads the log, and conformance does not hold either to a tampered
-log yet.
+same race). Conformance does not hold either to a tampered log yet.
 
 ## What it does not show
 
@@ -210,8 +208,9 @@ log yet.
 `coffre verify instance` checks an instance someone runs, from the outside:
 the current one, or the one its argument names. As no one, it writes
 nothing. With a token, as in CI, it writes nothing either, with one
-exception: each run adds a few entries to the instance's audit log, which is
-append-only, so they stay for good. It says so when it starts. They are the
+exception: each run adds a few entries to the instance's audit log. They
+are uses, so they age out with the rest after `log.keepUsesDays` (90 days by
+default). It says so when it starts. They are the
 canary's read, and a refused read for each place it tries and must not
 reach: two a run with the setup below, a refused one more for each other
 environment in the canary's project. Besides, coffre notes when the token
@@ -225,7 +224,7 @@ deployment it booted.
 
 | Check | What must hold |
 |---|---|
-| health | `/livez` and `/readyz` answer: the instance is up and its scheduled job beats |
+| health | `/livez` and `/readyz` answer: the instance is up, and its database has every migration its version ships |
 | headers | As in the local run: a fresh CSP nonce per page, frames refused, `nosniff`, `no-store`, HSTS on https, no CORS for another origin |
 | anonymous api | Every route of the API, whatever its method, answers no one 401 with `{ error, message }` and nothing more. The routes come from the client's route map, so a route added to the server fails the typecheck until it is listed, and is checked from then on |
 | forged cross-site | Every change, and the sign-out, sent from another site with a session cookie gets 403. The cookie is made up: coffre refuses the request before it looks at the cookie, so a real one would get the same answer |
@@ -292,25 +291,28 @@ as it is, and the clean-up line says so.
 ### By hand, for a token in CI
 
 The setup an owner's run does for itself, kept for a run that is
-unattended, from CI, with a long-lived token. Once, as an owner. The CLI has
-no command yet to create a project, an environment or a token, so those
-three are made in the pages; the rest is the CLI.
+unattended, from CI, with a long-lived token. Once, as an owner, with the
+CLI:
 
-1. In **Projects**, create a project `conformance`, and in it an environment
-   `live`. Nothing else goes there.
-2. In **Tokens**, add a token `conformance-probe`, and issue it a credential.
-   It is shown once; keep it where the check will run, as a secret.
-3. Write the canary, a random value nothing else uses, and give the token
-   read on it and the project's audit:
+1. Make a project `conformance`, and in it an environment `live`. Nothing
+   else goes there.
+2. Admit a service account `conformance-probe`, a viewer of
+   `conformance/live` and an auditor of the project, and issue it a token.
+   The token is written to a new file only you can read, and kept nowhere
+   else; it lasts 90 days unless `--expires-in` says otherwise. Keep it
+   where the check will run, as a secret, then delete the file.
+3. Write the canary, a random value nothing else uses.
 
-   ```sh
-   CANARY="coffre-canary-$(openssl rand -hex 16)"
-   printf '%s' "$CANARY" | coffre set conformance/live/CANARY
-   coffre grant conformance conformance-probe --service --role viewer --env live
-   coffre grant conformance conformance-probe --service --role auditor
-   ```
+```sh
+coffre projects create conformance
+coffre environments create conformance/live
+coffre admit conformance-probe --service --grant conformance/live=viewer,conformance=auditor
+coffre tokens issue conformance-probe --label 'conformance, from CI' --output-file probe-token
+CANARY="coffre-canary-$(openssl rand -hex 16)"
+printf '%s' "$CANARY" | coffre set conformance/live/CANARY
+```
 
-   Keep `$CANARY` beside the token: the check looks for it.
+Keep `$CANARY` beside the token: the check looks for it.
 
 Then sign in with the token, as every CI job does, and check, the
 canary's value asked for or piped in; neither is ever an argument:
@@ -325,7 +327,7 @@ holds nothing on:
 
 ```
 Checking https://secrets.example.com, as no one and with the bearer token `coffre login --token` saved
-  The token's reads add a few entries to the instance's audit log, for good.
+  The token's reads add a few entries to the instance's audit log, kept as long as it keeps uses.
 
   ✓ health              /livez and /readyz
   ✓ headers             a fresh CSP nonce per page, frames refused, nosniff; no CORS; /_coffre/assets/index-C4woDgwj.js served
