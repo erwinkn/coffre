@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { connect, createServer, type Server } from 'node:net';
 
-import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
+import { KekRegistry, keyCheckOf, LocalKekProvider } from '@coffre/core/kek';
+import type { About } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
 import * as schema from '@coffre/db/schema';
@@ -24,6 +25,8 @@ const url = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.CO
 export type TestVault = Serving & {
   /** The Owners the deployment names, by email: none, unless told. */
   owners: readonly string[];
+  /** What `about` answers of the keys below. */
+  about: About;
   owner: Database;
   /** The hashes the signer was woken with, oldest first. */
   woken: Buffer[];
@@ -42,11 +45,13 @@ export async function openTestVault(more: Partial<Serving & { owners: readonly s
   const [owner, vault] = await Promise.all([openDatabase(url('coffre_owner:local-dev-only')), openDatabase(VAULT_URL)]);
   const woken: Buffer[] = [];
   let now = Date.UTC(2026, 10, 13, 12);
+  const seed = randomBytes(32);
   return {
     db: vault.db,
     owner: owner.db,
-    keys: [keyOf(randomBytes(32))],
+    keys: [keyOf(seed)],
     keks: new KekRegistry(LocalKekProvider.generate('test')),
+    about: { kek: { provider: 'local', id: 'test' }, previous: [], checks: [keyCheckOf(seed)] },
     cap: { count: 1000, windowMs: 15 * 60_000 },
     workloads: { noReads: false, useOnly: false },
     memory: memoryOf(2),

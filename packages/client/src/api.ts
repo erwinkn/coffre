@@ -1214,7 +1214,17 @@ export type Api = {
   };
   "GET /audit/keys": {
     input: undefined;
-    output: never;
+    output: {
+      kek: {
+        provider: string;
+        id: string;
+      };
+      previous: {
+        provider: string;
+        id: string;
+      }[];
+      checks: string[];
+    };
   };
   "GET /approvals/:id": {
     input: undefined;

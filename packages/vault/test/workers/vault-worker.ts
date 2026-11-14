@@ -1,6 +1,6 @@
 // The vault Worker as a deployment writes it: its entrypoint, its signer,
 // and the binding between them. Its fetch plays the app's side of a reveal
-// (POST) and of a write (PATCH), as the app's routes do them: the token hashed, never looked up, and the
+// (POST) and of a write (PATCH), and asks `about` (GET /about), as the app's routes do them: the token hashed, never looked up, and the
 // vault called over a service binding.
 import type { Vault as Contract } from '@coffre/core/vault';
 
@@ -35,6 +35,8 @@ export default {
         await pool.end();
       }
     }
+    // The vault's configuration, as GET /audit/keys asks it: no token, and nothing read.
+    if (new URL(request.url).pathname === '/about') return Response.json(await env.VAULT.about());
     const bearer = /^Bearer (\S+)$/.exec(request.headers.get('authorization') ?? '')?.[1];
     if (bearer === undefined) return Response.json({ refused: 'unauthenticated' }, { status: 401 });
     const { path, keys, values } = (await request.json()) as { path: string; keys?: string[] | null; values?: Record<string, string> };

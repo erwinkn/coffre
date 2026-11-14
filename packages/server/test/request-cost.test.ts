@@ -404,6 +404,8 @@ const requests: Record<string, Entry> = {
   // The audit page: the caller with the log's head, then the stretch and its tiles; by a path, its place first.
   'GET /audit': { request: () => api('cy-cli', 'GET', '/audit'), calls: ['caller'], statements: 2 },
   'GET /audit?path=': { request: () => api('cy-cli', 'GET', '/audit?path=market/dev'), calls: ['caller'], statements: 3 },
+  // What the keys an operator keeps are checked against: the vault's configuration, which reads nothing.
+  'GET /audit/keys': { request: () => api('cy-cli', 'GET', '/audit/keys'), calls: ['caller', 'about'], statements: 0, fixed: true },
 
   // Every change: one call to the vault, `change`, and no statement.
   'PATCH /secrets/:project/:environment': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy', { KEY: `fake-${round}` }), calls: ['change'], statements: 0 },

@@ -296,9 +296,9 @@ export const queries = {
     queryOptions({ queryKey: keys.apps, queryFn: () => uiResult(() => client.apps.list()) }),
 
   /**
-   * What the keys an operator keeps are checked against: the vault's ID and
-   * the app key's fingerprint, no secret. Null for anyone but owners and root
-   * admins, who alone may ask.
+   * What the keys an operator keeps are checked against: the vault's keys
+   * by ID and its signing keys' checks, no secret. Null for anyone but
+   * those who run the instance, who alone may ask.
    */
   auditKeys: (client: CoffreClient, allowed: boolean) =>
     queryOptions({
