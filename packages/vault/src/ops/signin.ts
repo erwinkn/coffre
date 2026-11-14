@@ -550,6 +550,8 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       if (caller.workload !== null) return { refused: 'workload_cannot_issue' };
+      // A personal token makes no other, whoever it names: told so by what it is, as 0.14.7 told it, before the person named is weighed.
+      if (kind === 'personal' && caller.credential.kind === 'personal') return { refused: 'personal_token' };
       // A row written behind the vault is not a row that is absent, wherever it is: one grant less, one role less, an environment unprotected.
       if (Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
       const holder = caller.holds;

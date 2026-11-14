@@ -211,7 +211,10 @@ test('only a person on a session makes a personal token: a token never makes ano
   const bound = binding(ci, { profile: 'kubernetes', policy: '{}' });
   await write(world, ...rows('bindings', bound), ...rows('credentials', session('ci-pod', bound)));
   const scope = { 'market/dev': 'viewer' };
-  assert.deepEqual(await vault.change(personal('cy-pat', scope)), { refused: 'no_access' });
+  // A personal token makes no other: told so by what it is, the same whoever it names, its person, another or nobody.
+  for (const member of [cy, bo, user('zed')]) assert.deepEqual(await vault.change(personal('cy-pat', scope, 60, member)), { refused: 'personal_token' }, member);
+  // Nor a service's token, refused as anything beyond it is.
+  assert.deepEqual(await vault.change(serviceToken('cy-pat', ci)), { refused: 'no_access' });
   // For themselves alone: Bo, on his session, names Cy's, and is refused as for anything beyond him.
   assert.deepEqual(await vault.change(personal('bo-cli', scope, 60, cy)), { refused: 'no_access' });
   assert.deepEqual(await vault.change(personal('bo-cli', scope, 60, bo.replace('bo', 'BO'))), { refused: 'no_access' });

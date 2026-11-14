@@ -125,8 +125,9 @@ export type AccountUnlink = { op: 'account.unlink'; identity: string };
  * scope is sealed on its row, each place by id with what its role held
  * there as it was made, and never changes after: a request made with it
  * holds what both that and its member hold then. A credential with a
- * scope never makes one, but a personal token a handle; a workload's
- * session makes none (`workload_cannot_issue`).
+ * scope never makes one, but a personal token a handle; a personal token
+ * asking for a personal token is told what it is (`personal_token`), whoever
+ * it names; a workload's session makes none (`workload_cannot_issue`).
  *
  * - `personal`: a person, on a session, for themselves (`member`, the route's
  *   `user:<email>`: anyone else's is `no_access`, as 0.14.7 refused a person
