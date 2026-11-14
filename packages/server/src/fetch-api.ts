@@ -97,7 +97,8 @@ export async function fetchApi(request: Request, runtime: CoffreRuntime, options
       db: runtime.db,
       vault: runtime.vault,
       shown,
-      caller: () => (asked ??= ask(shown)),
+      // With the log's head, its own call: a head is never shared, nor remembered.
+      caller: (wanted) => (wanted?.head === true ? callerOf(runtime.vault, { ...shown, head: true }) : (asked ??= ask(shown))),
       crossSite,
       auth: runtime.auth,
       rotateAfterDays: runtime.rotateAfterDays,

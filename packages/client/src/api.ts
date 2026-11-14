@@ -1162,11 +1162,23 @@ export type Api = {
         metadata: {
           [key: string]: unknown;
         };
+        proof: "failed" | "proven" | "unproven";
       }[];
       more: boolean;
+      next: number | null;
       hidden?: {
         action: string;
         count: number;
+      }[];
+      head: null | {
+        size: number;
+        signedAt: string;
+      };
+      holes: null | {
+        above: number | null;
+        below: number | null;
+        kept: number;
+        aging: number;
       }[];
     };
   };

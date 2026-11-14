@@ -28,6 +28,8 @@ export type TestApp = {
   vault: Vault;
   /** The vault's calls the app made, by name, oldest first. */
   calls: string[];
+  /** What each of `calls` was given, in the same order. */
+  inputs: unknown[];
   /** How many statements the app ran on its own connection. */
   readonly statements: number;
   /** What it executed, oldest first, as Drizzle's `SQL`: for a test to read a statement's parameters. */
@@ -70,6 +72,7 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
   });
   const app = { db: createDatabase(client), close: () => client.end() };
   const calls: string[] = [];
+  const inputs: unknown[] = [];
   let statements = 0;
   const executed: unknown[] = [];
   const answered: unknown[][] = [];
@@ -93,6 +96,7 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
   const recorded = new Proxy(vault, {
     get: (target, name: keyof Vault) => (input: never) => {
       calls.push(name);
+      inputs.push(input);
       return (target[name] as (input: never) => unknown)(input);
     },
   });
@@ -108,6 +112,7 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
     world,
     vault,
     calls,
+    inputs,
     get statements() {
       return statements;
     },
