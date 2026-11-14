@@ -421,20 +421,25 @@ function ProofStatus({
   onCheck: () => void;
 }) {
   const plural = (n: number) => `${n.toLocaleString('en')} ${n === 1 ? 'entry' : 'entries'}`;
-  if (counts.failed > 0) {
-    return (
-      <span className="chain-flag chain-flag-bad">
-        <AlertTriangle size={14} />
-        {plural(counts.failed)} not as signed
-      </span>
-    );
-  }
-
   const again = (
     <button type="button" className="btn btn-sm" disabled={checking} onClick={onCheck}>
       Check again
     </button>
   );
+  if (counts.failed > 0) {
+    // A failure stands, but the rows past the head or a prune's gap beside
+    // it are still settled by checking again.
+    return (
+      <div className="chain">
+        <span className="chain-flag chain-flag-bad">
+          <AlertTriangle size={14} />
+          {plural(counts.failed)} not as signed
+        </span>
+        {(counts.unproven > 0 || pruned) && again}
+      </div>
+    );
+  }
+
   if (head === null) {
     return (
       <div className="chain">
