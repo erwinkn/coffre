@@ -70,8 +70,11 @@ export async function connect(session: string, scope = 'read'): Promise<string> 
 export const sent: string[] = [];
 
 /** The official client, connected in an era, every request answered by coffre in process. */
-export async function client(token: string, mode: 'modern' | 'legacy'): Promise<Client> {
-  const mcp = new Client({ name: 'coffre-tests', version: '1.0.0' }, mode === 'modern' ? { versionNegotiation: { mode: { pin: '2026-07-28' } } } : {});
+export async function client(token: string, mode: 'modern' | 'legacy', options: { elicitsUrl?: boolean } = {}): Promise<Client> {
+  const mcp = new Client(
+    { name: 'coffre-tests', version: '1.0.0' },
+    { ...(mode === 'modern' ? { versionNegotiation: { mode: { pin: '2026-07-28' } } } : {}), ...(options.elicitsUrl === true ? { capabilities: { elicitation: { url: {} } } } : {}) },
+  );
   await mcp.connect(
     new StreamableHTTPClientTransport(new URL(RESOURCE), {
       requestInit: { headers: { authorization: `Bearer ${token}` } },
@@ -109,8 +112,8 @@ export function envelope(capabilities: Record<string, unknown> = {}) {
   return { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': capabilities };
 }
 
-/** A raw 2026-07-28 tool call. */
-export async function callRaw(token: string, name: string, args: Record<string, unknown>) {
-  const response = await raw(token, { method: 'tools/call', params: { name, arguments: args, _meta: envelope() } }, { 'mcp-name': name });
-  return { status: response.status, headers: response.headers, body: (await response.json()) as { result?: Result; error?: { code: number; message: string } } };
+/** A raw 2026-07-28 tool call: `requestState` and `inputResponses` among its params if given, and the client's capabilities. */
+export async function callRaw(token: string, name: string, args: Record<string, unknown>, more: Record<string, unknown> = {}, capabilities: Record<string, unknown> = {}) {
+  const response = await raw(token, { method: 'tools/call', params: { name, arguments: args, ...more, _meta: envelope(capabilities) } }, { 'mcp-name': name });
+  return { status: response.status, headers: response.headers, body: (await response.json()) as { result?: Result & Record<string, unknown>; error?: { code: number; message: string } } };
 }

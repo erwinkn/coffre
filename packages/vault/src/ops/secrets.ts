@@ -111,7 +111,8 @@ function valid(item: KeyWrite): boolean {
     return written(item.value) && (item.nature === undefined || NATURES.includes(item.nature)) && item.ref === undefined && item.restore === undefined && item.archived !== true
       // A value a client generated is never plain.
       && (item.generated === undefined || (generatedBy(item.key, item.generated) && item.nature !== 'plain'))
-      && (item.replaces === undefined || (typeof item.replaces === 'string' && VERSION_ID.test(item.replaces)));
+      && (item.replaces === undefined || item.replaces === null || (typeof item.replaces === 'string' && VERSION_ID.test(item.replaces))
+        || (typeof item.replaces === 'object' && Object.keys(item.replaces).length === 1 && typeof item.replaces.source === 'string' && VERSION_ID.test(item.replaces.source)));
   }
   // Only a value is generated, or replaces the version listed.
   if (item.generated !== undefined || item.replaces !== undefined) return false;
@@ -255,7 +256,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
   // The keys whose parents decide: one reset, or made live (a reset one written over stops being one), whose dismissal ends.
   const inheriting = items.flatMap((item) => ([item.value, item.restore, item.ref, item.inherit].some((said) => said !== undefined) || item.archived === false ? [item.key] : []));
   const restores = items.flatMap((item) => (item.restore === undefined ? [] : [{ key: item.key, version: item.restore }]));
-  const replacing = items.flatMap((item) => (item.replaces === undefined ? [] : [item.replaces]));
+  const replacing = items.flatMap((item) => (typeof item.replaces === 'string' ? [item.replaces] : []));
   const refs = items.flatMap((item) => (item.ref === undefined ? [] : [{ key: item.key, to: item.ref }]));
   // The keys whose readers decide: one archived stops them, and one made a reference would be a second hop for them.
   const stopping = [...archiving, ...refs.map((ref) => ref.key)];
@@ -413,9 +414,14 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           // since it was listed is one whose listed version is no longer read, which a client knows to list again.
           const now = was !== null && was.archivedAt === null ? was : passedDown(key, 'read');
           if (now === undefined) return { refused: 'unreadable' };
-          const listed = seen.replaced.find((row) => row.id === replaces);
-          // A reference, holding no version of its own, holds none listed.
-          if (now === null || listed?.secretId !== now.id || listed.version !== now.currentVersion) return { refused: 'stale' };
+          // Null: no value, and no reference; a source: a reference to it, which holds no version of its own. Otherwise a reference holds none listed.
+          if (replaces === null || typeof replaces === 'object') {
+            const source = replaces?.source ?? null;
+            if (now === null ? source !== null : now.currentVersion !== null || now.sourceId !== source) return { refused: 'stale' };
+          } else {
+            const listed = seen.replaced.find((row) => row.id === replaces);
+            if (now === null || listed?.secretId !== now.id || listed.version !== now.currentVersion) return { refused: 'stale' };
+          }
         }
         // An archived key keeps its name: it is brought back, not written over. In a fork, one reset to what a parent passes
         // down is an override set aside, which a value, a version or a reference written over it makes one again, as in 0.14.

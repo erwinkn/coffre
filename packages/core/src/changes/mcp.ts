@@ -9,7 +9,7 @@ import type { McpScope } from '../mcp.ts';
  * hour, under it (`ancestors`): it stands while its connection does, so
  * ending the connection ends them all, with no write of theirs.
  */
-export type McpChanges = McpConnect | McpToken | McpRevoke | OauthRegister;
+export type McpChanges = McpConnect | McpToken | McpRevoke | OauthRegister | McpAsk | McpDecide;
 
 export type McpAnswers = {
   /** The connection, and when its code stops being good, ISO 8601. */
@@ -25,6 +25,10 @@ export type McpAnswers = {
   'mcp.revoke': { connection: string };
   /** The client registered, and when, ISO 8601. */
   'oauth.register': { client: string; createdAt: string };
+  /** The approval opened, and when it expires, ISO 8601. */
+  'mcp.ask': { approval: string; expiresAt: string };
+  /** The approval decided. */
+  'mcp.decide': { approval: string };
 };
 
 /**
@@ -114,3 +118,33 @@ export type McpRevoke = { op: 'mcp.revoke'; token: string; client: string | null
  * week after they were made. Its entry ages out.
  */
 export type OauthRegister = { op: 'oauth.register'; name: string; redirectUris: string[] };
+
+/**
+ * An MCP client asks for a change, on its access token (`tools/call`): an
+ * approval, pending for `APPROVAL_SECONDS`, which its person decides on
+ * coffre's page. `arguments` is the tool's, as canonical JSON (keys
+ * sorted); the vault keeps them in the row, and the SHA-256 of
+ * `[tool, arguments]` beside them (`digest`), which the page sends back.
+ * The entry names the tool, the `place` it is about
+ * (`project/environment/KEY`, or less) and the digest, never the
+ * arguments: they are the client's text. Nothing changes until the person
+ * approves it, as theirs (`ForConnection`).
+ *
+ * Refused, writing nothing: `unauthenticated` for a token that is no MCP
+ * access token that stands; `full` for a connection with `MAX_PENDING`
+ * approvals waiting, which only their person's decision or their expiry
+ * frees; `pending` for one waiting already for the same call, which the
+ * app joins.
+ */
+export type McpAsk = { op: 'mcp.ask'; tool: string; arguments: string; place: string | null };
+
+/**
+ * A person, on their browser session, denies an approval, or approves one
+ * whose tool changes nothing (`MCP_SHOWS`): the page showed them the value
+ * first. `digest` is the one the page rendered. Every other approval is
+ * approved by its change (`ForConnection`). Refused `unknown_approval` for
+ * one that is not pending (decided, or expired by the time its write
+ * starts), not of this digest, or not theirs; `disconnected` for one whose
+ * connection no longer stands.
+ */
+export type McpDecide = { op: 'mcp.decide'; approval: string; approve: boolean; digest: string };

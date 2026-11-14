@@ -1,854 +1,477 @@
-// Changes through MCP (docs/design/mcp.md, section 7): nothing changes until
-// the person approves on coffre's page, and Approve makes the change, once,
-// as the person through the connection. A client that opens URLs is asked
-// by elicitation and retries with its requestState; any other gets the link
-// and calls again. Values come only from the page.
-import test from 'node:test';
+// Changes through MCP on the 0.16 contract (docs/design/0.16.md, "An MCP
+// client's changes"): nothing changes until the person approves on coffre's
+// page, and Approve makes the change, once, on their browser session with the
+// connection and the approval named, which the vault holds to them and marks
+// approved in the change's own write. A client that opens URLs is asked by
+// elicitation and retries with its requestState; any other gets the link and
+// calls again naming the approval. Values come only from the page, and go only to it.
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
+import { beforeEach, test } from 'node:test';
 
-import { and, desc, eq } from 'drizzle-orm';
+import { rowsOf } from '@coffre/db/dialect';
+import { credential, emptyDatabase, environment, grant, identity, instance, principal, project, role, rows, secret, user, value, write } from '@coffre/vault/testing';
+import { sql } from 'drizzle-orm';
 
-import { decideApproval } from '../src/db/queries.ts';
-import { callDigest } from '../src/mcp/approvals.ts';
-import { TOOL_BY_NAME } from '../src/mcp/tools.ts';
-import { clientFor, holdSomething } from './api-fixture.ts';
-import { auditLog, credentials, mcpApprovals, mcpConnections } from './db/tables.ts';
-import { browserFor, callRaw, client, connect, db, deps, DEV, documents, entries, fetched, fromPage, type Result, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
+import { approvalWait, callDigest } from '../src/mcp/approvals.ts';
+import { app, callRaw, client, connect, fromPage, type Result } from './mcp-fixture.ts';
 
-const OTHER = 'other@acme.example';
-const SECRET = `value-${randomBytes(8).toString('hex')}`;
+const { world } = app;
+const [root, dev, other] = [user('root'), user('dev'), user('other')];
+const VALUE = `value-${randomBytes(6).toString('hex')}`;
+const CAPABLE = { elicitation: { url: {} } };
+approvalWait.ms = 50;
 
-useMcp(
-  async () => {
-    const root = clientFor(deps, ROOT);
-    await root.members.add(`user:${DEV}`);
-    await root.members.add(`user:${OTHER}`);
-    await root.projects.create('market', { name: 'Market' });
-    await root.environments.create('market/prod', { name: 'Production' });
-    await root.secrets.set('market/prod', { API_KEY: SECRET, OLD_KEY: `old-${SECRET}` });
-    await root.access.set(`user:${DEV}`, { market: 'maintainer' });
-    await root.access.set(`user:${OTHER}`, { 'market/prod': 'viewer' });
-  },
-  { approvalWaitMs: 50 },
-);
+/**
+ * market/prod holds API_KEY. Root owns the instance; dev leads market, and
+ * writes; other views market/prod. Each has a browser session,
+ * `<name>-web`; dev has a CLI's too.
+ */
+beforeEach(async () => {
+  await emptyDatabase(world.owner);
+  for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
+  const market = project('market');
+  const prod = environment(market, 'prod');
+  const people = [root, dev, other].map((who) => [who, identity(who)] as const);
+  await write(
+    world,
+    ...rows('policy', instance()),
+    ...rows('projects', market),
+    ...rows('environments', prod),
+    ...rows('secrets', value(world, secret(prod, 'API_KEY'), VALUE)),
+    ...rows('roles',
+      role(false, 'viewer', ['secret.read', 'secret.use'], []),
+      role(false, 'lead', ['secret.read', 'secret.use', 'secret.write', 'environment.manage', 'project.manage', 'grant.manage']),
+      role(true, 'owner', ['secret.read', 'secret.use', 'secret.write', 'environment.manage', 'project.manage', 'grant.manage', 'audit.read']),
+      role(true, 'member', [])),
+    ...rows('principals', principal(root, { role: 'owner' }), principal(dev), principal(other)),
+    ...rows('grants', grant(dev, 'lead', { project: market }), grant(other, 'viewer', { environment: prod })),
+    ...rows('identities', ...people.map(([, id]) => id)),
+    ...rows('credentials', ...people.map(([who, id]) => credential(`${who.slice(5, who.indexOf('@'))}-web`, who, { kind: 'browser', identityId: id.id })), credential('dev-cli', dev)),
+  );
+  app.calls.length = 0;
+});
 
-type View = {
-  digest: string;
-  basis: string | null;
-  status: string;
-  summary: string;
-  details: { label: string; value: string; note?: string; warn?: true }[];
-  asks: unknown;
-  reveals: boolean;
-  ready: boolean;
-  outcome: { text: string; error?: string } | null;
-};
+type View = { digest: string; basis: string | null; status: string; summary: string; kind: string; details: { label: string; value: string }[]; asks: unknown; ready: boolean; outcome: { text: string } | null };
+type Decided = { status: string; outcome: { text: string; result?: Record<string, unknown> }; shown: { label: string; value: string }[]; message?: string; error?: string };
 
 /** The person, on coffre's page: what the approval shows them, as their browser session sees it. */
-async function view(id: string, email = DEV) {
-  const response = await route(`/api/approvals/${id}`, { headers: fromPage(await browserFor(email)) });
+async function view(id: string, session = 'dev-web', headers = fromPage(session)) {
+  const response = await app.request(`/api/approvals/${id}`, { headers });
   return { status: response.status, body: (await response.json()) as { approval: View; message?: string } };
 }
 
-/** The person's decision on that page, sent with the digest and basis it showed, or `shown` if given. */
-async function decide(id: string, approve: boolean, extra: { value?: string; digest?: string; shown?: View } = {}, email = DEV) {
-  const shown = extra.shown ?? (await view(id, email)).body.approval;
-  const response = await route(`/api/approvals/${id}`, {
+/** The person's decision on that page, sent with the digest and basis it showed. */
+async function decide(id: string, approve: boolean, extra: { value?: string; digest?: string; shown?: View } = {}, session = 'dev-web', headers = fromPage(session)) {
+  const shown = extra.shown ?? (await view(id, session)).body.approval;
+  const response = await app.request(`/api/approvals/${id}`, {
     method: 'POST',
-    headers: fromPage(await browserFor(email), { 'content-type': 'application/json' }),
+    headers: { ...headers, 'content-type': 'application/json' },
     body: JSON.stringify({ approve, digest: extra.digest ?? shown.digest, basis: shown.basis, ...(extra.value === undefined ? {} : { value: extra.value }) }),
   });
-  return { status: response.status, body: (await response.json()) as { status: string; outcome: { text: string }; shown: { label: string; value: string }[]; message?: string } };
+  return { status: response.status, body: (await response.json()) as Decided };
 }
 
-async function archived(key: string): Promise<boolean> {
-  return (await clientFor(deps, ROOT).secrets.history(`market/prod/${key}`)).archived;
+/** A secret's value now, as root reads it, past what the vault remembers of an earlier read. */
+async function valueOf(key: string): Promise<string | null> {
+  world.memory.reads.clear();
+  const response = await app.request('/api/reveals', { method: 'POST', headers: { ...fromPage('root-web'), 'content-type': 'application/json' }, body: JSON.stringify({ path: `market/prod/${key}` }) });
+  return response.status === 200 ? ((await response.json()) as { values: Record<string, string> }).values[key]! : null;
 }
 
-async function approvalRows() {
-  return db.owner.select().from(mcpApprovals);
+/** The vault's entries of `action`, as written. */
+async function entries(action: string): Promise<{ actor: string; credential: string; detail: Record<string, unknown>; objects: string[] }[]> {
+  return (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`)).map((row) => JSON.parse(row.body)).filter((entry) => entry.action === action);
 }
 
-const idOf = (result: { body: { result?: { structuredContent?: Record<string, unknown> } } }) => (result.body.result!.structuredContent!.approval as { id: string }).id;
+const approvals = () => rowsOf<{ id: string; status: string; outcome: string | null; arguments: string }>(world.owner, sql`SELECT id::text, status, outcome, arguments FROM mcp_approvals ORDER BY created_at`);
+/** What the vault wrote: its entries and the approvals' rows, as a count and a fingerprint. */
+const written = async () => JSON.stringify([(await rowsOf(world.owner, sql`SELECT count(*)::int AS n FROM log_pending`))[0], await approvals()]);
+const asRoot = { ...fromPage('root-web'), 'content-type': 'application/json' };
+const idOf = (result: { body: { result?: Result } }) => (result.body.result!.structuredContent!.approval as { id: string }).id;
+const SET = { secret: 'market/prod/NEW_KEY', note: 'the Stripe key' };
 
-test('with URL elicitation, the official client is asked to open the page, and its retry reports the change the page made, once', async () => {
-  const mcp = await client(await connect(DEV, 'read write'), 'modern', { elicitsUrl: true });
+test('with URL elicitation, the official client is asked to open the page, and its retry reports the change the page made, once, the connection named in its entry', async () => {
+  const mcp = await client(await connect('dev-web', 'read write'), 'modern', { elicitsUrl: true });
   const prompts: { url: string; message: string }[] = [];
   mcp.setRequestHandler('elicitation/create', async (request) => {
     const params = request.params as { mode: string; url: string; message: string };
     prompts.push(params);
-    // Asked: nothing has changed yet. The person opens the page, reads it and approves.
-    assert.equal(await archived('OLD_KEY'), false);
+    // Asked: nothing has changed yet. The person opens the page, reads it, types the value and approves.
+    assert.equal(await valueOf('NEW_KEY'), null);
     const id = params.url.split('/').at(-1)!;
     const shown = await view(id);
-    assert.equal(shown.body.approval.summary, 'archive market/prod/OLD_KEY');
-    assert.ok(shown.body.approval.details.some((line) => line.label === 'Now' && /version 1/.test(line.value)));
-    assert.equal((await decide(id, true)).body.status, 'approved');
+    assert.equal(shown.body.approval.summary, 'set market/prod/NEW_KEY to a value you type on coffre');
+    assert.ok(shown.body.approval.details.some((line) => line.label === 'Now' && /none yet/.test(line.value)));
+    assert.equal((await decide(id, true, { value: 'typed-on-the-page' })).body.status, 'approved');
     return { action: 'accept' };
   });
   try {
-    const result = (await mcp.callTool({ name: 'archive_secret', arguments: { secret: 'market/prod/OLD_KEY' } })) as Result;
+    const result = (await mcp.callTool({ name: 'request_secret_value', arguments: SET })) as Result;
     assert.equal(result.isError, undefined, JSON.stringify(result));
     assert.equal(result.structuredContent!.status, 'approved');
-    assert.match(result.content[0]!.text!, /archived/);
+    assert.match(result.content[0]!.text!, /market\/prod\/NEW_KEY is set to the value the person typed on coffre/);
+    assert.ok(!JSON.stringify(result).includes('typed-on-the-page'), 'the value never reaches the client');
   } finally {
     await mcp.close();
   }
   assert.equal(prompts.length, 1);
   assert.match(prompts[0]!.url, /^https:\/\/secrets\.acme\.example\/approvals\/[0-9a-f-]{36}$/);
-  assert.equal(prompts[0]!.message, 'Approve on coffre: archive market/prod/OLD_KEY');
-  assert.equal(await archived('OLD_KEY'), true);
+  assert.equal(prompts[0]!.message, 'Approve on coffre: set market/prod/NEW_KEY to a value you type on coffre');
+  assert.equal(await valueOf('NEW_KEY'), 'typed-on-the-page');
 
-  // The change's own entry is the person's, through the connection and the approval; the decision is logged too.
-  const updates = await entries('secret.archive');
-  assert.equal(updates.length, 1, 'made once');
-  const via = updates[0]!.metadata.via as { clientName: string; approvalId: string };
-  assert.equal(updates[0]!.actor, `user:${DEV}`);
-  assert.equal(via.clientName, 'Claude Code');
-  const [approval] = await approvalRows();
-  assert.equal(via.approvalId, approval!.id);
-  assert.notEqual(approval!.reportedAt, null, 'the client heard the outcome');
-  assert.deepEqual((await entries('mcp.approve')).map((entry) => entry.metadata.tool), ['archive_secret']);
-  assert.deepEqual((await entries('mcp.call')).map((entry) => [entry.decision, entry.metadata.approvalId]), [['allow', approval!.id]], 'the call is logged once, not each retry');
+  // The change's entry is the person's, on their browser session, and names the connection and the approval; made once.
+  const [made, ...more] = await entries('secret.write');
+  assert.equal(more.length, 0, 'made once');
+  const [connection] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id::text FROM credentials WHERE kind = 'mcp' AND ancestors IS NULL`);
+  const [session] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id::text FROM credentials WHERE label = 'dev-web'`);
+  const [row] = await approvals();
+  assert.deepEqual([made!.actor, made!.credential, made!.detail.via, made!.detail.approval], [dev, session!.id, connection!.id, row!.id]);
+  assert.ok(made!.objects.includes(`credential:${connection!.id}`));
+  assert.deepEqual([row!.status, row!.outcome], ['approved', null], "approved in the change's own write, with no outcome kept");
+  assert.ok(!row!.arguments.includes('typed-on-the-page'), 'no row holds the value');
+  // The ask is the client's, on its access token: its tool, place and digest, never its arguments.
+  const [asked] = await entries('mcp.ask');
+  assert.deepEqual([asked!.actor, asked!.detail.tool, asked!.detail.names, asked!.detail.digest], [dev, 'request_secret_value', ['market/prod/NEW_KEY'], callDigest('request_secret_value', SET)]);
+  assert.ok(!JSON.stringify(asked).includes('Stripe'));
 });
 
-test('without URL elicitation, the result carries the link; nothing changes until the person approves, and calling again reports it', async () => {
-  const token = await connect(DEV, 'read write');
-  const first = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
+test('without URL elicitation, the result carries the link and the id; calling again naming it reads how it ended, as often as the client likes, writing nothing', async () => {
+  const token = await connect('dev-web', 'read write');
+  const first = await callRaw(token, 'request_secret_value', SET);
   assert.equal(first.status, 200);
   const result = first.body.result!;
-  assert.equal(result.isError, undefined);
   const approval = result.structuredContent!.approval as { id: string; url: string };
   assert.equal(result.structuredContent!.status, 'pending');
   assert.match(result.content[0]!.text!, new RegExp(approval.url.replace(/[./]/g, '\\$&')));
-  assert.equal(await archived('OLD_KEY'), false);
+  assert.ok(result.content[0]!.text!.includes(`with the same arguments and approval: "${approval.id}"`));
 
-  // Asked again before the person decided: it waits a little, then says so with the same link.
-  const waiting = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
-  assert.equal((waiting.body.result!.structuredContent!.approval as { id: string }).id, approval.id, 'the same call rejoins its approval');
+  // Asked again without the id before the person decided: it joins the same approval, waits a little, and says so.
+  const waiting = await callRaw(token, 'request_secret_value', SET);
+  assert.equal(idOf(waiting), approval.id, 'the same call joins its approval');
   assert.equal(waiting.body.result!.structuredContent!.status, 'pending');
+  assert.equal((await entries('mcp.ask')).length, 1);
+  assert.equal(await valueOf('NEW_KEY'), null);
 
-  assert.equal((await decide(approval.id, true)).body.status, 'approved');
-  assert.equal(await archived('OLD_KEY'), true, 'the page made the change');
-  const after = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
-  assert.equal(after.body.result!.structuredContent!.status, 'approved');
+  assert.equal((await decide(approval.id, true, { value: 'v1' })).body.status, 'approved');
+  // Named, three times over: the same answer, and nothing written.
+  const before = await written();
+  for (let time = 0; time < 3; time += 1) {
+    const after = await callRaw(token, 'request_secret_value', { ...SET, approval: approval.id });
+    assert.equal(after.body.result!.structuredContent!.status, 'approved');
+    assert.deepEqual(after.body.result!.structuredContent!.result, { secret: 'market/prod/NEW_KEY' });
+  }
+  assert.equal(await written(), before, 'hearing writes nothing');
 
-  // Heard once, the same call asks afresh.
-  const again = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
+  // Without the id, after the decision: a new approval, whose page says the same was approved a moment ago.
+  const again = await callRaw(token, 'request_secret_value', SET);
   assert.equal(again.body.result!.structuredContent!.status, 'pending');
-  assert.notEqual((again.body.result!.structuredContent!.approval as { id: string }).id, approval.id);
-  assert.equal((await entries('secret.archive')).length, 1);
+  assert.notEqual(idOf(again), approval.id);
+  const shown = (await view(idOf(again))).body.approval;
+  assert.ok(shown.details.some((line) => line.label === 'Asked before' && line.value === 'You approved this same request less than a minute ago.'), JSON.stringify(shown.details));
+  assert.equal((await entries('secret.write')).length, 1);
+  // Another call's approval says nothing of it.
+  const other = (await view(idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/OTHER' })))).body.approval;
+  assert.ok(!other.details.some((line) => line.label === 'Asked before'));
 });
 
-test('a requestState replayed with other arguments, or by another connection, is refused; decline cancels', async () => {
-  const token = await connect(DEV, 'read write');
-  const capabilities = { elicitation: { url: {} } };
-  const first = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }, {}, capabilities);
+test("a call names its approval by requestState or by its argument, alike: another call's is not for it, an unknown one or another connection's is no such approval; cancel gives the link, decline leaves it waiting", async () => {
+  const token = await connect('dev-web', 'read write');
+  const first = await callRaw(token, 'request_secret_value', SET, {}, CAPABLE);
   assert.equal(first.body.result!.resultType, 'input_required');
   const state = first.body.result!.requestState as string;
+  const id = (first.body.result!.inputRequests as { approve: { params: { url: string } } }).approve.params.url.split('/').at(-1)!;
+  assert.equal(state, id);
 
-  const other = await callRaw(token, 'archive_secret', { secret: 'market/prod/API_KEY' }, { requestState: state, inputResponses: { approve: { action: 'accept' } } }, capabilities);
-  assert.equal(other.body.error?.code, -32602);
-  const elsewhere = await callRaw(await connect(DEV, 'read write'), 'archive_secret', { secret: 'market/prod/OLD_KEY' }, { requestState: state }, capabilities);
-  assert.equal(elsewhere.body.error?.code, -32602);
-  const forged = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }, { requestState: `${state.split('.')[0]}.AAAA` }, capabilities);
-  assert.equal(forged.body.error?.code, -32602);
+  const elsewhere = await connect('dev-web', 'read write');
+  const cases = [
+    [{ secret: 'market/prod/OTHER' }, token, state, 'Invalid params: this approval is not for this call'],
+    [SET, elsewhere, state, 'Invalid params: no such approval'],
+    [SET, token, '00000000-0000-4000-8000-000000000000', 'Invalid params: no such approval'],
+  ] as const;
+  for (const [args, by, sent, message] of cases) {
+    const byState = await callRaw(by, 'request_secret_value', args, { requestState: sent }, CAPABLE);
+    const byArgument = await callRaw(by, 'request_secret_value', { ...args, approval: sent });
+    assert.deepEqual([byState.body.error?.code, byState.body.error?.message], [-32602, message], JSON.stringify(args));
+    assert.deepEqual([byArgument.body.error?.code, byArgument.body.error?.message], [-32602, message], JSON.stringify(args));
+  }
+  assert.equal((await callRaw(token, 'request_secret_value', { ...SET, approval: 'not-an-id' })).body.result!.isError, true, "the tool's arguments refuse it");
 
   // Pending: the retry waits, then asks for nothing new, with the state again.
-  const held = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }, { requestState: state }, capabilities);
-  assert.equal(held.body.result!.resultType, 'input_required');
-  assert.equal(held.body.result!.inputRequests, undefined);
+  const held = await callRaw(token, 'request_secret_value', SET, { requestState: state }, CAPABLE);
+  assert.deepEqual([held.body.result!.resultType, held.body.result!.inputRequests, held.body.result!.requestState], ['input_required', undefined, state]);
 
   // Cancelled, the prompt was dismissed, or answered by a client that can ask no one: the link instead, still pending.
-  const cancelled = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }, { requestState: state, inputResponses: { approve: { action: 'cancel' } } }, capabilities);
+  const cancelled = await callRaw(token, 'request_secret_value', SET, { requestState: state, inputResponses: { approve: { action: 'cancel' } } }, CAPABLE);
   assert.equal(cancelled.body.result!.structuredContent!.status, 'pending');
   assert.match(String(cancelled.body.result!.structuredContent!.message), /Show the person the approval's url/);
 
-  const declined = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }, { requestState: state, inputResponses: { approve: { action: 'decline' } } }, capabilities);
+  // Declined: the client hears it, and the approval waits on, its place held, for its person or its expiry.
+  const before = await written();
+  const declined = await callRaw(token, 'request_secret_value', SET, { requestState: state, inputResponses: { approve: { action: 'decline' } } }, CAPABLE);
   assert.equal(declined.body.result!.isError, true);
-  assert.equal(declined.body.result!.structuredContent!.status, 'cancelled');
-  assert.equal(await archived('OLD_KEY'), false);
-  // The decline is logged, as every other way an approval ends (I2).
-  const [cancel] = await entries('mcp.cancel');
-  assert.equal(cancel!.actor, `user:${DEV}`);
-  assert.equal(cancel!.metadata.approvalId, (first.body.result!.inputRequests as { approve: { params: { url: string } } }).approve.params.url.split('/').at(-1));
-  assert.equal((await decide((first.body.result!.inputRequests as { approve: { params: { url: string } } }).approve.params.url.split('/').at(-1)!, true)).status, 409);
+  assert.match(declined.body.result!.content[0]!.text!, /declined to open coffre's page: nothing changed/);
+  assert.equal(await written(), before);
+  assert.equal((await decide(id, true, { value: 'v' })).body.status, 'approved', 'the person may still approve it');
+
+  // Past the outcome's ten minutes, a named approval says to ask anew.
+  await world.owner.execute(sql`UPDATE mcp_approvals SET created_at = created_at - interval '11 minutes' WHERE id = ${id}::uuid`);
+  const old = await callRaw(token, 'request_secret_value', { ...SET, approval: id });
+  assert.match(old.body.result!.content[0]!.text!, /This approval has expired: call request_secret_value again without approval/);
 });
 
-test('only its person decides an approval, with the digest they were shown; a denial changes nothing', async () => {
-  const token = await connect(DEV, 'read write');
-  const id = ((await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' })).body.result!.structuredContent!.approval as { id: string }).id;
+test('a client asking and declining in a loop opens five approvals, writes five entries, and no more until the person decides one or one expires', async () => {
+  const token = await connect('dev-web', 'read write');
+  for (let round = 0; round < 8; round += 1) {
+    const asked = await callRaw(token, 'request_secret_value', { secret: `market/prod/LOOP_${round}` }, {}, CAPABLE);
+    const state = asked.body.result!.requestState as string | undefined;
+    if (state !== undefined) await callRaw(token, 'request_secret_value', { secret: `market/prod/LOOP_${round}` }, { requestState: state, inputResponses: { approve: { action: 'decline' } } }, CAPABLE);
+    else assert.match(asked.body.result!.content[0]!.text!, /5 changes are waiting for the person already/, `round ${round}`);
+  }
+  assert.equal((await entries('mcp.ask')).length, 5);
+  assert.equal((await approvals()).length, 5);
+  await world.owner.execute(sql`UPDATE mcp_approvals SET expires_at = now() - interval '1 second' WHERE arguments = ${JSON.stringify({ secret: 'market/prod/LOOP_0' })}`);
+  assert.equal((await callRaw(token, 'request_secret_value', { secret: 'market/prod/LOOP_9' }, {}, CAPABLE)).body.result!.resultType, 'input_required');
+  assert.equal((await entries('mcp.ask')).length, 6);
+});
 
-  const theirs = await view(id, OTHER);
-  assert.equal(theirs.status, 403);
-  assert.match(theirs.body.message!, /someone else/);
-  assert.equal((await decide(id, true, { digest: '0'.repeat(64) })).status, 409, 'not the change the page showed');
-  assert.deepEqual((await entries('mcp.view')).map((entry) => [entry.decision, entry.metadata.reason]), [['deny', 'not_yours']]);
+test('only its person decides, on their browser session and from coffre\'s page; a denial changes nothing, and is reported', async () => {
+  const token = await connect('dev-web', 'read write');
+  const id = idOf(await callRaw(token, 'request_secret_value', SET));
+
+  const theirs = await view(id, 'other-web');
+  assert.deepEqual([theirs.status, theirs.body.message], [403, 'this approval is for someone else']);
+  const cli = await view(id, 'dev-cli', { authorization: 'Bearer dev-cli' });
+  assert.equal(cli.status, 403, "the CLI's session decides nothing");
+  const shown = (await view(id)).body.approval;
+  assert.equal((await decide(id, true, { value: 'v', shown }, 'dev-cli', { authorization: 'Bearer dev-cli' })).status, 403);
+  // Another site's page is refused before anything is read.
+  app.calls.length = 0;
+  const crossSite = await app.request(`/api/approvals/${id}`, { headers: { ...fromPage('dev-web'), 'sec-fetch-site': 'cross-site' } });
+  assert.deepEqual([crossSite.status, app.calls], [403, []]);
 
   const denied = await decide(id, false);
   assert.equal(denied.body.status, 'denied');
-  assert.equal((await decide(id, true)).status, 409, 'decided once');
-  const reported = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
+  assert.equal((await entries('mcp.deny')).length, 1);
+  assert.equal((await decide(id, true, { value: 'v', shown })).status, 409, 'decided once');
+  const reported = await callRaw(token, 'request_secret_value', { ...SET, approval: id });
   assert.equal(reported.body.result!.isError, true);
   assert.equal(reported.body.result!.structuredContent!.status, 'denied');
-  assert.equal(await archived('OLD_KEY'), false);
+  assert.equal(await valueOf('NEW_KEY'), null);
 });
 
-test('a value comes from the page only: the person types it, coffre writes it, and no result or row holds it', async () => {
-  const token = await connect(DEV, 'read write');
-  const first = await callRaw(token, 'request_secret_value', { secret: 'market/prod/NEW_KEY', note: 'the Stripe key' });
-  const id = (first.body.result!.structuredContent!.approval as { id: string }).id;
-  const shown = await view(id);
-  assert.deepEqual(shown.body.approval.asks, { value: { label: 'Value', note: 'It goes to coffre only: the app never sees it.' } });
-  assert.ok(shown.body.approval.details.some((line) => line.value === 'the Stripe key'));
-  assert.equal((await decide(id, true)).status, 400, 'Approve needs the value');
-  const typed = `typed-${randomBytes(8).toString('hex')}`;
-  assert.equal((await decide(id, true, { value: typed })).body.status, 'approved');
-  const result = await callRaw(token, 'request_secret_value', { secret: 'market/prod/NEW_KEY', note: 'the Stripe key' });
-  assert.equal(result.body.result!.structuredContent!.status, 'approved');
-
-  const revealed = await clientFor(deps, ROOT).secrets.reveal('market/prod/NEW_KEY');
-  assert.equal(JSON.stringify(revealed).includes(typed), true, 'written');
-  assert.equal(JSON.stringify(first.body).includes(typed) || JSON.stringify(result.body).includes(typed), false);
-  assert.equal(JSON.stringify(await approvalRows()).includes(typed), false, 'never stored with the approval');
-  const log = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog);
-  assert.equal(JSON.stringify(log).includes(typed), false);
-});
-
-test('a token issued through an approval is shown on the page, once, and never to the client', async () => {
-  await clientFor(deps, ROOT).members.add('token:ci-deploy');
-  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
-  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
-  const token = await connect(DEV, 'read manage-access');
-  const id = ((await callRaw(token, 'issue_service_token', { service: 'ci-deploy', label: 'deploys', expiresInDays: 30 })).body.result!.structuredContent!.approval as { id: string }).id;
-  const details = (await view(id)).body.approval.details;
-  assert.ok(details.some((line) => line.label === 'The app calls it' && line.value === 'deploys'), 'the label is the app’s');
-  assert.equal(details.find((line) => line.label === 'Reaches')?.value, 'viewer on ci-deploy-reads', 'what the token will reach: all the account holds');
-  const decided = await decide(id, true);
-  assert.equal(decided.body.status, 'approved', JSON.stringify(decided.body));
-  const issued = decided.body.shown.find((line) => line.label === 'Token')!.value;
-  assert.match(issued, /^coffre_svc_/);
-  const result = await callRaw(token, 'issue_service_token', { service: 'ci-deploy', label: 'deploys', expiresInDays: 30 });
-  assert.equal(result.body.result!.structuredContent!.status, 'approved');
-  assert.equal(JSON.stringify(result.body).includes(issued), false);
-  assert.equal(JSON.stringify(await approvalRows()).includes(issued), false);
-});
-
-test('a token or a binding reaches what the page said: an account given more since is refused on Approve, and no token is made', async () => {
-  const root = clientFor(deps, ROOT);
-  await root.members.add('token:ci-deploy');
-  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
-  await root.members.add(`user:${DEV}`, { role: 'admin' });
-  const token = await connect(DEV, 'read manage-access');
-  const id = idOf(await callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30 }));
+test('Approve runs only the ask the page rendered: a digest that is not it, or arguments edited in the row since, is refused before the vault is asked to change anything', async () => {
+  const token = await connect('dev-web', 'read write');
+  const id = idOf(await callRaw(token, 'request_secret_value', SET));
   const shown = (await view(id)).body.approval;
-  assert.equal(shown.details.find((line) => line.label === 'Reaches')?.value, 'viewer on ci-deploy-reads');
-  // Another Admin gives the account prod before the person approves: the token would reach it, which the page never said.
-  await root.access.set('token:ci-deploy', { 'market/prod': 'viewer' });
-  const decided = await decide(id, true, { shown });
-  assert.equal(decided.status, 409, JSON.stringify(decided.body));
-  assert.match(decided.body.message!, /changed since you opened it/);
-  const tokens = () => db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.principal, 'token:ci-deploy'));
-  assert.deepEqual(await tokens(), []);
-  // Opened again, the page says it, and Approve makes what it says.
-  const again = (await view(id)).body.approval;
-  assert.equal(again.details.find((line) => line.label === 'Reaches')?.value, 'viewer on ci-deploy-reads, market/prod');
-  assert.equal((await decide(id, true, { shown: again })).body.status, 'approved');
-  assert.equal((await tokens()).map((each) => JSON.parse(each.scope!) as unknown[]).flat().length, 2, 'it reaches both');
+  assert.equal(shown.digest, callDigest('request_secret_value', SET));
+  assert.equal((await decide(id, true, { value: 'v', digest: '0'.repeat(64), shown })).status, 409);
 
-  // A binding's basis is the server's plan: what its runs reach, and which bindings it takes the place of.
-  const trust = TOOL_BY_NAME.get('trust_workload')!.change!;
-  const plan = (scope: Record<string, string>, replaces: string[]) => ({ bindings: { preview: async () => ({ scope, replaces: replaces.map((each) => ({ id: each, why: 'keys_moved' })) }) } });
-  const basis = async (scope: Record<string, string>, replaces: string[] = []) =>
-    (await trust.replaces!(plan(scope, replaces) as never, { service: 'ci-deploy', profile: 'github', claims: { event_name: 'push' } } as never)).state;
-  assert.notDeepEqual(await basis({ market: 'viewer' }), await basis({ market: 'viewer', 'market/prod': 'viewer' }));
-  assert.notDeepEqual(await basis({ market: 'viewer' }), await basis({ market: 'viewer' }, ['b1']));
+  // A writer of the app's database points the approval at another key, its digest left as it was: the page showed NEW_KEY.
+  await world.owner.execute(sql`UPDATE mcp_approvals SET arguments = ${JSON.stringify({ secret: 'market/prod/API_KEY' })} WHERE id = ${id}::uuid`);
+  app.calls.length = 0;
+  const edited = await decide(id, true, { value: 'v', shown });
+  assert.equal(edited.status, 409);
+  assert.match(edited.body.message!, /not the one the page showed/);
+  assert.deepEqual(app.calls, ['caller'], 'no change asked');
+  assert.equal(await valueOf('API_KEY'), VALUE);
 });
 
-test('Approve makes the token or the binding with the reach it found as the page showed it: a grant landing just after its compare reaches neither', async () => {
-  const root = clientFor(deps, ROOT);
-  await root.members.add('token:ci-deploy');
-  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
-  await root.members.add(`user:${DEV}`, { role: 'admin' });
-  const token = await connect(DEV, 'read manage-access');
-  const id = idOf(await callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30 }));
+test("a value comes from the page only: Approve asks for it, writes it, and no outcome, row or client's answer holds it", async () => {
+  const token = await connect('dev-web', 'read write');
+  const id = idOf(await callRaw(token, 'request_secret_value', SET));
   const shown = (await view(id)).body.approval;
-  assert.equal(shown.details.find((line) => line.label === 'Reaches')?.value, 'viewer on ci-deploy-reads');
-  // Another Admin gives the account prod in the moment between Approve's compare and the change.
-  const change = TOOL_BY_NAME.get('issue_service_token')!.change!;
-  const replaces = change.replaces!;
-  change.replaces = async (...given) => {
-    const replaced = await replaces(...given);
-    await root.access.set('token:ci-deploy', { 'market/prod': 'viewer' });
-    return replaced;
-  };
-  let decided: Awaited<ReturnType<typeof decide>>;
-  try {
-    decided = await decide(id, true, { shown });
-  } finally {
-    change.replaces = replaces;
+  assert.deepEqual(shown.asks, { value: { label: 'Value', note: 'It goes to coffre only: the app never sees it.' } });
+  assert.ok(shown.details.some((line) => line.label === 'The app says' && line.value === 'the Stripe key'));
+  assert.equal((await decide(id, true, { shown })).status, 400, 'no value typed');
+  const made = await decide(id, true, { value: 'secret-typed', shown });
+  assert.equal(made.body.status, 'approved');
+  assert.deepEqual(made.body.shown, []);
+  assert.equal(await valueOf('NEW_KEY'), 'secret-typed');
+  const told = await callRaw(token, 'request_secret_value', { ...SET, approval: id });
+  assert.equal(told.body.result!.structuredContent!.status, 'approved');
+  assert.ok(!JSON.stringify(told.body).includes('secret-typed'));
+  assert.ok((await approvals()).every((row) => !JSON.stringify(row).includes('secret-typed')));
+});
+
+test("Approve refuses a change whose page is stale: a version set since it was shown", async () => {
+  const token = await connect('dev-web', 'read write');
+  const id = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/API_KEY' }));
+  const shown = (await view(id)).body.approval;
+  assert.ok(shown.details.some((line) => line.label === 'Now' && /version 1/.test(line.value)));
+  await app.request('/api/secrets/market/prod', { method: 'PATCH', headers: asRoot, body: JSON.stringify({ API_KEY: 'by-root' }) });
+  const stale = await decide(id, true, { value: 'v', shown });
+  assert.equal(stale.status, 409);
+  assert.match(stale.body.message!, /changed since you opened it/);
+  assert.equal(await valueOf('API_KEY'), 'by-root');
+  // Still pending: the page opened again shows the version now, and Approve takes it.
+  assert.equal((await decide(id, true, { value: 'v' })).body.status, 'approved');
+  assert.equal(await valueOf('API_KEY'), 'v');
+});
+
+test('Approve refuses a page shown for a key since renamed, whose name another key now holds at the same version', async () => {
+  const token = await connect('dev-web', 'read write');
+  const id = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/API_KEY' }));
+  const shown = (await view(id)).body.approval;
+  assert.equal((await app.request('/api/secrets/market/prod/API_KEY', { method: 'PATCH', headers: asRoot, body: JSON.stringify({ key: 'MOVED' }) })).status, 200);
+  assert.equal((await app.request('/api/secrets/market/prod', { method: 'PATCH', headers: asRoot, body: JSON.stringify({ API_KEY: 'another' }) })).status, 200);
+  // The new API_KEY is at version 1 too: the page read another key.
+  assert.ok((await view(id)).body.approval.details.some((line) => line.label === 'Now' && /version 1/.test(line.value)));
+  const stale = await decide(id, true, { value: 'v', shown });
+  assert.equal(stale.status, 409);
+  assert.match(stale.body.message!, /changed since you opened it/);
+  assert.deepEqual([await valueOf('API_KEY'), await valueOf('MOVED')], ['another', VALUE]);
+});
+
+test("a value written between Approve's read and its change refuses the change in the vault: nothing is written over it, and the approval still waits", async () => {
+  const token = await connect('dev-web', 'read write');
+  // Over a version, and over none: a key made in that moment is not written over either.
+  for (const [secret, key] of [['market/prod/API_KEY', 'API_KEY'], ['market/prod/NEW_KEY', 'NEW_KEY']] as const) {
+    const id = idOf(await callRaw(token, 'request_secret_value', { secret }));
+    const shown = (await view(id)).body.approval;
+    app.beforeChange.next = async (input) => {
+      assert.equal((input as { op: string }).op, 'secret.write');
+      assert.equal((await app.request('/api/secrets/market/prod', { method: 'PATCH', headers: asRoot, body: JSON.stringify({ [key]: 'by-root' }) })).status, 200);
+    };
+    const decided = await decide(id, true, { value: 'v', shown });
+    assert.equal(app.beforeChange.next, null, 'the write came between');
+    assert.equal(decided.status, 409, key);
+    assert.match(decided.body.message!, /changed since it was listed/);
+    assert.equal(await valueOf(key), 'by-root');
+    assert.equal((await view(id)).body.approval.status, 'pending', 'the person reloads, sees the value now, and decides again');
   }
-  assert.equal(decided.body.status, 'approved', JSON.stringify(decided.body));
-  assert.match(decided.body.outcome.text, /reaching viewer on ci-deploy-reads\./);
-  const tokens = await db.owner.select({ scope: credentials.scope }).from(credentials).where(eq(credentials.principal, 'token:ci-deploy'));
-  assert.deepEqual(tokens.map((row) => (JSON.parse(row.scope!) as unknown[]).length), [1], 'the token reaches what the page said, not prod');
-
-  // A binding the same: made with the scope of the plan Approve found, never left for the server to decide again.
-  const trust = TOOL_BY_NAME.get('trust_workload')!.change!;
-  const made: unknown[] = [];
-  const api = { bindings: { create: async (_member: string, input: unknown) => (made.push(input), { binding: { id: 'b1' }, replaced: [] }) } };
-  const args = { service: 'ci-deploy', profile: 'github', claims: { event_name: 'push' } };
-  await trust.apply(api as never, args as never, { replaced: { details: [], state: { scope: { 'market/dev': 'viewer' }, replaces: [] } } });
-  assert.deepEqual((made[0] as { scope: unknown }).scope, { 'market/dev': 'viewer' });
 });
 
-test("issue_service_token checks a scope it names as issuing would, before anyone is asked: the page shows only what would be issued", async () => {
-  const root = clientFor(deps, ROOT);
-  await root.members.add('token:ci-deploy');
-  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
-  await root.members.add(`user:${DEV}`, { role: 'admin' });
-  const token = await connect(DEV, 'read manage-access');
-  // Past the account: refused at the call, and no page asks the person about it.
-  const beyond = (await callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30, scope: { 'market/prod': 'viewer' } })).body.result!;
-  assert.equal(beyond.isError, true);
-  assert.match(beyond.content[0]!.text!, /at most what its account holds and what you could give it: not market\/prod/);
-  const unknown = (await callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30, scope: { 'shop/prod': 'viewer' } })).body.result!;
-  assert.match(unknown.content[0]!.text!, /no project "shop"/);
-  assert.equal((await approvalRows()).length, 0);
+test("a reference made, or pointed elsewhere, between Approve's read and its change refuses it in the vault too: the page showed none, or another", async () => {
+  const token = await connect('dev-web', 'read write');
+  const patch = async (body: Record<string, unknown>) => (await app.request('/api/secrets/market/prod', { method: 'PATCH', headers: asRoot, body: JSON.stringify(body) })).status;
+  assert.equal(await patch({ OTHER: 'other', LINK: { ref: 'market/prod/API_KEY' } }), 200);
+  for (const [key, between, reads] of [['NEW_KEY', { NEW_KEY: { ref: 'market/prod/API_KEY' } }, VALUE], ['LINK', { LINK: { ref: 'market/prod/OTHER' } }, 'other']] as const) {
+    const id = idOf(await callRaw(token, 'request_secret_value', { secret: `market/prod/${key}` }));
+    const shown = (await view(id)).body.approval;
+    app.beforeChange.next = async () => assert.equal(await patch(between), 200);
+    const decided = await decide(id, true, { value: 'v', shown });
+    assert.equal(app.beforeChange.next, null, 'the reference came between');
+    assert.equal(decided.status, 409, key);
+    assert.match(decided.body.message!, /changed since it was listed/);
+    assert.equal(await valueOf(key), reads, 'still the reference made between');
+    assert.equal((await view(id)).body.approval.status, 'pending');
+  }
+  // Read again, a reference is written over: the one the page shows now.
+  const id = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/LINK' }));
+  assert.ok((await view(id)).body.approval.details.some((line) => line.label === 'Now' && line.value === 'a reference to market/prod/OTHER'));
+  assert.equal((await decide(id, true, { value: 'v' })).body.status, 'approved');
+  assert.equal(await valueOf('LINK'), 'v');
+});
 
-  // Within it: the page says what the server would issue, and its dry run issues nothing.
-  await root.access.set('token:ci-deploy', { 'market/prod': 'developer' });
-  const id = idOf(await callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30, scope: { 'market/prod': 'viewer' } }));
+/**
+ * Can an approval be applied twice, or a change other than the one the page
+ * showed be applied under it? Each race lands between Approve's checks on
+ * the app and the vault's change: the vault, deciding on the approval's
+ * row as it reads it then, refuses the change, and writes nothing.
+ */
+test("Approve racing another Approve, a denial, the expiry, or the connection's end, between the page's checks and the change: the vault refuses it", async () => {
+  const token = await connect('dev-web', 'read write');
+  const races: [string, (id: string, shown: View) => Promise<void>, RegExp, string][] = [
+    // Its write moved the version on too: the change's own decision refuses it first (`stale`), the approval's second.
+    ['another Approve', async (id, shown) => assert.equal((await decide(id, true, { value: 'from-the-other-tab', shown })).body.status, 'approved'), /changed since it was listed|decided already/, 'from-the-other-tab'],
+    ['a denial', async (id, shown) => assert.equal((await decide(id, false, { shown })).body.status, 'denied'), /decided already/, VALUE],
+    ['the expiry', async (id) => void (await world.owner.execute(sql`UPDATE mcp_approvals SET expires_at = now() + interval '2 seconds' WHERE id = ${id}::uuid`)), /has expired/, VALUE],
+    ["the connection's end", async () => {
+      const [connection] = ((await (await app.request('/api/apps', { headers: fromPage('dev-web') })).json()) as { apps: { id: string }[] }).apps;
+      assert.equal((await app.request(`/api/apps/${connection!.id}`, { method: 'DELETE', headers: fromPage('dev-web') })).status, 200);
+    }, /disconnected/, VALUE],
+  ];
+  for (const [race, between, refused, left] of races) {
+    const id = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/API_KEY' }));
+    const shown = (await view(id)).body.approval;
+    app.beforeChange.next = async () => between(id, shown);
+    const decided = await decide(id, true, { value: 'from-this-tab', shown });
+    assert.equal(app.beforeChange.next, null, `${race} came between`);
+    assert.equal(decided.status, 409, race);
+    assert.match(decided.body.message!, refused, race);
+    assert.equal(await valueOf('API_KEY'), left, race);
+    // Set back for the next race.
+    if (left !== VALUE) assert.equal((await app.request('/api/secrets/market/prod', { method: 'PATCH', headers: asRoot, body: JSON.stringify({ API_KEY: VALUE }) })).status, 200);
+  }
+  assert.equal((await entries('secret.write')).filter((entry) => entry.detail.approval !== undefined && entry.detail.refused === undefined).length, 1, "one change made under an approval: the other tab's");
+});
+
+test('a value shown while the approval is denied in another tab: the person sees it, theirs to read, and the client hears it denied', async () => {
+  const token = await connect('dev-web', 'read');
+  const id = idOf(await callRaw(token, 'show_secret_value', { secret: 'market/prod/API_KEY' }));
   const shown = (await view(id)).body.approval;
-  assert.equal(shown.details.find((line) => line.label === 'Reaches')?.value, 'viewer on market/prod');
-  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, 'token:ci-deploy')), []);
-  // The account loses it before Approve: the page cannot say what would be issued, and nothing is.
-  await root.access.set('token:ci-deploy', { 'market/prod': null });
-  const stale = (await view(id)).body.approval;
-  assert.equal(stale.ready, false);
-  assert.match(stale.details.find((line) => line.label === 'Note')!.value, /could not read what this replaces: .*not market\/prod/);
-  assert.equal((await decide(id, true, { shown })).status, 503);
-  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, 'token:ci-deploy')), []);
+  app.beforeChange.next = async (input) => {
+    assert.equal((input as { op: string }).op, 'mcp.decide');
+    assert.equal((await decide(id, false, { shown })).body.status, 'denied');
+  };
+  const revealed = await decide(id, true, { shown });
+  assert.equal(revealed.status, 200);
+  assert.equal(revealed.body.status, 'denied');
+  assert.deepEqual(revealed.body.shown, [{ label: 'API_KEY', value: VALUE, kind: 'mono' }]);
+  assert.match(revealed.body.outcome.text, /could not record the approval/);
+  const told = await callRaw(token, 'show_secret_value', { secret: 'market/prod/API_KEY', approval: id });
+  assert.equal(told.body.result!.structuredContent!.status, 'denied');
+});
+
+test('a disconnected app\'s approvals can no longer be decided; one expired neither', async () => {
+  const token = await connect('dev-web', 'read write');
+  const id = idOf(await callRaw(token, 'request_secret_value', SET));
+  const shown = (await view(id)).body.approval;
+  await world.owner.execute(sql`UPDATE mcp_approvals SET expires_at = now() - interval '1 second' WHERE id = ${id}::uuid`);
+  assert.equal((await view(id)).body.approval.status, 'expired');
+  assert.equal((await decide(id, true, { value: 'v', shown })).status, 409);
+
+  const second = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/SECOND' }));
+  const [connection] = (await (await app.request('/api/apps', { headers: fromPage('dev-web') })).json() as { apps: { id: string }[] }).apps;
+  assert.equal((await app.request(`/api/apps/${connection!.id}`, { method: 'DELETE', headers: fromPage('dev-web') })).status, 200);
+  const gone = await view(second);
+  assert.equal(gone.status, 409);
+  assert.match(gone.body.message!, /disconnected/);
+  assert.equal(await valueOf('SECOND'), null);
 });
 
 test('a change the person could not make is refused before anyone is asked; without Write, the step-up starts', async () => {
-  const viewer = await connect(OTHER, 'read write');
-  const refused = await callRaw(viewer, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
-  assert.equal(refused.body.result!.isError, true);
-  assert.match(refused.body.result!.content[0]!.text!, /secret\.archive/);
-  assert.equal((await approvalRows()).length, 0);
-
-  const reading = await connect(DEV);
-  const stepUp = await callRaw(reading, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
-  assert.equal(stepUp.status, 403);
-  assert.equal((await approvalRows()).length, 0);
+  // Other views market/prod: the call fails as the API would, and no approval is opened.
+  const theirs = await callRaw(await connect('other-web', 'read write'), 'request_secret_value', SET);
+  assert.equal(theirs.body.result!.isError, true);
+  assert.match(theirs.body.result!.content[0]!.text!, /you need secret.write on market\/prod/);
+  assert.equal((await approvals()).length, 0);
+  const readOnly = await callRaw(await connect('dev-web', 'read'), 'request_secret_value', SET);
+  assert.equal(readOnly.status, 403);
+  assert.match(readOnly.headers.get('www-authenticate')!, /insufficient_scope.*scope="read write"/);
+  assert.equal((await approvals()).length, 0);
 });
 
-test('a 2025-era client makes changes through the link, as any client without URL elicitation (D62); a connection holds at most five waiting', async () => {
-  const token = await connect(DEV, 'read write');
-  const legacy = await client(token, 'legacy');
-  try {
-    const asked = (await legacy.callTool({ name: 'archive_secret', arguments: { secret: 'market/prod/OLD_KEY' } })) as Result;
-    assert.equal(asked.structuredContent!.status, 'pending', JSON.stringify(asked));
-    assert.equal(await archived('OLD_KEY'), false);
-    assert.equal((await decide((asked.structuredContent!.approval as { id: string }).id, true)).body.status, 'approved');
-    const reported = (await legacy.callTool({ name: 'archive_secret', arguments: { secret: 'market/prod/OLD_KEY' } })) as Result;
-    assert.equal(reported.structuredContent!.status, 'approved');
-    assert.equal(await archived('OLD_KEY'), true);
-  } finally {
-    await legacy.close();
-  }
-  for (let index = 0; index < 5; index += 1) {
-    const asked = await callRaw(token, 'create_environment', { environment: `market/env${index}` });
-    assert.equal(asked.body.result!.structuredContent!.status, 'pending');
-  }
-  const sixth = await callRaw(token, 'create_environment', { environment: 'market/env9' });
-  assert.equal(sixth.body.result!.isError, true);
-  assert.match(sixth.body.result!.content[0]!.text!, /5 changes are waiting/);
-});
-
-test('a create call that names its environment, as before 0.6.2, still matches its approval, and the name is not shown', async () => {
-  const token = await connect(DEV, 'read write');
-  const args = { environment: 'market/stage', name: 'Stage' };
-  const asked = (await callRaw(token, 'create_environment', args)).body.result!;
-  const { id } = asked.structuredContent!.approval as { id: string };
-  const shown = (await view(id)).body.approval;
-  assert.equal(shown.summary, 'create the environment market/stage');
-  assert.deepEqual(shown.details.map((line) => line.label), ['Environment']);
-  assert.equal((await decide(id, true)).body.status, 'approved');
-  assert.equal((await callRaw(token, 'create_environment', args)).body.result!.structuredContent!.status, 'approved');
-  const market = (await clientFor(deps, ROOT).projects.list()).projects.find((project) => project.slug === 'market')!;
-  assert.equal(market.environments.find((environment) => environment.slug === 'stage')?.name, 'stage');
-});
-
-test('create_environment with `inherits` makes a fork, its page saying what it inherits from', async () => {
-  const token = await connect(DEV, 'read write');
-  const args = { environment: 'market/prod-eu', inherits: 'prod' };
-  const { id } = (await callRaw(token, 'create_environment', args)).body.result!.structuredContent!.approval as { id: string };
-  const shown = (await view(id)).body.approval;
-  assert.equal(shown.summary, 'create the environment market/prod-eu, inheriting market/prod');
-  assert.deepEqual(shown.details.map((line) => [line.label, line.value]), [['Environment', 'market/prod-eu'], ['Inherits from', 'market/prod']]);
-  assert.match((await decide(id, true)).body.outcome.text, /is created, inheriting market\/prod/);
-  const listed = await clientFor(deps, ROOT).secrets.list('market/prod-eu');
-  assert.deepEqual([listed.parents, listed.keys.map((key) => [key.key, key.parent?.state])], [['prod'], [['API_KEY', 'inherited'], ['OLD_KEY', 'inherited']]]);
-});
-
-test('a disconnected app’s approvals can no longer be decided', async () => {
-  const token = await connect(DEV, 'read write');
-  const id = ((await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' })).body.result!.structuredContent!.approval as { id: string }).id;
-  const [approval] = await db.owner.select().from(mcpApprovals).where(eq(mcpApprovals.id, id));
-  const session = await sessionFor(DEV);
-  const disconnected = await route(`/api/apps/${approval!.connectionId}`, { method: 'DELETE', headers: { authorization: `Bearer ${session}` } });
-  assert.equal(disconnected.status, 200);
-  assert.equal((await view(id)).status, 409);
-  assert.equal(await archived('OLD_KEY'), false);
-});
-
-// --- W47's findings ----------------------------------------------------------
-
-/** An approval as a call would have opened it, for a tool this instance cannot check a call of (trust bindings are off here). */
-async function opened(email: string, tool: string, args: Record<string, unknown>): Promise<string> {
-  const [connection] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${email}`)).orderBy(desc(mcpConnections.createdAt)).limit(1);
-  const id = randomUUID();
-  await db.owner.insert(mcpApprovals).values({
-    id, connectionId: connection!.id, tool, arguments: JSON.stringify(args), digest: Buffer.from(callDigest(tool, args), 'hex'),
-    status: 'pending', createdAt: new Date(), expiresAt: new Date(Date.now() + 300_000),
-  });
-  return id;
-}
-
-test("trust_workload's page names each ID from GitHub or GitLab, says when it cannot, and shows the label as the app's (M1)", async () => {
-  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
-  await connect(DEV, 'read manage-access');
-  const notes = async (args: Record<string, unknown>) => {
-    const { details } = (await view(await opened(DEV, 'trust_workload', { service: 'ci-deploy', ...args }))).body.approval;
-    return Object.fromEntries(details.map((line) => [line.label, line.note ?? line.value]));
-  };
-
-  // The IDs a model picked, which name the attacker's project, whatever the label says.
-  documents.set('https://gitlab.com/api/v4/projects/55123', { id: 55123, path_with_namespace: 'attacker/web', namespace: { id: 81234, full_path: 'attacker' } });
-  const gitlab = await notes({ profile: 'gitlab', claims: { namespace_id: '81234', project_id: '55123', ref_type: 'branch', ref: 'main', pipeline_source: 'push' }, label: 'acme/web deploy' });
-  assert.equal(gitlab.project_id, 'the GitLab project attacker/web');
-  assert.equal(gitlab.namespace_id, 'the GitLab namespace attacker');
-  assert.equal(gitlab['The app calls it'], 'acme/web deploy');
-  assert.equal(gitlab.Label, undefined);
-
-  // Private, unknown, or not answered: the person is told to check the ID.
-  const unknown = await notes({ profile: 'gitlab', claims: { namespace_id: '77', project_id: '99', ref_type: 'branch', ref: 'main', pipeline_source: 'push' } });
-  assert.equal(unknown.project_id, 'private or unknown: check this ID yourself');
-  assert.equal(unknown.namespace_id, 'private or unknown: check this ID yourself');
-
-  documents.set('https://api.github.com/repositories/41532', { id: 41532, full_name: 'acme/web', owner: { id: 9919, login: 'acme' } });
-  const github = await notes({
-    profile: 'github',
-    claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/web/.github/workflows/deploy.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' },
-  });
-  assert.equal(github.repository_id, 'the GitHub repository acme/web');
-  assert.equal(github.repository_owner_id, 'the GitHub account acme');
-  documents.set('https://api.github.com/user/5150', { id: 5150, login: 'evil-org' });
-  const organization = await notes({
-    profile: 'github-reusable-organization',
-    claims: { repository_owner_id: '5150', ref: 'refs/heads/main', event_name: 'push', job_workflow_ref: 'acme/ci/.github/workflows/deploy.yml@refs/heads/main', job_workflow_sha: 'a'.repeat(40) },
-  });
-  assert.equal(organization.repository_owner_id, 'the GitHub account evil-org');
-
-  // Pull requests and workflow_run: the page says what they expose, as a line to check.
-  const ci = (await view(await opened(DEV, 'trust_workload', {
-    service: 'ci-deploy',
-    profile: 'github',
-    claims: { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/web/.github/workflows/ci.yml@refs/heads/main', ref: 'refs/heads/main', event_name: ['push', 'pull_request'] },
-  }))).body.approval.details.find((line) => line.label === 'event_name')!;
-  assert.equal(ci.value, 'push, pull_request');
-  assert.equal(ci.warn, true);
-  assert.match(ci.note!, /^Anyone who can push a branch to the repository can open a pull request/);
-  assert.equal((await view(await opened(DEV, 'trust_workload', { service: 'ci-deploy', profile: 'github', claims: { event_name: 'push' } }))).body.approval.details.find((line) => line.label === 'event_name')!.warn, undefined);
-});
-
-test('an approved change that never answered is reported failed, its outcome unknown, never as nothing changed; the person is warned before approving it again (L2)', async () => {
-  const token = await connect(DEV, 'read write');
-  const call = () => callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
-  const id = idOf(await call());
-  const set = (values: Partial<typeof mcpApprovals.$inferInsert>) => db.owner.update(mcpApprovals).set(values).where(eq(mcpApprovals.id, id));
-
-  // Approve committed, and its change has not answered yet.
-  await set({ status: 'approved', decidedAt: new Date() });
-  const making = (await call()).body.result!;
-  assert.equal(making.structuredContent!.status, 'pending');
-  assert.match(making.content[0]!.text!, /^The person approved this, and coffre is making the change/);
-  assert.doesNotMatch(JSON.stringify(making), /[Nn]othing (has )?changed/);
-
-  // A minute on, still no answer: the request died. Failed, outcome unknown, on every call that rejoins it.
-  await set({ decidedAt: new Date(Date.now() - 2 * 60_000) });
-  for (const _ of [1, 2]) {
-    const unknown = (await call()).body.result!;
-    assert.equal(unknown.isError, true);
-    assert.equal(unknown.structuredContent!.status, 'failed');
-    assert.equal(idOf({ body: { result: unknown } }), id);
-    assert.match(unknown.content[0]!.text!, /does not know whether the change was made/);
-    assert.doesNotMatch(JSON.stringify(unknown), /[Nn]othing (has )?changed/);
-  }
-  const page = (await view(id)).body.approval;
-  assert.equal(page.status, 'failed');
-  assert.equal(page.outcome?.error, 'unknown_outcome');
-
-  // Past the time a call may rejoin it, the same call asks anew, and its page says the first may have been made.
-  await set({ createdAt: new Date(Date.now() - 11 * 60_000) });
-  const again = idOf(await call());
-  assert.notEqual(again, id);
-  assert.equal((await view(again)).body.approval.details[0]!.label, 'Asked before');
-});
-
-test('identical calls at once open one approval, logged once, and a burst gets no more than five waiting (L3)', async () => {
-  const token = await connect(DEV, 'read write');
-  const same = await Promise.all(Array.from({ length: 6 }, () => callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' })));
+test('identical calls at once open one approval, and a connection holds at most five waiting', async () => {
+  const token = await connect('dev-web', 'read write');
+  const same = await Promise.all([1, 2, 3].map(() => callRaw(token, 'request_secret_value', SET)));
   assert.equal(new Set(same.map(idOf)).size, 1);
-  assert.equal((await approvalRows()).length, 1);
-  assert.equal((await entries('mcp.call')).length, 1);
-
-  const burst = await Promise.all(Array.from({ length: 8 }, (_, index) => callRaw(token, 'create_environment', { environment: `market/burst${index}` })));
-  assert.equal(burst.filter((result) => result.body.result!.structuredContent?.status === 'pending').length, 4);
-  assert.equal(burst.filter((result) => /5 changes are waiting/.test(result.body.result!.content[0]!.text!)).length, 4);
-  assert.equal((await approvalRows()).filter((row) => row.status === 'pending').length, 5);
+  const keys = ['A', 'B', 'C', 'D', 'E', 'F'].map((key) => `market/prod/KEY_${key}`);
+  const burst = await Promise.all(keys.map((secret) => callRaw(token, 'request_secret_value', { secret })));
+  assert.equal(burst.filter((call) => call.body.result!.isError === true).length, 2, 'five waiting: the first, and four of the burst');
+  assert.match(burst.find((call) => call.body.result!.isError === true)!.body.result!.content[0]!.text!, /5 changes are waiting for the person already/);
+  assert.equal((await approvals()).length, 5);
 });
 
-test('Approve refuses a change whose page is stale: a version set, or a role changed, since it was shown (L4)', async () => {
-  const token = await connect(DEV, 'read write');
-  const id = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/API_KEY' }));
+test("show_secret_value shows the value to the person on the page, on Read, and never to the client nor into a row", async () => {
+  const token = await connect('dev-web', 'read');
+  const asked = await callRaw(token, 'show_secret_value', { secret: 'market/prod/API_KEY' });
+  const id = idOf(asked);
   const shown = (await view(id)).body.approval;
-  assert.match(shown.basis!, /^[0-9a-f]{64}$/, 'a digest of version 1');
-  await clientFor(deps, ROOT).secrets.set('market/prod', { API_KEY: `meanwhile-${SECRET}` });
-  const stale = await decide(id, true, { value: 'typed', shown });
-  assert.equal(stale.status, 409);
-  assert.match(stale.body.message!, /changed since you opened it/);
-  assert.equal((await clientFor(deps, ROOT).secrets.reveal('market/prod/API_KEY')).values.API_KEY, `meanwhile-${SECRET}`, 'version 2 stands');
-  assert.deepEqual((await entries('mcp.approve')).map((entry) => [entry.decision, entry.metadata.reason]), [['deny', 'replaced']]);
-  // Opened again, the page shows version 2, and Approve goes through.
-  assert.equal((await decide(id, true, { value: 'typed' })).body.status, 'approved');
-
-  const root = await connect(ROOT, 'read manage-access');
-  const access = idOf(await callRaw(root, 'set_access', { member: `user:${OTHER}`, changes: { 'market/prod': 'auditor' } }));
-  const page = (await view(access, ROOT)).body.approval;
-  assert.ok(page.details.some((line) => line.label === 'market/prod' && line.value === 'viewer → auditor'));
-  await clientFor(deps, ROOT).access.set(`user:${OTHER}`, { 'market/prod': 'developer' });
-  assert.equal((await decide(access, true, { shown: page }, ROOT)).status, 409);
-  assert.equal((await approvalRows()).find((row) => row.id === access)!.status, 'pending');
-});
-
-test('approvals asked too long ago to rejoin are not read again, so they never count toward the five (L5)', async () => {
-  const token = await connect(DEV, 'read write');
-  for (let index = 0; index < 5; index += 1) await callRaw(token, 'create_environment', { environment: `market/env${index}` });
-  // Rows that still say pending, as if their expiry were far off, but asked eleven minutes ago.
-  await db.owner.update(mcpApprovals).set({ createdAt: new Date(Date.now() - 11 * 60_000), expiresAt: new Date(Date.now() + 60_000) });
-  const sixth = await callRaw(token, 'create_environment', { environment: 'market/env9' });
-  assert.equal(sixth.body.result!.structuredContent!.status, 'pending');
-});
-
-test("only the browser's session decides an approval: the CLI's is refused, sent either way, and another site's page is refused before any read (I1, I3)", async () => {
-  const token = await connect(DEV, 'read write');
-  const id = idOf(await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }));
-  const { approval } = (await view(id)).body;
-  const cli = await sessionFor(DEV);
-  for (const headers of [{ authorization: `Bearer ${cli}` }, fromPage(cli)]) {
-    const read = await route(`/api/approvals/${id}`, { headers });
-    assert.equal(read.status, 403);
-    assert.match(((await read.json()) as { message: string }).message, /signed in in your browser/);
-    const decided = await route(`/api/approvals/${id}`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ approve: true, digest: approval.digest }) });
-    assert.equal(decided.status, 403);
-  }
-  const crossSite = await route(`/api/approvals/${id}`, { headers: fromPage(await browserFor(DEV), { 'sec-fetch-site': 'cross-site' }) });
-  assert.equal(crossSite.status, 403);
-  assert.match(((await crossSite.json()) as { message: string }).message, /must come from coffre itself/);
-  assert.equal(await archived('OLD_KEY'), false);
-  assert.equal((await approvalRows())[0]!.status, 'pending');
-});
-
-test('the decision reads the approval and its connection again as it commits: expired or disconnected meanwhile, it is refused (I3)', async () => {
-  const token = await connect(DEV, 'read write');
-  const change = TOOL_BY_NAME.get('request_secret_value')!.change!;
-  const replaces = change.replaces!;
-  const during = async (id: string, meanwhile: () => Promise<unknown>) => {
-    const shown = (await view(id)).body.approval;
-    // Between the first checks and the decision's transaction: while Approve reads what the change replaces.
-    change.replaces = async (api, args) => {
-      await meanwhile();
-      return replaces(api, args);
-    };
-    try {
-      return await decide(id, true, { value: 'typed', shown });
-    } finally {
-      change.replaces = replaces;
-    }
-  };
-
-  const expiring = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/NEW_KEY' }));
-  const expired = await during(expiring, () => db.owner.update(mcpApprovals).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(mcpApprovals.id, expiring)));
-  assert.equal(expired.status, 409);
-  assert.match(expired.body.message!, /expired already/);
-
-  const disconnecting = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/API_KEY' }));
-  const [row] = await db.owner.select().from(mcpApprovals).where(and(eq(mcpApprovals.id, disconnecting)));
-  const session = await sessionFor(DEV);
-  const disconnected = await during(disconnecting, () => route(`/api/apps/${row!.connectionId}`, { method: 'DELETE', headers: { authorization: `Bearer ${session}` } }));
-  assert.equal(disconnected.status, 409);
-  assert.match(disconnected.body.message!, /disconnected/);
-  assert.deepEqual((await entries('secret.write')).filter((entry) => entry.actor === `user:${DEV}`), [], 'nothing written');
-});
-
-test('a change the person could not make is refused before anyone is asked, for every tool: admins and owners only, and access where they manage it (I3)', async () => {
-  const dev = await connect(DEV, 'read write manage-access');
-  const owners: [string, Record<string, unknown>][] = [
-    ['create_project', { project: 'shop' }],
-    ['admit_member', { member: 'user:new@acme.example' }],
-    ['offboard_member', { member: `user:${OTHER}` }],
-  ];
-  for (const [tool, args] of owners) {
-    const refused = (await callRaw(dev, tool, args)).body.result!;
-    assert.equal(refused.isError, true, tool);
-    assert.match(refused.content[0]!.text!, /only an admin or owner (of the whole instance|whose scope takes in new projects) can do this/, tool);
-  }
-  // A service account's tools, for one it does not manage: it holds what DEV does not, or holds nothing DEV gave it.
-  const services: [string, Record<string, unknown>][] = [
-    ['issue_service_token', { service: 'ci-deploy', expiresInDays: 1 }],
-    ['revoke_service_token', { service: 'ci-deploy', id: randomUUID() }],
-    ['untrust_workload', { service: 'ci-deploy', id: randomUUID() }],
-    ['offboard_member', { member: 'service:ci-deploy' }],
-  ];
-  for (const [tool, args] of services) {
-    const refused = (await callRaw(dev, tool, args)).body.result!;
-    assert.equal(refused.isError, true, tool);
-    assert.match(refused.content[0]!.text!, /you do not manage service:ci-deploy/, tool);
-  }
-  const viewer = await connect(OTHER, 'read write manage-access');
-  const access = (await callRaw(viewer, 'set_access', { member: `user:${DEV}`, changes: { market: 'viewer' } })).body.result!;
-  assert.match(access.content[0]!.text!, /you need grant\.manage on market/);
-  const environment = (await callRaw(viewer, 'create_environment', { environment: 'market/stage' })).body.result!;
-  assert.match(environment.content[0]!.text!, /you need environment\.manage on market/);
-  assert.equal((await approvalRows()).length, 0);
-});
-
-// --- W49's findings on the fixes -----------------------------------------------
-
-test("trust_workload names IDs only from github.com and gitlab.com: an issuer the app names is flagged, and never asked (M1)", async () => {
-  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
-  await connect(DEV, 'read manage-access');
-  // The attacker's own GitLab would name its project anything.
-  documents.set('https://attacker.example/api/v4/projects/55123', { id: 55123, path_with_namespace: 'acme/web', namespace: { id: 81234, full_path: 'acme' } });
-  const id = await opened(DEV, 'trust_workload', {
-    service: 'ci-deploy', profile: 'gitlab', issuer: 'https://attacker.example',
-    claims: { namespace_id: '81234', project_id: '55123', ref_type: 'branch', ref: 'main', pipeline_source: 'push' },
-  });
-  const { details } = (await view(id)).body.approval;
-  const line = (label: string) => details.find((entry) => entry.label === label)!;
-  assert.equal(line('project_id').note, "coffre can't check this host: check this ID yourself");
-  assert.equal(line('namespace_id').note, "coffre can't check this host: check this ID yourself");
-  assert.equal(line('Runs from').value, 'https://attacker.example');
-  assert.match(line('Runs from').note!, /Not GitHub's or GitLab's own/);
-  assert.equal((line('Runs from') as { warn?: boolean }).warn, true);
-  assert.doesNotMatch(JSON.stringify(details), /acme\/web/);
-  assert.deepEqual(fetched, [], 'the host the app named was never asked');
-});
-
-test('the basis Approve compares is the state the page showed, read once: a version set while the page was made refuses Approve (L4)', async () => {
-  const token = await connect(DEV, 'read write');
-  const id = idOf(await callRaw(token, 'request_secret_value', { secret: 'market/prod/API_KEY' }));
-  const before = (await view(id)).body.approval.basis;
-  const change = TOOL_BY_NAME.get('request_secret_value')!.change!;
-  const preview = change.preview;
-  // Version 2 lands after what it replaces was read, while the rest of the page is made.
-  change.preview = async (...args) => {
-    const details = await preview(...args);
-    await clientFor(deps, ROOT).secrets.set('market/prod', { API_KEY: `meanwhile-${SECRET}` });
-    return details;
-  };
-  let shown: View;
-  try {
-    shown = (await view(id)).body.approval;
-  } finally {
-    change.preview = preview;
-  }
-  assert.ok(shown.details.some((line) => line.label === 'Now' && /^version 1,/.test(line.value)));
-  assert.equal(shown.basis, before, 'the basis of version 1, which the page showed');
-  assert.equal((await decide(id, true, { value: 'typed', shown })).status, 409);
-  assert.equal((await clientFor(deps, ROOT).secrets.reveal('market/prod/API_KEY')).values.API_KEY, `meanwhile-${SECRET}`);
-});
-
-test('a change made whose outcome is not stored reads as being made, then unknown, never failed, and is never reported (L2)', async () => {
-  await clientFor(deps, ROOT).members.add('token:ci-deploy');
-  await holdSomething(db.owner, deps.vault, 'token:ci-deploy', `user:${ROOT}`);
-  await clientFor(deps, ROOT).members.add(`user:${DEV}`, { role: 'admin' });
-  const token = await connect(DEV, 'read manage-access');
-  const call = () => callRaw(token, 'issue_service_token', { service: 'ci-deploy', expiresInDays: 30 });
-  const id = idOf(await call());
-  const change = TOOL_BY_NAME.get('issue_service_token')!.change!;
-  const apply = change.apply;
-  const update = deps.db.update;
-  // The token is issued; then the database blips, once, as the outcome is written.
-  change.apply = async (...args) => {
-    const applied = await apply(...args);
-    deps.db.update = (() => {
-      deps.db.update = update;
-      throw new Error('database blip');
-    }) as typeof update;
-    return applied;
-  };
-  let decided: Awaited<ReturnType<typeof decide>>;
-  try {
-    decided = await decide(id, true);
-  } finally {
-    change.apply = apply;
-    deps.db.update = update;
-  }
-  assert.equal(decided.body.status, 'approved', 'the page hears it was made');
-  assert.match(decided.body.shown.find((line) => line.label === 'Token')!.value, /^coffre_svc_/, 'and sees the token, once');
-  const [row] = await db.owner.select().from(mcpApprovals).where(eq(mcpApprovals.id, id));
-  assert.deepEqual([row!.status, row!.outcome], ['approved', null]);
-
-  assert.match((await call()).body.result!.content[0]!.text!, /^The person approved this, and coffre is making the change/);
-  await db.owner.update(mcpApprovals).set({ decidedAt: new Date(Date.now() - 2 * 60_000) }).where(eq(mcpApprovals.id, id));
-  const unknown = (await call()).body.result!;
-  assert.equal(unknown.structuredContent!.status, 'failed');
-  assert.match(unknown.content[0]!.text!, /does not know whether the change was made/);
-  assert.doesNotMatch(unknown.content[0]!.text!, /could not make the change/);
-  const [after] = await db.owner.select().from(mcpApprovals).where(eq(mcpApprovals.id, id));
-  assert.equal(after!.reportedAt, null, 'never heard as an end');
-});
-
-test("set_access takes places as the API reads them, and no grant on every project, from anyone, up front (I3)", async () => {
-  const root = await connect(ROOT, 'read manage-access');
-  const asked = await callRaw(root, 'set_access', { member: `user:${OTHER}`, changes: { market: 'viewer', ' /market/prod/ ': 'auditor' } });
-  assert.equal(asked.body.result!.structuredContent!.status, 'pending', JSON.stringify(asked.body.result));
-  const { details } = (await view(idOf(asked), ROOT)).body.approval;
-  assert.ok(details.some((line) => line.label === ' /market/prod/ ' && line.value === 'viewer → auditor'), 'the grant held there, found');
-  assert.ok(details.some((line) => line.label === 'market' && line.value === 'nothing → viewer'));
-
-  // A person reaches every project by their instance role: `*` is no project, whoever asks.
-  for (const [who, client] of [[ROOT, root], [OTHER, await connect(OTHER, 'read write manage-access')]] as const) {
-    for (const place of ['*', '*/prod']) {
-      const refused = (await callRaw(client, 'set_access', { member: `user:${DEV}`, changes: { [place]: 'viewer' } })).body.result!;
-      assert.equal(refused.isError, true, `${who} ${place}`);
-      assert.match(refused.content[0]!.text!, /grants are on a project or an environment: a person reaches every project by their instance role/, place);
-    }
-  }
-});
-
-test('admit_member as an instance role says what the role holds as the instance defines it now, an Owner\'s edit included', async () => {
-  await clientFor(deps, ROOT).roles.set('auditor', { name: 'Auditor', description: 'Reads the log, and values too.', permissions: ['audit.read', 'secret.read', 'secret.use'], protected: ['audit.read'] }, { instance: true });
-  const root = await connect(ROOT, 'read manage-access');
-  const id = idOf(await callRaw(root, 'admit_member', { member: 'user:bob@acme.example', role: 'auditor' }));
-  const as = (await view(id, ROOT)).body.approval.details.find((line) => line.label === 'As')?.value;
-  assert.equal(as, 'Auditor: Reads the log, and values too. Holds secret.read, secret.use, audit.read; in a protected environment, audit.read.');
-  // Approved as shown, it admits Bob as that.
-  assert.equal((await decide(id, true, {}, ROOT)).status, 200);
-  assert.ok((await clientFor(deps, ROOT).members.list()).members.some((member) => member.principalId === 'bob@acme.example'));
-});
-
-test('admit_member as an instance role an Owner edits after the page showed it is refused: Approve gives what the page said, or nothing', async () => {
-  const root = await connect(ROOT, 'read manage-access');
-  const id = idOf(await callRaw(root, 'admit_member', { member: 'user:bob@acme.example', role: 'auditor' }));
-  const shown = (await view(id, ROOT)).body.approval;
-  await clientFor(deps, ROOT).roles.set('auditor', { name: 'Auditor', description: 'Reads the log, and values too.', permissions: ['audit.read', 'secret.read', 'secret.use'], protected: ['audit.read'] }, { instance: true });
-  assert.equal((await decide(id, true, { shown }, ROOT)).status, 409);
-  assert.equal((await clientFor(deps, ROOT).members.list()).members.some((member) => member.principalId === 'bob@acme.example'), false);
-});
-
-test('admit_member makes a service account with its first grant in one approval: the page shows the grant, and Approve makes both', async () => {
-  const root = await connect(ROOT, 'read manage-access');
-  const id = idOf(await callRaw(root, 'admit_member', { member: 'service:ci-new', access: { 'market/prod': 'viewer' } }));
-  const shown = (await view(id, ROOT)).body.approval;
-  assert.ok(shown.details.some((line) => line.label === 'market/prod' && line.value === 'nothing → viewer'), JSON.stringify(shown.details));
-  const decided = await decide(id, true, { shown }, ROOT);
-  assert.equal(decided.status, 200, JSON.stringify(decided.body));
-  assert.deepEqual((await clientFor(deps, ROOT).members.access('token:ci-new')).grants.map((grant) => [grant.project, grant.environment, grant.role]), [['market', 'prod', 'viewer']]);
-
-  // Access with a role or a scope, or for a person, is refused before anyone is asked: the page would show what Approve never makes.
-  const before = (await approvalRows()).length;
-  for (const args of [
-    { member: 'service:ci-owner', role: 'owner', access: { market: 'viewer' } },
-    { member: 'service:ci-scoped', scope: { projects: 'all' }, access: { market: 'viewer' } },
-    { member: 'user:eve@acme.example', access: { market: 'viewer' } },
-  ]) {
-    const refused = (await callRaw(root, 'admit_member', args)).body.result!;
-    assert.equal(refused.isError, true, JSON.stringify(args));
-    assert.match(refused.content[0]!.text!, /access comes with a service account, and no role or scope/);
-  }
-  assert.equal((await approvalRows()).length, before);
-});
-
-test("the decision moves an approval only while it is unexpired by the database's clock as the write runs (I3)", async () => {
-  const token = await connect(DEV, 'read write');
-  const id = idOf(await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' }));
-  await db.owner.update(mcpApprovals).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(mcpApprovals.id, id));
-  assert.equal(await decideApproval(deps.db, id, 'approved'), 0, 'expired: no write');
-  await db.owner.update(mcpApprovals).set({ expiresAt: new Date(Date.now() + 60_000) }).where(eq(mcpApprovals.id, id));
-  assert.equal(await decideApproval(deps.db, id, 'approved'), 1);
-  assert.equal(await decideApproval(deps.db, id, 'approved'), 0, 'decided once');
-});
-
-test("set_access's page and basis carry each grant's end: shortened since it was shown, Approve is refused (L4)", async () => {
-  const root = await connect(ROOT, 'read manage-access');
-  const id = idOf(await callRaw(root, 'set_access', { member: `user:${OTHER}`, changes: { 'market/prod': 'auditor' } }));
-  const shown = (await view(id, ROOT)).body.approval;
-  await clientFor(deps, ROOT).access.set(`user:${OTHER}`, { 'market/prod': { role: 'viewer', until: '2099-01-01' } });
-  assert.equal((await decide(id, true, { shown }, ROOT)).status, 409);
-  const again = (await view(id, ROOT)).body.approval;
-  assert.ok(again.details.some((line) => line.label === 'market/prod' && /^viewer until 2099-01-01.* → auditor$/.test(line.value)), JSON.stringify(again.details));
-});
-
-test("set_access's basis is a digest, as long for fifty expiring grants as for one, and Approve takes it (L4)", async () => {
-  const root = clientFor(deps, ROOT);
-  const places = Array.from({ length: 50 }, (_, index) => `market/place-${index}`);
-  for (const place of places) await root.environments.create(place, { name: place });
-  await root.access.set(`user:${OTHER}`, Object.fromEntries(places.map((place) => [place, { role: 'viewer', until: '2099-01-01' }])));
-  const token = await connect(ROOT, 'read manage-access');
-  const id = idOf(await callRaw(token, 'set_access', { member: `user:${OTHER}`, changes: Object.fromEntries(places.map((place) => [place, 'auditor'])) }));
-  const shown = (await view(id, ROOT)).body.approval;
-  assert.equal(shown.details.filter((line) => / until 2099-01-01.* → auditor$/.test(line.value)).length, 50, 'the page still reads each grant');
-  assert.match(shown.basis!, /^[0-9a-f]{64}$/);
-  const decided = await decide(id, true, { shown }, ROOT);
-  assert.equal(decided.status, 200, JSON.stringify(decided.body));
-  assert.equal(decided.body.status, 'approved');
-});
-
-test('what a change replaces, unread on the page or on Approve, approves nothing: the page says so, and Approve is refused (L4)', async () => {
-  // An access manager of market, whose list of members asks the vault where they set up service accounts.
-  const MANAGER = 'manager@acme.example';
-  const root = clientFor(deps, ROOT);
-  await root.members.add(`user:${MANAGER}`);
-  await root.access.set(`user:${MANAGER}`, { market: 'access-manager' });
-  const manager = await connect(MANAGER, 'read manage-access');
-  const id = idOf(await callRaw(manager, 'set_access', { member: `user:${OTHER}`, changes: { 'market/prod': 'auditor' } }));
-  const settings = deps.vault.settings;
-  const failing = async <T>(work: () => Promise<T>): Promise<T> => {
-    deps.vault.settings = async () => {
-      throw new Error('vault unreachable');
-    };
-    try {
-      return await work();
-    } finally {
-      deps.vault.settings = settings;
-    }
-  };
-  const held = async () => (await clientFor(deps, ROOT).members.list()).members.find((entry) => entry.member === `user:${OTHER}`)!.grants.map((grant) => grant.role);
-
-  // The vault fails while the page reads the member's roles: it can't be approved, and a null basis is refused.
-  const blind = await failing(() => view(id, MANAGER));
-  assert.equal(blind.body.approval.ready, false);
-  assert.equal(blind.body.approval.basis, null);
-  const unread = await decide(id, true, { shown: blind.body.approval }, MANAGER);
-  assert.equal(unread.status, 409);
-  assert.match(unread.body.message!, /could not read what this replaces/);
-
-  // Read on the page, then the vault fails as Approve reads them again: refused, to retry.
-  const shown = (await view(id, MANAGER)).body.approval;
-  assert.equal(shown.ready, true);
-  const retry = await failing(() => decide(id, true, { shown }, MANAGER));
-  assert.equal(retry.status, 503);
-  assert.match(retry.body.message!, /try again/);
-  assert.deepEqual(await held(), ['viewer'], 'nothing applied');
-  assert.deepEqual((await entries('mcp.approve')).map((entry) => [entry.decision, entry.metadata.reason]), [['deny', 'unconfirmed'], ['deny', 'unconfirmed']]);
-
-  // Read on both sides: approved.
-  assert.equal((await decide(id, true, { shown }, MANAGER)).body.status, 'approved');
-  assert.deepEqual(await held(), ['auditor']);
+  assert.deepEqual([shown.kind, shown.asks, shown.ready], ['reveal', null, true]);
+  assert.ok(!JSON.stringify(shown).includes(VALUE), 'the page shows no value before Reveal');
+  const revealed = await decide(id, true, { shown });
+  assert.equal(revealed.body.status, 'approved');
+  assert.deepEqual(revealed.body.shown, [{ label: 'API_KEY', value: VALUE, kind: 'mono' }]);
+  assert.ok(!JSON.stringify(revealed.body.outcome).includes(VALUE));
+  assert.equal((await entries('mcp.approve')).length, 1);
+  const told = await callRaw(token, 'show_secret_value', { secret: 'market/prod/API_KEY', approval: id });
+  assert.equal(told.body.result!.structuredContent!.status, 'approved');
+  assert.match(told.body.result!.content[0]!.text!, /shown to the person on coffre .* It was not sent here\./);
+  assert.ok(!JSON.stringify(told.body).includes(VALUE));
+  assert.ok((await approvals()).every((row) => !JSON.stringify(row).includes(VALUE)));
+  // The read is the person's, on their session, as any reveal on the page is.
+  const [read] = await entries('secret.read');
+  assert.equal(read!.actor, dev);
 });

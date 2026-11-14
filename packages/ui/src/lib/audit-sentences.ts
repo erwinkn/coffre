@@ -459,6 +459,8 @@ const TEMPLATES: Record<string, Template> = {
   'mcp.connect': { did: 'connected', tried: 'connect', what: ({ entry }) => app(entry) },
   // A tool an MCP client called, by its name, and the places it named.
   'mcp.call': { did: 'used', tried: 'use', what: ({ entry }) => tool(entry), then: ({ entry }) => via(entry) },
+  // A change an MCP client asked for, on its access token (0.16): it waits for the person's approval.
+  'mcp.ask': { did: 'was asked by an app for', tried: 'be asked by an app for', what: ({ entry }) => tool(entry) },
   // A person's decision, on coffre's page, on a change an MCP client asked for; the change's own entries follow, via the client.
   'mcp.approve': { did: 'approved', tried: 'approve', what: ({ entry }) => tool(entry), then: ({ entry }) => [` for ${text(entry.metadata.clientName) ?? 'an app'}`] },
   'mcp.deny': { did: 'turned down', tried: 'turn down', what: ({ entry }) => tool(entry), then: ({ entry }) => [` for ${text(entry.metadata.clientName) ?? 'an app'}`] },

@@ -91,8 +91,13 @@ export type ReferenceView = {
 /** An environment's key as its list shows it: no value. */
 type ListedKey = {
   key: string;
-  /** The reference it is, when it has no value of its own, and whether the caller lists its source's environment. */
-  reference: (ReferenceView & { canOpenSource: boolean }) | null;
+  /**
+   * The reference it is, when it has no value of its own, and whether the
+   * caller lists its source's environment; the source by its id too, which
+   * a value written over it names to replace that reference and no other
+   * (`replaces` in @coffre/core/changes/secrets).
+   */
+  reference: (ReferenceView & { sourceId: string; canOpenSource: boolean }) | null;
   folder: string | null;
   archived: boolean;
   /** Its own current version; a reference has none, and reads its source's. */
@@ -325,7 +330,7 @@ export const keyRoutes = {
         const sourceAt = source === undefined ? undefined : environments.get(source.environmentId);
         return {
           key: row.key,
-          reference: reference === null ? null : { ...reference, canOpenSource: sourceAt !== undefined && lists(who, placeAt({ id: source!.projectId }, sourceAt, environments)) },
+          reference: reference === null ? null : { ...reference, sourceId: row.sourceId!, canOpenSource: sourceAt !== undefined && lists(who, placeAt({ id: source!.projectId }, sourceAt, environments)) },
           folder: row.folder,
           archived: row.archived,
           version: row.currentVersion,

@@ -783,7 +783,8 @@ export const oauthClients = pgTable(
  * never a value: the page shows what they would do and, on Approve, does it,
  * once, as the person, through the connection. Its digest is of the tool
  * and arguments, which the page sends back with the decision, so what runs
- * is what the person read. No MAC: a row changes nothing by itself.
+ * is what the person read. The vault writes it, and the change approved
+ * marks it in the same write. No MAC: a row changes nothing by itself.
  */
 export const mcpApprovals = pgTable(
   'mcp_approvals',
@@ -796,15 +797,13 @@ export const mcpApprovals = pgTable(
     arguments: text().notNull(),
     // SHA-256 of the canonical JSON of the tool and its arguments.
     digest: bytea().notNull(),
-    // pending, approved, denied, cancelled or failed; a pending one past its expiry has expired.
+    // pending, approved or denied (0.14 wrote cancelled and failed too); a pending one past its expiry has expired.
     status: text().notNull(),
-    // JSON: what the change answered, or why it failed. Never a value.
+    // 0.14's: what the change answered. 0.16 writes none: its status and when it was decided say it.
     outcome: text(),
     createdAt: at('created_at').notNull(),
     expiresAt: at('expires_at').notNull(),
     decidedAt: at('decided_at'),
-    // When the client read the outcome: an identical call after that asks again.
-    reportedAt: at('reported_at'),
   },
   (table) => [
     check('mcp_approvals_status_check', sql`${table.status} IN ('pending', 'approved', 'denied', 'cancelled', 'failed')`),
@@ -816,8 +815,8 @@ export const mcpApprovals = pgTable(
       columns: [table.connectionId],
       foreignColumns: [credentials.id],
     }).onDelete('cascade'),
-    // A connection's approvals its client has not yet heard the end of: the ones a call rejoins, and the five it may wait on.
-    index('mcp_approvals_open_idx').on(table.connectionId, table.digest).where(sql`${table.reportedAt} IS NULL`),
+    // A connection's approvals: the five it may wait on, the one a call joins, and the same call decided before.
+    index('mcp_approvals_open_idx').on(table.connectionId, table.digest),
   ],
 );
 

@@ -529,10 +529,16 @@ SELECT id, 'mcp', refresh_hash, refresh_previous_hash, code_hash, generation, pr
 --> statement-breakpoint
 DELETE FROM mcp_approvals WHERE connection_id NOT IN (SELECT id FROM credentials WHERE kind = 'mcp');
 --> statement-breakpoint
+-- The vault writes approvals, and a client hears one by its id, read again as often as it likes: nothing marks it heard.
+DROP INDEX mcp_approvals_open_idx;
+--> statement-breakpoint
 ALTER TABLE mcp_approvals
     DROP CONSTRAINT mcp_approvals_connection_fkey,
     ADD CONSTRAINT mcp_approvals_connection_fkey FOREIGN KEY (connection_id) REFERENCES credentials (id) ON DELETE CASCADE,
-    ALTER COLUMN status DROP DEFAULT;
+    ALTER COLUMN status DROP DEFAULT,
+    DROP COLUMN reported_at;
+--> statement-breakpoint
+CREATE INDEX mcp_approvals_open_idx ON mcp_approvals (connection_id, digest);
 --> statement-breakpoint
 DROP TABLE mcp_connections;
 --> statement-breakpoint

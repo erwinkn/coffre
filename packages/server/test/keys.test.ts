@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
 import { credential, dismissed, emptyDatabase, environment, grant, principal, project, rewrite, role, rows, secret, user, value, write } from '@coffre/vault/testing';
+import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import { versionOf } from '../src/api/routes/secrets.ts';
@@ -118,7 +119,9 @@ test("an environment's keys: no value but a plain one's, each key readable as 0.
   const [a, , c, , r] = listed.keys;
   assert.deepEqual([a!.updatedBy !== null, typeof a!.versionId, c!.archived, r!.folder], [true, 'string', true, 'links']);
   // A reference: its source, read live, as old as the version it reads.
-  assert.deepEqual({ ...r!.reference, id: undefined }, { id: undefined, holder: 'market/prod/R', source: 'market/prod/A', state: 'live', version: 1, createdBy: null, createdAt: null, endedBy: null, endedAt: null, canOpenSource: true });
+  // Its source by its id too, which a value written over it says it replaces (`replaces: { source }`).
+  const [held] = await rowsOf<{ source: string }>(world.owner, sql`SELECT source_id::text AS source FROM secrets WHERE key = 'R'`);
+  assert.deepEqual({ ...r!.reference, id: undefined }, { id: undefined, holder: 'market/prod/R', source: 'market/prod/A', sourceId: held!.source, state: 'live', version: 1, createdBy: null, createdAt: null, endedBy: null, endedAt: null, canOpenSource: true });
   assert.equal(r!.updatedAt, a!.updatedAt);
   assert.deepEqual([listed.permissions, listed.parents, listed.personal, listed.protected, listed.unprotectable, listed.loosenable, listed.rotateAfterDays], [['secret.read'], [], null, false, false, false, 365]);
 

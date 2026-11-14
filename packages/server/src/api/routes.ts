@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 
+import { approvalRoutes } from './routes/approvals.ts';
 import { auditRoutes } from './routes/audit.ts';
 import { bindingRoutes } from './routes/bindings.ts';
 import { freezeRoutes } from './routes/freezes.ts';
@@ -19,7 +20,7 @@ import { unservedRoutes } from './routes/unserved.ts';
  * The API, as `METHOD /route`: every area's routes. An area adds its list here, and nothing else of the router.
  * Those not served yet come first, so that an area serving one replaces it.
  */
-export const routes = { ...unservedRoutes, ...meRoutes, ...placeRoutes, ...secretRoutes, ...keyRoutes, ...memberRoutes, ...bindingRoutes, ...roleRoutes, ...settingsRoutes, ...freezeRoutes, ...signinRoutes, ...tokenRoutes, ...oauthRoutes, ...auditRoutes };
+export const routes = { ...unservedRoutes, ...meRoutes, ...placeRoutes, ...secretRoutes, ...keyRoutes, ...memberRoutes, ...bindingRoutes, ...roleRoutes, ...settingsRoutes, ...freezeRoutes, ...signinRoutes, ...tokenRoutes, ...oauthRoutes, ...auditRoutes, ...approvalRoutes };
 
 export type Routes = typeof routes;
 export type RouteKey = keyof Routes;

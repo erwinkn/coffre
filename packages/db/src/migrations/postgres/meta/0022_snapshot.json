@@ -2090,12 +2090,6 @@
           "type": "timestamp (3) with time zone",
           "primaryKey": false,
           "notNull": false
-        },
-        "reported_at": {
-          "name": "reported_at",
-          "type": "timestamp (3) with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -2116,7 +2110,6 @@
             }
           ],
           "isUnique": false,
-          "where": "\"mcp_approvals\".\"reported_at\" IS NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}

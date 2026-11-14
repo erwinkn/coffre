@@ -1,4 +1,4 @@
-import { PURPOSES, type Answers, type Asked, type Change, type McpUnasked, type Unasked, type UseInput, type Vault, type WorkloadsUnasked } from '@coffre/core/vault';
+import { PURPOSES, type Answers, type Asked, type Change, type McpUnasked, type Presented, type Unasked, type UseInput, type Vault, type WorkloadsUnasked } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
 import type { ResolvedVaultConfig } from './config.ts';
@@ -6,6 +6,7 @@ import { caller } from './caller.ts';
 import { change, weigh, type Operation, type Parts } from './change.ts';
 import { OPERATIONS } from './ops/index.ts';
 import { presented, text } from './ops/input.ts';
+import { through } from './ops/via.ts';
 import { keyOf } from './rows.ts';
 import { memoryOf, peek, use, type Ask, type Serving } from './use.ts';
 
@@ -71,7 +72,11 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
     if (!Object.hasOwn(OPERATIONS, input.op)) throw new TypeError('a change names an operation the contract has');
     // The registry holds each operation under its own name: what it answers is that name's.
     const made = OPERATIONS[input.op] as unknown as (input: Asked<O>, vault: Deciding) => Operation<Parts, Answers[O], unknown>;
-    return made(input, { workloads: serving.workloads, owners: prepared.owners });
+    const operation = made(input, { workloads: serving.workloads, owners: prepared.owners });
+    // A change a person approved for an MCP connection: the same operation, the connection read and named beside it.
+    if (!('via' in input) || input.via === undefined) return operation;
+    if (Object.hasOwn(UNASKED, input.op)) throw new TypeError('a change nobody asks is made for no connection');
+    return through(operation, input.via, presented(input as unknown as Presented).token);
   };
   return {
     async use(input) {

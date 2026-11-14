@@ -68,7 +68,8 @@ for (const mode of ['modern', 'legacy'] as const) {
       const { tools } = await mcp.listTools();
       // A viewer's: the tools their role reaches somewhere, the one that reveals values among them, though this
       // connection holds Read alone, so that a client steps up for it; and those for the service accounts they may set up.
-      assert.deepEqual(tools.map((tool) => tool.name), ['whoami', 'list_projects', 'list_secrets', 'secret_history', 'list_access', 'describe_member', 'reveal_secret_values']);
+      // And the one that shows a value to the person alone, through an approval: Read too.
+      assert.deepEqual(tools.map((tool) => tool.name), ['whoami', 'list_projects', 'list_secrets', 'secret_history', 'list_access', 'describe_member', 'reveal_secret_values', 'show_secret_value']);
       assert.ok(tools.every((tool) => tool.annotations?.readOnlyHint === true && tool.annotations.openWorldHint === false));
       // No tool takes a value: an agent cannot supply one.
       assert.ok(tools.every((tool) => !JSON.stringify(tool.inputSchema).includes('"value"')), 'no input named value');
@@ -317,7 +318,8 @@ async function listFor(token: string): Promise<{ names: string[]; legacy: string
 }
 
 const ANYONE = ['whoami', 'list_projects'];
-const READS = ['list_secrets', 'secret_history', 'reveal_secret_values'];
+const READS = ['list_secrets', 'secret_history', 'reveal_secret_values', 'show_secret_value'];
+const WRITES = ['request_secret_value'];
 const SERVICES = ['list_access', 'describe_member'];
 const sorted = (...names: string[][]) => names.flat().sort();
 
@@ -329,7 +331,7 @@ test("each person's tools/list is what their roles reach somewhere, whatever the
   // Nothing held: who they are, and the projects they see, none.
   assert.deepEqual((await listFor(await connect('plain-web'))).names.sort(), sorted(ANYONE));
   // A project's lead, and the instance's Owner: every tool.
-  assert.deepEqual((await listFor(await connect('lead-web'))).names.sort(), sorted(ANYONE, READS, SERVICES));
+  assert.deepEqual((await listFor(await connect('lead-web'))).names.sort(), sorted(ANYONE, READS, SERVICES, WRITES));
   assert.deepEqual((await listFor(await connect('root-web', 'read'))).names, [...TOOL_BY_NAME.keys()]);
 });
 

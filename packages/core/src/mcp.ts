@@ -37,6 +37,12 @@ export const ACCESS_TOKEN_MINUTES = 60;
 export const MAX_CONNECTIONS = 20;
 /** Registered clients the instance keeps at most: anyone may register one, so the table has a ceiling. */
 export const MAX_CLIENTS = 10_000;
+/** How long an approval waits for its person: a change an MCP client asks for that nobody decides by then expired. */
+export const APPROVAL_SECONDS = 5 * 60;
+/** Approvals a connection holds waiting at once: no flood of prompts, and no more than this many entries an expiry. */
+export const MAX_PENDING = 5;
+/** The tools whose Approve changes nothing but shows the person a value (`mcp.decide`): every other is approved by its change. */
+export const MCP_SHOWS: readonly string[] = ['show_secret_value'];
 
 /** What OAuth's `offline_access` asks for, a refresh token, every connection has: accepted and dropped. */
 const IGNORED_SCOPES = new Set(['offline_access']);

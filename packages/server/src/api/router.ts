@@ -158,7 +158,9 @@ export async function runRoute<K extends RouteKey>(key: K, params: Params<K>, in
   try {
     const checked: Record<string, string> = { ...params };
     checkParams(checked);
-    return (await runChecked(routes[key] as AnyRoute, checked, input ?? {}, undefined, ctx)) as RouteOutput<K>;
+    const def = routes[key] as AnyRoute;
+    // No query string: what a route reads from one is its default (a write, not its dry run).
+    return (await runChecked(def, checked, input ?? {}, def.query?.parse({}), ctx)) as RouteOutput<K>;
   } catch (error) {
     noteTampered(error, key, ctx.shown.request);
     throw error;
