@@ -46,7 +46,8 @@ first live instance.
 3. **Rotation that can retire a key.** Parked under [Later](#later): the
    rewrap command.
 4. **A signer someone hears.** 0.16's signer alerts within about a minute
-   on what a writer of the database changed ([design](design/0.16.md#what-it-promises));
+   on an access row added, deleted or put back from an older copy, and on a
+   log cut or edited; it revokes nothing ([design](design/0.16.md#what-it-promises));
    what `/readyz` says of it is [still to design](design/0.16.md#still-to-design).
    Attaching an external monitor is part of phase 3's setup.
 5. **The log's head off the box.** Done in 0.16: the signer keeps it, and
