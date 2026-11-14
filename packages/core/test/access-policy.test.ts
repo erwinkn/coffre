@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { allows, DEFAULT_POLICY, EVERYWHERE, givesService, isCredentialScope, protectedWithin, readsWholeLog, ROLES, scopeDefinition, type Holdings, type Policy } from '../src/access.ts';
+import { allows, DEFAULT_POLICY, EVERYWHERE, givesService, grantDefinition, heldColumns, isCredentialScope, issuedGrant, issuesCredential, protectedWithin, readsWholeLog, ROLES, scopeDefinition, type Holdings, type Policy } from '../src/access.ts';
 
 const market = '11111111-1111-4111-8111-111111111111';
 const dev = '22222222-2222-4222-8222-222222222222';
@@ -31,4 +31,35 @@ test('a name a plain object holds already names no role and no project of the po
     const developer: Holdings = { role: 'developer', scope: EVERYWHERE, grants: [], policy: DEFAULT_POLICY };
     assert.equal(givesService(developer, EVERYWHERE, 'viewer', { projectId: name }), true);
   }
+});
+
+test('a grant on an environment gives nothing while its role holds a permission only a project takes', () => {
+  // Eve's editor grant on market/dev, the role widened with grant.manage behind it: no grant on an environment takes that.
+  const editor = { name: 'Editor', description: '', permissions: ['secret.read', 'secret.use', 'secret.write'], protected: ['secret.use', 'secret.write'] } as const;
+  const narrow: Policy = { ...DEFAULT_POLICY, roles: { ...DEFAULT_POLICY.roles, editor } };
+  const wide: Policy = { ...narrow, roles: { ...narrow.roles, editor: { ...editor, permissions: [...editor.permissions, 'grant.manage'] } } };
+  const onDev = { projectId: market, environmentId: dev, role: 'editor' };
+  const place = { projectId: market, environmentId: dev, environmentSlug: 'dev' };
+  const eve = (policy: Policy): Holdings => ({ role: 'member', scope: EVERYWHERE, grants: [onDev], policy });
+  assert.deepEqual(grantDefinition(narrow, onDev), narrow.roles.editor);
+  assert.equal(grantDefinition(wide, onDev), undefined);
+  for (const permission of ['secret.read', 'secret.write', 'grant.manage'] as const) assert.equal(allows(eve(wide), permission, place), false, permission);
+  assert.deepEqual(heldColumns(eve(wide), place), { normal: [], protected: [] });
+  assert.deepEqual(issuedGrant(onDev, wide).permissions, { normal: [], protected: [] });
+  assert.equal(givesService(eve(wide), EVERYWHERE, 'editor', place), false);
+  // Narrowed back, it gives what it did; on the project, the widened role gives everything it holds.
+  assert.equal(allows(eve(narrow), 'secret.read', place), true);
+  assert.equal(givesService(eve(narrow), EVERYWHERE, 'editor', place), true);
+  const onMarket: Holdings = { ...eve(wide), grants: [{ ...onDev, environmentId: null }] };
+  assert.equal(allows(onMarket, 'grant.manage', place), true);
+  assert.equal(allows(onMarket, 'secret.read', place), true);
+  // Nor is one given at an environment, to a service account or on its credential: a Maintainer of market, who holds
+  // environment.manage at market/dev, gives no maintainer there; an Owner issues none there for an account that holds it on market.
+  const maintainer: Holdings = { role: 'member', scope: EVERYWHERE, grants: [{ projectId: market, environmentId: null, role: 'maintainer' }], policy: DEFAULT_POLICY };
+  assert.equal(givesService(maintainer, EVERYWHERE, 'maintainer', place), false);
+  assert.equal(givesService(maintainer, EVERYWHERE, 'maintainer', { projectId: market }), true);
+  const owner: Holdings = { role: 'owner', scope: EVERYWHERE, grants: [], policy: DEFAULT_POLICY };
+  const account = { grants: [{ role: 'maintainer', place: { projectId: market } }], admittedBy: null };
+  assert.equal(issuesCredential(owner, EVERYWHERE, 'user:ada', account, [{ role: 'maintainer', place }]), false);
+  assert.equal(issuesCredential(owner, EVERYWHERE, 'user:ada', account, [{ role: 'maintainer', place: { projectId: market } }]), true);
 });

@@ -106,6 +106,12 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   too_deep: ['conflict', 'that environment already inherits from three: fork one higher up'],
   workload_cannot_issue: ['forbidden', "a workload's session issues no credential and changes no one's access"],
   not_a_person: ['forbidden', 'a service account keeps no personal config: name the environment itself'],
+  // Members and their grants (routes/members.ts): to whoever may manage them, as 0.14 answered.
+  not_a_member: ['not_found', 'no such member'],
+  removed: ['conflict', 'they were removed: add them again first'],
+  last_owner: ['conflict', 'the instance keeps one Owner of all of it: make another one first'],
+  configured_owner: ['conflict', "the deployment names them an Owner, which they stay while its configuration says so"],
+  invalid: ['conflict', 'a role the instance does not have, one that holds what only a project has given on an environment, or an end that has passed'],
 };
 
 /** The vault's refusal, as the API answers it: `what` names what was asked for, `market/prod/KEY`. */

@@ -1,15 +1,19 @@
 import { randomUUID } from 'node:crypto';
 
-import { allows, EVERYWHERE, isInstanceRole, isScope, normalScope, ownsInstance, PROJECT_ONLY_PERMISSIONS, ROLE_ID, runsInstance, unscoped, type Filter, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
-import type { AccessAnswers, AccessChange, AccessChanges, AccessGrant, MemberAdd, MemberRemove, MemberRestore, MemberRole, Presented, ScopeInput, Standing } from '@coffre/core/vault';
-import { environments, grants, identities, principals, projects, roles } from '@coffre/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import {
+  allows, definitionProblem, EVERYWHERE, FIXED_ROLES, INSTANCE_ROLES, isBuiltinRole, isInstanceRole, isScope, normalDefinition, normalScope, ownsInstance, PROJECT_ONLY_PERMISSIONS, ROLE_ID, ROLES, runsInstance, unscoped,
+  type Filter, type InstanceRole, type Permission, type RoleDefinition, type Scope,
+} from '@coffre/core/access';
+import type { AccessAnswers, AccessChange, AccessChanges, AccessGrant, MemberPut, MemberRemove, Presented, RoleEdit, ScopeInput, SettingsEdit, Standing } from '@coffre/core/vault';
+import { environments, grants, identities, policy, principals, projects, roles } from '@coffre/db/schema';
+import { and, eq, sql } from 'drizzle-orm';
 
-import { callerFrom, callerParts, refusedTo, type Asking, type Shown } from '../caller.ts';
+import { callerParts, refusedTo, type Asking, type Shown } from '../caller.ts';
 import { amended, drop, part, put, type Operation, type Parts, type Refusal, type Seen, type Unsealed, type Write } from '../change.ts';
 import type { Said } from '../entry.ts';
 import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
+import { asking, NOWHERE } from './asking.ts';
 import type { Operations } from './index.ts';
 import { presented, text } from './input.ts';
 
@@ -20,16 +24,14 @@ import { presented, text } from './input.ts';
  * roles; only an Owner
  * of the whole instance makes an Owner, or changes or removes one; nobody
  * else changes their own role; and the instance always keeps one Owner of
- * all of it. These are 0.14's rules, as they were.
+ * all of it. Only an Owner of the whole instance edits roles, and whoever
+ * runs the instance its settings. These are 0.14's rules, as they were.
  *
  * Not yet: a person who does not run the instance setting up or removing a
  * service account (`setsUpServices`, `managesService`). That weighs a
  * project's protected environments, which the engine settles first: those
  * paths are refused.
  */
-
-/** A change about no project: the caller's instance role and its scope decide, and none of their grants. */
-const NOWHERE = sql`(SELECT NULL::uuid WHERE false)`;
 
 /** A member's id, as the table's checks have it (`principals_id_check`, `principals_user_lowercase`). */
 const PRINCIPAL = /^(user|token):[^\s:]\S*$/;
@@ -81,14 +83,11 @@ const ownsAllAsking = (caller: Asking) => caller.holds.credentialScope == null &
 /** Whether the deployment names this person an Owner (`owners`): no change demotes or removes them while it does. */
 const named = (vault: Deciding, principal: string) => vault.owners.some((email) => principal === `user:${email}`);
 
-/** Who asks, or why they are refused: a stopped or narrowed session as `secret.write` takes it, and any workload's session, which changes no one's access. */
-function asking(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, vault: Deciding, at: number): Asking | Refusal {
-  const caller = callerFrom(seen, shown, vault.workloads, at);
-  if (caller === null) return { refused: 'unauthenticated' };
-  if (caller.workload?.stop != null) return { refused: caller.workload.stop };
-  if (caller.workload?.narrowed === true) return { refused: 'narrowed' };
+/** Who asks, or why they are refused (`asking`), and any workload's session, which changes no one's access. */
+function managing(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, vault: Deciding, at: number): Asking | Refusal {
+  const caller = asking(seen, shown, vault, at);
   // A workload's session changes no one's access, whatever its scope holds, as 0.14's router refused it (docs/design/workload-access.md, D15).
-  if (caller.workload !== null) return { refused: 'workload_cannot_issue' };
+  if (!('refused' in caller) && caller.workload !== null) return { refused: 'workload_cannot_issue' };
   return caller;
 }
 
@@ -118,90 +117,48 @@ function said(action: string, caller: Asking, shown: { request: string | null; i
 }
 
 /**
- * A member's role and scope as asked, checked before any read: a person's
- * role is one of the instance's, its scope's lists bounded; a service
- * account, and anyone admitted as a `member`, has no scope, and a service
- * account no role but `member`.
+ * A member's role and scope as asked, checked before any read: a role is
+ * one of the instance's, or null; a scope's lists are bounded, and a scope
+ * is given only with a role but `member`. Whether a service account may
+ * hold the role is the decision's (`invalid`), as 0.14.7 refused it.
  */
-function membership(input: MemberAdd | MemberRestore | MemberRole): { principal: string; role: InstanceRole; scope: ScopeInput | null } {
+function membership(input: MemberPut): { principal: string; role: InstanceRole | null; scope: ScopeInput | null } {
   const { principal, role, scope } = input;
-  const asked = scope === null ? null : typeof scope === 'object' && scope !== null && !Array.isArray(scope) && Object.keys(scope).length === 2
-    ? { projects: filterOf(scope.projects), environments: filterOf(scope.environments) } : undefined;
-  const valid = isMember(principal) && typeof role === 'string' && isInstanceRole(role) && asked !== undefined
-    && (asked === null || (asked.projects !== undefined && asked.environments !== undefined && role !== 'member'))
-    && (principal.startsWith('user:') || (role === 'member' && asked === null));
+  const asked = scope === null ? null : scopeAsked(scope);
+  const valid = isMember(principal) && (role === null || (typeof role === 'string' && isInstanceRole(role))) && asked !== undefined
+    && (asked === null || (role !== null && role !== 'member'));
   if (!valid) {
-    throw new TypeError('a member is user:<email> in lowercase or token:<name>, with an instance role, and a scope of 1,000 slugs a list at most only with a role but member; a service account is a member, with no scope');
+    throw new TypeError('a member is user:<email> in lowercase or token:<name>, with an instance role or null, and a scope of 1,000 slugs a list at most only with a role but member');
   }
-  return { principal, role, scope: asked as ScopeInput | null };
+  return { principal, role, scope: asked };
 }
 
-/**
- * The scope as the row keeps it, its projects by id, from the projects the
- * read found by their slugs: null, everywhere. Undefined when a slug names
- * no project there is (a deleted one's slug holds a `~`, which none asked does).
- */
-function scopeWritten(asked: ScopeInput | null, found: readonly Row<typeof projects>[]): string | null | undefined {
-  if (asked === null) return null;
+/** A scope as asked, its projects by id, from the projects the read found by their slugs. Undefined when a slug names no project there is (a deleted one's slug holds a `~`, which none asked does). */
+function scopeById(asked: ScopeInput, found: readonly Row<typeof projects>[]): Scope | undefined {
   const ids = listOf(asked.projects).map((slug) => found.find((row) => row.slug === slug)?.id);
   if (ids.includes(undefined)) return undefined;
-  const scope = normalScope({ projects: asked.projects === 'all' ? 'all' : 'only' in asked.projects ? { only: ids as string[] } : { except: ids as string[] }, environments: asked.environments });
-  return unscoped(scope) ? null : JSON.stringify(scope);
+  return normalScope({ projects: asked.projects === 'all' ? 'all' : 'only' in asked.projects ? { only: ids as string[] } : { except: ids as string[] }, environments: asked.environments });
 }
 
+/** The scope as a member's row keeps it: null, everywhere. Undefined when a slug names no project there is. */
+function scopeWritten(asked: ScopeInput | null, found: readonly Row<typeof projects>[]): string | null | undefined {
+  if (asked === null) return null;
+  const scope = scopeById(asked, found);
+  return scope === undefined ? undefined : unscoped(scope) ? null : JSON.stringify(scope);
+}
+
+/** A scope as the app names it, its two filters copied, or undefined for any other shape. */
+function scopeAsked(value: unknown): ScopeInput | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value) || Object.keys(value).length !== 2) return undefined;
+  const { projects: inProjects, environments: inEnvironments } = value as Record<string, unknown>;
+  const asked = { projects: filterOf(inProjects), environments: filterOf(inEnvironments) };
+  return asked.projects === undefined || asked.environments === undefined ? undefined : (asked as ScopeInput);
+}
+
+/** The projects a scope asked names by slug, read with the change. */
+const projectsIn = (scope: ScopeInput | null) => part(projects, sql`${projects.slug} = ANY(${sql.param(scope === null ? [] : listOf(scope.projects))}::text[])`);
+
 const standing = (role: InstanceRole, scope: string | null): Standing => ({ role, scope: scope === null ? null : (JSON.parse(scope) as Scope) });
-
-/**
- * Admit someone the instance has never had (`member.add`), or bring back
- * one removed (`member.restore`), in the generation their removal moved on
- * to and with no grant. Whoever runs the instance admits a member, with
- * any role but Owner, which only an Owner of the whole instance gives. A
- * removed service account comes back the same way: 0.14 let whoever
- * removed it bring it back too, but only those who run the instance remove
- * one yet. A person the
- * deployment names an Owner comes in as one, or not at all.
- *
- * A removed member whose row is deleted around the vault looks new, and comes
- * back in generation 0: no row the vault reads says otherwise. Its entry says
- * the row it made replaced none, which the signer's mirror finds false
- * history (`rewritten`), as it does any write over a deleted row.
- */
-const admit = (action: 'member.add' | 'member.restore') =>
-  function admitting(input: Presented & (MemberAdd | MemberRestore), vault: Deciding): Operation<Parts, AccessAnswers[typeof action]> {
-    const shown = presented(input);
-    const { principal, role, scope } = membership(input);
-    const read = {
-      ...callerParts(shown.token, NOWHERE),
-      member: part(principals, eq(principals.id, principal)),
-      scoped: part(projects, sql`${projects.slug} = ANY(${sql.param(scope === null ? [] : listOf(scope.projects))}::text[])`),
-    };
-    return {
-      read,
-      denied: deniedTo(action, shown, vault),
-      decide(seen: Seen<typeof read>, at: number) {
-        const caller = asking(seen, shown, vault, at);
-        if ('refused' in caller) return caller;
-        if (!runs(caller) || (role === 'owner' && !ownsAllAsking(caller))) return { refused: 'no_access' };
-        const [was] = seen.member;
-        if (action === 'member.add' ? was !== undefined : was?.status !== 'removed') {
-          return { refused: was === undefined ? 'not_a_member' : was.status === 'removed' ? 'removed' : 'exists' };
-        }
-        const written = scopeWritten(scope, seen.scoped);
-        if (written === undefined) return { refused: 'no_access' };
-        if (named(vault, principal) && !(role === 'owner' && written === null)) return { refused: 'configured_owner' };
-
-        const now = new Date(at);
-        const row: Fresh<typeof principals> = was === undefined
-          ? { id: principal, status: 'active', role, scope: written, generation: 0, createdAt: now, createdBy: caller.principal, statusChangedAt: now, statusChangedBy: caller.principal, frozenAt: null }
-          : { ...withoutMac(was), status: 'active', role, scope: written, statusChangedAt: now, statusChangedBy: caller.principal };
-        return {
-          writes: [put(principals, row, was ?? null)],
-          entry: said(action, caller, shown, [`principal:${principal}`, ...seen.scoped.map((project) => `project:${project.id}`)], { member: principal, role, scope: standing(role, written).scope, generation: row.generation }),
-          answer: standing(role, written),
-        };
-      },
-    };
-  };
 
 /** Every active Owner, whom a role's change or a removal counts, read with it: two changes side by side, each leaving one Owner, start over and the second is refused. */
 const owners = () => part(principals, sql`${principals.status} = 'active' AND ${principals.role} = 'owner'`);
@@ -210,43 +167,79 @@ const owners = () => part(principals, sql`${principals.status} = 'active' AND ${
 const anotherOwner = (seen: readonly Row<typeof principals>[], principal: string) => seen.some((row) => row.id !== principal && ownsAll(row));
 
 /**
- * A person's instance role and its scope (`member.role`), which whoever runs
- * the instance sets; an Owner's, or Owner, only an Owner of the whole
- * instance, who alone also sets their own. So an Admin makes another Admin
- * but never widens what they hold themselves, and an Owner may step down,
- * but not the last one, and not one the deployment names.
+ * A member admitted, brought back or given an instance role (`member.put`),
+ * as their row calls for, which only this read knows, as 0.14.7's `admit`
+ * did. Whoever runs the instance puts anyone, as any role but Owner, which
+ * only an Owner of the whole instance gives, changes or takes. With no row,
+ * they are added (`member.add`); removed, brought back (`member.restore`),
+ * in the generation their removal moved on to and with no grant; either
+ * way as `member` when no role is asked. Active, their role and scope are
+ * set (`member.role`), and kept when no role is asked: nobody but an Owner
+ * of the whole instance sets their own, so an Admin makes another Admin
+ * but never widens what they hold themselves; an Owner may step down, but
+ * not the last one. A person the deployment names an Owner comes in as
+ * one and stays one. A service account holds no role but `member`: 0.14
+ * let whoever removed one bring it back too, but only those who run the
+ * instance remove one yet.
+ *
+ * A removed member whose row is deleted around the vault looks new, and comes
+ * back in generation 0: no row the vault reads says otherwise. Its entry says
+ * the row it made replaced none, which the signer's mirror finds false
+ * history (`rewritten`), as it does any write over a deleted row.
  */
-function memberRole(input: Presented & MemberRole, vault: Deciding): Operation<Parts, AccessAnswers['member.role']> {
+function memberPut(input: Presented & MemberPut, vault: Deciding): Operation<Parts, AccessAnswers['member.put']> {
   const shown = presented(input);
   const { principal, role, scope } = membership(input);
-  if (!principal.startsWith('user:')) throw new TypeError('a service account holds no instance role');
   const read = {
     ...callerParts(shown.token, NOWHERE),
     member: part(principals, eq(principals.id, principal)),
     owners: owners(),
-    scoped: part(projects, sql`${projects.slug} = ANY(${sql.param(scope === null ? [] : listOf(scope.projects))}::text[])`),
+    scoped: projectsIn(scope),
   };
   return {
     read,
-    denied: deniedTo('member.role', shown, vault),
-    decide(seen: Seen<typeof read>, at: number) {
-      const caller = asking(seen, shown, vault, at);
+    // Refused, it is logged as an admission, whatever the row: 0.14.7's `admit` logged it so.
+    denied: deniedTo('member.add', shown, vault),
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+      const caller = managing(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       if (!runs(caller)) return { refused: 'no_access' };
-      const [was] = seen.member;
-      if (was === undefined || was.status !== 'active') return { refused: was === undefined ? 'not_a_member' : 'removed' };
+      // A row the vault did not write is neither someone new nor a member to change: added over it, the write would fail.
+      if (unsealed.member > 0) return { refused: 'tampered' };
+      if (!principal.startsWith('user:') && role !== null && role !== 'member') return { refused: 'invalid' };
       const written = scopeWritten(scope, seen.scoped);
       if (written === undefined) return { refused: 'no_access' };
-      // A role asked as it is changes nothing, so whoever runs the instance may ask it, of anyone, themselves included, as 0.14 did. Its entry says so, as `secret.write`'s with no key does.
-      if (was.role === role && was.scope === written) return { writes: [], entry: said('member.role', caller, shown, [`principal:${principal}`, ...seen.scoped.map((project) => `project:${project.id}`)], { member: principal, role, scope: standing(role, written).scope, unchanged: true }), answer: standing(role, written) };
-      if ((was.role === 'owner' || role === 'owner' || principal === caller.principal) && !ownsAllAsking(caller)) return { refused: 'no_access' };
-      const ownsAfter = role === 'owner' && written === null;
+      const objects = [`principal:${principal}`, ...seen.scoped.map((project) => `project:${project.id}`)];
+      const [was] = seen.member;
+
+      if (was === undefined || was.status === 'removed') {
+        const given = role ?? 'member';
+        if (given === 'owner' && !ownsAllAsking(caller)) return { refused: 'no_access' };
+        if (named(vault, principal) && !(given === 'owner' && written === null)) return { refused: 'configured_owner' };
+        const now = new Date(at);
+        const row: Fresh<typeof principals> = was === undefined
+          ? { id: principal, status: 'active', role: given, scope: written, generation: 0, createdAt: now, createdBy: caller.principal, statusChangedAt: now, statusChangedBy: caller.principal, frozenAt: null }
+          : { ...withoutMac(was), status: 'active', role: given, scope: written, statusChangedAt: now, statusChangedBy: caller.principal };
+        return {
+          writes: [put(principals, row, was ?? null)],
+          entry: said(was === undefined ? 'member.add' : 'member.restore', caller, shown, objects, { member: principal, role: given, scope: standing(given, written).scope, generation: row.generation }),
+          answer: { ...standing(given, written), created: true },
+        };
+      }
+
+      // Active: the role and scope asked, or theirs, kept.
+      const next = role === null ? { role: was.role as InstanceRole, scope: was.scope } : { role, scope: written };
+      const answer = { ...standing(next.role, next.scope), created: false };
+      // Asked as it is, it changes nothing, so whoever runs the instance may ask it, of anyone, themselves included, as 0.14 did. Its entry says so, as `secret.write`'s with no key does.
+      if (was.role === next.role && was.scope === next.scope) return { writes: [], entry: said('member.role', caller, shown, objects, { member: principal, role: next.role, scope: answer.scope, unchanged: true }), answer };
+      if ((was.role === 'owner' || next.role === 'owner' || principal === caller.principal) && !ownsAllAsking(caller)) return { refused: 'no_access' };
+      const ownsAfter = next.role === 'owner' && next.scope === null;
       if (named(vault, principal) && !ownsAfter) return { refused: 'configured_owner' };
       if (ownsAll(was) && !ownsAfter && !anotherOwner(seen.owners, principal)) return { refused: 'last_owner' };
       return {
-        writes: [put(principals, { ...withoutMac(was), role, scope: written }, was)],
-        entry: said('member.role', caller, shown, [`principal:${principal}`, ...seen.scoped.map((project) => `project:${project.id}`)], { member: principal, role, scope: standing(role, written).scope }),
-        answer: standing(role, written),
+        writes: [put(principals, { ...withoutMac(was), role: next.role, scope: next.scope }, was)],
+        entry: said('member.role', caller, shown, objects, { member: principal, role: next.role, scope: answer.scope }),
+        answer,
       };
     },
   };
@@ -280,7 +273,7 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
     read,
     denied: deniedTo('member.remove', shown, vault),
     decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
-      const caller = asking(seen, shown, vault, at);
+      const caller = managing(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       if (!runs(caller)) return { refused: 'no_access' };
       const [was] = seen.member;
@@ -391,7 +384,7 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
       ],
     }),
     decide(seen: Seen<typeof read>, at: number) {
-      const caller = asking(seen, shown, vault, at);
+      const caller = managing(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       const places = placed(seen);
       // One answer whether a place is not there or not theirs to manage, and for a service account's grants, not given here yet: none says which.
@@ -447,6 +440,154 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
   };
 }
 
+/** A role's definition as a change asks it, copied and in order, or undefined for one `definitionProblem` refuses: an array from another isolate may have holes. */
+function definitionAsked(value: unknown): RoleDefinition | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const { name, description, permissions, protected: guarded } = value as Record<string, unknown>;
+  if (!text(name) || !text(description) || !Array.isArray(permissions) || !Array.isArray(guarded)) return undefined;
+  const definition = { name, description, permissions: [...permissions], protected: [...guarded] } as RoleDefinition;
+  return definitionProblem(definition) === null ? normalDefinition(definition) : undefined;
+}
+
+/** A role as its row says it. */
+const definitionIn = (row: Row<typeof roles>): RoleDefinition => ({ name: row.name, description: row.description, permissions: row.permissions as Permission[], protected: row.protected as Permission[] });
+
+/** Whether a role's row says `definition`, its permissions in any order; no row, none. */
+function says(row: Row<typeof roles> | undefined, definition: RoleDefinition | null): boolean {
+  if (row === undefined || definition === null) return row === undefined && definition === null;
+  const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((item) => b.includes(item));
+  return row.name === definition.name && row.description === definition.description && same(row.permissions, definition.permissions) && same(row.protected, definition.protected);
+}
+
+/** The role as the caller saw it: a definition's shape, held to the row as it is, whatever a release's rules say of it now. */
+function seenAs(value: unknown): RoleDefinition | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const { name, description, permissions, protected: guarded } = value as Record<string, unknown>;
+  const column = (list: unknown) => Array.isArray(list) && list.length <= 64 && [...list].every(text);
+  if (!text(name) || !text(description) || !column(permissions) || !column(guarded)) return undefined;
+  return { name, description, permissions: [...(permissions as Permission[])], protected: [...(guarded as Permission[])] };
+}
+
+/**
+ * A role defined, edited, put back as it ships or deleted
+ * (`policy.change`), by an Owner of the whole instance on a session, as
+ * 0.14 allowed. Roles are rows, and a role with no row is no role: one put
+ * back is written as it ships, one deleted is dropped, and one that ships
+ * whose row was deleted is written again.
+ *
+ * A grant is read only to refuse: deleting a role one names, defining one
+ * that does not ship while one names it, or giving a role one names on an
+ * environment what only a project has. The read takes the first such
+ * grant, and one the vault did not write refuses as `tampered`: it may
+ * stand in front of a genuine one. After a genuine deletion no grant names
+ * the role, so defining it again refuses no honest caller; a grant put back
+ * around the vault refuses it, and one kept hidden from the deletion through
+ * the definition is the accepted "row taken away for one decision"
+ * (docs/design/0.16.md). One on an environment put back after a widening
+ * gives nothing (`grantDefinition`).
+ */
+function roleEdit(input: Presented & RoleEdit, vault: Deciding): Operation<Parts, AccessAnswers['policy.change']> {
+  const shown = presented(input);
+  const { instance, role } = input;
+  const definition = input.definition === null ? null : definitionAsked(input.definition);
+  const was = seenAs(input.was);
+  const fixed = (instance ? (FIXED_ROLES.instanceRoles as readonly string[]) : FIXED_ROLES.roles).includes(role);
+  if (typeof instance !== 'boolean' || typeof role !== 'string' || !ROLE_ID.test(role) || (instance && !isInstanceRole(role)) || fixed || definition === undefined || was === undefined) {
+    throw new TypeError("a role's change names a project role or an Admin's or Auditor's, by id, never Owner's or the instance's Member's, with a definition as definitionProblem holds one or null, and the role as it was or null");
+  }
+  // What it holds once changed: one that ships, put back, as it ships; one an Owner made, deleted, nothing.
+  const shipped = instance ? INSTANCE_ROLES[role as InstanceRole] : isBuiltinRole(role) ? ROLES[role] : null;
+  const next = definition ?? (shipped === null ? null : normalDefinition(shipped));
+  // The one grant that would refuse it, if any: naming the role, to delete it or to define one that does not ship (seen as
+  // absent: one there refuses as changed); on an environment, to give it what only a project has.
+  const wide = next !== null && next.permissions.some((permission) => PROJECT_ONLY_PERMISSIONS.includes(permission));
+  const anyGrant = !instance && (next === null || (shipped === null && was === null));
+  const refusing = instance || (!anyGrant && !wide)
+    ? sql`false`
+    : sql`${grants.id} = (SELECT g.id FROM grants g WHERE g.role = ${role}${anyGrant ? sql`` : sql` AND g.environment_id IS NOT NULL`} ORDER BY g.id LIMIT 1)`;
+  const read = {
+    ...callerParts(shown.token, NOWHERE),
+    edited: part(roles, and(eq(roles.instance, instance), eq(roles.id, role))),
+    naming: part(grants, refusing),
+  };
+  const object = `${instance ? 'instance-role' : 'role'}:${role}`;
+  return {
+    read,
+    denied: refusedTo('policy.change', shown, vault.workloads, { objects: () => [object] }),
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+      const caller = managing(seen, shown, vault, at);
+      if ('refused' in caller) return caller;
+      if (!runs(caller) || !ownsAllAsking(caller)) return { refused: 'no_access' };
+      // A row the vault did not write is neither the role the caller saw nor one to write over.
+      if (unsealed.edited > 0) return { refused: 'tampered' };
+      const [row] = seen.edited;
+      if (!says(row, was)) return { refused: 'policy_changed' };
+      if (row === undefined && next === null) return { refused: 'invalid' };
+      // The first grant naming it, unreadable, may hide a genuine one behind it.
+      if (unsealed.naming > 0) return { refused: 'tampered' };
+      if (seen.naming.length > 0) return { refused: anyGrant ? 'role_granted' : 'invalid' };
+      const detail = { role, instance, definition: next, was: row === undefined ? null : definitionIn(row) };
+      if (says(row, next)) return { writes: [], entry: said('policy.change', caller, shown, [object], { ...detail, unchanged: true }), answer: { role: next } };
+      return {
+        writes: [next === null ? drop(roles, row!) : put(roles, { instance, id: role, ...next, permissions: [...next.permissions], protected: [...next.protected] }, row ?? null)],
+        entry: said('policy.change', caller, shown, [object], detail),
+        answer: { role: next },
+      };
+    },
+  };
+}
+
+/** The setting as the policy row holds it, or null for one that does not read as a scope. */
+function settingIn(row: Row<typeof policy>): Scope | null {
+  try {
+    const setting: unknown = JSON.parse(row.serviceAccounts);
+    return isScope(setting) ? normalScope(setting) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where people set up service accounts themselves (`settings.change`):
+ * whoever runs the instance sets it, as 0.14 allowed, in the instance's
+ * policy row. That row is always there: without it the change would make
+ * one, and lift a freeze of every workload that the row held, so a change
+ * that does not find it refuses.
+ */
+function settingsEdit(input: Presented & SettingsEdit, vault: Deciding): Operation<Parts, AccessAnswers['settings.change']> {
+  const shown = presented(input);
+  const asked = scopeAsked(input.serviceAccounts);
+  if (asked === undefined) throw new TypeError('who sets up service accounts is a scope: projects and environments, each all, or only or except 1,000 slugs at most');
+  const read = {
+    ...callerParts(shown.token, NOWHERE),
+    instance: part(policy, eq(policy.onlyRow, true)),
+    scoped: projectsIn(asked),
+  };
+  return {
+    read,
+    denied: refusedTo('settings.change', shown, vault.workloads, { objects: (seen: Seen<typeof read>) => seen.scoped.map((project) => `project:${project.id}`) }),
+    decide(seen: Seen<typeof read>, at: number) {
+      const caller = managing(seen, shown, vault, at);
+      if ('refused' in caller) return caller;
+      if (!runs(caller)) return { refused: 'no_access' };
+      const [row] = seen.instance;
+      if (row === undefined) return { refused: 'tampered' };
+      const setting = scopeById(asked, seen.scoped);
+      if (setting === undefined) return { refused: 'no_access' };
+      const before = settingIn(row);
+      const objects = seen.scoped.map((project) => `project:${project.id}`);
+      const detail = { serviceAccounts: setting, was: before };
+      if (JSON.stringify(before) === JSON.stringify(setting)) return { writes: [], entry: said('settings.change', caller, shown, objects, { ...detail, unchanged: true }), answer: { serviceAccounts: setting } };
+      return {
+        writes: [amended(policy, row, { serviceAccounts: JSON.stringify(setting), changedAt: new Date(at), changedBy: caller.principal })],
+        entry: said('settings.change', caller, shown, objects, detail),
+        answer: { serviceAccounts: setting },
+      };
+    },
+  };
+}
+
 /** A row as read, but for its MAC: the engine seals what a change writes. */
 function withoutMac<T extends { mac: unknown }>(row: T): Omit<T, 'mac'> {
   const { mac: _, ...kept } = row;
@@ -455,9 +596,9 @@ function withoutMac<T extends { mac: unknown }>(row: T): Omit<T, 'mac'> {
 
 /** The changes of members, grants, roles and the instance's policy. */
 export const accessOperations: Operations<AccessChanges> = {
-  'member.add': admit('member.add'),
-  'member.restore': admit('member.restore'),
-  'member.role': memberRole,
+  'member.put': memberPut,
   'member.remove': memberRemove,
   'access.grant': accessGrant,
+  'policy.change': roleEdit,
+  'settings.change': settingsEdit,
 };

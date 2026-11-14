@@ -14,7 +14,7 @@ import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
-import { binding, credential, environment, grant, instance, principal, project, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
+import { amend, binding, credential, environment, grant, instance, principal, project, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
 
 const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
@@ -176,6 +176,29 @@ test('what the caller held once, or holds by a role whose row is gone, manages n
   // The role that gave Eve grant.manage, gone: she holds a name, and no permission.
   await world.owner.execute(sql`DELETE FROM roles WHERE NOT instance AND id = 'admin'`);
   await nothingWritten(async () => assert.deepEqual(await set('eve-cli', bo, { project: 'market', role: 'developer' }), { refused: 'no_access' }));
+});
+
+test('a grant on an environment gives nothing while its role holds what only a project takes, and gives again once the role is narrowed back', async () => {
+  // Eve reads and writes market/prod by a role an Owner made. A writer hides her grant, an Owner widens the role with
+  // grant.manage, which no grant on an environment may hold, and the writer puts the grant back.
+  await write(world, ...rows('roles', role(false, 'editor', ['secret.read', 'secret.use', 'secret.write'])), ...rows('grants', grant(eve, 'editor', { environment: prod })));
+  const writes = (label: string) => vault.change({ ...shown(label), op: 'secret.write', project: 'market', environment: 'prod', keys: [{ key: 'DATABASE_URL', value: `by ${label}` }] } as never);
+  assert.equal(await uses('eve-cli'), 'postgres://market');
+  assert.deepEqual(await writes('eve-cli'), { answer: { keys: { DATABASE_URL: { version: 2, nature: 'secret' } } } });
+
+  const editor = sql`NOT instance AND id = 'editor'`;
+  await amend(world, 'roles', editor, { permissions: ['secret.read', 'secret.use', 'secret.write', 'grant.manage'] });
+  world.tick(2000);
+  // The grant manages nobody's access at prod, where it would have given grant.manage, and reads and writes nothing either.
+  await nothingWritten(async () => assert.deepEqual(await set('eve-cli', bo, { project: 'market', environment: 'prod', role: 'viewer' }), { refused: 'no_access' }));
+  assert.equal(await uses('eve-cli'), 'no_access');
+  assert.deepEqual(await writes('eve-cli'), { refused: 'no_access' });
+
+  // Narrowed back, it gives what it did.
+  await amend(world, 'roles', editor, { permissions: ['secret.read', 'secret.use', 'secret.write'] });
+  world.tick(2000);
+  assert.equal(await uses('eve-cli'), 'by eve-cli');
+  assert.deepEqual(await writes('eve-cli'), { answer: { keys: { DATABASE_URL: { version: 3, nature: 'secret' } } } });
 });
 
 test('a grant asked of a place it cannot be: no role by that id, a project\'s on an environment, an end gone, a personal config, a place of another project', async () => {
