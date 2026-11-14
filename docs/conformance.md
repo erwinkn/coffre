@@ -98,7 +98,8 @@ In order, since each builds on the ones before:
 
 | Check | What must hold |
 |---|---|
-| health | `/livez` answers. On Workers, `/readyz` fails before any heartbeat, and passes once the Cron trigger has run and the vault has checkpointed it |
+| ready once adopted | Skipped until the app learns from the vault's `about` call whether it has adopted the database (T311): 0.16's `/readyz` says only that the database is migrated. On a fresh Workers deployment, `/readyz` fails until the vault has adopted the database and the signer has signed its first entry, then passes |
+| health | `/livez` answers, and `/readyz` passes |
 | browser bundle | Nothing of the server in what the browser loads: every text file of the build's `app/dist/client`, read as the browser gets it, holds no database layer, driver, table only the server knows or `COFFRE_*` read. A page importing across the line otherwise just grows by the database layer, with no error |
 | sign-in | The admin signs in through GitHub, the first to, and is the Owner of the whole instance |
 | setup, personas | The admin creates the project, its values and the people above |

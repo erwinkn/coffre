@@ -95,14 +95,25 @@ export async function auditProven({ admin }: People): Promise<string> {
  * not shown as one coffre could not check.
  */
 export async function auditPageProofs({ admin }: People): Promise<string> {
-  const page = await admin.browser.fetch('/audit');
-  const html = await page.text();
-  expect(page.status === 200 && !html.includes('Verifying'), 'the audit page was not sent with its proofs', { status: page.status });
-  const proofs = [...html.matchAll(/data-proof="([a-z]+)"/g)].map((match) => match[1]);
+  let status = 0;
+  let html = '';
+  let proofs: string[] = [];
+  // The race `auditProven` waits out, in the page's own call: a batch signed
+  // between its head and its rows can leave every row shown honestly
+  // unproven. So a page of rows none of which proves is asked again; an
+  // empty one, a failed proof or an error is final.
+  await until('an audit page with a row its head numbers', async () => {
+    const page = await admin.browser.fetch('/audit');
+    status = page.status;
+    html = await page.text();
+    proofs = [...html.matchAll(/data-proof="([a-z]+)"/g)].map((match) => match[1]);
+    return status !== 200 || proofs.length === 0 || proofs.some((proof) => proof !== 'unproven');
+  }, 90);
+  expect(status === 200 && !html.includes('Verifying'), 'the audit page was not sent with its proofs', { status });
   const proven = proofs.filter((proof) => proof === 'proven').length;
-  expect(proven > 0, "the audit page's rows say no proof, or none proven", { status: page.status, proofs: proofs.slice(0, 10) });
+  expect(proven > 0, "the audit page's rows say no proof, or none proven", { status, proofs: proofs.slice(0, 10) });
   expect(!proofs.includes('failed'), 'the audit page shows an entry whose proof failed', { proofs: proofs.slice(0, 10) });
-  expect(!html.includes('could not check the log'), 'the audit page says coffre could not check the log', { status: page.status });
+  expect(!html.includes('could not check the log'), 'the audit page says coffre could not check the log', { status });
   return `the audit page sent with its proofs, rendered by the server: ${proven} of ${proofs.length} rows proven`;
 }
 
