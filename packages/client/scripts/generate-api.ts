@@ -23,15 +23,17 @@ const target = fileURLToPath(new URL('../src/api.ts', import.meta.url));
  * exports, never one of 0.14's that the server's tsconfig excludes. A type
  * whose route is unserved (`unserved.ts`) has none: it comes back with the
  * route, as `TokenPlan`, `BindingPlan`, `KeysPlan`, `WorkloadIds`,
- * `Deletion`, `DeletionResult`, `ApprovalView` and `Decision` will.
+ * `Deletion` and `DeletionResult` will.
  */
 const NAMED = {
   AccessValue: "RouteInput<'PATCH /access/:member'>[string]",
+  ApprovalView: 'mcp/approvals.ts',
   AuditEntryView: 'api/audit.ts',
   AuthInfo: 'signin.ts',
   AuthorizationView: 'mcp/oauth.ts',
   BindingView: 'api/routes/bindings.ts',
   ConnectedApp: 'db/queries/mcp.ts',
+  Decision: 'mcp/approvals.ts',
   Deletion: 'api/routes/places.ts',
   DeletionResult: 'api/routes/places.ts',
   DismissedKey: "RouteOutput<'GET /projects/:project/:environment/missing'>['dismissed'][number]",

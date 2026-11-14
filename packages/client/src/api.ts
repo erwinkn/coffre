@@ -41,11 +41,6 @@ export type Api = {
       };
     };
     output: {
-      dryRun: true;
-      keys: {
-        [key: string]: "added" | "archived" | "changed" | "unchanged";
-      };
-    } | {
       operationId: string | null;
       keys: {
         [key: string]: {
@@ -56,6 +51,11 @@ export type Api = {
         } | {
           reference: string;
         };
+      };
+    } | {
+      dryRun: true;
+      keys: {
+        [key: string]: "added" | "archived" | "changed" | "unchanged";
       };
     };
   };
@@ -130,6 +130,7 @@ export type Api = {
           createdAt: null;
           endedBy: null;
           endedAt: null;
+          sourceId: string;
           canOpenSource: boolean;
         };
         folder: string | null;
@@ -1183,11 +1184,71 @@ export type Api = {
   };
   "GET /approvals/:id": {
     input: undefined;
-    output: never;
+    output: {
+      approval: {
+        id: string;
+        status: "approved" | "cancelled" | "denied" | "expired" | "failed" | "pending";
+        client: {
+          name: string;
+          host: string | null;
+          registration: "cimd" | "dcr";
+        };
+        tool: string;
+        summary: string;
+        details: {
+          label: string;
+          value: string;
+          kind?: "mono" | "time";
+          note?: string;
+          warn?: true;
+        }[];
+        asks: null | {
+          value: {
+            label: string;
+            note: string;
+          };
+        };
+        kind: "change" | "reveal";
+        reveals: boolean;
+        digest: string;
+        basis: string | null;
+        ready: boolean;
+        createdAt: string;
+        expiresAt: string;
+        outcome: null | {
+          text: string;
+          result?: {
+            [key: string]: unknown;
+          };
+          error?: string;
+        };
+      };
+    };
   };
   "POST /approvals/:id": {
-    input: undefined;
-    output: never;
+    input: {
+      approve: boolean;
+      digest: string;
+      basis?: string | null;
+      value?: string;
+    };
+    output: {
+      status: "approved" | "cancelled" | "denied" | "expired" | "failed" | "pending";
+      outcome: {
+        text: string;
+        result?: {
+          [key: string]: unknown;
+        };
+        error?: string;
+      };
+      shown: {
+        label: string;
+        value: string;
+        kind?: "mono" | "time";
+        note?: string;
+        warn?: true;
+      }[];
+    };
   };
   "PUT /settings": {
     input: {
@@ -1472,6 +1533,45 @@ export type AccessValue = string | null | {
   until: string | null;
 };
 
+export type ApprovalView = {
+  id: string;
+  status: "approved" | "cancelled" | "denied" | "expired" | "failed" | "pending";
+  client: {
+    name: string;
+    host: string | null;
+    registration: "cimd" | "dcr";
+  };
+  tool: string;
+  summary: string;
+  details: {
+    label: string;
+    value: string;
+    kind?: "mono" | "time";
+    note?: string;
+    warn?: true;
+  }[];
+  asks: null | {
+    value: {
+      label: string;
+      note: string;
+    };
+  };
+  kind: "change" | "reveal";
+  reveals: boolean;
+  digest: string;
+  basis: string | null;
+  ready: boolean;
+  createdAt: string;
+  expiresAt: string;
+  outcome: null | {
+    text: string;
+    result?: {
+      [key: string]: unknown;
+    };
+    error?: string;
+  };
+};
+
 export type AuditEntryView = {
   seq: number;
   author: "app" | "vault";
@@ -1595,6 +1695,24 @@ export type ConnectedApp = {
   lastUsedAt: string | null;
   lastUsedIp: string | null;
   expiresAt: string;
+};
+
+export type Decision = {
+  status: "approved" | "cancelled" | "denied" | "expired" | "failed" | "pending";
+  outcome: {
+    text: string;
+    result?: {
+      [key: string]: unknown;
+    };
+    error?: string;
+  };
+  shown: {
+    label: string;
+    value: string;
+    kind?: "mono" | "time";
+    note?: string;
+    warn?: true;
+  }[];
 };
 
 export type Deletion = {
@@ -2052,6 +2170,7 @@ export type SecretKey = {
     createdAt: null;
     endedBy: null;
     endedAt: null;
+    sourceId: string;
     canOpenSource: boolean;
   };
   folder: string | null;
