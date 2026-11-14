@@ -87,8 +87,12 @@ its root renders the Agentation toolbar. `dev/deployment/app/vite.config.ts` res
 every `@coffre/*` import, the config's own included, to its sources through
 `coffre:source`, so an edit to any package, a page or a route hot-reloads without a
 build. The vault keeps its members, grants and log entries in the same
-Postgres database, through its own login and Hyperdrive binding, and the
-seed starts them over with everything else. `COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT` and `COFFRE_DEV_DATABASE` run a
+Postgres database, through its own login and Hyperdrive binding. Each
+`pnpm dev` drops that database and the Workers' local storage, the signer's
+with it (`dev/reset.mjs`), so the two start over together; the seed then
+fills them through the API. A second stack on the same Postgres therefore
+needs its own `COFFRE_DEV_DATABASE` and `COFFRE_STATE_DIR`: starting one
+drops and recreates the database it names, and empties that storage. `COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT` and `COFFRE_DEV_DATABASE` run a
 second stack beside the first, and `COFFRE_DEV_PUBLIC_URL` and `COFFRE_DEV_IDP_PUBLIC_URL`
 sign in to it through a tunnel (see `dev/start.sh`). Sign in at
 `http://127.0.0.1:3000/login`, through either button (the dev IdP plays GitHub and
