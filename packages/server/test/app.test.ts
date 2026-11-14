@@ -209,13 +209,45 @@ test('a write is one change of the vault and no statement of the app; what it re
   app.calls.length = 0;
   const shapes: [string, unknown, number][] = [
     ['market/prod', { API_KEY: 'a\0b' }, 400], ['market/prod', { API_KEY: '\ud800' }, 400], ['market/prod', { API_KEY: 'x'.repeat(64 * 1024 + 1) }, 400], ['market/prod', { 'not a key': 'x' }, 400], ['market/prod', {}, 400],
-    ['market/prod', { API_KEY: null }, 400], ['market/prod', { API_KEY: { ref: 'market/prod/FLAG' } }, 400], ['market/prod', { API_KEY: { sensitivity: 'sensitive' } }, 400],
+    ['market/prod', { API_KEY: null }, 400], ['market/prod', { API_KEY: { ref: 'market/prod' } }, 400],
+    ['market/prod', { API_KEY: { ref: 'market/prod@me/FLAG' } }, 400], ['market/prod', { API_KEY: { ref: 'market/prod/FLAG', value: 'x' } }, 400], ['market/prod', { API_KEY: { sensitivity: 'sensitive' } }, 400],
     ['market/prod?dryRun=1', { API_KEY: 'x' }, 400], ['market/prod@me', { API_KEY: 'x' }, 501], ['Market/prod', { API_KEY: 'x' }, 400],
   ];
   for (const [path, values, expected] of shapes) assert.equal((await patch('bo-cli', path, values))[0], expected, `${path} ${JSON.stringify(values).slice(0, 40)}`);
   // `__proto__`, which a schema would drop without a word, is refused in the body itself.
   assert.equal((await app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: '{"__proto__":"v","A":"1"}' }))).status, 400);
   assert.deepEqual(app.calls, []);
+});
+
+test('a key made a reference, and a reference broken, is one change each: it reads its source, until broken', async () => {
+  const patch = (label: string, path: string, values: unknown) => answered(app.request(`/api/secrets/${path}`, as(label, { method: 'PATCH', body: JSON.stringify(values) })));
+  const unlink = (label: string, path: string) => cost(() => answered(app.request(`/api/secrets/${path}/reference`, as(label, { method: 'DELETE' }))));
+  const [[status, body], calls, statements] = await cost(() => patch('bo-cli', 'market/prod', { LINK: { ref: 'market/prod/DATABASE_URL' }, API_KEY: 'k1' }));
+  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  assert.deepEqual(body.keys, { API_KEY: { version: 1, sensitivity: 'secret' }, LINK: { reference: 'market/prod/DATABASE_URL' } });
+  world.memory.reads.clear();
+  assert.deepEqual((await reveal('ada-cli', 'market/prod/LINK'))[1].values, { LINK: 'postgres://märkt' }, 'whoever reads here reads it');
+  const refused: [unknown, number, string][] = [
+    [{ LINK2: { ref: 'market/prod/LINK' } }, 409, 'reference_to_reference'], [{ DATABASE_URL: { ref: 'market/prod/DATABASE_URL' } }, 409, 'reference_to_itself'],
+    [{ DATABASE_URL: { ref: 'market/prod/FLAG' } }, 409, 'referenced'], [{ LINK2: { ref: 'market/prod/NOPE' } }, 404, 'unknown_key'],
+    // A sensitive source is used by its maker, which a developer here does not; billing is past Bo's reach.
+    [{ LINK2: { ref: 'market/prod/STRIPE_KEY' } }, 403, 'no_access'], [{ LINK2: { ref: 'billing/prod/X' } }, 403, 'no_access'],
+  ];
+  for (const [values, code, reason] of refused) {
+    const [got, said] = await patch('bo-cli', 'market/prod', values);
+    assert.deepEqual([got, said.reason], [code, reason], JSON.stringify(values));
+  }
+
+  assert.deepEqual((await unlink('ada-cli', 'market/prod/LINK'))[0].slice(0, 1), [403], 'a viewer breaks nothing');
+  const [[broke, broken], did, ran] = await unlink('bo-cli', 'market/prod/LINK');
+  assert.deepEqual([broke, did, ran], [200, ['change'], 0], JSON.stringify(broken));
+  assert.deepEqual({ ...broken, operationId: 'x' }, { operationId: 'x', reference: { holder: 'market/prod/LINK', source: 'market/prod/DATABASE_URL', state: 'broken' } });
+  for (const path of ['market/prod/LINK', 'market/prod/DATABASE_URL', 'market/prod@me/LINK']) {
+    const [[got, said]] = await unlink('bo-cli', path);
+    assert.deepEqual([got, said.error, said.reason], [404, 'not_found', 'no_reference'], path);
+  }
+  world.memory.reads.clear();
+  assert.deepEqual((await reveal('ada-cli', 'market/prod/LINK')).map((part, i) => (i === 0 ? part : (part as Body).reason)), [404, 'no_value']);
 });
 
 test('a path is a route or it is not: its method, its segments and its body are held before any handler runs', async () => {
