@@ -63,9 +63,9 @@ const MAX_QUIET = 1_000;
 /**
  * Whether `service`'s unknown key is said now: its gate's count decides,
  * once in each hour of the clock (two may come a moment apart, either side
- * of the hour's turn). The isolate then keeps quiet until that window ends,
+ * of the hour's turn). The isolate then keeps quiet until that hour ends,
  * so a flood asks the gate once an hour. With no gate, or one that failed,
- * the isolate's own hour caps it. A gate past its ceiling says nothing, and
+ * the isolate's own hour from now caps it. A gate past its ceiling says nothing, and
  * the next refusal asks again.
  */
 async function unknownKeyDue(workloads: WorkloadsConfig, gates: Gates | null, service: string): Promise<boolean> {
@@ -79,9 +79,13 @@ async function unknownKeyDue(workloads: WorkloadsConfig, gates: Gates | null, se
     try {
       const admitted = await gates(service).admit({ counts: [UNKNOWN_KEY_COUNT] });
       if (!admitted.ok && admitted.reason !== 'limit') return false;
-      if (!admitted.ok) [due, ends] = [false, now + admitted.retryAfterMs];
+      // Quiet until the gate's window ends, the clock's hour: the same for every isolate.
+      ends = admitted.ok ? (Math.floor(now / UNKNOWN_KEY_ALERT_MS) + 1) * UNKNOWN_KEY_ALERT_MS : now + admitted.retryAfterMs;
+      due = admitted.ok;
     } catch (error) {
       console.error("the workload gate failed: an unknown key's alert is capped in this isolate alone", logged(error));
+      // Another refusal that asked the gate at the same moment, failed too and spoke first: this one keeps quiet.
+      if (Date.now() < (until.get(service) ?? -Infinity)) return false;
     }
   }
   until.delete(service);

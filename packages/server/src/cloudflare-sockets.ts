@@ -21,7 +21,7 @@ export type SocketsNamespace = {
   get(id: unknown): { fetch(request: Request): Promise<Response> };
 };
 
-/** What the object is given by the runtime: its `waitUntil`, for the database's closing. */
+/** What the object is given by the runtime: its `waitUntil`, for the database's closing and a limit's alert. */
 type ObjectState = { waitUntil(promise: Promise<unknown>): void };
 
 /** A WebSocket's admission: the plugin's refusal, or its session (`admitSocket`), and the decision itself told to `hold`, if it outlasts the answer. */

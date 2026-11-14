@@ -208,9 +208,9 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
 }
 
 /** The plugin's answer to a WebSocket asked for under its prefix; null when no plugin takes it. */
-export function pluginSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | SocketSession> | null {
+export function pluginSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): Promise<Response | SocketSession> | null {
   const routes = socketRoutes(request, runtime.plugins);
-  return routes === undefined ? null : routes.socket!(request, pluginContext(request, runtime, sourceIp));
+  return routes === undefined ? null : routes.socket!(request, pluginContext(request, runtime, sourceIp, track));
 }
 
 /** Whether a plugin takes WebSockets at `request`'s path, deciding nothing about the request itself. */
