@@ -14,7 +14,7 @@ import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
-import { credential, environment, grant, instance, principal, project, role, rows, secret, tokenOf, user, value, write } from './world.ts';
+import { binding, credential, environment, grant, instance, principal, project, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
 
 const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
@@ -242,6 +242,18 @@ test('a change of grants shaped otherwise than the contract says is a fault, bef
   // The same places, well formed, are not.
   assert.doesNotThrow(() => OPERATIONS['access.grant'](change('fay-cli', eve, Array.from({ length: 1000 }, (_, i) => ({ project: `p${i}`, environment: 'dev', role: 'viewer', expiresAt: '2028-02-29T00:00:00Z' }))), { workloads: world.workloads, owners: world.owners }));
   assert.equal(world.woken.length, 0);
+});
+
+test('a workload\'s session changes no one\'s grants, even where its scope holds `grant.manage`; its service account\'s own token does', async () => {
+  // The service account manages access on market, and its binding's sessions hold that role.
+  const scope = JSON.stringify([{ projectId: market.id, environmentId: null, role: 'admin', permissions: { normal: ['grant.manage', 'project.manage'], protected: ['grant.manage', 'project.manage'] } }]);
+  const bound = binding(api, { profile: 'kubernetes', scope, policy: '{}' });
+  await write(world, ...rows('grants', grant(api, 'admin', { project: market })), ...rows('bindings', bound), ...rows('credentials', session('pod', bound), credential('api-token', api, { scope })));
+  await nothingWritten(async () => {
+    assert.deepEqual(await vault.change<'access.grant'>({ ...change('pod', eve, [{ project: 'market', role: 'developer' }]), proof: 'pod' }), { refused: 'workload_cannot_issue' });
+    assert.deepEqual(await vault.change<'access.grant'>({ ...change('pod', bo, [{ project: 'market', role: null }]), proof: 'pod' }), { refused: 'workload_cannot_issue' }, 'nor takes one away');
+  });
+  assert.deepEqual(await set('api-token', eve, { project: 'market', role: 'developer' }), { answer: { changes: ['created'] } }, 'a bearer token of the service account, as 0.14 allowed');
 });
 
 test('a refused change of grants is logged once, with why and what it was about', async () => {

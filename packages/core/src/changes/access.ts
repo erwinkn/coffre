@@ -1,7 +1,11 @@
 import type { Filter, InstanceRole, Role, Scope } from '../access.ts';
 import type { AccessChange } from '../vault.ts';
 
-/** The changes of members, grants, roles and the instance's policy (`packages/vault/src/ops/access.ts`). */
+/**
+ * The changes of members, grants, roles and the instance's policy
+ * (`packages/vault/src/ops/access.ts`). A workload's session makes none of
+ * them, whatever its scope holds (`workload_cannot_issue`), as 0.14 refused.
+ */
 export type AccessChanges = MemberAdd | MemberRestore | MemberRole | MemberRemove | AccessGrant;
 
 export type AccessAnswers = {

@@ -472,13 +472,13 @@ test('a row written around the vault is no row: an Owner edited in place or forg
   await assert.rejects(add('fay-cli', cy), /principals_pkey|duplicate key/);
 });
 
-test('a workload\'s session that is stopped or narrowed is told so, as for any change, and runs no instance', async () => {
+test('a workload\'s session that is stopped or narrowed is told so, as for any change, and changes no member', async () => {
   const bound = binding(api, { profile: 'kubernetes', scope: '[]', policy: '{}' });
   const pod = session('pod', bound);
   await write(world, ...rows('bindings', bound), ...rows('credentials', pod, session('tool', bound, { ancestors: JSON.stringify([pod.id]) })));
   const by = (label: string) => vault.change({ ...shown(label), proof: label, op: 'member.add', principal: user('new'), role: 'member', scope: null });
   await nothingWritten(async () => {
-    assert.deepEqual(await by('pod'), { refused: 'no_access' });
+    assert.deepEqual(await by('pod'), { refused: 'workload_cannot_issue' });
     assert.deepEqual(await by('tool'), { refused: 'narrowed' });
   });
   await amend(world, 'bindings', eq(bindings.id, bound.id), { frozenAt: new Date(world.now()) });

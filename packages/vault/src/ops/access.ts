@@ -81,12 +81,14 @@ const ownsAllAsking = (caller: Asking) => caller.holds.credentialScope == null &
 /** Whether the deployment names this person an Owner (`owners`): no change demotes or removes them while it does. */
 const named = (vault: Deciding, principal: string) => vault.owners.some((email) => principal === `user:${email}`);
 
-/** Who asks, or why they are refused, as `secret.write` takes them: a narrowed session changes nothing. */
+/** Who asks, or why they are refused: a stopped or narrowed session as `secret.write` takes it, and any workload's session, which changes no one's access. */
 function asking(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, vault: Deciding, at: number): Asking | Refusal {
   const caller = callerFrom(seen, shown, vault.workloads, at);
   if (caller === null) return { refused: 'unauthenticated' };
   if (caller.workload?.stop != null) return { refused: caller.workload.stop };
   if (caller.workload?.narrowed === true) return { refused: 'narrowed' };
+  // A workload's session changes no one's access, whatever its scope holds, as 0.14's router refused it (docs/design/workload-access.md, D15).
+  if (caller.workload !== null) return { refused: 'workload_cannot_issue' };
   return caller;
 }
 
@@ -361,8 +363,9 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
 
   const named = sql`(SELECT p.id FROM projects p WHERE p.slug = ANY(${sql.param([...new Set(changes.map((change) => change.project))])}::text[]))`;
   const onProjects = sql`(SELECT p.id FROM projects p WHERE p.slug = ANY(${sql.param(changes.filter((change) => change.environment === null).map((change) => change.project))}::text[]))`;
-  // Slugs hold no slash, so a path names one environment.
-  const onEnvironments = sql`(SELECT e.id FROM environments e JOIN projects p ON p.id = e.project_id WHERE p.slug || '/' || e.slug = ANY(${sql.param(changes.filter((change) => change.environment !== null).map(path))}::text[]))`;
+  // Each project and environment pair through the two unique keys, so each is an index lookup.
+  const pairs = changes.filter((change) => change.environment !== null);
+  const onEnvironments = sql`(SELECT e.id FROM unnest(${sql.param(pairs.map((change) => change.project))}::text[], ${sql.param(pairs.map((change) => change.environment))}::text[]) AS a(project, environment) JOIN projects p ON p.slug = a.project JOIN environments e ON e.project_id = p.id AND e.slug = a.environment)`;
   const read = {
     ...callerParts(shown.token, named),
     member: part(principals, eq(principals.id, principal)),
