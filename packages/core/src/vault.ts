@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 
-import type { AccessFault } from './access-fault.ts';
 import type { CallerKind, CredentialScope, GrantPlace, Holdings, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
 import type { AccessAnswers, AccessChanges } from './changes/access.ts';
 import type { FreezeAnswers, FreezeChanges } from './changes/freezes.ts';
@@ -14,7 +13,6 @@ import type { McpScope } from './mcp.ts';
 
 export type { CallerKind } from './access.ts';
 
-export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './checkpoint.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
 
 /**
@@ -363,8 +361,6 @@ export type RefusalCode =
    * Asked again on the answer now, it is decided as they are now.
    */
   | 'access_changed'
-  /** The vault's own log no longer carries the head the last checkpoint signed, or does not rehash since. */
-  | 'log_broken'
   /**
    * A KEK the vault is given does not open what it wrapped: a restore with
    * the wrong key, or a key mistyped under the right id. Every key
@@ -727,67 +723,3 @@ export type ChangePolicyInput = Correlation & Through & {
    */
   revision?: string;
 };
-
-/**
- * A prefix of the log the vault signed: every entry up to `seq`, the last
- * of which has `hash`, which pins every byte before it. Kept as the vault's
- * `audit.checkpoint` entry, just after the prefix it signs.
- */
-export type Checkpoint = {
-  seq: number;
-  /** The hash of entry `seq`, hex. */
-  hash: string;
-  signedAt: string;
-  keyId: string;
-  /** Ed25519 over `checkpointMessage(...)`, base64. */
-  signature: string;
-};
-
-/**
- * A public key the vault's checkpoints verify under, base64. One it
- * replaced vouches only for checkpoints whose prefix ends before `until`,
- * its first entry under the key that replaced it; the one it signs with now
- * has none.
- */
-export type CheckpointKey = { publicKey: string; until: number | null };
-
-/** An entry of the vault's log, and so the chain up to it. */
-export type LogHead = { seq: number; hash: string };
-
-export type VerifyLogInput = {
-  /**
-   * The last entry the app verified, every link and hash up to it
-   * recomputed and its own entries checked by its key: the vault checks the
-   * log still holds it, so between them both authors' entries are
-   * authenticated over the same stretch, and the vault leaves the links to
-   * the app.
-   */
-  upTo?: LogHead | null;
-  /**
-   * Where the vault's walk starts: the seq of one of its `audit.checkpoint`
-   * entries that keeps a tally, or `start`, the first entry. The newest
-   * such checkpoint when absent, and a vault older than 0.10.1 walks from
-   * the first entry whatever it says.
-   */
-  from?: number | 'start';
-  /**
-   * A later checkpoint's entry, whose prefix `upTo` is: the walk ends
-   * there, and must come to the tally it keeps. The members' rows and the
-   * key batches are as they are now, not then, so only a walk without one
-   * holds them to the log.
-   */
-  to?: number;
-};
-
-/**
- * Whether the vault's log holds, with the number of its entries through
- * where the walk ended, `through`: `upTo`, the prefix `to` signed, or as
- * far as one walk goes. On a failure, the entry where it breaks, or null
- * when the chain holds but the members and grants do not follow from it.
- * Then `fault` says which, as facts the app can word with names: `reason`
- * has only ids. A walk that ends at the present reports live key batches in
- * `pending`; overdue ones fail.
- */
-export type LogVerification =
-  | { ok: true; entries: number; pending?: number; through?: number }
-  | { ok: false; failedAtSeq: number | null; reason: string; fault?: AccessFault };

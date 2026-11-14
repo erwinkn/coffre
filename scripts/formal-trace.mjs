@@ -118,11 +118,6 @@ const show = (value) => {
     }
     // Another model's entry: its kind, what it names, and the operation that wrote it.
     if ('kind' in value && 'id' in value) return `${value.kind}${named(value, ['kind', 'id'])} (${value.id[0]})`;
-    // Audit.tla's: its kind, and what is not as written, and what a beat or a checkpoint says.
-    if ('kind' in value && 'wver' in value) {
-      const said = named(value, ['kind', 'wver', 'ver', 'vver', 'atVer', 'lapVer', 'claimsVer']).replace(/ (verified|at|lap|lapEnd|edited|fEdit|fault|claims) 0\b/g, '');
-      return `${value.kind}${said}${value.ver === value.wver ? '' : ' rechained'}`;
-    }
     return `[${Object.entries(value).map(([k, v]) => `${k} ${show(v)}`).join(', ')}]`;
   }
   return String(value);

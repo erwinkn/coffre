@@ -1,5 +1,4 @@
 export type * from '@coffre/core/vault';
-export { checkpointMessage, verifyCheckpoint } from '@coffre/core/vault';
 export type { SecretContext } from '@coffre/core/envelope';
 export { awsKms, KekBadClaimError, KekRefusedError, KekUnavailableError } from '@coffre/core/kek';
 export type { AwsCredentials, AwsKmsOptions, KekProvider, WrappedDek } from '@coffre/core/kek';
