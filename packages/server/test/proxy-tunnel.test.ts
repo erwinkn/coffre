@@ -16,6 +16,7 @@ import { after, before, beforeEach, test } from 'node:test';
 
 import { createProof, generateProofKey, thumbprint, type ProofKey } from '@coffre/client/dpop';
 import { generateToken, github, signin } from '@coffre/core/identity';
+import type { UseInput } from '@coffre/core/vault';
 import { amend, APP_URL, binding, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, session, tokenOf, value, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 
@@ -246,9 +247,9 @@ test("queries through the tunnel run as the real login: one use opens the URL, o
     // Admission: the handle's row, where its run ends; the use. The login: a peek, the rows read now.
     assert.deepEqual(calls, ['use', 'peek']);
     assert.equal(statements, 1, "the handle's row, read to route it");
-    const [use, peek] = app.inputs.slice(-2) as { purpose: string; upstream: string; keys: string[]; fresh?: boolean }[];
-    assert.deepEqual([use!.purpose, use!.upstream, use!.keys, use!.fresh], ['use', 'db', ['DATABASE_URL'], undefined]);
-    assert.deepEqual([peek!.purpose, peek!.upstream, peek!.keys, peek!.fresh], ['use', 'db', ['DATABASE_URL'], true]);
+    const [use, peek] = app.inputs.slice(-2) as { purpose: string; upstream: UseInput['upstream']; keys: string[]; fresh?: boolean }[];
+    assert.deepEqual([use!.purpose, use!.upstream, use!.keys, use!.fresh], ['use', { credential: 'db' }, ['DATABASE_URL'], undefined]);
+    assert.deepEqual([peek!.purpose, peek!.upstream, peek!.keys, peek!.fresh], ['use', { credential: 'db' }, ['DATABASE_URL'], true]);
     // An extended-protocol query with parameters, as drivers send them: on the session, nothing more asked.
     const [joined, more] = await cost(async () => [...(await client.unsafe('SELECT $1::text || $2::text AS joined', ['a', 'b']))]);
     assert.deepEqual(joined, [{ joined: 'ab' }]);

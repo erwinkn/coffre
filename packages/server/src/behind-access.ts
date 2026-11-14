@@ -4,7 +4,7 @@ import { emailAddress } from '@coffre/core/schemas';
 
 import { ApiError, noteTampered, refusal } from './api/errors.ts';
 import { bearerToken, readCookie } from './auth.ts';
-import { logged } from './logged.ts';
+import { logged } from '@coffre/db/dialect';
 import type { CoffreRuntime } from './runtime.ts';
 import { dpopToken } from './sessions.ts';
 import { describeUserAgent } from './signin.ts';

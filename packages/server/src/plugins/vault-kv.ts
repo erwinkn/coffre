@@ -28,6 +28,8 @@
  * another site's page send one, so these GETs can reveal what coffre's own
  * API reveals only to a POST. Each read is the API's reveal, as the token's
  * holder: the same checks, the same vault, the same `secret.read` entry.
+ * Behind Cloudflare Access, which 0.16.0 serves to browsers alone, the token
+ * is refused as any bearer token is, before anything is read.
  */
 import { CoffreError, type Me } from '@coffre/client';
 
@@ -196,8 +198,8 @@ function mountInfo(mount: string) {
  * Terraform before every plan. ESO reads `type`, a string, `ttl`, a number,
  * and `expire_time`, which may be null; Terraform needs no `namespace_path`.
  * The ttl is the seconds the token has left, which ESO takes for expired
- * under 60. A credential that is not coffre's, Access's assertion, says
- * none: a ttl of 0 and no expire time, as Vault's tokens that never expire.
+ * under 60. A credential with no end says none: a ttl of 0 and no expire
+ * time, as Vault's tokens that never expire.
  */
 function lookupSelf(me: Me, now = Date.now()) {
   if (!me.registered) throw new CoffreError(403, 'registration_required', 'you are signed in, but not a member here');

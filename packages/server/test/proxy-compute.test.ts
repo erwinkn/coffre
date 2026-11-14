@@ -120,10 +120,13 @@ async function asSession(who: Held, body: unknown, path = '/use', options: { sig
   return app.request(path, { method: 'POST', headers: { authorization: `DPoP ${who.token}`, dpop: proof, ...headers }, body: bytes });
 }
 
-/** The vault's log entries not yet signed in: the credential each names. */
+/** The vault's log entries not yet signed in: the credential each names, and the host where it names one. */
 async function logged(): Promise<(string | undefined)[]> {
   const bodies = await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`);
-  return bodies.map(({ body }) => (JSON.parse(body) as { detail: { credential?: string } }).detail.credential);
+  return bodies.map(({ body }) => {
+    const { credential, host } = (JSON.parse(body) as { detail: { credential?: string; host?: string } }).detail;
+    return host === undefined ? credential : `${credential} ${host}`;
+  });
 }
 
 /** As a request a moment later, past the vault's memory (two seconds). */
@@ -160,8 +163,9 @@ test("a session's ask: one statement routes it, its gate takes the proof once, t
   decipher.setAAD(Buffer.from('workspace-1'));
   decipher.setAuthTag(Buffer.from(tag, 'base64url'));
   assert.equal(Buffer.concat([decipher.update(Buffer.from(ciphertext, 'base64url')), decipher.final()]).toString(), 'pennylane-token');
-  // Each logged once a minute under its own name, by the vault; nothing of what was signed, checked or encrypted.
-  assert.deepEqual(await logged(), ['s3', 'dfns-key', 'sumsub-key', 'tokens']);
+  // Each logged once a minute under its own name, by the vault, the HMAC's and the verifier's apart though they share a key;
+  // a presign's with its URL's host; nothing of what was signed, checked or encrypted.
+  assert.deepEqual(await logged(), ['s3 s3.eu-west-3.example', 'dfns-key', 'sumsub-key', 'webhook', 'tokens']);
   const text = (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending`)).map((row) => row.body).join('\n');
   for (const leaked of ['transfer 10', 'pennylane', WEBHOOK_SECRET, b64('transfer 10')]) assert.ok(!text.includes(leaked), leaked);
   // A handle's, the same: one use, and no statement where it names its place.

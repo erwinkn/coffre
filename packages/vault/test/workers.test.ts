@@ -5,6 +5,9 @@
 // the signer's object; this holds that one request goes all the way.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test, { after } from 'node:test';
 
 import { rowsOf } from '@coffre/db/dialect';
@@ -14,7 +17,7 @@ import { resolveVaultConfig } from '../src/config.ts';
 import { checked } from '../src/rows.ts';
 import { headText } from '../src/signer.ts';
 import { prepareVault } from '../src/vault.ts';
-import { emptyDatabase, openTestVault, slowPostgres, VAULT_URL } from './database.ts';
+import { backupOf, emptyDatabase, openTestVault, slowPostgres, VAULT_URL } from './database.ts';
 import { vaultWorker, type Answer } from './workers/boot.ts';
 import { credential, environment, grant, principal, project, role, rows, secret, user, value, write } from './world.ts';
 
@@ -39,7 +42,7 @@ async function instance(): Promise<void> {
 }
 
 /** A fresh isolate of the vault Worker and its signer, over the suite's database through the vault's login. */
-const freshVault = (database: string, more?: { signer?: boolean }) => vaultWorker(database, { id: 'vault-workers-test', key: VAULT_KEY }, more);
+const freshVault = (database: string, more?: { signer?: boolean; signerName?: string; state?: string }) => vaultWorker(database, { id: 'vault-workers-test', key: VAULT_KEY }, more);
 
 const count = async (table: 'log' | 'log_pending') => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM ${sql.identifier(table)}`))[0]!.n;
 const reads = async () => (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log WHERE NOT kept ORDER BY seq`)).map(({ body }) => JSON.parse(body) as { action: string; actor: string; detail: { keys: { key: string }[] } });
@@ -126,6 +129,68 @@ test('a refusal crosses the binding as an answer, and writes nothing', { timeout
     assert.deepEqual([await count('log'), await count('log_pending')], [written, 0]);
   } finally {
     await vault.stop();
+  }
+});
+
+test("a database restored, deployed with a new `signerName`: the vault calls that object, which goes on from the database's head; the one named before signs nothing, its alarm stopped and its storage as it was", { timeout: 180_000 }, async () => {
+  await instance();
+  const seqs = async () => (await rowsOf<{ seq: number }>(world.owner, sql`SELECT seq::int FROM log ORDER BY seq`)).map(({ seq }) => seq);
+  // The objects' storage, kept from the deployment before the restore to the one after, as Cloudflare keeps it.
+  const state = mkdtempSync(join(tmpdir(), 'coffre-vault-state-'));
+  try {
+    const before = await freshVault(VAULT_URL, { state });
+    let restore: () => Promise<void>;
+    let kept: { storage: string; alarm: number | null };
+    try {
+      assert.equal((await before.write('bo-cli', 'market/prod', { KEY_0: 'in the backup' })).status, 200);
+      await until(async () => (await count('log_pending')) === 0, 15_000, 'the signer has taken every entry');
+      restore = await backupOf(world.owner);
+      // Signed by the signer named then, past the backup: it numbers its next entry after this one.
+      assert.equal((await before.write('bo-cli', 'market/prod', { KEY_0: 'past the backup' })).status, 200);
+      await until(async () => (await count('log_pending')) === 0, 15_000, 'the signer has taken every entry');
+      kept = (await before.object('signer', 'kept')) as typeof kept;
+      assert.notEqual(kept.alarm, null);
+    } finally {
+      await before.stop();
+    }
+    await restore();
+    const size = (await seqs()).length;
+    const vault = await freshVault(VAULT_URL, { state, signerName: 'signer-restored-2026-11-14' });
+    try {
+      const done = await vault.write('bo-cli', 'market/prod', { KEY_0: 'after the restore' });
+      assert.equal(done.status, 200, JSON.stringify(done.body));
+      // The old object's alarm, while that entry waits: it would sign it after its own last, leaving a hole.
+      assert.equal(await count('log_pending'), 1);
+      await vault.object('signer', 'ring');
+      await until(async () => (await count('log_pending')) === 0, 15_000, 'the signer has taken every entry');
+      assert.deepEqual(await seqs(), Array.from({ length: size + 1 }, (_, i) => i));
+      const named = await vault.status();
+      assert.deepEqual([named.adopted, named.standing, named.asked > 0], [true, [], true]);
+      assert.match(named.took!.said, /a log begun that it did not sign, from its head/);
+      // Refused, and left as it was: named again, it would find itself so.
+      assert.deepEqual(await vault.object('signer', 'kept'), { ...kept, alarm: null });
+      const { error } = (await vault.status('signer')) as unknown as { error: string };
+      assert.equal(error, 'this signer\'s object is "signer", and the deployment names "signer-restored-2026-11-14" (signerName): it touches nothing');
+    } finally {
+      await vault.stop();
+    }
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+  }
+});
+
+test('a `signerName` of 1,024 bytes names the signer, whose object Cloudflare gives that name; one of 1,025 is refused, as Cloudflare would give it none', { timeout: 120_000 }, async () => {
+  await instance();
+  for (const [signerName, fits] of [['é'.repeat(512), true], ['é'.repeat(512) + 'x', false]] as const) {
+    const vault = await freshVault(VAULT_URL, { signerName });
+    try {
+      const done = await vault.write('bo-cli', 'market/prod', { KEY_0: signerName.length.toString() });
+      if (fits) assert.deepEqual([done.status, (await vault.status()).adopted], [200, true]);
+      // Refused at once, rather than an object the fence takes for another, and `adopting` for good.
+      else assert.match((done.body as unknown as { error: string }).error, /^signerName names the signer's object, a text of 1 to 1,024 bytes/);
+    } finally {
+      await vault.stop();
+    }
   }
 });
 

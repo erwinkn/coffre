@@ -5,7 +5,7 @@ import { migrated } from '@coffre/db/schema-version';
 
 import { ApiError } from './api/errors.ts';
 import { admit, type Admission } from './behind-access.ts';
-import { exchangeToken } from './exchange.ts';
+import { exchangeToken, renewWorkload, signInWorkload } from './exchange.ts';
 import { fetchApi, isSameOrigin, pageClient } from './fetch-api.ts';
 import { errorResponse, jsonResponse, methodNotAllowed } from './http.ts';
 import { mcpEndpoint } from './mcp/endpoint.ts';
@@ -43,7 +43,10 @@ const PATHS: Record<string, { method: 'GET' | 'POST'; handler: Handler; browserF
   '/api/auth/logout': { method: 'POST', handler: logout },
   '/auth/signout': { method: 'POST', handler: signOut, browserForm: true },
   // A CI run's exchange (exchange.ts): its platform's ID token, for a five-minute token of its service.
-  '/api/auth/oidc': { method: 'POST', handler: exchangeToken },
+  '/api/auth/oidc': { method: 'POST', handler: (request, runtime, sourceIp, track) => exchangeToken(request, runtime, sourceIp, track) },
+  // A workload's sign-in and renewal (exchange.ts): its platform's proof, for a session bound to its key; then that session moved on.
+  '/api/auth/workload': { method: 'POST', handler: signInWorkload },
+  '/api/auth/workload/renew': { method: 'POST', handler: renewWorkload },
   // MCP's OAuth (mcp/http.ts): the metadata clients read first, then the token, registration and revocation endpoints;
   // and the endpoint its access tokens are for (mcp/endpoint.ts).
   '/.well-known/oauth-protected-resource': { method: 'GET', handler: protectedResource },

@@ -155,8 +155,12 @@ export async function serviceBindings(db: Queryable, member: string, now: Date):
   };
 }
 
-/** A live binding on an issuer: what the app reads to know which keys to verify a CI run's token under. */
-export type IssuerBinding = { id: string; profile: string; jwksUri: string; jwks: string | null; claims: string; bearer: boolean };
+/**
+ * A live binding on an issuer: what the app reads to know which keys to
+ * verify a token under, and for a workload's, which audience (`policy`,
+ * its canonical JSON; null on one a CI run's exchange takes, `bearer`).
+ */
+export type IssuerBinding = { id: string; profile: string; jwksUri: string; jwks: string | null; claims: string; policy: string | null; bearer: boolean };
 
 /**
  * The live bindings of `member` (`token:<name>`) on `issuer`, of the
@@ -167,13 +171,13 @@ export type IssuerBinding = { id: string; profile: string; jwksUri: string; jwks
  * under, and the vault decides on its own read of them.
  */
 export async function issuerBindings(db: Queryable, member: string, issuer: string, most: number): Promise<IssuerBinding[]> {
-  const rows = await rowsOf<{ id: string; profile: string; jwks_uri: string; jwks: string | null; claims: string; bearer: boolean }>(db, sql`
-    SELECT b.id, b.profile, b.jwks_uri, b.jwks, b.claims, b.policy IS NULL AS bearer
+  const rows = await rowsOf<{ id: string; profile: string; jwks_uri: string; jwks: string | null; claims: string; policy: string | null }>(db, sql`
+    SELECT b.id, b.profile, b.jwks_uri, b.jwks, b.claims, b.policy
     FROM principals p
     JOIN bindings b ON b.principal = p.id AND b.issuer = ${issuer} AND b.generation = p.generation AND b.revoked_at IS NULL
     WHERE p.id = ${member} AND p.status = 'active'
     ORDER BY b.created_at, b.id
     LIMIT ${most}
   `);
-  return rows.map((row) => ({ id: row.id, profile: row.profile, jwksUri: row.jwks_uri, jwks: row.jwks, claims: row.claims, bearer: row.bearer }));
+  return rows.map((row) => ({ id: row.id, profile: row.profile, jwksUri: row.jwks_uri, jwks: row.jwks, claims: row.claims, policy: row.policy, bearer: row.policy === null }));
 }

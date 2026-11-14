@@ -25,9 +25,10 @@
 import type { Asked, Change, McpUnasked, Presented, Refused, Unasked, UseInput, Vault, WorkloadsUnasked } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
+import { logged } from '@coffre/db/dialect';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
-import { signerObject, signerOf, type SignerNamespace } from './cloudflare-signer.ts';
+import { SIGNER, signerObject, signerOf, type SignerNamespace } from './cloudflare-signer.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { about, openVault, prepareVault, type PreparedVault } from './vault.ts';
 
@@ -36,7 +37,23 @@ export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
 export * from './index.ts';
 
 /** What the vault Worker's `vault(env => …)` returns. */
-export type WorkersVaultConfig = VaultConfig & { database: PostgresDatabase };
+export type WorkersVaultConfig = VaultConfig & {
+  database: PostgresDatabase;
+  /**
+   * The name of the signer's object, `signer` unless set. A new name is a
+   * signer whose storage is empty, which goes on from the database's head:
+   * a backup restored over a deployment is deployed under a new name, and
+   * the old object is left (docs/restore.md).
+   */
+  signerName?: string;
+};
+
+/** The signer's object, as the configuration names it. */
+function signerNameOf({ signerName = SIGNER }: WorkersVaultConfig): string {
+  // Cloudflare gives an object a name longer than 1,024 bytes no `id.name`, and the fence would refuse it.
+  if (typeof signerName !== 'string' || signerName === '' || new TextEncoder().encode(signerName).length > 1024) throw new Error(`signerName names the signer's object, a text of 1 to 1,024 bytes; got ${JSON.stringify(signerName)}`);
+  return signerName;
+}
 
 /** Set when the Worker's module runs `vault(…)`, before any call comes in. */
 let configure: ((env: never) => WorkersVaultConfig) | null = null;
@@ -46,7 +63,8 @@ let configure: ((env: never) => WorkersVaultConfig) | null = null;
  * isolate keeps with the vault's short memory (vault.ts, `PreparedVault`),
  * and that the signer said the database is adopted, once it has.
  */
-const ready = new WeakMap<object, { database: PostgresDatabase; prepared: PreparedVault; adopted: boolean }>();
+const ready = new WeakMap<object, Ready>();
+type Ready = { database: PostgresDatabase; prepared: PreparedVault; signer: string; adopted: boolean };
 
 /**
  * How long a call waits for the signer to adopt the database. An empty one
@@ -74,11 +92,11 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   async #call<T>(run: (vault: Vault) => Promise<T>): Promise<T | Refused> {
     const entry = this.#ready();
     const { prepared, database } = entry;
-    const { SIGNER } = this.env as { SIGNER?: SignerNamespace };
-    if (SIGNER === undefined) throw new Error('the vault Worker binds its signer: a durable_objects binding SIGNER to CoffreSigner, which it exports (docs/design/0.16.md, "The signer")');
+    const { SIGNER: namespace } = this.env as { SIGNER?: SignerNamespace };
+    if (namespace === undefined) throw new Error('the vault Worker binds its signer: a durable_objects binding SIGNER to CoffreSigner, which it exports (docs/design/0.16.md, "The signer")');
     if (!entry.adopted) {
       // A call that hears no in time leaves alone the yes another heard meanwhile.
-      if (!(await this.#adopted(SIGNER))) return ADOPTING;
+      if (!(await this.#adopted(signerOf(namespace, entry.signer)))) return ADOPTING;
       entry.adopted = true;
     }
     const pool = new HyperdrivePool(database.hyperdrive.connectionString);
@@ -89,9 +107,9 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
         (async () => {
           try {
             // A copy of its own: what crosses is the bytes' whole buffer.
-            await signerOf(SIGNER).wake(Uint8Array.from(hash));
+            await signerOf(namespace, entry.signer).wake(Uint8Array.from(hash));
           } catch (error) {
-            console.error('coffre: the signer was not told of an entry', error);
+            console.error('coffre: the signer was not told of an entry', logged(error));
           }
         })(),
       );
@@ -103,12 +121,12 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   }
 
   /** Whether the signer says the database is adopted, within `ADOPTION_WAIT_MS`. The call lives on until it has answered. */
-  async #adopted(SIGNER: SignerNamespace): Promise<boolean> {
+  async #adopted(signer: ReturnType<typeof signerOf>): Promise<boolean> {
     // Its failure logged once, whether it comes before the wait is over or after.
-    const asked = signerOf(SIGNER)
+    const asked = signer
       .adopt()
       .catch((error: unknown) => {
-        console.error('coffre: the signer did not say whether the database is adopted', error);
+        console.error('coffre: the signer did not say whether the database is adopted', logged(error));
         return false;
       });
     this.ctx.waitUntil(asked);
@@ -120,13 +138,13 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     }
   }
 
-  #ready(): { database: PostgresDatabase; prepared: PreparedVault; adopted: boolean } {
+  #ready(): Ready {
     const env = this.env as object;
     let entry = ready.get(env);
     if (entry === undefined) {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
-      entry = { database: config.database, prepared: prepareVault(resolveVaultConfig(config)), adopted: false };
+      entry = { database: config.database, prepared: prepareVault(resolveVaultConfig(config)), signer: signerNameOf(config), adopted: false };
       ready.set(env, entry);
     }
     return entry;
@@ -160,7 +178,7 @@ export const CoffreSigner = signerObject((env: object) => {
   if (configure === null) throw new Error('the vault Worker must export default vault(…)');
   const config = configure(env as never);
   const { signingKeys, keks, owners, keepUsesDays } = resolveVaultConfig(config);
-  return { database: config.database, signingKeys, keks, owners, keepUsesDays, alert: config.alert };
+  return { database: config.database, signingKeys, keks, owners, keepUsesDays, alert: config.alert, name: signerNameOf(config) };
 });
 
 /** The vault Worker's default export, `VaultEntrypoint`, configured from its `env`. */

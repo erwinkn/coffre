@@ -58,6 +58,7 @@ import { CoffreError } from '@coffre/client';
 import { bodyDigest, bodyLine, contentDigest, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_BODY } from '@coffre/client/dpop';
 import { constraintsAllow } from '@coffre/core/identity';
 import { parseRecipe } from '@coffre/core/recipe';
+import type { Upstream } from '@coffre/core/vault';
 
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { WorkloadRefused, type CoffrePlugin, type Connect, type Exposed, type PluginContext, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
@@ -780,7 +781,7 @@ async function shaped(coffre: PluginContext, credential: Resolved, handle: strin
   const placeholder = credential.placeholder!;
   if (placeholder.kind === 'prefix') return `${placeholder.prefix}${handle}`;
   const key = credential.keys[0]!;
-  const used = await coffre.use(handle, { path, keys: [key], purpose: 'use', upstream: credential.name });
+  const used = await coffre.use(handle, { path, keys: [key], purpose: 'use', upstream: { credential: credential.name } });
   const real = claimsOf(used.values[key]);
   if (real === null) throw new CoffreError(409, 'conflict', `${path}'s ${key} is no JWT, which ${credential.name}'s placeholder copies its claims from`);
   const { expiresAt } = await coffre.handle(handle);
@@ -959,7 +960,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   // Read whole first, however long it takes to come, so the handle is checked, and the values opened, as the request goes out.
   const content = early?.content ?? (await carried(request, credential));
   if (content instanceof Response) return content;
-  const opened = await valuesFor(coffre, proxy, handle, path, credential);
+  const opened = await valuesFor(coffre, proxy, handle, path, credential, target);
   const headers = new Headers();
   for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
   // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
@@ -1055,7 +1056,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     // A form or JSON rule's field, whatever the app put there, as a header rule's header: it holds no handle.
     const field = inBody(credential.inject) ? fieldIn(request, content.body, credential.name, credential.inject) : null;
     if (field instanceof Response) return field;
-    const used = await coffre.use(caller, { path: caller.path, keys: credential.keys, purpose: 'use', upstream: credential.name });
+    const used = await coffre.use(caller, { path: caller.path, keys: credential.keys, purpose: 'use', upstream: sentTo(credential, aimed.target) });
     const constraints = used.workload?.constraints ?? null;
     if (!constraintsAllow(constraints, { place: caller.path, credential: credential.name, request: { method: request.method, url: aimed.target } })) {
       return failure(403, `this narrowed session may not ${request.method} ${aimed.relative} through ${credential.name}`, 'narrowed');
@@ -1155,7 +1156,9 @@ async function asCaller(request: Request, coffre: PluginContext, path: string | 
  * limited to them makes nothing.
  */
 async function used(coffre: PluginContext, proxy: Proxy, path: string, who: User, name: string, keys: string[], request?: { method: string; url: URL }): Promise<Used> {
-  const opened = await coffre.use(who, { path: typeof who === 'string' ? readOf(proxy, path) : path, keys, purpose: 'use', upstream: name });
+  // A presigned URL's host is where the values' signature goes; a signer's, a verifier's or a cipher's go nowhere.
+  const upstream = { credential: name, ...(request === undefined ? {} : { host: request.url.hostname }) };
+  const opened = await coffre.use(who, { path: typeof who === 'string' ? readOf(proxy, path) : path, keys, purpose: 'use', upstream });
   if (!constraintsAllow(opened.workload?.constraints ?? null, { place: path, credential: name, ...(request === undefined ? {} : { request }) })) {
     throw new CoffreError(403, 'forbidden', `this narrowed session may not ${request === undefined ? 'use' : `${request.method} ${request.url.pathname} through`} ${name}`, 'narrowed');
   }
@@ -1743,6 +1746,11 @@ function bytesOf(text: string): string {
   return text.replace(/%([0-9a-f]{2})/gi, (_, byte: string) => String.fromCharCode(parseInt(byte, 16)));
 }
 
+/** A proxied request's upstream as its use's entry names it: the credential, the host it goes to, and whether through the deployment's egress. */
+function sentTo(credential: Resolved, target: URL): Upstream {
+  return { credential: credential.name, host: target.hostname, ...(credential.egress === undefined ? {} : { egress: true }) };
+}
+
 /**
  * The credential's values for a handle, opened now: one use, which the
  * vault decides and logs, naming the credential. Nothing is kept here; the
@@ -1750,8 +1758,8 @@ function bytesOf(text: string): string {
  * of the database, the rows it last answered this same ask from
  * (`outageSeconds`, D238).
  */
-async function valuesFor(coffre: PluginContext, proxy: Proxy, handle: string, path: string, credential: Resolved): Promise<Opened> {
-  const used = await coffre.use(handle, { path: readOf(proxy, path), keys: credential.keys, purpose: 'use', upstream: credential.name });
+async function valuesFor(coffre: PluginContext, proxy: Proxy, handle: string, path: string, credential: Resolved, target: URL): Promise<Opened> {
+  const used = await coffre.use(handle, { path: readOf(proxy, path), keys: credential.keys, purpose: 'use', upstream: sentTo(credential, target) });
   return { values: used.values, plain: used.plain };
 }
 
@@ -2181,7 +2189,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   // The row, unchecked: where the handle's run ends, and which of its environments `@me` reads. The vault decides the rest.
   const { expiresAt } = await coffre.handle(handle);
   const read = readOf(proxy, path);
-  const used = await coffre.use(handle, { path: read, keys: [tunnel.key], purpose: 'use', upstream: name });
+  const used = await coffre.use(handle, { path: read, keys: [tunnel.key], purpose: 'use', upstream: { credential: name } });
   const db = dialled(proxy, path, name, tunnel, used.values[tunnel.key]!);
   if (db instanceof Response) return db;
   const key = groupKey(handle, path, name);
@@ -2212,7 +2220,7 @@ async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Pr
   const path = caller.path;
   let used;
   try {
-    used = await coffre.use(caller, { path, keys: [tunnel.key], purpose: 'use', upstream: name });
+    used = await coffre.use(caller, { path, keys: [tunnel.key], purpose: 'use', upstream: { credential: name } });
   } catch (error) {
     if (!(error instanceof CoffreError)) throw error;
     return nonced(failure(error.status, error.message, error.reason ?? error.code), caller);
