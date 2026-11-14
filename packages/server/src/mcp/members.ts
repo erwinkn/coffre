@@ -302,10 +302,12 @@ const ADMIT = changeTool({
       // As PUT /members/:member refuses them, before anyone is asked: a scope said with no role would be dropped.
       if (scope !== undefined && role === undefined) throw badRequest('a scope goes with a role: name the role too');
       if (scope !== undefined && role === 'member') throw badRequest('a member holds nothing by their role: it takes no scope');
-      if (!service || (role ?? 'member') !== 'member' || scope !== undefined) {
+      // As the vault refuses it (`invalid`): a service account's one role is `member`, which apply sends as none.
+      if (service && role !== undefined && role !== 'member') throw badRequest('a service account holds no instance role: it is a member, given grants (access)');
+      if (!service) {
         instanceOnly(tool);
         // A person's role kept as it is (none asked) is no change of it.
-        if (!service && role !== undefined) await ownerOnly(tool, canonical(member), role);
+        if (role !== undefined) await ownerOnly(tool, canonical(member), role);
         return;
       }
       if (!(await runRoute('GET /me', {}, undefined, tool.ctx)).setsUpServices) throw forbidden('you set up no service account: the instance keeps them to admins where you hold access');
