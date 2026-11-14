@@ -1,26 +1,35 @@
-// Health: up, and ready only once the scheduled job has beaten and the
-// vault has checkpointed it. What else anyone on the network sees, its
-// headers among it, `coffre verify instance` checks, here as anywhere.
+// Health: up, and ready once migrated; a fresh deployment, only once its
+// vault has adopted the database and its signer signed the first entry.
+// What else anyone on the network sees, its headers among it, `coffre
+// verify instance` checks, here as anywhere.
 import { clientFiles, serverCodeIn } from '../bundle.ts';
 import type { Deployment } from '../harness.ts';
 import type { Person } from './people.ts';
 import { expect, until } from '../report.ts';
 
+/**
+ * A fresh deployment is not ready until its vault has adopted the database
+ * and the signer has signed its first entry, what the app learns from the
+ * vault's `about` (docs/design/0.16.md, "Readiness"). 0.14 asked the same of
+ * its heartbeat and checkpoint, which 0.16 drops. Run first, while the
+ * deployment is still fresh.
+ */
+export async function readyOnceAdopted(deployment: Deployment): Promise<string> {
+  const { origin } = deployment;
+  if (!deployment.fresh) return 'not a fresh deployment: its database was adopted before the suite';
+  const early = await fetch(`${origin}/readyz`);
+  const body = await early.text();
+  expect(early.status === 503, `/readyz answered ${early.status} before the vault adopted the database`, body);
+  await until('/readyz', async () => (await fetch(`${origin}/readyz`)).ok, 90);
+  return '/readyz red until the vault adopted the database and signed its first entry, then green';
+}
+
 export async function health(deployment: Deployment): Promise<string> {
   const { origin } = deployment;
   const live = await fetch(`${origin}/livez`);
   expect(live.ok, `/livez answered ${live.status}`);
-  // Readiness follows the audit heartbeat and the vault's checkpoint of it,
-  // which only the scheduled job writes: not ready until it has run.
-  if (deployment.beforeFirstBeat) {
-    const early = await fetch(`${origin}/readyz`);
-    expect(early.status === 503, `/readyz answered ${early.status} before any heartbeat`, await early.text());
-    await deployment.scheduled();
-  }
   await until('/readyz', async () => (await fetch(`${origin}/readyz`)).ok, 20);
-  const ready = (await (await fetch(`${origin}/readyz`)).json()) as { checkpointed?: unknown };
-  expect(ready.checkpointed === true, '/readyz passed without a checkpoint covering the heartbeat', ready);
-  return deployment.beforeFirstBeat ? '/livez, and /readyz only once the heartbeat ran and was checkpointed' : '/livez and /readyz';
+  return '/livez and /readyz';
 }
 
 /** The headers coffre sets on everything it answers, but the policy, whose nonce is each response's own. */

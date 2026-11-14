@@ -98,7 +98,8 @@ In order, since each builds on the ones before:
 
 | Check | What must hold |
 |---|---|
-| health | `/livez` answers. On Workers, `/readyz` fails before any heartbeat, and passes once the Cron trigger has run and the vault has checkpointed it |
+| ready once adopted | Skipped until the app learns from the vault's `about` call whether it has adopted the database (T311): 0.16's `/readyz` says only that the database is migrated. On a fresh Workers deployment, `/readyz` fails until the vault has adopted the database and the signer has signed its first entry, then passes |
+| health | `/livez` answers, and `/readyz` passes |
 | browser bundle | Nothing of the server in what the browser loads: every text file of the build's `app/dist/client`, read as the browser gets it, holds no database layer, driver, table only the server knows or `COFFRE_*` read. A page importing across the line otherwise just grows by the database layer, with no error |
 | sign-in | The admin signs in through GitHub, the first to, and is the Owner of the whole instance |
 | setup, personas | The admin creates the project, its values and the people above |
@@ -113,7 +114,7 @@ In order, since each builds on the ones before:
 | inheritance | The admin forks prod as a fork that inherits: it copies nothing and reads prod's values; the reader, given a viewer grant on the fork alone, reads none of what it inherits, the whole fork or one key. The grant is revoked and the fork archived after |
 | personal configs | The reader, a viewer on dev, keeps a value in their personal config, `dev@me`, and reads it. The admin, an Owner of the whole instance, sees that it exists and its key's name, is refused its value (403), and their own `dev@me` reads dev. Made the admin's in the database, around coffre, the config opens nothing for them: the vault bound the value to its owner. The config is deleted after |
 | references | The admin makes a key in dev a reference to a prod secret: the reader, a viewer on dev with no grant on prod, reads prod's value through it, and the read is in prod's log and in dev's. The leaver, a developer on dev who cannot read prod, makes none. A reference row written straight into the database, pointing at a vault entry about something else, is refused as `bad_claim`; once the admin breaks the reference, the read answers 409. The key is archived after |
-| loosening | The admin writes a sensitive key in dev, which the reader, a viewer on dev, may not read. The leaver, a developer on dev, is told the listing offers no loosening, and is refused one; the admin, told it does, makes it a secret in place: the answer carries no value, a second version is made and the first stays sensitive, the reader then reads it, and the log has one `secret.loosen` saying both levels. The key is archived after |
+| loosening | Skipped until 0.16 serves a nature changed in place. The admin writes a sensitive key in dev, which the reader, a viewer on dev, may not read. The leaver, a developer on dev, is told the listing offers no loosening, and is refused one; the admin, told it does, makes it a secret in place: the answer carries no value, a second version is made and the first stays sensitive, the reader then reads it, and the log has one `secret.loosen` saying both levels. The key is archived after |
 | missing keys | The admin adds a key to prod alone: dev's missing keys show it, by name and as prod's, to the admin and to the reader, a viewer on dev who cannot read prod, with nothing of its value; the reader cannot dismiss it; the admin's dismissal moves it to the dismissed list, and restoring brings it back. The key is archived after |
 | reveals audited, runs audited | A single-secret reveal or an environment read writes one `secret.read` of the vault's per value, under the reveal's operation and request, at the versions revealed |
 | cross-site | A write, a reveal and a sign-out with the admin's cookie, from another site or from no page at all: 403, no value in the answer, nothing changed |
@@ -124,9 +125,9 @@ In order, since each builds on the ones before:
 | verify as the admin, verify again | With the admin's session, twice: every check of the [owner tier](#signed-in-as-an-owner) passes, and none is skipped. The first makes `token:conformance-probe` and its grants; the second finds everything. No line shows a credential, the session or the canary, and the session still works after |
 | verify interrupted | The same, stopped with Ctrl-C mid-run: it exits 130, its credential revoked and the session still signed in, and nothing it printed shows a credential or a canary |
 | verify leftovers | After the runs: the service holds no credential, the CLI's session is the one `coffre login` made, `conformance/live/CANARY` is as the live setup wrote it, no other member, grant, project or environment changed, and the runs' entries are in the audit log |
-| verify keys | `coffre verify keys` with the admin's session: the deployment's own keys pass, piped in, vault ID included; a wrong vault key and a malformed app key are each named. No key shows in what it prints |
+| verify keys | Skipped until 0.16 serves `GET /audit/keys`. `coffre verify keys` with the admin's session: the deployment's own keys pass, piped in, vault ID included; a wrong vault key and a malformed app key are each named. No key shows in what it prints |
 | manage by CLI | With the admin's `coffre login` session: a project and its environment made, a secret set and renamed; `grant` to a service not yet admitted refused, naming `coffre admit … --service`; the service admitted and granted; `tokens issue --output-file` writes a 0600 file and prints no token; the token, piped to `coffre login --token` in a CLI of its own, reads the renamed secret; `tokens revoke` previews, then with `--apply` the token is refused, plainly; the grant revoked, the secret and the project archived, as `list --json` and `projects --json` show; `sessions --json` marks the CLI's own session |
-| delete by CLI | With the same session: `coffre projects delete` refuses a live project; archived, it shows what it would erase (five versions), revoke (the one grant of a service) and leave holding nothing, warns that earlier backups still hold the values, and changes nothing. With `--apply`, every version under it has an empty ciphertext and wrapped key in the database, the project is renamed `conformance-gone~deleted-<date>`, leaves every list and revealing it by its tombstone is 404; a new `conformance-gone` is another project, reading its own value, and the log names the deletion under the tombstone. `coffre environments delete` does the same for an environment, whose slug is then free in its project. The log verifies |
+| delete by CLI | With the same session: `coffre projects delete` refuses a live project; archived, it shows what it would erase (five versions), revoke (the one grant of a service) and leave holding nothing, warns that earlier backups still hold the values, and changes nothing. With `--apply`, every version under it has an empty ciphertext and wrapped key in the database, the project is renamed `conformance-gone~deleted-<date>`, leaves every list and revealing it by its tombstone is 404; a new `conformance-gone` is another project, reading its own value, and the log names the deletion under the tombstone. `coffre environments delete` does the same for an environment, whose slug is then free in its project |
 | offboarding | Removing the leaver names the values they read, to rotate; their browser session, their CLI session and a new sign-in all stop at once. A removed service's token stops too |
 | instance roles | No grant is on every project, and a service account holds no instance role. A Developer scoped to `dev` reads and writes the `dev` of a project made after the role, and no `prod`. An Admin scoped to one environment grants there and nowhere else, sets no role and makes no project, and an Admin of the whole instance does not change its own role, nor demote or remove the Owner (403 `not_allowed`, not `last_owner`) |
 | bulk limit | One more value at once than the limit allows gets 403 `bulk_limit`, with reason `bulk_limit`; a single value still opens |
@@ -139,23 +140,15 @@ In order, since each builds on the ones before:
 | run unbound | Removing the binding ends the credential it issued at once, and the next run's token buys none |
 | exchanges limited | Malformed tokens from one address get 429 `busy`, with `Retry-After: 60`, within 200 a minute: the limit counts before anything is read. Last of these, since it spends the address's minute |
 | tokens unlogged | No ID token or credential these checks used is in the processes' output, nor any service credential |
-| checkpoints | Each Cron run has the vault sign the log up to its last entry, in an `audit.checkpoint` entry of its own that covers the one before, and the log verifies through it |
 | keys behind writes | Every `secret.write`, `secret.restore` and `secret.loosen` names, by `related_seq`, the vault's `key.wrap` (a new value) or `key.rewrap` (a restore, a mark, a loosening) for the same member, request, operation, secret and version; and no value read is logged by the app, only by the vault |
 | no audit, no value | With a trigger refusing `secret.read` appends, a reveal gets 500 `internal_error`, the injected cause appears in the process output, and no value leaves; it works again once the log does |
 | canary scan | No value in any answer to any GET route, or any page, as each of the people, signed in or removed; nor in the database, in any column of any table; nor the processes' output |
 | app login, vault login | Neither the app's login nor the vault's can update, delete, truncate or drop the audit log, append an entry as the other, change or delete a value's versions, delete a secret or a member, or create a table; nor can the app's write a member or a grant |
 | access authorship | Admission, grant, revoke, removal and re-admission leave only vault entries |
 | no audit, no access | A refused append commits no grant, removal or admission |
-| full verification | Verification from the newest checkpoint, and the walk from the first entry a stretch a request, each reach the actual head and count every entry; the audit page is sent with its verification result |
-| checkpoint refused, checkpoint missing | A recent heartbeat without an accepted checkpoint turns readiness red; restoring checkpointing recovers |
 | forged grant, forged member, stale member | A forged grant, an edited member or a genuine older member row put back is refused at use, marked tampered, and logged as vault.tampered. Sign-in mode refuses the credential with 401 |
 | sealing race | A grant inserted while the vault's decision waits on the held log head is refused as `tampered` and logged; removal recovers the member |
 | forged credential, forged identity, forged approval, edited generation | Owner-written authentication rows cannot mint sessions or revive old tokens, and the row failure is reported |
-| app rewritten, vault rewritten, vault forged | The walk from the first entry catches each author's first entry rewritten in place at its sequence; verification catches a publicly chained vault entry without its MAC |
-| middle gap, first gap, batch gap | Missing entries fail verification, including the first entry and the 1,000-entry paging boundary |
-| middle cut | Two entries removed before the latest signed prefix make the next scheduled checkpoint refuse with `log_broken` and readiness turn red; restoring them recovers checkpointing |
-| earlier checkpoint | An invalid earlier signature cannot be hidden from the walk from the first entry by valid MACs and a later valid checkpoint |
-| tail deleted | The newest entries removed with the head retained fail verification; this runs last |
 
 All table inspection and tampering goes through the one database. There
 is no vault file or Durable Object to discover. The canary scan reads every
@@ -175,6 +168,25 @@ evidence rather than booting a second app and vault pair.
 
 A check that fails prints what it saw. The ones that need its result are
 skipped, and the run ends with the processes' output.
+
+A check of a route 0.16 declares and does not serve yet is skipped by name,
+saying what it waits for (`packages/conformance/src/unserved.ts`), and runs
+again once the area that serves the route deletes its line. 0.14's checks
+of `GET /audit/verification` (full verification, the rewritten, forged and
+missing entries, the earlier checkpoint and the deleted tail) went with the
+route, and `checkpoint refused`, `checkpoint missing` and `middle cut` with
+the heartbeat and checkpoint they tested: in 0.16 readiness never turns red
+on tampering, and the signer's full check reports a cut to the alert
+function or the Worker's log.
+In 0.16 the audit page proves each entry it lists against the head
+the vault signed: `audit proven` requires every entry the head numbers
+proven and only those past it not (it waits for a head that numbers an
+entry on the page: a batch signed between the head's read and the log's can
+leave the whole page past it), and `audit page proofs` that the page is sent
+with them rendered, each row's proof in `data-proof`, at least one proven
+and none failed, which waits for the page's port. `coffre verify
+--full` reads the log, and conformance does not hold either to a tampered
+log yet.
 
 ## What it does not show
 

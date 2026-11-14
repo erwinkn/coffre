@@ -65,19 +65,6 @@ export async function transaction<T>(sql: Sql, work: () => Promise<T>): Promise<
   }
 }
 
-/**
- * `work` with the audit log's append-only triggers lifted, as only its owner
- * can: disabled for the session.
- */
-export async function appendOnlyLifted<T>(sql: Sql, work: () => Promise<T>): Promise<T> {
-  await sql.exec('ALTER TABLE audit_log DISABLE TRIGGER USER');
-  try {
-    return await work();
-  } finally {
-    await sql.exec('ALTER TABLE audit_log ENABLE TRIGGER USER');
-  }
-}
-
 export const LOG_REFUSAL = 'coffre-conformance: the log refuses writes';
 
 /**

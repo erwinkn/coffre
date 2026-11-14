@@ -44,9 +44,10 @@ async function serve(readyFile: string, environmentFile: string): Promise<void> 
     process.once('SIGTERM', resolve);
     process.once('SIGINT', resolve);
   });
-  // On the local Postgres, as `pnpm conformance:node` runs it: the workflow made its logins (scripts/ensure-database.mjs).
+  // On the local Postgres, as `pnpm conformance:workers` runs it: the workflow made its logins (scripts/ensure-database.mjs).
+  // On Workers: 0.16.0 ships for Workers only (docs/design/0.16.md, "Node in 0.16.0").
   const local = (login: string) => `postgresql://${login}@127.0.0.1:${process.env.COFFRE_POSTGRES_PORT ?? '55432'}/postgres`;
-  const deployment = await boot('node', fileURLToPath(new URL('../../../examples/node', import.meta.url)), {
+  const deployment = await boot('workers', fileURLToPath(new URL('../../../examples/workers', import.meta.url)), {
     port: 3982,
     postgres: local('coffre_owner:local-dev-only'),
     runtime: local('coffre_runtime:local-runtime-only'),
@@ -79,6 +80,10 @@ async function serve(readyFile: string, environmentFile: string): Promise<void> 
     appendFileSync(environmentFile, `ACTION_TEST_URL=${deployment.origin}\nACTION_TEST_TOKEN=${token}\n`);
     writeFileSync(readyFile, String(process.pid), { mode: 0o600 });
     await stopped;
+  } catch (error) {
+    // The workflow prints this log when the fixture dies: what the deployment said, with the error.
+    console.error(`The processes' output, last lines:\n${deployment.output(4000)}`);
+    throw error;
   } finally {
     await deployment.stop();
   }

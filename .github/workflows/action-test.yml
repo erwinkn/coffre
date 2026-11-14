@@ -12,7 +12,7 @@ on:
       - 'packages/vault/**'
       - 'packages/db/**'
       - 'packages/conformance/**'
-      - 'examples/node/**'
+      - 'examples/workers/**'
       - 'scripts/action-pin*'
       - 'scripts/bump.mjs'
       - 'scripts/check-pins.mjs'
@@ -102,7 +102,7 @@ jobs:
           cli="$RUNNER_TEMP/coffre-action-consumer/node_modules/@coffre/cli/dist/main.js"
           node "$cli" help > /dev/null
           node "$cli" keys --json > /dev/null
-          node "$cli" init --node "$RUNNER_TEMP/coffre-action-generated" > /dev/null
+          node "$cli" init --workers "$RUNNER_TEMP/coffre-action-generated" > /dev/null
       - name: Stop on an environment that lacks its siblings' keys
         id: incomplete
         continue-on-error: true

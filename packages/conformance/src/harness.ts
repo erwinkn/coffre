@@ -42,8 +42,8 @@ export type Deployment = {
   idp: DevIdp;
   /** The one bootstrap Owner the vault is told of: the first to sign in, who owns the instance. */
   owner: string;
-  /** Whether no heartbeat has run yet, so /readyz fails until `scheduled` runs. */
-  beforeFirstBeat: boolean;
+  /** Whether it serves a database its vault has not adopted yet, so /readyz fails until it has. */
+  fresh: boolean;
   /** What the Cron trigger does every five minutes. */
   scheduled(options?: { allowFailure?: boolean }): Promise<void>;
   /** Stop what serves the deployment and start it again on the same data: new isolates on Workers, new processes on Node. */
@@ -229,7 +229,6 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
   }
 
   async function startWorkers(): Promise<Deployment> {
-    // A fresh log has no heartbeat: only the scheduled job can make /readyz pass.
     const { owner, runtime, vaultRuntime } = await ownDatabase();
     // The app as it deploys: its Start app, built by its own Vite, which wrangler runs unbundled.
     await run(bin('vite'), ['build', 'app']);
@@ -263,7 +262,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       origin,
       idp,
       owner: OWNER,
-      beforeFirstBeat: true,
+      fresh: true,
       async scheduled(options = {}) {
         const response = await fetch(`${origin}/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*`);
         if (!response.ok && !options.allowFailure) throw new Failure(`the scheduled handler answered ${response.status}`, `${await response.text()}\n${logs()}`);
@@ -318,7 +317,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       origin,
       idp,
       owner: OWNER,
-      beforeFirstBeat: false,
+      fresh: false,
       // `serve` runs the job as it starts, and every five minutes after: so restart the server, then wait for the
       // run's end, as the Cron trigger's request does on Workers: the vault's checkpoint entry, or the run's failure.
       // The head is read once the old server is gone, and the checkpoint must reach past it: one the old run asked for

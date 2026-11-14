@@ -193,7 +193,9 @@ export async function keysUploaded(deployment: Deployment, admin: Person, canari
   const { keys } = (await (await fetch(deployment.idp.workloads.jwksUrl)).json()) as { keys: Record<string, unknown>[] };
   const claims = { sub: POD_ACCOUNT.sub, 'kubernetes.io.serviceaccount.uid': POD_ACCOUNT.uid };
   const made = await admin.api.bindings.create(POD, { profile: 'custom', issuer: CLUSTER, claims, jwks: { keys }, label: 'conformance pod' });
-  expect(made.binding.keys?.length === 2 && /^sha256:/.test(made.binding.jwksUri), 'the binding does not show the keys uploaded with it', made.binding);
+  // The answer names the binding made; its keys are in the service's list of bindings.
+  const listed = (await admin.api.bindings.list(POD)).bindings.find((binding) => binding.id === made.binding.id);
+  expect(listed?.keys?.length === 2 && /^sha256:/.test(listed.jwksUri), 'the binding does not show the keys uploaded with it', { made, listed });
   const now = Math.floor(Date.now() / 1000);
   const pod = (alg: 'RS256' | 'ES256', uid = POD_ACCOUNT.uid, times: Record<string, number> = {}) =>
     mint(deployment, { iss: CLUSTER, sub: POD_ACCOUNT.sub, 'kubernetes.io': { namespace: 'ci', serviceaccount: { name: 'deploy', uid } }, ...times }, { alg });

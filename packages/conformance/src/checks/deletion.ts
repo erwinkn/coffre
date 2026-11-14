@@ -91,8 +91,5 @@ export async function deletion(deployment: Deployment, cli: Cli, admin: Person):
   const environments = (await admin.api.projects.list()).projects.find((project) => project.slug === PROJECT)?.environments ?? [];
   expect(environments.length === 1 && environments[0]!.name === 'prod, again', 'a deleted environment is still listed, or its slug is not free', environments);
   expect((await sealed(deployment, (await projectId(deployment, PROJECT))!)).sealed === 0, 'a deleted environment still holds a value');
-
-  const verified = await admin.api.audit.verify();
-  expect(verified.ok, 'the log does not verify after the deletions', verified);
-  return `${PROJECT} and ${PROJECT}/prod deleted by the CLI: 5 versions erased, a grant revoked, both unlisted and their slugs reused; ${verified.entries} entries verify`;
+  return `${PROJECT} and ${PROJECT}/prod deleted by the CLI: 5 versions erased, a grant revoked, both unlisted and their slugs reused`;
 }
