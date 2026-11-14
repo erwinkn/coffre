@@ -488,7 +488,11 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
  *
  * Every row the cascade decides on is read, by the name and the new one,
  * and the names a key moved aside could take; one whose MAC does not hold
- * refuses the rename, `unreadable`, rather than leave a fork behind.
+ * refuses the rename, `unreadable`, rather than leave a fork behind. So
+ * does any of the project's environments: the forks below and the parents
+ * above are found by their `parent_id`, and one edited out of its place
+ * would hide a fork from the cascade, or a parent's key from the names a key
+ * moved aside avoids, which it would shadow once put back.
  */
 function secretRename(input: Presented & SecretRename, vault: Deciding): Operation<Parts, Answers['secret.rename']> {
   const shown = presented(input);
@@ -502,6 +506,7 @@ function secretRename(input: Presented & SecretRename, vault: Deciding): Operati
   const stem = to.slice(0, 128 - ASIDE_SUFFIX);
   const named = (column: typeof secrets.key | typeof dismissedKeys.key) => sql`(${column} = ${key} OR starts_with(${column}, ${stem}))`;
   // Every environment below this one, however deep: one left out would keep the old name.
+  // Found by `parent_id` as stored; the project's environments, each read as sealed, vouch for it.
   const below = sql`(WITH RECURSIVE below (id) AS (
     SELECT e.id FROM environments e WHERE e.parent_id = ${here}
     UNION SELECT e.id FROM environments e JOIN below ON e.parent_id = below.id
@@ -515,7 +520,8 @@ function secretRename(input: Presented & SecretRename, vault: Deciding): Operati
     ...callerParts(shown.token, project),
     project: part(projects, sql`${projects.slug} = ${projectSlug}`),
     environment,
-    forks: part(environments, sql`${environments.id} IN ${below}`),
+    // Every one of the project's: what is below and above stands on their `parent_id`s, so each one's MAC must hold.
+    environments: part(environments, sql`${environments.projectId} = ${project}`),
     // This environment's and those below's, by either name, or one a key moved aside could take.
     secret: part(secrets, sql`${secrets.projectId} = ${project} AND (${secrets.environmentId} = ${here} OR ${secrets.environmentId} IN ${below}) AND ${named(secrets.key)}`),
     inherited: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} IN ${above} AND ${secrets.environmentId} IS DISTINCT FROM ${here} AND starts_with(${secrets.key}, ${stem})`),
@@ -550,7 +556,8 @@ function secretRename(input: Presented & SecretRename, vault: Deciding): Operati
       // A config they do not have holds no key.
       if (mine && config === undefined) return { refused: unsealed.environment > 0 ? 'unreadable' : 'unknown_key' };
       const environment = mine ? config! : named;
-      if (unsealed.forks + unsealed.secret + unsealed.dismissed > 0) return { refused: 'unreadable' };
+      // An environment edited behind the vault anywhere in the project: its place in the tree is not known, so neither what is below nor above.
+      if (unsealed.environments + unsealed.secret + unsealed.dismissed > 0) return { refused: 'unreadable' };
       const row = seen.secret.find((found) => found.environmentId === environment.id && found.key === key);
       if (row === undefined) return { refused: 'unknown_key' };
       if (row.archivedAt !== null) return { refused: 'archived' };
@@ -573,8 +580,14 @@ function secretRename(input: Presented & SecretRename, vault: Deciding): Operati
 
       const now = new Date(at);
       const by = caller.principal;
-      // By slug, so that the entry says them in one order.
-      const forks = seen.forks.filter((fork) => fork.projectId === place.id).sort((a, b) => (a.slug < b.slug ? -1 : 1));
+      const tree = seen.environments.filter((layer) => layer.projectId === place.id);
+      // Below, however deep, by the rows as sealed; by slug, so that the entry says them in one order.
+      const under = new Set([environment.id]);
+      for (let size = 0; size < under.size; ) {
+        size = under.size;
+        for (const layer of tree) if (layer.parentId !== null && under.has(layer.parentId)) under.add(layer.id);
+      }
+      const forks = tree.filter((layer) => layer.id !== environment.id && under.has(layer.id)).sort((a, b) => (a.slug < b.slug ? -1 : 1));
       const layers = new Map([environment, ...forks].map((layer) => [layer.id, layer]));
       const writes: Write[] = [amended(secrets, row, { key: to, updatedAt: now })];
       const lines: Record<string, unknown>[] = [{ secret: row.id, environment: environment.id, key, to }];

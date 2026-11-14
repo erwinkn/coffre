@@ -19,13 +19,15 @@ after(() => world.close());
 
 const [ada, bo, cy] = [user('ada'), user('bo'), user('cy')];
 const archivedAt = new Date(Date.UTC(2026, 10, 1));
-const places: Record<string, { id: string }> = {};
+const places: Record<string, ReturnType<typeof environment>> = {};
+let market: ReturnType<typeof project>;
 beforeEach(async () => {
   await emptyDatabase(world.owner);
   world.memory.reads.clear();
   world.memory.logged.clear();
   world.refused.clear();
-  const [market, billing] = [project('market'), project('billing')];
+  market = project('market');
+  const billing = project('billing');
   const prod = environment(market, 'prod');
   const staging = environment(market, 'staging', { parentId: prod.id });
   // A fork of a fork, and one archived: the name carries down to each.
@@ -133,6 +135,33 @@ test("a personal config's key moved aside takes no name a parent above the one r
     { in: 'adas', key: 'STRIPE_SECRET_KEY', to: 'STRIPE_SECRET_KEY_3', aside: true },
   ]);
   assert.deepEqual(await given('staging', ['STRIPE_SECRET_KEY', 'STRIPE_SECRET_KEY_3'], { mine: true }), ['only-staging', 'local-ada']);
+});
+
+test("a parent edited out of its place behind the vault refuses a rename that moves a key aside, rather than let it shadow the parent's key once put back", async () => {
+  // Ada's config of EU, three below prod, holds the name EU's own key is about to take; prod, above, holds `_2`.
+  const config = environment(market, 'eu-p-01020304', { parentId: places.eu!.id, owner: ada });
+  places.adasEu = config;
+  await write(world, ...rows('environments', config), ...rows('secrets', value(world, secret(places.eu!, 'LOCAL'), 'local-eu'), value(world, secret(config, 'STRIPE_SECRET_KEY'), 'local-ada-eu')));
+  // Staging cut loose from prod: walking up its raw parent, EU would see no `_2` above.
+  await world.owner.execute(sql`UPDATE environments SET parent_id = NULL WHERE id = ${places.staging!.id}`);
+  const before = [await keys(), await dismissals(), await count()];
+  assert.deepEqual(await rename('ada-cli', 'LOCAL', 'STRIPE_SECRET_KEY', { environment: 'eu' }), { refused: 'unreadable' });
+  assert.deepEqual([await keys(), await dismissals(), await count()], before);
+  // Put back, the key moved aside takes the first name nothing above holds.
+  await world.owner.execute(sql`UPDATE environments SET parent_id = ${places.prod!.id} WHERE id = ${places.staging!.id}`);
+  assert.ok('answer' in (await rename('ada-cli', 'LOCAL', 'STRIPE_SECRET_KEY', { environment: 'eu' })));
+  assert.deepEqual((await entry()).changes, [
+    { in: 'eu', key: 'LOCAL', to: 'STRIPE_SECRET_KEY' },
+    { in: 'adasEu', key: 'STRIPE_SECRET_KEY', to: 'STRIPE_SECRET_KEY_3', aside: true },
+  ]);
+  assert.deepEqual(await given('eu', ['STRIPE_SECRET_KEY', 'STRIPE_SECRET_KEY_2', 'STRIPE_SECRET_KEY_3'], { mine: true }), ['local-eu', 'stripe-2-prod', 'local-ada-eu']);
+});
+
+test('a fork edited out of its place behind the vault refuses the rename, rather than keep the old name once put back', async () => {
+  await world.owner.execute(sql`UPDATE environments SET parent_id = NULL WHERE id = ${places.old!.id}`);
+  const before = [await keys(), await dismissals(), await count()];
+  assert.deepEqual(await rename('ada-cli', 'STRIPE_KEY', 'STRIPE_SECRET_KEY'), { refused: 'unreadable' });
+  assert.deepEqual([await keys(), await dismissals(), await count()], before);
 });
 
 test('a shared fork that holds the new name of its own refuses the rename, and nothing is written', async () => {
