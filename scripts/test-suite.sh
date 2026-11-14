@@ -16,4 +16,8 @@ export COFFRE_TEST_DATABASE="$(node --input-type=module -e '
 trap 'node --conditions=coffre:source scripts/test-databases.mjs cleanup "$COFFRE_TEST_DATABASE"' EXIT
 ./scripts/setup-test-database.sh
 
-node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@" "scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts"
+# Every test file but 0.14's that do not build on 0.16 yet, which packages/server/tsconfig.json lists.
+files=$(node scripts/test-files.mjs "scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts")
+mapfile -t files <<<"$files"
+
+node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@" "${files[@]}"
