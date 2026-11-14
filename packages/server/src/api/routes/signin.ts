@@ -37,7 +37,7 @@ export const signinRoutes = {
     run: async (ctx, { params }): Promise<{ request: DeviceLoginRow | null; sessionDays: number }> => {
       if (!onOwnSession(await ctx.caller())) throw refusal('no_access');
       const code = normalizeUserCode(params.code);
-      const request = code === null ? null : await waitingDeviceLogin(ctx.db, code);
+      const request = code === null ? null : await waitingDeviceLogin(ctx.db, code, new Date());
       return { request, sessionDays: ctx.auth.mode === 'signin' ? ctx.auth.signin.cliSessionDays : 0 };
     },
   }),

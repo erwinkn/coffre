@@ -124,10 +124,17 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   unknown_code: ['not_found', 'that code is unknown or has expired'],
 };
 
-/** The vault's refusal, as the API answers it: `what` names what was asked for, `market/prod/KEY`. */
+/** Refusals about the instance, not what was asked for: their words are the same whatever the request named. */
+const UNNAMED = new Set(['tampered', 'adopting']);
+
+/**
+ * The vault's refusal, as the API answers it: `what` names what was asked
+ * for, `market/prod/KEY`, but on a refusal about the instance itself
+ * (`tampered`, `adopting`), whose words name no row.
+ */
 export function refusal(refused: string, what?: string): ApiError {
   const [code, message] = REFUSALS[refused] ?? ['vault_refused', `the vault refused: ${refused}`];
-  return new ApiError(code, what === undefined ? message : `${what}: ${message}`, refused);
+  return new ApiError(code, what === undefined || UNNAMED.has(refused) ? message : `${what}: ${message}`, refused);
 }
 
 /**

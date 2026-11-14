@@ -245,37 +245,44 @@ export async function finishSignin(request: Request, runtime: CoffreRuntime, sou
     return fail('provider_unavailable');
   }
 
-  const route = `GET /auth/callback/${provider.id}`;
-  const session = sessionCookie(request, auth);
-  if (pending.link !== null) {
-    // The session that asked, and no other: one signed out and back in as someone else meanwhile links nothing.
-    if (session === null || hashed(session) !== pending.link) return fail('link_session');
-    const shown = presented(session, sourceIp);
-    const linked = await ask<'account.link'>(runtime, { ...shown, op: 'account.link', account });
-    if (!('refused' in linked)) return redirectResponse(`/account?${new URLSearchParams({ linked: provider.id })}`, [clearPending]);
-    if (linked.refused === 'unauthenticated' || linked.refused === 'no_access') return fail('link_session');
-    if (linked.refused === 'already_linked') return fail('already_linked');
-    return refused(route, shown.request, linked.refused, [clearPending]);
-  }
+  // The provider has spent its code: a fault from here on clears the pending cookie too, as every other way out does.
+  try {
+    const route = `GET /auth/callback/${provider.id}`;
+    const session = sessionCookie(request, auth);
+    if (pending.link !== null) {
+      // The session that asked, and no other: one signed out and back in as someone else meanwhile links nothing.
+      if (session === null || hashed(session) !== pending.link) return fail('link_session');
+      const shown = presented(session, sourceIp);
+      const linked = await ask<'account.link'>(runtime, { ...shown, op: 'account.link', account });
+      if (!('refused' in linked)) return redirectResponse(`/account?${new URLSearchParams({ linked: provider.id })}`, [clearPending]);
+      if (linked.refused === 'unauthenticated' || linked.refused === 'no_access') return fail('link_session');
+      if (linked.refused === 'already_linked') return fail('already_linked');
+      return refused(route, shown.request, linked.refused, [clearPending]);
+    }
 
-  const token = generateToken('browser');
-  const trace = { request: crypto.randomUUID(), ip: sourceIp };
-  const signedIn = await ask<'signin'>(runtime, {
-    ...trace,
-    op: 'signin',
-    account,
-    session: { token: hashed(token), minutes: minutesOf(auth.signin.browserSessionHours * 60), label: describeUserAgent(request.headers.get('user-agent')) },
-    // Signing in again on the same browser ends the session it had, rather than leaving it alive until it expires.
-    replaces: session === null ? null : hashed(session),
-  });
-  if ('refused' in signedIn) {
-    const code = signedIn.refused;
-    if (code === 'not_registered') return fail(account.emails.length === 0 ? 'no_verified_email' : code);
-    if (code === 'deactivated' || code === 'account_mismatch') return fail(code);
-    return refused(route, trace.request, code, [clearPending]);
+    const token = generateToken('browser');
+    const trace = { request: crypto.randomUUID(), ip: sourceIp };
+    const signedIn = await ask<'signin'>(runtime, {
+      ...trace,
+      op: 'signin',
+      account,
+      session: { token: hashed(token), minutes: minutesOf(auth.signin.browserSessionHours * 60), label: describeUserAgent(request.headers.get('user-agent')) },
+      // Signing in again on the same browser ends the session it had, rather than leaving it alive until it expires.
+      replaces: session === null ? null : hashed(session),
+    });
+    if ('refused' in signedIn) {
+      const code = signedIn.refused;
+      if (code === 'not_registered') return fail(account.emails.length === 0 ? 'no_verified_email' : code);
+      if (code === 'deactivated' || code === 'account_mismatch') return fail(code);
+      return refused(route, trace.request, code, [clearPending]);
+    }
+    const maxAge = (Date.parse(signedIn.answer.expiresAt) - Date.now()) / 1000;
+    return redirectResponse(pending.next, [clearPending, cookieHeader(auth, sessionCookieName(auth), token, maxAge)]);
+  } catch (error) {
+    const response = errorResponse(error);
+    response.headers.append('set-cookie', clearPending);
+    return response;
   }
-  const maxAge = (Date.parse(signedIn.answer.expiresAt) - Date.now()) / 1000;
-  return redirectResponse(pending.next, [clearPending, cookieHeader(auth, sessionCookieName(auth), token, maxAge)]);
 }
 
 /** The most addresses an account is sent with, its primary first: what the vault takes. */
@@ -384,7 +391,7 @@ export const startDevice: Path = async (request, runtime, sourceIp) => {
   if (auth.mode !== 'signin') return errorResponse(notFound('device login needs signin mode'));
   try {
     const input = deviceStart.parse(await readJson(request, DEVICE_BODY_BYTES, {}));
-    const waiting = await waitingDeviceLogins(runtime.db, sourceIp);
+    const waiting = await waitingDeviceLogins(runtime.db, sourceIp, new Date());
     if (waiting.here >= DEVICE_WAITING_PER_IP || waiting.all >= DEVICE_WAITING) {
       return jsonResponse({ error: 'slow_down', message: 'too many sign-in requests are waiting; try again in a few minutes' }, 429);
     }

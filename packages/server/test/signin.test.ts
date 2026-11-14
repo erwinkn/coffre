@@ -12,6 +12,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { credential, emptyDatabase, identity, instance, principal, role, rows, user, write } from '@coffre/vault/testing';
 import { sql, type SQL } from 'drizzle-orm';
 
+import { refusal } from '../src/api/errors.ts';
 import { openApp, PUBLIC_URL, SESSION } from './app-fixture.ts';
 
 const ISSUER = 'https://sso.acme.example';
@@ -126,6 +127,9 @@ async function whoIs(cookie: string): Promise<string> {
   return body.principal?.id ?? `${response.status} ${body.error}`;
 }
 const dbRows = <T>(query: SQL) => rowsOf<T>(world.owner, query);
+/** What any request is told of a row the vault did not write, whatever it named: the same words, no row. */
+const ADOPTING = "coffre's vault has not taken over its database yet; try again in a moment";
+const TAMPERED = { error: 'tampered', message: "a record coffre's vault reads failed its integrity check: whoever runs coffre has the details in its server log", reason: 'tampered' };
 
 test('the sign-in page reads how the instance signs people in, before anyone is signed in: no vault call, no statement', async () => {
   const [response, calls, statements] = await cost(() => app.request('/api/auth'));
@@ -209,9 +213,7 @@ test("a sign-in on a row the vault did not write is a fault: 500 tampered, said 
   const logged = t.mock.method(console, 'error', () => {});
   await world.owner.execute(sql`UPDATE principals SET mac = '\\x'::bytea WHERE id = ${ada}`);
   const response = await roundTrip(account('acme-ada', 'ada@acme.example'));
-  const body = (await response.json()) as { error: string; message: string };
-  assert.deepEqual([response.status, body.error], [500, 'tampered']);
-  assert.doesNotMatch(body.message, /principal|ada|identit/i);
+  assert.deepEqual([response.status, await response.json()], [500, TAMPERED]);
   assert.equal(logged.mock.callCount(), 1);
   const [what, where] = logged.mock.calls[0]!.arguments as [string, { route: string; request: string }];
   assert.match(what, /did not write/);
@@ -222,10 +224,27 @@ test("a sign-in on a row the vault did not write is a fault: 500 tampered, said 
   const login = await started();
   await world.owner.execute(sql`UPDATE device_logins SET mac = '\\x'::bytea`);
   const decided = await decide(login.user_code, true);
-  assert.deepEqual([decided.status, ((await decided.json()) as { error: string }).error], [500, 'tampered']);
+  assert.deepEqual([decided.status, await decided.json()], [500, TAMPERED]);
   assert.equal(logged.mock.callCount(), 1);
   assert.deepEqual(Object.keys(logged.mock.calls[0]!.arguments[1] as object), ['route', 'request']);
   assert.equal((logged.mock.calls[0]!.arguments[1] as { route: string }).route, 'POST /device-logins/:code');
+  // Nor what any route was asked about, which it names in its other refusals (`that account: unknown sign-in account`).
+  for (const [refused, words] of [['tampered', TAMPERED.message], ['adopting', ADOPTING]] as const) assert.equal(refusal(refused, 'that account').message, words);
+  assert.equal(refusal('unknown_identity', 'that account').message, 'that account: unknown sign-in account');
+});
+
+test('a vault call that throws once the provider has answered still clears the pending cookie, signing in or linking', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const change = t.mock.method(app.vault, 'change', async () => {
+    throw new Error('the vault went away');
+  });
+  for (const [cookie, query] of [['', ''], [`${SESSION}=bo-web`, '?link=1']] as const) {
+    const response = await roundTrip(account('acme-bo-2', 'bo@acme.example'), { cookie, query });
+    assert.deepEqual([response.status, ((await response.json()) as { error: string }).error], [500, 'internal_error']);
+    assert.equal(cookiesOf(response)[PENDING]?.value, '');
+    assert.equal(cookiesOf(response)[SESSION], undefined);
+  }
+  assert.equal(change.mock.callCount(), 2);
 });
 
 test('a person links a second account on the session that asked, and it signs them in after; one vault call', async () => {
@@ -411,12 +430,31 @@ test('device logins waiting are capped, 5 from an address and 200 in all, by one
   assert.deepEqual(await start(), [429, [], 1, 1]);
 });
 
+test("the cap and the device page read a code's expiry on the app's clock, the vault's, not the database's", async (t) => {
+  const onAppClock = (offset: number) => t.mock.timers.enable({ apis: ['Date'], now: Date.now() + offset });
+  const page = async (code: string) => ((await (await app.request(`/api/device-logins/${code}`, { headers: { cookie: `${SESSION}=bo-web` } })).json()) as { request: unknown }).request;
+  // Five from here that expired 30 s ago by the database's clock, which runs a minute ahead of the app's: they still wait, and count.
+  await write(world, ...waiting(4, '192.0.2.7', { expiresAt: new Date(Date.now() - 30_000) }), ...waiting(1, '192.0.2.7', { userCode: 'BCDF-GHJK', expiresAt: new Date(Date.now() - 30_000) }));
+  onAppClock(-60_000);
+  const [behind, behindCalls] = await cost(() => app.request('/api/auth/device', { method: 'POST', body: '{}' }));
+  assert.deepEqual([behind.status, behindCalls], [429, []]);
+  assert.notEqual(await page('BCDF-GHJK'), null);
+  t.mock.timers.reset();
+  // Five that wait ten minutes by the database's clock, eleven behind the app's: they have expired, and nothing counts them.
+  await emptyDatabase(world.owner);
+  await instanceOf(...waiting(4, '192.0.2.7'), ...waiting(1, '192.0.2.7', { userCode: 'BCDF-GHJK' }));
+  onAppClock(11 * 60_000);
+  const [ahead, aheadCalls] = await cost(() => app.request('/api/auth/device', { method: 'POST', body: '{}' }));
+  assert.deepEqual([ahead.status, aheadCalls], [200, ['change']]);
+  assert.equal(await page('BCDF-GHJK'), null);
+});
+
 test('a device login waits for an adopted, untampered instance; the CLI is told as any caller is', async (t) => {
   t.mock.method(console, 'error', () => {});
   await world.owner.execute(sql`UPDATE policy SET mac = '\\x'::bytea`);
   const tampered = await app.request('/api/auth/device', { method: 'POST', body: '{}' });
   assert.deepEqual([tampered.status, ((await tampered.json()) as { error: string }).error], [500, 'tampered']);
-  assert.deepEqual(await poll('any'), [500, { error: 'tampered', message: "a record coffre's vault reads failed its integrity check: whoever runs coffre has the details in its server log", reason: 'tampered' }]);
+  assert.deepEqual(await poll('any'), [500, TAMPERED]);
   await world.owner.execute(sql`DELETE FROM policy`);
   const adopting = await app.request('/api/auth/device', { method: 'POST', body: '{}' });
   assert.deepEqual([adopting.status, adopting.headers.get('retry-after'), ((await adopting.json()) as { error: string }).error], [503, '5', 'adopting']);
