@@ -8,6 +8,7 @@ import { serveApi } from './api/router.ts';
 import { bearerToken, presented, sessionCookie, sessionCookieName } from './auth.ts';
 import { errorResponse } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
+import { dpopToken, provenSession, SessionRefused, sessionStopped } from './sessions.ts';
 
 /**
  * How a request proves who it is. A cookie is `ambient`: the browser attaches
@@ -46,46 +47,74 @@ type AskCaller = (shown: Presented) => Promise<Called>;
  * render in process, through `pageClient`.
  *
  * It reads the request's credential and hashes it, and that is all it does
- * about who is asking: the vault finds the credential by the hash. Two
+ * about who is asking: the vault finds the credential by the hash. Three
  * things are the app's to hold, since only it sees the request. A change
  * made with a cookie must come from one of coffre's own pages: otherwise
  * any site the person visits could make it in their name (CSRF); a header
  * needs no such check, since another site's page cannot make the browser
- * send it. And a handle reaches the credential proxy alone.
+ * send it. A workload's session comes with its key's proof, which the app
+ * holds to the request and its service's gate takes once (`sessions.ts`);
+ * every answer then carries the gate's nonce, for the next proof. And a
+ * handle reaches the credential proxy alone.
  */
 export async function fetchApi(request: Request, runtime: CoffreRuntime, options: { sourceIp: string | null; caller?: AskCaller; page?: Request }): Promise<Response> {
+  let nonce: string | null = null;
+  let response: Response;
   try {
     // Behind Access a request carries Access's assertion, which is no credential of the vault's (docs/design/0.16.md, "Still to design").
     if (runtime.auth.mode === 'cloudflare') throw new ApiError('not_implemented', 'coffre behind Cloudflare Access is not served yet');
-    const credential = apiCredential(request, runtime.auth);
-    if (credential === null) throw new ApiError('unauthenticated', 'sign in first');
-    if (credential.ambient && !SAFE_METHODS.has(request.method) && !isSameOrigin(request, runtime.publicUrl)) {
-      throw new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself');
+    let shown: Presented;
+    let crossSite = false;
+    const session = dpopToken(request);
+    if (session !== null) {
+      const proven = await provenSession(request, runtime, session);
+      nonce = proven.nonce;
+      shown = presented(session, options.sourceIp, proven.proof);
+    } else {
+      const credential = apiCredential(request, runtime.auth);
+      if (credential === null) throw new ApiError('unauthenticated', 'sign in first');
+      if (credential.ambient && !SAFE_METHODS.has(request.method) && !isSameOrigin(request, runtime.publicUrl)) {
+        throw new ApiError('cross_origin', 'a change sent with a browser session must come from coffre itself');
+      }
+      const kind = tokenKind(credential.token);
+      // A handle is a placeholder for secrets in a person's app: the vault would open values for one, so the API turns it away.
+      if (kind === 'handle') {
+        throw new ApiError('forbidden', "a handle stands in for secrets, and only coffre's credential proxy takes one: sign in to use the API", 'handle');
+      }
+      // An MCP client's tokens are good at `/mcp` and its token endpoint alone, as 0.14.7 held them.
+      if (kind === 'mcp' || kind === 'mcp-refresh') throw new ApiError('unauthenticated', "an MCP client's token is good at /mcp alone");
+      // The vault would refuse it anyway, without its proof; this says why.
+      if (kind === 'workload') {
+        throw new ApiError('unauthenticated', "a workload's session is sent with its key's proof, Authorization: DPoP, never as a bearer token", 'workload');
+      }
+      shown = presented(credential.token, options.sourceIp);
+      crossSite = credential.ambient && !(options.page === undefined ? isSameOrigin(request, runtime.publicUrl) : topLevel(options.page));
     }
-    const kind = tokenKind(credential.token);
-    // A handle is a placeholder for secrets in a person's app: the vault would open values for one, so the API turns it away.
-    if (kind === 'handle') {
-      throw new ApiError('forbidden', "a handle stands in for secrets, and only coffre's credential proxy takes one: sign in to use the API", 'handle');
-    }
-    // An MCP client's tokens are good at `/mcp` and its token endpoint alone, as 0.14.7 held them.
-    if (kind === 'mcp' || kind === 'mcp-refresh') throw new ApiError('unauthenticated', "an MCP client's token is good at /mcp alone");
-    const shown = presented(credential.token, options.sourceIp);
     const ask = options.caller ?? ((from) => callerOf(runtime.vault, from));
     // Asked once a request, by the handler that needs it. The promise is this request's alone.
     let asked: Promise<Called> | undefined;
-    return await serveApi(request, {
+    response = await serveApi(request, {
       db: runtime.db,
       vault: runtime.vault,
       shown,
       caller: () => (asked ??= ask(shown)),
-      crossSite: credential.ambient && !(options.page === undefined ? isSameOrigin(request, runtime.publicUrl) : topLevel(options.page)),
+      crossSite,
       auth: runtime.auth,
       rotateAfterDays: runtime.rotateAfterDays,
       transport: runtime.transport,
     });
   } catch (error) {
-    return errorResponse(error);
+    // A session the gate took and the vault then stopped is answered as 0.14.7 answered its workload.
+    response = error instanceof SessionRefused ? error.response : errorResponse(nonce === null ? error : sessionStopped(error, options.sourceIp));
   }
+  return nonce === null ? response : withNonce(response, nonce);
+}
+
+/** An answer to a workload, with the nonce its next proof signs: a response of its own, since another's headers may be immutable. */
+function withNonce(response: Response, nonce: string): Response {
+  const headers = new Headers(response.headers);
+  headers.set('dpop-nonce', nonce);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
 /**

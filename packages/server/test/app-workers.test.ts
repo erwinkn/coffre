@@ -13,8 +13,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import test, { after, before } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { createProof, generateProofKey, thumbprint } from '@coffre/client/dpop';
+import { generateToken } from '@coffre/core/identity';
 import { rowsOf } from '@coffre/db/dialect';
-import { APP_URL, credential, emptyDatabase, environment, grant, identity, openConfiguredVault, principal, project, role, rows, secret, slowPostgres, user, value, VAULT_URL, write } from '@coffre/vault/testing';
+import { APP_URL, binding, credential, emptyDatabase, environment, grant, identity, instance, openConfiguredVault, principal, project, role, rows, secret, session, slowPostgres, user, value, VAULT_URL, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
@@ -25,6 +27,10 @@ const { world } = await openConfiguredVault({ kek: { id: 'app-workers-test', key
 const [ada, bo] = [user('ada'), user('bo')];
 const BROWSER = `coffre_web_${'b'.repeat(43)}`;
 const SESSION = '__Host-coffre_session';
+/** A workload's session of `token:deploy`, bound to `KEY`. */
+const DEPLOY = 'token:deploy';
+const WORKLOAD = generateToken('workload');
+const KEY = await generateProofKey();
 
 let worker: Unstable_DevWorker;
 let dir: string;
@@ -39,16 +45,19 @@ before(async () => {
   const url = await value(world, secret(prod, 'DATABASE_URL'), 'postgres://märkt');
   const used = { lastUsedAt: new Date() };
   const github = identity(bo);
+  const deploy = binding(DEPLOY, { policy: '{}', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) });
   await write(
     world,
     ...rows('projects', market),
     ...rows('environments', prod, staging),
     ...rows('secrets', url),
     ...rows('roles', role(false, 'viewer', ['secret.read'], []), role(false, 'developer', ['secret.read', 'secret.write']), role(true, 'member', [])),
-    ...rows('principals', principal(ada), principal(bo)),
+    ...rows('policy', instance()),
+    ...rows('principals', principal(ada), principal(bo), principal(DEPLOY)),
     ...rows('identities', github),
-    ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market })),
-    ...rows('credentials', credential('ada-cli', ada, used), credential('bo-cli', bo, used), credential(BROWSER, bo, { ...used, kind: 'browser', identityId: github.id })),
+    ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market }), grant(DEPLOY, 'viewer', { project: market })),
+    ...rows('bindings', deploy),
+    ...rows('credentials', credential('ada-cli', ada, used), credential('bo-cli', bo, used), credential(BROWSER, bo, { ...used, kind: 'browser', identityId: github.id }), session(WORKLOAD, deploy, { jkt: await thumbprint(KEY.jwk), places: JSON.stringify([{ environmentId: prod.id }]) })),
   );
 
   [app, vault] = await Promise.all([slowPostgres(3, APP_URL), slowPostgres(3, VAULT_URL)]);
@@ -67,8 +76,8 @@ before(async () => {
       ],
       // As a deployment's two Workers: the app binds the vault's entrypoint, and the vault its signer.
       services: [{ binding: 'VAULT', service: name, entrypoint: 'Vault' }],
-      durable_objects: { bindings: [{ name: 'SIGNER', class_name: 'CoffreSigner' }] },
-      migrations: [{ tag: 'signer', new_sqlite_classes: ['CoffreSigner'] }],
+      durable_objects: { bindings: [{ name: 'SIGNER', class_name: 'CoffreSigner' }, { name: 'GATES', class_name: 'CoffreGates' }] },
+      migrations: [{ tag: 'signer', new_sqlite_classes: ['CoffreSigner'] }, { tag: 'gates', new_sqlite_classes: ['CoffreGates'] }],
     }),
   );
   // Bundled from the packages' sources, as the tests read them.
@@ -149,4 +158,22 @@ test('a reveal and a write go all the way: the app opens no connection, the vaul
   const entries = (await rowsOf<{ kept: boolean; body: string }>(world.owner, sql`SELECT kept, body FROM log ORDER BY seq`)).map(({ kept, body }) => [kept, (JSON.parse(body) as { action: string }).action, (JSON.parse(body) as { actor: string | null }).actor]);
   // After the instance's own writing: Ada's read, her refused write, which ages out as reads do, Bo's write, kept for good, and her second read.
   assert.deepEqual(entries.slice(-4), [[false, 'secret.read', ada], [false, 'secret.write', ada], [true, 'secret.write', bo], [false, 'secret.read', ada]]);
+});
+
+test("a workload's session on Workers: its service's gate, a Durable Object, gives the nonce and takes each proof once, before the vault is asked", { timeout: 120_000 }, async () => {
+  const URL_ME = 'https://secrets.acme.example/api/me';
+  const asSession = async (nonce?: string, proof?: string) => ({
+    headers: { authorization: `DPoP ${WORKLOAD}`, dpop: proof ?? (await createProof(KEY, { method: 'GET', url: URL_ME, token: WORKLOAD, ...(nonce === undefined ? {} : { nonce }) })) },
+  });
+  const [first, , none] = await opened(async () => ask('/api/me', await asSession()));
+  assert.deepEqual([first.status, first.body.reason, none], [401, 'use_dpop_nonce', 0]);
+  const nonce = first.headers.get('dpop-nonce');
+  assert.ok(nonce !== null);
+  const proof = await createProof(KEY, { method: 'GET', url: URL_ME, token: WORKLOAD, nonce });
+  const me = await ask('/api/me', await asSession(nonce, proof));
+  assert.equal(me.status, 200, JSON.stringify(me.body));
+  assert.deepEqual(me.body.principal, { type: 'service', id: 'deploy' });
+  assert.ok(me.headers.get('dpop-nonce') !== null);
+  const [replayed, , asked] = await opened(async () => ask('/api/me', await asSession(nonce, proof)));
+  assert.deepEqual([replayed.status, replayed.body.reason, asked], [401, 'replayed', 0]);
 });

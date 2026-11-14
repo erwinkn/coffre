@@ -12,6 +12,7 @@ import { APP_URL, openConfiguredVault, type TestVault } from '@coffre/vault/test
 import type { PageContext } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime } from '../src/runtime.ts';
+import type { Gates } from '../src/gate.ts';
 import { requestScope } from '../src/scope.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { watched } from './db/postgres-pool.ts';
@@ -51,11 +52,12 @@ export type TestApp = {
 /**
  * `database`: another than the suite's, by name, for the app's own connection. `auth`: another than coffre's own sign-in.
  * `transport`: what the app asks issuers through, in place of the network. `workloads`: the vault's, which takes none unless given.
+ * `gates`: the workload gates, none unless given.
  */
 /** A test's transport unless it brings its own: it asks no issuer anything. */
 const FETCHES_NOTHING: WorkloadTransport = { json: (url) => Promise.reject(new FetchRefused(url, "this test fetches nothing")) };
 
-export async function openApp({ database, auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }), transport, workloads }: { database?: string; auth?: Auth; transport?: WorkloadTransport; workloads?: { noReads?: boolean; useOnly?: boolean } } = {}): Promise<TestApp> {
+export async function openApp({ database, auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }), transport, workloads, gates = null }: { database?: string; auth?: Auth; transport?: WorkloadTransport; workloads?: { noReads?: boolean; useOnly?: boolean }; gates?: Gates | null } = {}): Promise<TestApp> {
   const { world, vault } = await openConfiguredVault({ kek: { id: 'app-test', key: Buffer.alloc(32, 9).toString('base64') }, owners: ['root@acme.example'], ...(workloads === undefined ? {} : { workloads }) });
   const url = new URL(APP_URL);
   if (database !== undefined) url.pathname = `/${database}`;
@@ -101,7 +103,7 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
     auditChainKey: Buffer.alloc(32, 3).toString('base64'),
   });
   const tracked: Promise<unknown>[] = [];
-  const scope = requestScope(createRuntime(config, counted, recorded, transport ?? FETCHES_NOTHING), () => '192.0.2.7', (work) => tracked.push(work));
+  const scope = requestScope(createRuntime(config, counted, recorded, { transport: transport ?? FETCHES_NOTHING, gates }), () => '192.0.2.7', (work) => tracked.push(work));
   return {
     world,
     vault,

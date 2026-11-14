@@ -30,5 +30,6 @@
  * its src/start.ts; see `coffre init --workers`.
  */
 export { createCoffre, postgres, type CoffreWorker, type PostgresDatabase, type WaitUntil, type WorkersConfig } from './cloudflare-handler.ts';
+export type { GatesNamespace } from './cloudflare-gates.ts';
 export type { CoffreContext, CoffreRequest, PageContext, Preferences } from './scope.ts';
 export * from './index.ts';

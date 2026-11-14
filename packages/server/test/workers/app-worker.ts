@@ -3,11 +3,13 @@
 // behind the app's `VAULT` service binding, with its signer, each over a
 // Hyperdrive binding of its own to the suite's database. Its fetch answers
 // as a deployment's Start app does: coffre's middleware around every
-// request, coffre's routes for coffre's paths, and a page for `/page`.
+// request, coffre's routes for coffre's paths, and a page for `/page`. Each
+// service's workload gate is its Durable Object, `GATES`.
 import { github, signin } from '@coffre/core/identity';
 import { postgres as vaultDatabase, vault } from '@coffre/vault/cloudflare';
 
-import { createCoffre, postgres, type Vault as VaultBinding, type WaitUntil } from '../../src/cloudflare.ts';
+import { createCoffre, postgres, type GatesNamespace, type Vault as VaultBinding, type WaitUntil } from '../../src/cloudflare.ts';
+import { processLimits } from '../../src/workloads/limits.ts';
 
 export { CoffreSigner } from '@coffre/vault/cloudflare';
 
@@ -17,21 +19,26 @@ type Env = {
   APP_KEY: string;
   VAULT_KEY: string;
   VAULT: VaultBinding;
+  GATES: GatesNamespace;
 };
 
 export const Vault = vault((env: Env) => ({
   database: vaultDatabase(env.VAULT_HYPERDRIVE as never),
   kek: { id: 'app-workers-test', key: env.VAULT_KEY },
   owners: ['root@acme.example'],
+  workloads: {},
 }));
 
 const coffre = createCoffre((env: Env) => ({
   publicUrl: 'https://secrets.acme.example',
   database: postgres(env.HYPERDRIVE as never),
   vault: env.VAULT,
-  auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }),
+  auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits() } }),
   auditChainKey: env.APP_KEY,
+  gates: env.GATES,
 }));
+
+export const CoffreGates = coffre.Gates;
 
 export default {
   fetch(request: Request, env: Env, ctx: WaitUntil): Promise<Response> {

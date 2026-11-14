@@ -3,6 +3,7 @@ import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
 import type { ResolvedConfig } from './config.ts';
+import type { Gates } from './gate.ts';
 import type { WorkloadTransport } from './workloads/transport.ts';
 
 /**
@@ -31,6 +32,13 @@ export type CoffreRuntime = {
    * public `fetch` on Workers.
    */
   transport: WorkloadTransport;
+  /**
+   * Each service's workload gate, which holds a session's proof to its
+   * nonce and takes it once (`sessions.ts`): a Durable Object per service on
+   * Workers, an object in the process on Node. Null for a deployment that
+   * runs none, which takes no workload session.
+   */
+  gates: Gates | null;
 };
 
 /**
@@ -43,8 +51,8 @@ const known = new WeakMap<ResolvedConfig, Pick<CoffreRuntime, 'schema' | 'signin
  * The app around a database: once per invocation on Workers, whose
  * database clients belong to one request; once per process on Node.
  */
-export function createRuntime(config: ResolvedConfig, db: Database, vault: Vault, transport: WorkloadTransport): CoffreRuntime {
+export function createRuntime(config: ResolvedConfig, db: Database, vault: Vault, platform: Pick<CoffreRuntime, 'transport' | 'gates'>): CoffreRuntime {
   let kept = known.get(config);
   if (kept === undefined) known.set(config, (kept = { schema: { migrated: false }, signinKey: deriveKey(config.auditChainKey, 'signin-state/v1') }));
-  return { db, vault, auth: config.auth, publicUrl: config.publicUrl, rotateAfterDays: config.rotateAfterDays, transport, ...kept };
+  return { db, vault, auth: config.auth, publicUrl: config.publicUrl, rotateAfterDays: config.rotateAfterDays, transport: platform.transport, gates: platform.gates, ...kept };
 }

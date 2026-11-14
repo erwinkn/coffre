@@ -269,6 +269,18 @@ test('a row kept in a shape the vault would not write is listed as best it reads
   assert.deepEqual(shown[0]!.scope, { [old.id]: 'viewer' });
 });
 
+test('an instance that lets no binding list reads refuses one that does: 400, its own words, not the words a workload stopped by it is told', async () => {
+  const strict = await openApp({ auth: workloads, transport, workloads: { noReads: true } });
+  try {
+    const got = await strict.request(`/api/members/${ci}/bindings`, { method: 'POST', headers: { authorization: 'Bearer ada-cli' }, body: JSON.stringify({ profile: 'custom', issuer: KUBE, claims: POD, policy: { reads: { 'market/dev': ['DATABASE_URL'] } } }) });
+    const answer = (await got.json()) as Body;
+    assert.deepEqual([got.status, answer.error, answer.reason], [400, 'bad_request', 'no_reads']);
+    assert.match(String(answer.message), /its services read plain values only/);
+  } finally {
+    await strict.close();
+  }
+});
+
 test('with workloads off, each route says how to turn them on, and asks nothing', async () => {
   const off = await openApp();
   try {

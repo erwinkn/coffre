@@ -2,7 +2,9 @@ import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 
 import { cloudflareSourceIp } from './auth.ts';
+import { CoffreGates, workersGates, type GatesNamespace } from './cloudflare-gates.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
+import type { Gates } from './gate.ts';
 import { createRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
 import { fetchTransport } from './workloads/transport.ts';
@@ -10,7 +12,15 @@ import { fetchTransport } from './workloads/transport.ts';
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
 
 /** What the app Worker's `createCoffre(env => …)` returns. */
-export type WorkersConfig = CoffreConfig & { database: PostgresDatabase };
+export type WorkersConfig = CoffreConfig & {
+  database: PostgresDatabase;
+  /**
+   * The Durable Object that holds each service's workload gate, `CoffreGates`
+   * (`CoffreWorker.Gates`), bound as `GATES`: `gates: env.GATES`. Without it
+   * the deployment takes no workload session.
+   */
+  gates?: GatesNamespace;
+};
 
 /** The part of the Workers `ExecutionContext` coffre uses. */
 export type WaitUntil = { waitUntil(promise: Promise<unknown>): void };
@@ -39,6 +49,8 @@ export type CoffreWorker<Env> = {
    * `deleted_classes` migration the deployment then needs.
    */
   Anchor: typeof CoffreAnchor;
+  /** The workload gates' Durable Object, which the deployment exports as bound: `export const CoffreGates = coffre.Gates`. */
+  Gates: typeof CoffreGates;
 };
 
 /**
@@ -49,13 +61,13 @@ export type CoffreWorker<Env> = {
  * the request and the work it left to finish are done.
  */
 export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): CoffreWorker<Env> {
-  const configs = new WeakMap<object, { config: WorkersConfig; resolved: ResolvedConfig }>();
+  const configs = new WeakMap<object, { config: WorkersConfig; resolved: ResolvedConfig; gates: Gates | null }>();
 
   function configured(env: Env) {
     let entry = configs.get(env as object);
     if (entry === undefined) {
       const config = configure(env);
-      entry = { config, resolved: resolveConfig(config) };
+      entry = { config, resolved: resolveConfig(config), gates: config.gates === undefined ? null : workersGates(config.gates) };
       configs.set(env as object, entry);
     }
     return entry;
@@ -65,7 +77,7 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     request(env, ctx) {
       const entry = configured(env);
       const pool = new HyperdrivePool(entry.config.database.hyperdrive.connectionString);
-      const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, fetchTransport());
+      const runtime = createRuntime(entry.resolved, createDatabase(pool), entry.config.vault, { transport: fetchTransport(), gates: entry.gates });
       const left: Promise<unknown>[] = [];
       let closing: Promise<void> | undefined;
       /**
@@ -85,5 +97,6 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     },
     async scheduled() {},
     Anchor: CoffreAnchor,
+    Gates: CoffreGates,
   };
 }
