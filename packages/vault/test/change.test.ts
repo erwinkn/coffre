@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { after, beforeEach, test } from 'node:test';
+import { setTimeout as wait } from 'node:timers/promises';
 
 import { leafHash } from '@coffre/core/log';
 import { openDatabase } from '@coffre/db/connect';
@@ -349,6 +350,45 @@ test('a change that spends a proof is made once: a second is refused `replayed` 
   await assert.rejects(change(vault, promote('admin', new Uint8Array(32) as Buffer)), /32 bytes/);
 });
 
+test('a change whose decision holds until a time is written only if its write starts by then, on the database\'s clock', async () => {
+  await done(writing(put(principals, member(ada))));
+  const read = { who: part(principals, eq(principals.id, ada)) };
+  let decisions = 0;
+  // A decision that holds for `ms` from its time, the first of them for `first`.
+  const holding = (to: string, ms: number, first = ms): Operation<typeof read, string> => ({
+    read,
+    decide: ({ who: [found] }, at) => ({ writes: [put(principals, member(ada, to), found!)], until: at + ((decisions += 1) === 1 ? first : ms), entry: said(`role.${to}`, ada), answer: to }),
+  });
+  const role = async () => (await seenOf(principals, eq(principals.id, ada)))[0]!.role;
+  const entries = async () => (await rowsOf<{ n: number }>(vault.owner, sql`SELECT count(*)::int AS n FROM log_pending`))[0]!.n;
+
+  // Written in time: made. The time is the database's, between its read and its write: the vault's own clock moving on is not it.
+  const early = await prepare(vault, holding('admin', 60_000));
+  vault.tick(120_000);
+  assert.deepEqual([await written(vault, early as never), await role()], ['made', 'admin']);
+  // Written late: nothing is, no row, no entry, no word to the signer, though no row it read has changed.
+  const [before, late] = [await entries(), await prepare(vault, holding('auditor', 40))];
+  vault.woken.length = 0;
+  await wait(80);
+  assert.deepEqual([await written(vault, late as never), await role(), await entries(), vault.woken.length], ['moved', 'admin', before, 0]);
+  // Late by its wait for the change lock: the time is told as its statement starts, behind the lock, not as it is sent.
+  const queued = await prepare(vault, holding('auditor', 300));
+  const { landing } = await vault.owner.transaction(async (holder) => {
+    await holder.execute(sql`SELECT pg_advisory_xact_lock(${sql.raw(String(CHANGE_LOCK))})`);
+    const landing = written(vault, queued as never);
+    await wait(600);
+    return { landing };
+  });
+  assert.deepEqual([await landing, await role(), await entries()], ['moved', 'admin', before]);
+  // A change that comes late starts over, and is decided again at a later time.
+  decisions = 0;
+  const slow: Operation<typeof read, string> = { ...holding('auditor', 60_000, 40), check: async () => void (decisions === 0 && (await wait(80))) };
+  assert.deepEqual([await change(vault, slow), decisions, await role(), await entries()], [{ answer: 'auditor' }, 2, 'auditor', before + 1]);
+  // It holds until a time after its decision, a number, and by a row it read.
+  const until = (to: (at: number) => number, from: Parts = read): Operation<Parts, null> => ({ read: from, decide: (_, at) => ({ writes: [], until: to(at), entry: said('test'), answer: null }) });
+  for (const bad of [until((at) => at), until((at) => at - 1), until(() => Number.NaN), until(() => Infinity), until((at) => at + 1000, nothing)]) await assert.rejects(change(vault, bad), /holds until a time after its decision, by a row it read/);
+});
+
 test('a change that is a use of a binding moves its last use on, to its entry\'s date, if and only if it is made', async () => {
   const api = 'token:api';
   const [bound, idle] = [binding(api), binding(api)];
@@ -372,6 +412,11 @@ test('a change that is a use of a binding moves its last use on, to its entry\'s
   assert.equal(await written(vault, mine as never), 'made');
   assert.deepEqual([await lastUse(), (await seenOf(bindings)).length], [await entryAt(), 2]);
   assert.equal(await lastUse(), vault.now() - 1000, 'dated as its entry, not as it landed');
+  // Late for the time its decision held until: not made either, its proof not spent and the binding not used again.
+  const [overdue, usedAt] = [randomBytes(32), await lastUse()];
+  const tardy = await prepare(vault, { read, decide: ({ binding: [found], who: [was] }: Seen<typeof read>, at: number) => ({ writes: [put(principals, member(ada, 'owner'), was!)], once: overdue, used: found!, until: at + 40, entry: said('token.exchange', api), answer: 'owner' }) });
+  await wait(80);
+  assert.deepEqual([await written(vault, tardy as never), await lastUse(), await rowsOf(vault.owner, sql`SELECT 1 FROM spent_id_tokens WHERE hash = decode(${overdue.toString('hex')}, 'hex')`)], ['moved', usedAt, []]);
   // One that read the binding before a use of it is not stopped by that use.
   const beside = await prepare(vault, { read: { binding: read.binding }, decide: ({ binding: [found] }: Pick<Seen<typeof read>, 'binding'>) => ({ writes: [], used: found!, entry: said('token.renew', api), answer: null }) });
   vault.tick(1000);
