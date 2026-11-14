@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { after, beforeEach, test } from 'node:test';
 
-import { CoffreError } from '@coffre/client';
+import { CoffreError, createClient, planImport } from '@coffre/client';
 import { DEFAULT_POLICY } from '@coffre/core/access';
 import { cloudflareAccess } from '@coffre/core/identity';
 import type { Called } from '@coffre/core/vault';
@@ -16,7 +16,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 
 import { can, placeOf, projectsReached } from '../src/api/caller.ts';
-import { openApp, SESSION } from './app-fixture.ts';
+import { openApp, PUBLIC_URL, SESSION } from './app-fixture.ts';
 
 const app = await openApp();
 const { world } = app;
@@ -213,12 +213,105 @@ test('a write is one change of the vault and no statement of the app; what it re
     ['market/prod', { API_KEY: 'a\0b' }, 400], ['market/prod', { API_KEY: '\ud800' }, 400], ['market/prod', { API_KEY: 'x'.repeat(64 * 1024 + 1) }, 400], ['market/prod', { 'not a key': 'x' }, 400], ['market/prod', {}, 400],
     ['market/prod', { API_KEY: { ref: 'market/prod' } }, 400],
     ['market/prod', { API_KEY: { ref: 'market/prod@me/FLAG' } }, 400], ['market/prod', { API_KEY: { ref: 'market/prod/FLAG', value: 'x' } }, 400], ['market/prod', { API_KEY: { sensitivity: 'sensitive' } }, 400],
-    ['market/prod?dryRun=1', { API_KEY: 'x' }, 400], ['market/prod@me', { API_KEY: { ref: 'market/prod/FLAG' } }, 400], ['Market/prod', { API_KEY: 'x' }, 400],
+    ['market/prod?dryRun=yes', { API_KEY: 'x' }, 400], ['market/prod?dry=1', { API_KEY: 'x' }, 400], ['market/prod@me', { API_KEY: { ref: 'market/prod/FLAG' } }, 400], ['Market/prod', { API_KEY: 'x' }, 400],
   ];
   for (const [path, values, expected] of shapes) assert.equal((await patch('bo-cli', path, values))[0], expected, `${path} ${JSON.stringify(values).slice(0, 40)}`);
   // `__proto__`, which a schema would drop without a word, is refused in the body itself.
   assert.equal((await app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: '{"__proto__":"v","A":"1"}' }))).status, 400);
   assert.deepEqual(app.calls, []);
+});
+
+test('a dry run is one weigh, and one use only to compare a value typed over the key\'s own: unchanged only if the caller reads it, and it is that version', async () => {
+  const dry = (label: string, path: string, values: unknown) => cost(() => answered(app.request(`/api/secrets/${path}?dryRun=1`, as(label, { method: 'PATCH', body: JSON.stringify(values) }))));
+  const compared = async () => (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending WHERE body LIKE '%"purpose":"compare"%' ORDER BY id`)).map((row) => row.body);
+  const versions = async () => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM secret_versions`))[0]!.n;
+  const before = [await pending(), await versions()];
+  // The same values: a secret and a plain one are opened to compare, and logged so, once; a sensitive one is a person's to use, never to read, so not.
+  const [[status, body], calls, statements] = await dry('bo-cli', 'market/prod', { DATABASE_URL: 'postgres://märkt', FLAG: { value: 'on', sensitivity: 'plain' }, STRIPE_KEY: 'sk_live', API_KEY: 'k1' });
+  assert.deepEqual([status, calls, statements], [200, ['weigh', 'use'], 0], JSON.stringify(body));
+  assert.deepEqual(body, { dryRun: true, keys: { DATABASE_URL: 'unchanged', FLAG: 'unchanged', STRIPE_KEY: 'changed', API_KEY: 'added' } });
+  const [read, ...more] = await compared();
+  assert.equal(more.length, 0);
+  assert.ok(read!.includes('"key":"DATABASE_URL"') && read!.includes('"key":"FLAG"') && !read!.includes('STRIPE_KEY'), read);
+  assert.deepEqual([await pending(), await versions()], [before[0]! + 1, before[1]], 'nothing written but the read');
+  // Another value, or the same said another nature, is a change: only the first is opened.
+  assert.deepEqual((await dry('bo-cli', 'market/prod', { DATABASE_URL: 'postgres://other' })).slice(0, 2), [[200, { dryRun: true, keys: { DATABASE_URL: 'changed' } }], ['weigh', 'use']]);
+  // A key with no value of its own has none to compare.
+  assert.deepEqual((await dry('bo-cli', 'market/prod', { FLAG: 'on', DATABASE_URL: { value: 'postgres://märkt', sensitivity: 'plain' }, EMPTY: 'x', NEW: 'x' })).slice(0, 2),
+    [[200, { dryRun: true, keys: { FLAG: 'changed', DATABASE_URL: 'changed', EMPTY: 'changed', NEW: 'added' } }], ['weigh']]);
+  // What the write would refuse, the dry run refuses, as the write does.
+  const [[refused, why], asked] = await dry('ada-cli', 'market/prod', { DATABASE_URL: 'postgres://märkt' });
+  assert.deepEqual([refused, why.reason, asked], [403, 'no_access', ['weigh']]);
+  assert.equal(await versions(), before[1]);
+});
+
+test('a dry run tells nobody their guess is right unless they read the value, as weighed: a writer who does not read, a version written since, a value read through a reference or a parent', async () => {
+  const dry = (label: string, path: string, values: unknown) => cost(() => answered(app.request(`/api/secrets/${path}?dryRun=1`, as(label, { method: 'PATCH', body: JSON.stringify(values) }))));
+  // Wes writes market, and reads nothing there.
+  const wes = user('wes');
+  await write(world, ...rows('roles', role(false, 'writer', ['secret.write'])), ...rows('principals', principal(wes)), ...rows('grants', grant(wes, 'writer', { project: market })),
+    ...rows('credentials', credential('wes-cli', wes, { lastUsedAt: new Date() })));
+  const logged = await pending();
+  const [[status, body], calls] = await dry('wes-cli', 'market/prod', { DATABASE_URL: 'postgres://märkt', FLAG: { value: 'on', sensitivity: 'plain' }, NEW: 'x' });
+  assert.deepEqual([status, body, calls], [200, { dryRun: true, keys: { DATABASE_URL: 'changed', FLAG: 'changed', NEW: 'added' } }, ['weigh', 'use']]);
+  assert.equal(await pending(), logged, 'nothing opened, nothing logged');
+
+  // A version written between the weigh and the use: the value is the same, the version is not the one weighed.
+  const use = app.vault.use;
+  app.vault.use = async (input) => {
+    assert.equal((await answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ DATABASE_URL: 'postgres://märkt' }) }))))[0], 200);
+    return use.call(app.vault, input);
+  };
+  try {
+    assert.deepEqual((await dry('bo-cli', 'market/prod', { DATABASE_URL: 'postgres://märkt' }))[0], [200, { dryRun: true, keys: { DATABASE_URL: 'changed' } }]);
+  } finally {
+    app.vault.use = use;
+  }
+  world.memory.reads.clear();
+  assert.deepEqual((await dry('bo-cli', 'market/prod', { DATABASE_URL: 'postgres://märkt' }))[0], [200, { dryRun: true, keys: { DATABASE_URL: 'unchanged' } }], 'asked again');
+
+  // A key made a reference between the weigh and the use: its source has the same version and value, but it is another secret, and the write would end the reference.
+  assert.equal((await answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ SOURCE: 'same', HOLDER: 'same' }) }))))[0], 200);
+  app.vault.use = async (input) => {
+    assert.equal((await answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ HOLDER: { ref: 'market/prod/SOURCE' } }) }))))[0], 200);
+    return use.call(app.vault, input);
+  };
+  try {
+    assert.deepEqual((await dry('bo-cli', 'market/prod', { HOLDER: 'same' }))[0], [200, { dryRun: true, keys: { HOLDER: 'changed' } }]);
+  } finally {
+    app.vault.use = use;
+  }
+
+  // A key it inherits and a reference, live or not, are no value of its own to compare: only its own key is asked of the use.
+  assert.equal((await answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ LINK: { ref: 'market/prod/DATABASE_URL' } }) }))))[0], 200);
+  const used: (string[] | null)[] = [];
+  app.vault.use = async (input) => {
+    used.push(input.keys);
+    return use.call(app.vault, input);
+  };
+  try {
+    assert.deepEqual((await dry('bo-cli', 'market/prod', { LINK: 'postgres://märkt', FLAG: { value: 'on', sensitivity: 'plain' } }))[0], [200, { dryRun: true, keys: { LINK: 'changed', FLAG: 'unchanged' } }]);
+    const [[forked, outcomes], asked] = await dry('cy-cli', 'market/fork', { S_KEY: 'staging only', A_LINK: 'gone', FINE: 'fine' });
+    assert.deepEqual([forked, outcomes, asked], [200, { dryRun: true, keys: { S_KEY: 'added', A_LINK: 'changed', FINE: 'unchanged' } }, ['weigh', 'use']]);
+    assert.deepEqual(used, [['FLAG'], ['FINE']]);
+  } finally {
+    app.vault.use = use;
+  }
+});
+
+test("`coffre import` plans from a dry run: what is unchanged is not written again", async () => {
+  const coffre = createClient({
+    url: PUBLIC_URL,
+    headers: () => ({ authorization: 'Bearer bo-cli' }),
+    transport: async (request) => {
+      const url = new URL(request.url);
+      return app.request(`${url.pathname}${url.search}`, { method: request.method, headers: request.headers, body: request.method === 'GET' ? undefined : await request.text() });
+    },
+  });
+  const { plan, changes } = await planImport(coffre, 'market/prod', [{ key: 'DATABASE_URL', value: 'postgres://märkt' }, { key: 'API_KEY', value: 'k1' }, { key: 'FLAG', value: 'on' }]);
+  // A bare value over a plain one is a secret, as the write would make it: a change, as in 0.14.
+  assert.deepEqual(plan, [{ key: 'DATABASE_URL', action: 'unchanged', version: 1 }, { key: 'API_KEY', action: 'added', version: null }, { key: 'FLAG', action: 'changed', version: 1 }]);
+  assert.deepEqual({ ...changes }, { API_KEY: 'k1', FLAG: 'on' });
 });
 
 test('a key made a reference, and a reference broken, is one change each: it reads its source, until broken', async () => {

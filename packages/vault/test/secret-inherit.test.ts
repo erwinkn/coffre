@@ -70,13 +70,13 @@ const lines = async () => {
 const dismissals = async () => rowsOf(world.owner, sql`SELECT key, restored_by AS by FROM dismissed_keys ORDER BY key`);
 
 test("a fork's key reset reads its parent's, its own kept; undone, its own serves again", async () => {
-  assert.deepEqual(await reset('ada-cli', 'DATABASE_URL'), { answer: { keys: {} } });
+  assert.deepEqual(await reset('ada-cli', 'DATABASE_URL'), { answer: { keys: {}, outcomes: { DATABASE_URL: 'archived' } } });
   assert.deepEqual(await lines(), [{ key: 'DATABASE_URL', archived: true, reset: true }]);
   assert.deepEqual(await given(['DATABASE_URL']), ['database_url-prod']);
   // Reset already, it is left as it is.
-  assert.deepEqual(await reset('ada-cli', 'DATABASE_URL'), { answer: { keys: {} } });
+  assert.deepEqual(await reset('ada-cli', 'DATABASE_URL'), { answer: { keys: {}, outcomes: { DATABASE_URL: 'unchanged' } } });
   assert.deepEqual(await lines(), []);
-  assert.deepEqual(await reset('ada-cli', 'DATABASE_URL', false), { answer: { keys: {} } });
+  assert.deepEqual(await reset('ada-cli', 'DATABASE_URL', false), { answer: { keys: {}, outcomes: { DATABASE_URL: 'changed' } } });
   assert.deepEqual(await lines(), [{ key: 'DATABASE_URL', archived: false, reset: false }]);
   assert.deepEqual(await given(['DATABASE_URL']), ['database_url-staging']);
 });
@@ -84,9 +84,9 @@ test("a fork's key reset reads its parent's, its own kept; undone, its own serve
 test('a reset takes writing there, as an override does; its undoing reading too, since the value serves again', async () => {
   assert.deepEqual(await reset('bo-cli', 'DATABASE_URL'), { refused: 'no_access' }, 'a viewer');
   // A Contributor writes, and does not archive: a reset is no archiving.
-  assert.deepEqual(await reset('cy-cli', 'DATABASE_URL'), { answer: { keys: {} } });
+  assert.deepEqual(await reset('cy-cli', 'DATABASE_URL'), { answer: { keys: {}, outcomes: { DATABASE_URL: 'archived' } } });
   assert.deepEqual(await reset('cy-cli', 'DATABASE_URL', false), { refused: 'no_access' }, 'a contributor, who does not read its value');
-  assert.deepEqual(await reset('ada-cli', 'DATABASE_URL', false), { answer: { keys: {} } });
+  assert.deepEqual(await reset('ada-cli', 'DATABASE_URL', false), { answer: { keys: {}, outcomes: { DATABASE_URL: 'changed' } } });
 });
 
 test("a key no live parent passes down is not reset, nor is its reset undone: that is an archiving", async () => {
@@ -112,15 +112,15 @@ test('a key a reference reads is not reset: its readers would read nothing', asy
 });
 
 test('a value, a version or a reference written over a reset key makes it an override again; any other archived key stays archived', async () => {
-  assert.deepEqual(await vault.change(writing('cy-cli', [{ key: 'API', value: 'api-new' }])), { answer: { keys: { API: { version: 2, nature: 'secret' } } } });
+  assert.deepEqual(await vault.change(writing('cy-cli', [{ key: 'API', value: 'api-new' }])), { answer: { keys: { API: { version: 2, nature: 'secret' } }, outcomes: { API: 'changed' } } });
   assert.deepEqual(await lines(), [{ key: 'API', version: 2, nature: 'secret', archived: false }]);
   assert.deepEqual(await given(['API']), ['api-new']);
   assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'GONE', value: 'x' }])), { refused: 'archived' });
-  assert.deepEqual(await reset('ada-cli', 'API'), { answer: { keys: {} } });
-  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'API', restore: 1 }])), { answer: { keys: { API: { version: 3, nature: 'secret' } } } });
+  assert.deepEqual(await reset('ada-cli', 'API'), { answer: { keys: {}, outcomes: { API: 'archived' } } });
+  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'API', restore: 1 }])), { answer: { keys: { API: { version: 3, nature: 'secret' } }, outcomes: { API: 'changed' } } });
   assert.deepEqual(await given(['API']), ['api-staging']);
-  assert.deepEqual(await reset('ada-cli', 'API'), { answer: { keys: {} } });
-  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'API', ref: { project: 'market', environment: 'prod', key: 'EXTRA' } }])), { answer: { keys: {} } });
+  assert.deepEqual(await reset('ada-cli', 'API'), { answer: { keys: {}, outcomes: { API: 'archived' } } });
+  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'API', ref: { project: 'market', environment: 'prod', key: 'EXTRA' } }])), { answer: { keys: {}, outcomes: { API: 'changed' } } });
   assert.deepEqual((await lines()).map(({ refers: _, ...line }) => line), [{ key: 'API', archived: false }]);
   assert.deepEqual(await given(['API']), ['extra-prod']);
 });
@@ -128,12 +128,12 @@ test('a value, a version or a reference written over a reset key makes it an ove
 test('a key that holds a value here again is no longer dismissed here: reset later, it reads its parent again', async () => {
   // Reset, then dismissed: a use of staging reads nothing for it.
   assert.deepEqual(await given(['SESSION', 'EXTRA']), ['unknown_key', 'unknown_key']);
-  assert.deepEqual(await reset('ada-cli', 'SESSION', false), { answer: { keys: {} } });
+  assert.deepEqual(await reset('ada-cli', 'SESSION', false), { answer: { keys: {}, outcomes: { SESSION: 'changed' } } });
   assert.deepEqual(await lines(), [{ key: 'SESSION', archived: false, reset: false, dismissed: false }]);
-  assert.deepEqual(await reset('ada-cli', 'SESSION'), { answer: { keys: {} } });
+  assert.deepEqual(await reset('ada-cli', 'SESSION'), { answer: { keys: {}, outcomes: { SESSION: 'archived' } } });
   assert.deepEqual(await given(['SESSION']), ['session-prod']);
   // A value of its own made where it was dismissed.
-  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'EXTRA', value: 'extra-staging' }])), { answer: { keys: { EXTRA: { version: 1, nature: 'secret' } } } });
+  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'EXTRA', value: 'extra-staging' }])), { answer: { keys: { EXTRA: { version: 1, nature: 'secret' } }, outcomes: { EXTRA: 'added' } } });
   assert.deepEqual(await lines(), [{ key: 'EXTRA', version: 1, nature: 'secret', made: true, dismissed: false }]);
   assert.deepEqual(await dismissals(), [{ key: 'EXTRA', by: ada }, { key: 'SESSION', by: ada }]);
 });
@@ -141,7 +141,7 @@ test('a key that holds a value here again is no longer dismissed here: reset lat
 test('a parent or a dismissal edited behind the vault is not guessed at', async () => {
   await world.owner.execute(sql`UPDATE secrets SET folder = 'x' WHERE key = 'DATABASE_URL' AND environment_id = (SELECT id FROM environments WHERE slug = 'prod' AND project_id = (SELECT id FROM projects WHERE slug = 'market'))`);
   assert.deepEqual(await reset('ada-cli', 'DATABASE_URL'), { refused: 'unreadable' });
-  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'DATABASE_URL', archived: true }])), { answer: { keys: {} } }, 'an archiving asks nothing of its parents');
+  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'DATABASE_URL', archived: true }])), { answer: { keys: {}, outcomes: { DATABASE_URL: 'archived' } } }, 'an archiving asks nothing of its parents');
   await world.owner.execute(sql`UPDATE dismissed_keys SET dismissed_by = 'someone' WHERE key = 'SESSION'`);
   assert.deepEqual(await reset('ada-cli', 'SESSION', false), { refused: 'unreadable' });
 });

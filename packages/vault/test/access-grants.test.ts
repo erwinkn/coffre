@@ -182,9 +182,10 @@ test('a grant on an environment gives nothing while its role holds what only a p
   // Eve reads and writes market/prod by a role an Owner made. A writer hides her grant, an Owner widens the role with
   // grant.manage, which no grant on an environment may hold, and the writer puts the grant back.
   await write(world, ...rows('roles', role(false, 'editor', ['secret.read', 'secret.use', 'secret.write'])), ...rows('grants', grant(eve, 'editor', { environment: prod })));
+  const url = (await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM secrets WHERE environment_id = ${prod.id} AND key = 'DATABASE_URL'`))[0]!.id;
   const writes = (label: string) => vault.change({ ...shown(label), op: 'secret.write', project: 'market', environment: 'prod', keys: [{ key: 'DATABASE_URL', value: `by ${label}` }] } as never);
   assert.equal(await uses('eve-cli'), 'postgres://market');
-  assert.deepEqual(await writes('eve-cli'), { answer: { keys: { DATABASE_URL: { version: 2, nature: 'secret' } } } });
+  assert.deepEqual(await writes('eve-cli'), { answer: { keys: { DATABASE_URL: { version: 2, nature: 'secret' } }, outcomes: { DATABASE_URL: { compare: { secret: url, version: 1 } } } } });
 
   const editor = sql`NOT instance AND id = 'editor'`;
   await amend(world, 'roles', editor, { permissions: ['secret.read', 'secret.use', 'secret.write', 'grant.manage'] });
@@ -198,7 +199,7 @@ test('a grant on an environment gives nothing while its role holds what only a p
   await amend(world, 'roles', editor, { permissions: ['secret.read', 'secret.use', 'secret.write'] });
   world.tick(2000);
   assert.equal(await uses('eve-cli'), 'by eve-cli');
-  assert.deepEqual(await writes('eve-cli'), { answer: { keys: { DATABASE_URL: { version: 3, nature: 'secret' } } } });
+  assert.deepEqual(await writes('eve-cli'), { answer: { keys: { DATABASE_URL: { version: 3, nature: 'secret' } }, outcomes: { DATABASE_URL: { compare: { secret: url, version: 2 } } } } });
 });
 
 test('a grant asked of a place it cannot be: no role by that id, a project\'s on an environment, an end gone, a personal config, a place of another project', async () => {

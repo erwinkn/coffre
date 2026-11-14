@@ -2,8 +2,11 @@
 export type SecretsChanges = SecretWrite | SecretRename | SecretRefile | ReferenceBreak;
 
 export type SecretsAnswers = {
-  /** Each key given a value, written or restored: the version it is at now, and the nature it was written as. A key made a reference is given none. */
-  'secret.write': { keys: Record<string, { version: number; nature: Nature }> };
+  /**
+   * Each key given a value, written or restored: the version it is at now, and the nature it was written as. A key made a
+   * reference is given none. And what the write does to each key asked (`outcomes`), which a dry run tells (`weigh`).
+   */
+  'secret.write': { keys: Record<string, { version: number; nature: Nature }>; outcomes: Record<string, KeyOutcome> };
   /** Where the reference read, as its source's rows say: null when the vault does not see them. */
   'reference.break': { source: SecretPath | null };
   /** The key renamed, by its id. */
@@ -11,6 +14,20 @@ export type SecretsAnswers = {
   /** The keys filed there, by name, in order. */
   'secret.refile': { moved: string[] };
 };
+
+/**
+ * What a write does to one key, as 0.14's dry run said it (`DryRunOutcome`):
+ * `added`, a key made, by a value or a reference; `archived`; `unchanged`,
+ * nothing at all, a key archived already, filed where it is, or made a
+ * reference to the source it reads; `changed`, anything else. Or, for a
+ * value written over the key's own, live, of the nature it is written as,
+ * typed and no reference (`compare`): the same or not only by opening that
+ * version, which a decision never does. A dry run asks a use to compare
+ * (purpose `compare`), which opens and logs the value as a read: the version
+ * named is the one a use must hand back for the answer to stand. The write
+ * itself never compares: it writes the value as a new version.
+ */
+export type KeyOutcome = 'added' | 'changed' | 'archived' | 'unchanged' | { compare: { secret: string; version: number } };
 
 /** A key by where it is held: `market/prod/STRIPE_KEY`. */
 export type SecretPath = { project: string; environment: string; key: string };

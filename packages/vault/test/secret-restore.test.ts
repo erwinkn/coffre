@@ -83,7 +83,7 @@ const newest = async () => {
 test('a restore makes the old value the key\'s next version, sealed again, first written when its source was', async () => {
   await typed('DATABASE_URL', 'postgres://two');
   world.tick(day);
-  assert.deepEqual(await vault.change(restoring('ada-cli', 'DATABASE_URL', 1)), { answer: { keys: { DATABASE_URL: { version: 3, nature: 'secret' } } } });
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'DATABASE_URL', 1)), { answer: { keys: { DATABASE_URL: { version: 3, nature: 'secret' } }, outcomes: { DATABASE_URL: 'changed' } } });
   assert.deepEqual(await given(['DATABASE_URL']), [[3, 'postgres://one']]);
   const [one, two, three] = await versionsOf('DATABASE_URL');
   // Its own date is today's; its value's, version 1's; and it is encrypted anew, under its own number.
@@ -95,7 +95,7 @@ test('a restore makes the old value the key\'s next version, sealed again, first
 
   // A restore of the restore keeps the first date, and of the version that is current makes another copy of it.
   world.tick(day);
-  assert.deepEqual(await vault.change(restoring('ada-cli', 'DATABASE_URL', 3)), { answer: { keys: { DATABASE_URL: { version: 4, nature: 'secret' } } } });
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'DATABASE_URL', 3)), { answer: { keys: { DATABASE_URL: { version: 4, nature: 'secret' } }, outcomes: { DATABASE_URL: 'changed' } } });
   assert.deepEqual(await given(['DATABASE_URL']), [[4, 'postgres://one']]);
   assert.equal((await versionsOf('DATABASE_URL'))[3]!.first, one!.first);
 });
@@ -103,18 +103,18 @@ test('a restore makes the old value the key\'s next version, sealed again, first
 test('a value comes back as it was kept, and sensitive while the key is, or its newest value was', async () => {
   // Plain over a secret: plain, with its copy for the pages.
   await typed('ACCOUNT', 'acct_2');
-  assert.deepEqual(await vault.change(restoring('ada-cli', 'ACCOUNT', 1)), { answer: { keys: { ACCOUNT: { version: 3, nature: 'plain' } } } });
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'ACCOUNT', 1)), { answer: { keys: { ACCOUNT: { version: 3, nature: 'plain' } }, outcomes: { ACCOUNT: 'changed' } } });
   assert.deepEqual([(await versionsOf('ACCOUNT'))[2]!.plaintext, (await rowOf('ACCOUNT')).nature], ['acct_1', 'plain']);
   // A secret over a sensitive value: sensitive. Plain over a sensitive one too.
   await typed('DATABASE_URL', 'postgres://two', 'sensitive');
-  assert.deepEqual(await vault.change(restoring('ada-cli', 'DATABASE_URL', 1)), { answer: { keys: { DATABASE_URL: { version: 3, nature: 'sensitive' } } } });
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'DATABASE_URL', 1)), { answer: { keys: { DATABASE_URL: { version: 3, nature: 'sensitive' } }, outcomes: { DATABASE_URL: 'changed' } } });
   assert.deepEqual(await given(['DATABASE_URL']), ['sensitive']);
   await typed('ACCOUNT', 'acct_4', 'sensitive');
-  assert.deepEqual(await vault.change(restoring('ada-cli', 'ACCOUNT', 1)), { answer: { keys: { ACCOUNT: { version: 5, nature: 'sensitive' } } } });
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'ACCOUNT', 1)), { answer: { keys: { ACCOUNT: { version: 5, nature: 'sensitive' } }, outcomes: { ACCOUNT: 'changed' } } });
   assert.deepEqual([(await versionsOf('ACCOUNT'))[4]!.plaintext, (await rowOf('ACCOUNT')).nature], [null, 'sensitive']);
   // A sensitive value over a secret: sensitive still.
   await typed('STRIPE_KEY', 'sk_two');
-  assert.deepEqual(await vault.change(restoring('ada-cli', 'STRIPE_KEY', 1)), { answer: { keys: { STRIPE_KEY: { version: 3, nature: 'sensitive' } } } });
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'STRIPE_KEY', 1)), { answer: { keys: { STRIPE_KEY: { version: 3, nature: 'sensitive' } }, outcomes: { STRIPE_KEY: 'changed' } } });
   assert.deepEqual(await given(['STRIPE_KEY']), ['sensitive']);
 });
 
@@ -124,7 +124,7 @@ test('a key made a reference is restored from its own history: the reference end
   await typed('STRIPE_KEY', 'sk_three', 'sensitive');
   assert.ok(!('refused' in (await vault.change(writing('ada-cli', [{ key: 'STRIPE_KEY', ref: { project: 'billing', environment: 'prod', key: 'SOURCE' } }])))));
   assert.deepEqual([(await rowOf('STRIPE_KEY')).nature, (await rowOf('STRIPE_KEY')).source], [null, ids.SOURCE]);
-  assert.deepEqual(await vault.change(restoring('ada-cli', 'STRIPE_KEY', 2)), { answer: { keys: { STRIPE_KEY: { version: 4, nature: 'sensitive' } } } });
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'STRIPE_KEY', 2)), { answer: { keys: { STRIPE_KEY: { version: 4, nature: 'sensitive' } }, outcomes: { STRIPE_KEY: 'changed' } } });
   assert.deepEqual(await rowOf('STRIPE_KEY'), { nature: 'sensitive', versions: 4, current: 4, source: null, recipe: null, pair: null });
   const entry = await newest();
   assert.deepEqual((entry.detail as { keys: object[] }).keys, [{ key: 'STRIPE_KEY', secret: ids.STRIPE_KEY, version: 4, nature: 'sensitive', restored: 2, source: ids.SOURCE }]);
@@ -144,7 +144,7 @@ test('a key with no value of its own goes by its newest version\'s label, which 
   await world.owner.execute(sql`UPDATE secret_versions SET sensitive = true WHERE secret_id = ${ids.ACCOUNT!} AND version = 2`);
   assert.ok(!('refused' in (await vault.change({ ...shown('ada-cli'), op: 'reference.break', project: 'market', environment: 'prod', key: 'ACCOUNT' }))));
   assert.deepEqual([(await rowOf('ACCOUNT')).nature, (await rowOf('ACCOUNT')).current, (await rowOf('ACCOUNT')).source], [null, null, null]);
-  assert.deepEqual(await vault.change(restoring('ada-cli', 'ACCOUNT', 1)), { answer: { keys: { ACCOUNT: { version: 3, nature: 'sensitive' } } } });
+  assert.deepEqual(await vault.change(restoring('ada-cli', 'ACCOUNT', 1)), { answer: { keys: { ACCOUNT: { version: 3, nature: 'sensitive' } }, outcomes: { ACCOUNT: 'changed' } } });
   // Restoring the newest itself opens it as the copy: no second opening, and the same refusal relabelled.
   assert.ok(!('refused' in (await vault.change(writing('ada-cli', [{ key: 'ACCOUNT', ref: source }])))));
   await world.owner.execute(sql`UPDATE secret_versions SET sensitive = false WHERE secret_id = ${ids.ACCOUNT!} AND version = 3`);
@@ -188,7 +188,7 @@ test('whoever restores writes and reads the key there; a version the key never h
   assert.deepEqual(await vault.change(restoring('ada-cli', 'DATABASE_URL', 1)), { refused: 'archived' });
   assert.deepEqual(await counts(), archived);
   // Brought back in the same write, it is restored.
-  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'DATABASE_URL', restore: 1, archived: false }])), { answer: { keys: { DATABASE_URL: { version: 3, nature: 'secret' } } } });
+  assert.deepEqual(await vault.change(writing('ada-cli', [{ key: 'DATABASE_URL', restore: 1, archived: false }])), { answer: { keys: { DATABASE_URL: { version: 3, nature: 'secret' } }, outcomes: { DATABASE_URL: 'changed' } } });
   assert.deepEqual(await given(['DATABASE_URL']), [[3, 'postgres://one']]);
 });
 

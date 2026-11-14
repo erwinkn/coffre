@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 
 import { environmentPath, folderName, personalOf, secretKey, slug } from '@coffre/core/schemas';
-import type { KeyWrite } from '@coffre/core/vault';
+import type { KeyWrite, SecretWrite } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { changed } from '../change.ts';
@@ -66,6 +66,50 @@ const readPath = z.string().max(400).transform((text, issue) => {
 
 /** A reference's source, `market/prod/KEY`: a key of an environment, never of a personal config. */
 const sourcePath = readPath.refine((path) => path.key !== undefined && personalOf(path.environment) === null, 'a reference names its source as <project>/<environment>/<KEY>, never in a personal config');
+
+/** What a merge patch would do to a key: the answer to `?dryRun=1`, as 0.14's. */
+export type DryRunOutcome = 'added' | 'changed' | 'unchanged' | 'archived';
+export type DryRunResult = { dryRun: true; keys: Record<string, DryRunOutcome> };
+
+/** Whether two values are the same, in a time that says nothing of where they differ. */
+const same = (a: string, b: string) => timingSafeEqual(createHash('sha256').update(a).digest(), createHash('sha256').update(b).digest());
+
+/**
+ * A write weighed (`vault.weigh`), and nothing written: what it would do to
+ * each key, never a value. A value typed over the key's own, as it is kept,
+ * is `unchanged` only if it is that value, which takes opening it: the vault
+ * names the version (`compare`), and one use opens those keys for the
+ * caller, purpose `compare`, logged as a read and counted toward the cap,
+ * as 0.14's dry run did. Each is `unchanged` only if the use handed back
+ * the very version weighed, so neither a version written in between nor a
+ * value read through a reference or a parent is ever compared, and it is
+ * the value written. A key the use refuses, sensitive to a person or used
+ * only, or a use refused whole, is `changed`: nobody is told their guess
+ * is right unless they read the value. 0.14 refused the whole dry run
+ * without `secret.read`; a writer who does not read is told what the
+ * write's own answer would tell them, every value `changed`.
+ */
+async function dryRun(ctx: ApiContext, change: SecretWrite, values: ReadonlyMap<string, string>, at: string): Promise<DryRunResult> {
+  const weighed = await ctx.vault.weigh<'secret.write'>({ ...ctx.shown, ...change });
+  if ('refused' in weighed) throw refusal(weighed.refused, at);
+  const { outcomes } = weighed.answer;
+  const asked = Object.entries(outcomes).flatMap(([key, outcome]) => (typeof outcome === 'object' ? [{ key, ...outcome.compare }] : []));
+  // A null-prototype record: a key named __proto__ is a key like any other.
+  const keys: Record<string, DryRunOutcome> = Object.create(null);
+  for (const [key, outcome] of Object.entries(outcomes)) keys[key] = typeof outcome === 'object' ? 'changed' : outcome;
+  // A use reads 1,000 keys at most, and a write names 2,000.
+  for (let from = 0; from < asked.length; from += MOST_READ) {
+    const batch = asked.slice(from, from + MOST_READ);
+    const used = await ctx.vault.use({ ...ctx.shown, project: change.project, environment: change.environment, mine: change.mine ?? false, keys: batch.map((item) => item.key), purpose: 'compare', upstream: null });
+    if ('refused' in used) continue;
+    const given = new Map(used.values.map((item) => [item.key, item]));
+    for (const { key, secret, version } of batch) {
+      const got = given.get(key);
+      if (got !== undefined && !('refused' in got) && got.secret === secret && got.version === version && same(got.value, values.get(key)!)) keys[key] = 'unchanged';
+    }
+  }
+  return { dryRun: true, keys: { ...keys } };
+}
 
 /** The keys a folder of one environment, or of the caller's personal config of it, held, re-filed under `to`, or in none. */
 async function refiled(ctx: ApiContext, params: { project: string; environment: string; folder: string }, to: string | null): Promise<string[]> {
@@ -136,14 +180,18 @@ export const secretRoutes = {
    * gives a key a value where they have none, as 0.14's: its owner's alone,
    * while they read or use dev, and it holds no reference (a 400).
    *
+   * With `?dryRun=1`, what the write would do to each key, and nothing
+   * written (`dryRun`): `added`, `changed`, `unchanged` or `archived`.
+   *
    * Not served yet, each refused as a 400 by the input's shape: a generated
-   * value, a nature changed in place, and a dry run.
+   * value, and a nature changed in place.
    */
   ...route('PATCH /secrets/:project/:environment', {
     input: z.record(secretKey, z.union([secretValue, z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']) }).strict(), z.object({ ref: sourcePath }).strict()]).nullable())
       .refine((patch) => Object.keys(patch).length > 0, 'name at least one key'),
-    query: z.object({}).strict(),
-    run: async (ctx, { params, input }) => {
+    // `?dryRun=1` weighs the write and makes none. Any other query is refused, not ignored: a mistyped flag must not write.
+    query: z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict(),
+    run: async (ctx, { params, input, query }) => {
       const { environment, mine } = environmentOf(params.environment);
       if (mine && Object.values(input).some((written) => typeof written === 'object' && written !== null && 'ref' in written)) {
         throw badRequest(`${params.project}/${params.environment} is your personal config, which holds values only: make the reference in ${params.project}/${environment}`);
@@ -151,7 +199,10 @@ export const secretRoutes = {
       const keys = Object.entries(input).map(([key, written]): KeyWrite => (written === null ? { key, archived: true } : typeof written === 'string' ? { key, value: written }
         : 'ref' in written ? { key, ref: { project: written.ref.project, environment: written.ref.environment, key: written.ref.key! } }
           : { key, value: written.value, nature: written.sensitivity }));
-      const answer = await changed(ctx, { op: 'secret.write', project: params.project, environment, mine, keys }, `${params.project}/${params.environment}`);
+      const change = { op: 'secret.write', project: params.project, environment, mine, keys } as const;
+      const at = `${params.project}/${params.environment}`;
+      if (query.dryRun !== undefined) return dryRun(ctx, change, new Map(keys.flatMap((item) => (item.value === undefined ? [] : [[item.key, item.value]]))), at);
+      const answer = await changed(ctx, change, at);
       const told = keys.flatMap((item): [string, { reference: string } | { archived: true }][] => (item.ref !== undefined ? [[item.key, { reference: `${item.ref.project}/${item.ref.environment}/${item.ref.key}` }]]
         : item.archived === true ? [[item.key, { archived: true }]] : []));
       // As entries: a key named __proto__ is a key like any other.
