@@ -19,7 +19,6 @@
     "src/api/references.ts",
     "src/api/personal.ts",
     "test/forks-properties.test.ts",
-    "test/generated-values.test.ts",
     "test/recipes.test.ts",
     "test/inheritance.test.ts",
     "test/missing.test.ts",

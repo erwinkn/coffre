@@ -255,21 +255,21 @@ test("a key is placed by the nature its use opened it under, not the peek's: one
   }
 });
 
-test('a plan with no JWT placeholder is two calls to the vault and no statement; the vault reads twice and writes once, its memory on or off, and logs it once a minute', async () => {
+test('a plan with no JWT placeholder is two calls to the vault and no statement; the vault reads twice, never from its memory, and writes once, and logs it once a minute', async () => {
   // Each a handle of its own: one never used before, whose plan's first is the one measured.
   for (const [seconds, who] of [[2, ADA], [0, OLGA]] as const) {
     world.memory.seconds = seconds;
     const { plan, calls, statements, vault } = await planOf('market/staging', handleOf(who, staging));
     assert.deepEqual(plan, { environment: 'market/staging', env: { TWILIO_SID: SID, TWILIO_TOKEN: handleOf(who, staging), WEBHOOK_SECRET: 'whsec_staging' }, credentials: { twilio: `${PUBLIC_URL}/use/market/staging/twilio` }, tunnels: {}, left: [] });
-    // The peek's read, the use's own (it names its keys, so it is no ask the peek's rows answer), and the use's one write.
     // The peek's read; the use's own, since it names its keys and no ask the peek's rows answer; its one write; and the handle's last use, once a minute.
     assert.deepEqual([calls, statements, vault], [['peek', 'use'], 0, ['read', 'read', 'write', 'last use']], `memory ${seconds}s`);
   }
-  // Again within the minute: with no memory, both reads again and no write; within it, nothing at all.
+  // Again within the minute: both reads again, the memory on or off (a plan reads now, `fresh`: it follows the writes
+  // `coffre run` just made, test/generated-values.test.ts), and no write.
   assert.deepEqual((await planOf('market/staging', handleOf(OLGA, staging))).vault, ['read', 'read']);
   world.memory.seconds = 2;
   await planOf('market/staging', handleOf(ADA, staging));
-  assert.deepEqual((await planOf('market/staging', handleOf(ADA, staging))).vault, []);
+  assert.deepEqual((await planOf('market/staging', handleOf(ADA, staging))).vault, ['read', 'read']);
 });
 
 test("a fork's inherited values reach the app of whoever reads them where they are held; a reader of the fork alone does without them", async () => {
@@ -305,7 +305,7 @@ test("a handle reads a protected prod as its person does: a Maintainer's is hand
   assert.deepEqual(ada.calls, ['peek', 'use']);
 });
 
-test('a plan is a handle\'s alone, and refused as the vault refuses the handle; one of an environment the deployment generates for is not served yet', async () => {
+test('a plan is a handle\'s alone, and refused as the vault refuses the handle', async () => {
   const status = async (path: string, authorization?: string) => {
     const before = app.calls.length;
     const response = await app.request(`/use/${path}`, authorization === undefined ? {} : { headers: { authorization } });
@@ -318,7 +318,8 @@ test('a plan is a handle\'s alone, and refused as the vault refuses the handle; 
   assert.deepEqual(await status('market/dev', `Bearer ${cli}`), [401, undefined, []]);
   assert.deepEqual(await status('market/dev', `Bearer ${generateToken('handle')}`), [401, 'unauthenticated', ['peek']]);
   assert.deepEqual(await status('market/nowhere', `Bearer ${handleOf(ADA, dev)}`), [403, 'no_access', ['peek']]);
-  assert.deepEqual(await status('market/generated', `Bearer ${handleOf(ADA, generated)}`), [501, 'not_implemented', []]);
+  // One of an environment the deployment generates for costs what any plan does (test/generated-values.test.ts).
+  assert.deepEqual(await status('market/generated', `Bearer ${handleOf(ADA, generated)}`), [200, undefined, ['peek', 'use']]);
   assert.deepEqual((await status('market/dev', `Bearer ${handleOf(ADA, dev)}`))[0], 200);
 });
 

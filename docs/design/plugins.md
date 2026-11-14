@@ -211,11 +211,14 @@ else is needed.
 - `held(handle, path)`: what a handle may use at a place, each key with
   the nature its rows say or why not, opening and logging nothing: the
   vault's `peek`. The plan picks the keys it hands back by it, and never
-  places a value by it.
+  places a value by it; and what it generates, by each key's version id,
+  recipe and whether it is the caller's own, and by whether the read found
+  their personal config (`personal`).
 - `expose(caller, { path, keys })`: values handed back to the caller's own
   app, key by key, the vault's `use` with purpose `expose`: those given,
   which of them opened plain, and why each other is not given, which the
-  caller does without.
+  caller does without. Both read the vault's rows now, never its memory
+  (`fresh`): a plan follows the writes `coffre run` just made.
 
 **Capabilities to add later**, each when its first plugin needs it (none is
 built):
