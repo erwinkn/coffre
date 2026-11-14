@@ -833,6 +833,8 @@ function placeDelete(input: Presented & PlaceDelete, vault: Deciding): Operation
     decide(seen: Seen<typeof read>, at: number, _unsealed, _checked, rode) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
+      // Deleting for good stays with people, signed in as themselves: a personal token deletes nothing, its person's own config included (0.14.7).
+      if (caller.credential.kind === 'personal') return NO_ACCESS;
       const { place, there } = placed(seen);
       if (place === undefined || (named !== null && there === undefined)) return NO_ACCESS;
       const ofPlace = (row: Row<typeof environments>) => row.projectId === place.id;

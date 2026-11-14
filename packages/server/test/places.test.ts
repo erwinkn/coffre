@@ -382,6 +382,30 @@ test('an archived place is deleted for good by one change, and previewed by one 
   assert.deepEqual([bad, asked], [400, []]);
 });
 
+test("a personal token deletes nothing for good, and lists no project's personal configs: both stay with people, signed in as themselves (0.14.7)", async () => {
+  // Each a role a personal token may name: Cy's on market and shelf, Bo's and Dee's on market. Each manages its environments.
+  const scoped = (...projectIds: string[]) => JSON.stringify(projectIds.map((projectId) => ({ projectId, environmentId: null, role: 'maintainer' })));
+  const shelf = (await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM projects WHERE slug = 'shelf'`))[0]!.id;
+  await write(world, ...rows('credentials',
+    credential('cy-pat', cy, { kind: 'personal', scope: scoped(ids.market!, shelf) }),
+    credential('bo-pat', bo, { kind: 'personal', scope: scoped(ids.market!) }),
+    credential('dee-pat', dee, { kind: 'personal', scope: scoped(ids.market!) })));
+  // The archived project and environment Cy deletes on a session; Dee's own config; Ada's, which Bo deletes on a session.
+  for (const [label, path] of [['cy-pat', '/projects/shelf'], ['cy-pat', '/projects/market/old'], ['dee-pat', '/projects/market/prod@me'], ['bo-pat', '/projects/market/prod-ada']] as const) {
+    assert.deepEqual(refused(await call(label, 'DELETE', `${path}?dryRun=1`)), NO_ACCESS, `${label} weighs ${path}`);
+    assert.deepEqual(refused(await call(label, 'DELETE', path)), NO_ACCESS, `${label} ${path}`);
+  }
+  assert.ok(await projectRow('shelf'));
+  assert.deepEqual((await environmentRow('old'))?.slug, 'old');
+  assert.deepEqual((await rowsOf<{ slug: string }>(world.owner, sql`SELECT slug FROM environments WHERE owner IS NOT NULL AND project_id = ${ids.market!} ORDER BY slug`)).map((row) => row.slug), ['prod-ada', 'prod-dee']);
+  assert.deepEqual(refused(await call('bo-pat', 'GET', '/personal/market')), NO_ACCESS);
+  // On their sessions, the same asks are answered.
+  assert.equal((await call('bo-cli', 'GET', '/personal/market'))[0], 200);
+  assert.equal((await call('dee-cli', 'DELETE', '/projects/market/prod@me?dryRun=1'))[0], 200);
+  // The kind decides, not the scope: a service token that manages market's environments may, as in 0.14.7.
+  assert.equal((await call('ci-token', 'DELETE', '/projects/market/prod-ada?dryRun=1'))[0], 200);
+});
+
 test("each place refusal is answered with 0.14's status for the same case", () => {
   const statuses = Object.fromEntries(['exists', 'referenced', 'inherited', 'parent_archived', 'broken_chain', 'too_deep', 'not_archived', 'too_large', 'too_many_keys', 'workload_cannot_issue', 'not_a_person', 'no_access'].map((reason) => {
     const error = refusal(reason);

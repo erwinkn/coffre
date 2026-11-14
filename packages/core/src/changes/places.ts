@@ -186,7 +186,8 @@ export type FolderRefile = { op: 'folder.refile'; folder: string; to: string | n
  * Both by an Admin or Owner of the whole instance, on no credential's
  * scope (`runsInstance`); a place there but live is `not_archived`. A
  * personal config is deleted by its owner, or by whoever manages its
- * project's environments (`environment.manage`), archived or not:
+ * project's environments (`environment.manage`), archived or not, never
+ * on a personal token (deleting for good stays with people):
  * `environment` names it by its own slug, which only a list for deletion
  * shows, or, with `mine`, the environment it is the caller's config of.
  * A place that holds more versions with a value than one change erases
