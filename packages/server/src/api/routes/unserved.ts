@@ -34,7 +34,6 @@ export const unservedRoutes = {
   // MCP: a change an app asked for, on the page where its person decides it. Connecting an app and the apps connected are served (routes/oauth.ts).
   ...unserved('GET /approvals/:id', "an app's change to approve"),
   ...unserved('POST /approvals/:id', "deciding an app's change"),
-  // The log, a page of it proved by its tiles; and what `coffre verify keys` checks an escrowed key against.
-  ...unserved('GET /audit', 'the audit log'),
+  // What `coffre verify keys` checks an escrowed key against: the log's page is served (routes/audit.ts).
   ...unserved('GET /audit/keys', "the keys' public material"),
 };

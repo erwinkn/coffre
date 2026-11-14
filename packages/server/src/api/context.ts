@@ -16,9 +16,11 @@ export type ApiContext = {
    * Who the request is and what it holds, for a page's queries: asked of
    * the vault once a request, and once for all the calls of a page's
    * render. A use or a change does not ask: the vault reads its caller
-   * itself.
+   * itself. The audit page asks with `head`: the log's head the vault
+   * signed, read with the caller's rows and never from memory, so its
+   * answer is that page's own.
    */
-  caller(): Promise<Called>;
+  caller(asked?: { head: true }): Promise<Called>;
   /**
    * Whether the request rides on the browser's cookie from another site's
    * page, or from a page of coffre's that another site embeds: a read that
@@ -35,7 +37,7 @@ export type ApiContext = {
 };
 
 /** Who a request is, as the vault answers it; its refusal, thrown as the API's. */
-export async function callerOf(vault: Vault, shown: Presented): Promise<Called> {
+export async function callerOf(vault: Vault, shown: Presented & { head?: boolean }): Promise<Called> {
   const answer = await vault.caller(shown);
   if ('refused' in answer) throw refusal(answer.refused);
   return answer;
