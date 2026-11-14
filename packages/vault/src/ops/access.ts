@@ -14,7 +14,7 @@ import { amended, drop, part, put, type Operation, type Parts, type Refusal, typ
 import type { Said } from '../entry.ts';
 import type { Fresh, Row } from '../rows.ts';
 import type { Deciding } from '../vault.ts';
-import { asking, NOWHERE } from './asking.ts';
+import { managing, NOWHERE, ownsAllAsking, said } from './asking.ts';
 import type { Operations } from './index.ts';
 import { presented, text } from './input.ts';
 import { definitionsOf, held as holding, managesSealed, onSession, projectsOf, runs, serviceOf, serviceParts, settingOf } from './services.ts';
@@ -82,19 +82,10 @@ function ownsAll(row: Row<typeof principals>): boolean {
   return row.id.startsWith('user:') && scope !== null && ownsInstance({ role: row.role as InstanceRole, scope });
 }
 
-/** Whether the caller is an Owner of the whole instance, on a credential no scope narrows. */
-const ownsAllAsking = (caller: Asking) => caller.holds.credentialScope == null && ownsInstance(caller.holds);
 
 /** Whether the deployment names this person an Owner (`owners`): no change demotes or removes them while it does. */
 const named = (vault: Deciding, principal: string) => vault.owners.some((email) => principal === `user:${email}`);
 
-/** Who asks, or why they are refused (`asking`), and any workload's session, which changes no one's access. */
-function managing(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, vault: Deciding, at: number): Asking | Refusal {
-  const caller = asking(seen, shown, vault, at);
-  // A workload's session changes no one's access, whatever its scope holds, as 0.14's router refused it (docs/design/workload-access.md, D15).
-  if (!('refused' in caller) && caller.workload !== null) return { refused: 'workload_cannot_issue' };
-  return caller;
-}
 
 /**
  * What the log says of one of these changes refused (D236): the member it was
@@ -107,19 +98,6 @@ const deniedTo = <S extends Seen<ReturnType<typeof callerParts>> & { member: Row
     objects: (seen) => [...seen.member.map((row) => `principal:${row.id}`), ...(seen.scoped ?? []).map((project) => `project:${project.id}`)],
   });
 
-/** An entry of these changes: who asked, on what, and what it mentions. */
-function said(action: string, caller: Asking, shown: { request: string | null; ip: string | null }, objects: string[], detail: Record<string, unknown>): Said {
-  return {
-    kept: true,
-    action,
-    actor: caller.principal,
-    credential: caller.credential.id,
-    request: shown.request,
-    ip: shown.ip,
-    objects: [`principal:${caller.principal}`, `credential:${caller.credential.id}`, ...objects],
-    detail,
-  };
-}
 
 /**
  * A member's role and scope as asked, checked before any read: a role is
