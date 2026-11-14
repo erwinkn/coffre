@@ -2,10 +2,15 @@
  * The changes of sign-in and of credentials (`packages/vault/src/ops/signin.ts`,
  * docs/design/0.16.md, "Signing in").
  */
-export type SigninChanges = Signin;
+export type SigninChanges = Signin | CredentialEnd | AccountLink | AccountUnlink;
 
 export type SigninAnswers = {
   signin: Issued;
+  /** The credential ended. */
+  'credential.end': { credential: string };
+  /** The identity the account is bound by. */
+  'account.link': { identity: string };
+  'account.unlink': { identity: string };
 };
 
 /**
@@ -55,3 +60,44 @@ export type Issued = { principal: string; credential: string; expiresAt: string 
  * showed one: that session ends in the same change, whoever's it was.
  */
 export type Signin = { op: 'signin'; account: Account; session: NewCredential; replaces: string | null };
+
+/**
+ * End a credential: write its row revoked. Ending one that is already
+ * ended, expired, not there or not the caller's to end is one refusal,
+ * `unknown_credential`, which does not say which.
+ *
+ * - `credential` null: the one the request came in on, signing out
+ *   (`sign_out`). Any credential that stands signs itself out but a
+ *   handle, which is the proxy's; one that does not is told
+ *   `unauthenticated`, which the app answers as signed out all the same.
+ * - `credential` an id (`token.revoke`), by what the route named it as
+ *   (`of`), and only on a session, since a credential with a scope holds
+ *   nothing of the instance's own (`runsInstance` in @coffre/core/access):
+ *   - `of` null: one of the caller's own, any kind, or anyone's for whoever
+ *     runs the instance (`DELETE /sessions/:id`);
+ *   - `of` `'handle'`: a handle of the caller's own, and nothing else, on
+ *     a personal token too (`DELETE /handles/:id`, `coffre run` ending its
+ *     own);
+ *   - `of` a member: a token or a workload's session of that member
+ *     (`DELETE /members/:member/tokens/:id`): theirs, for a person who
+ *     manages the service account (`managesService`), or for whoever runs
+ *     the instance.
+ */
+export type CredentialEnd = { op: 'credential.end' } & ({ credential: null; of: null } | { credential: string; of: null | 'handle' | { member: string } });
+
+/**
+ * A person, on a browser session, binds a second account the app verified
+ * to themselves. Refused `already_linked` if the account is bound to
+ * anyone, themselves included.
+ */
+export type AccountLink = { op: 'account.link'; account: Account };
+
+/**
+ * The caller revokes one of their own accounts, by its identity's id
+ * (`unknown_identity` for one that is not theirs, or not bound). The
+ * sessions it opened end with it, with no write: the rule that reads them
+ * refuses a session whose account is revoked. Their last account too: they
+ * sign in again with any account a verified email of theirs names, as the
+ * first time.
+ */
+export type AccountUnlink = { op: 'account.unlink'; identity: string };
