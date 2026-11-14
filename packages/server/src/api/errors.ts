@@ -104,6 +104,9 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   reference_to_itself: ['conflict', 'a key cannot be a reference to itself'],
   reference_to_reference: ['conflict', 'that is itself a reference: a reference reads a value, so point at its source instead'],
   no_reference: ['not_found', 'that key is no reference'],
+  // A key renamed (routes/secrets.ts).
+  duplicate_key: ['conflict', 'the environment holds a key of that name already, archived or not'],
+  duplicate_key_below: ['conflict', 'an environment that inherits this one holds a key of that name of its own: rename or archive that one first'],
   // Folders of keys (routes/secrets.ts).
   no_folder: ['not_found', 'no key is filed in that folder there'],
   // A fork's key reset to what it inherits, or that undone (routes/secrets.ts).

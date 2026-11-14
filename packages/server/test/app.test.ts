@@ -287,10 +287,10 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
     const [[got, said]] = await call(label, 'PATCH', `secrets/market/prod/${key}`, patch);
     assert.deepEqual([got, said.reason], [code, reason], `${label} ${key}`);
   }
-  // What the app refuses by its shape, and what is not served yet: the vault is not asked.
+  // What the app refuses by its shape: the vault is not asked.
   app.calls.length = 0;
   const unserved: [string, unknown, number][] = [
-    ['market/prod/FLAG', { key: 'NEW_FLAG' }, 501], ['market/prod/FLAG', { key: 'FLAG' }, 501], ['market/prod@me/FLAG', { key: 'MINE' }, 501], ['market/prod/FLAG', { inherit: 'yes' }, 400],
+    ['market/prod/FLAG', { key: 'NEW_FLAG', folder: 'x' }, 400], ['market/prod/FLAG', { key: 'NEW_FLAG', archived: true }, 400], ['market/prod/FLAG', { key: 'not a key' }, 400], ['market/prod/FLAG', { inherit: 'yes' }, 400],
     ['market/prod/FLAG', {}, 400], ['market/prod/FLAG', { inherit: true, folder: 'x' }, 400], ['market/prod/FLAG', { folder: ' x' }, 400], ['market/prod/FLAG', { folder: '\ud800' }, 400], ['market/prod/FLAG', { archived: 'yes' }, 400], ['market/prod/FLAG', { sensitivity: 'plain' }, 400],
   ];
   for (const [path, patch, code] of unserved) assert.equal((await call('bo-cli', 'PATCH', `secrets/${path}`, patch))[0][0], code, `${path} ${JSON.stringify(patch)}`);
@@ -318,6 +318,28 @@ test('a key archived, brought back or filed, and a folder of keys renamed or emp
   const shapes: [string, string, unknown, number][] = [['PATCH', 'folders/market/prod/%20data', { name: 'x' }, 400], ['PATCH', 'folders/market/prod/data', { name: 'a/b' }, 400], ['PATCH', 'folders/market/prod/data', { name: '\ud800' }, 400]];
   for (const [method, path, input, code] of shapes) assert.equal((await call('bo-cli', method, path, input))[0][0], code, path);
   assert.deepEqual(app.calls, []);
+});
+
+test('a key renamed is one change, alone: the vault carries the name down', async () => {
+  const call = (label: string, path: string, body: unknown) => cost(() => answered(app.request(`/api/secrets/${path}`, as(label, { method: 'PATCH', body: JSON.stringify(body) }))));
+  const keys = async () => (await rowsOf<{ key: string }>(world.owner, sql`SELECT s.key FROM secrets s JOIN environments e ON e.id = s.environment_id WHERE e.slug = 'prod' AND s.key IN ('FLAG', 'NEW_FLAG') ORDER BY s.key`)).map((row) => row.key);
+  const [[status, body], calls, statements] = await call('bo-cli', 'market/prod/FLAG', { key: 'NEW_FLAG' });
+  assert.deepEqual([status, calls, statements], [200, ['change'], 0], JSON.stringify(body));
+  assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', key: 'NEW_FLAG' });
+  assert.deepEqual(await keys(), ['NEW_FLAG']);
+  // Onto its own name, it is asked all the same, and changes nothing.
+  assert.deepEqual((await call('bo-cli', 'market/prod/NEW_FLAG', { key: 'NEW_FLAG' }))[0].slice(0, 1), [200]);
+  const refused: [string, string, unknown, number, string][] = [
+    ['ada-cli', 'market/prod/NEW_FLAG', { key: 'FLAG' }, 403, 'no_access'], ['bo-cli', 'market/prod/NEW_FLAG', { key: 'DATABASE_URL' }, 409, 'duplicate_key'],
+    ['bo-cli', 'market/prod/NOPE', { key: 'X' }, 404, 'unknown_key'], ['bo-cli', 'market/prod/OLD', { key: 'X' }, 409, 'archived'],
+    // Bo has no config of prod: no key there.
+    ['bo-cli', 'market/prod@me/NEW_FLAG', { key: 'X' }, 404, 'unknown_key'],
+  ];
+  for (const [label, path, patch, code, reason] of refused) {
+    const [[got, said]] = await call(label, path, patch);
+    assert.deepEqual([got, said.reason], [code, reason], `${label} ${path}`);
+  }
+  assert.deepEqual(await keys(), ['NEW_FLAG']);
 });
 
 test('a version restored is one change: the key\'s next version is the old value, as it was kept', async () => {

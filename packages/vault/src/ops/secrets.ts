@@ -1,12 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
 import { allows, useOnly, withinCredential, type Permission } from '@coffre/core/access';
-import type { Answers, KeyWrite, Nature, Presented, ReferenceBreak, SecretPath, SecretRefile, SecretsChanges, SecretWrite } from '@coffre/core/vault';
+import type { Answers, KeyWrite, Nature, Presented, ReferenceBreak, SecretPath, SecretRefile, SecretRename, SecretsChanges, SecretWrite } from '@coffre/core/vault';
 import { dismissedKeys, environments, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, live, refusedTo, type Asking } from '../caller.ts';
-import { amended, part, put, type Operation, type Parts, type Refusal, type Seen, type Value, type Write } from '../change.ts';
+import { amended, aside, part, put, type Operation, type Parts, type Refusal, type Seen, type Value, type Write } from '../change.ts';
 import type { Fresh, Row } from '../rows.ts';
 import { natureOf } from '../value.ts';
 import type { Deciding } from '../vault.ts';
@@ -25,6 +25,8 @@ const NATURES = ['secret', 'sensitive', 'plain'];
 const MOST_VERSION = 2 ** 31 - 1;
 /** How many environments a key is inherited through, as a use reads them (use.ts). */
 const MAX_PARENTS = 3;
+/** The longest suffix a key moved out of a rename's way takes, `_99999`: past that many, the rename is refused. */
+const ASIDE_SUFFIX = 6;
 
 /** Text as Postgres stores it and a reader gets it back: no NUL, no half of a surrogate pair. */
 const wellFormed = (value: string) => !value.includes('\0') && Buffer.from(value).toString() === value;
@@ -464,6 +466,176 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
 }
 
 /**
+ * A key renamed (0.14's `patchSecret` and `renameBelow`), with its history,
+ * by whoever writes keys there, as filing one takes: no value moves. A
+ * live key only, and onto a name its environment holds nowhere, archived
+ * or not (`duplicate_key`). Its references read it by its id, as before.
+ *
+ * The name carries down (docs/design/forking.md, "A key is renamed in the
+ * parent"): a fork's override and dismissal are kept by name, so left
+ * alone, a fork would export its old override beside the renamed key. So
+ * every environment below, forks of forks, archived ones and personal
+ * configs included, has its own row of the key renamed, and its dismissal
+ * moved to the new name; one that dismissed the new name alone reads the
+ * key renamed, as 0.14 did. Wherever a key holds a value here again under
+ * the new name, its dismissal there ends (0.14's `endRemovals`). A shared
+ * fork that holds the new name of its own refuses the rename,
+ * `duplicate_key_below`. A personal config is named to nobody but its
+ * owner: its own key of the new name is moved out of the way, `NEW_2`,
+ * `_3` and on, a name nothing it holds or reads has, now or before this
+ * change, and the rename goes through. That key gives up its name first
+ * (`aside`): Postgres would otherwise find it taken.
+ *
+ * Every row the cascade decides on is read, by the name and the new one,
+ * and the names a key moved aside could take; one whose MAC does not hold
+ * refuses the rename, `unreadable`, rather than leave a fork behind.
+ */
+function secretRename(input: Presented & SecretRename, vault: Deciding): Operation<Parts, Answers['secret.rename']> {
+  const shown = presented(input);
+  const { project: projectSlug, environment: environmentSlug, key, to } = input;
+  const mine = input.mine ?? false;
+  if (!text(projectSlug) || !text(environmentSlug) || typeof mine !== 'boolean' || typeof key !== 'string' || !KEY.test(key) || typeof to !== 'string' || !KEY.test(to)) {
+    throw new TypeError('a key is renamed by its place\'s slugs, or the caller\'s personal config of it, its name and the one it takes, each as a key is named');
+  }
+  const { project, here, environment } = keysPlace(shown.token, projectSlug, environmentSlug, mine);
+  // Each name a key moved aside may take starts with this much of the new one.
+  const stem = to.slice(0, 128 - ASIDE_SUFFIX);
+  const named = (column: typeof secrets.key | typeof dismissedKeys.key) => sql`(${column} = ${key} OR starts_with(${column}, ${stem}))`;
+  // Every environment below this one, however deep: one left out would keep the old name.
+  const below = sql`(WITH RECURSIVE below (id) AS (
+    SELECT e.id FROM environments e WHERE e.parent_id = ${here}
+    UNION SELECT e.id FROM environments e JOIN below ON e.parent_id = below.id
+  ) SELECT id FROM below)`;
+  // And those above, whose keys a personal config below reads: a key moved aside takes none of their names.
+  const above = sql`(WITH RECURSIVE above (id, parent_id, depth) AS (
+    SELECT e.id, e.parent_id, 0 FROM environments e WHERE e.id = ${here}
+    UNION SELECT e.id, e.parent_id, above.depth + 1 FROM environments e JOIN above ON e.id = above.parent_id WHERE above.depth < ${MAX_PARENTS}
+  ) SELECT id FROM above)`;
+  const read = {
+    ...callerParts(shown.token, project),
+    project: part(projects, sql`${projects.slug} = ${projectSlug}`),
+    environment,
+    forks: part(environments, sql`${environments.id} IN ${below}`),
+    // This environment's and those below's, by either name, or one a key moved aside could take.
+    secret: part(secrets, sql`${secrets.projectId} = ${project} AND (${secrets.environmentId} = ${here} OR ${secrets.environmentId} IN ${below}) AND ${named(secrets.key)}`),
+    inherited: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} IN ${above} AND ${secrets.environmentId} IS DISTINCT FROM ${here} AND starts_with(${secrets.key}, ${stem})`),
+    dismissed: part(dismissedKeys, sql`(${dismissedKeys.environmentId} = ${here} OR ${dismissedKeys.environmentId} IN ${below}) AND ${named(dismissedKeys.key)}`),
+  };
+  const placed = (seen: Seen<typeof read>) => {
+    const place = seen.project.find((row) => row.slug === projectSlug && live(row));
+    const environment = place && seen.environment.find((row) => row.projectId === place.id && row.slug === environmentSlug && live(row));
+    return { place, environment, config: environment && seen.environment.find((row) => row.parentId === environment.id && row.owner !== null && !row.slug.includes('~')) };
+  };
+  return {
+    read,
+    denied: refusedTo('secret.rename', shown, vault.workloads, {
+      where: { project: projectSlug, environment: environmentSlug },
+      objects: (seen: Seen<typeof read>) => {
+        const { place, environment, config } = placed(seen);
+        return [...(place === undefined ? [] : [`project:${place.id}`]), ...[environment, mine ? config : undefined].flatMap((row) => (row === undefined ? [] : [`environment:${row.id}`]))];
+      },
+    }),
+    decide(seen: Seen<typeof read>, at: number, unsealed) {
+      const caller = callerFrom(seen, shown, vault.workloads, at);
+      if (caller === null) return { refused: 'unauthenticated' };
+      if (caller.workload?.stop != null) return { refused: caller.workload.stop };
+      if (caller.workload?.narrowed === true) return { refused: 'narrowed' };
+      const { place, environment: named, config } = placed(seen);
+      // As for a write: not there, someone's personal config, or not theirs to write in, and a personal config's keys, its owner's alone.
+      if (place === undefined || named === undefined || named.owner !== null) return { refused: 'no_access' };
+      const denied = deniedIn(caller, named, mine, ['secret.write']);
+      if (denied !== undefined) return denied;
+      if (mine && config !== undefined && config.owner !== caller.principal) return { refused: 'unreadable' };
+      if (mine && config !== undefined && !live(config)) return { refused: 'no_access' };
+      // A config they do not have holds no key.
+      if (mine && config === undefined) return { refused: unsealed.environment > 0 ? 'unreadable' : 'unknown_key' };
+      const environment = mine ? config! : named;
+      if (unsealed.forks + unsealed.secret + unsealed.dismissed > 0) return { refused: 'unreadable' };
+      const row = seen.secret.find((found) => found.environmentId === environment.id && found.key === key);
+      if (row === undefined) return { refused: 'unknown_key' };
+      if (row.archivedAt !== null) return { refused: 'archived' };
+      const entry = (lines: Record<string, unknown>[], forks: string[]) => ({
+        kept: true,
+        action: 'secret.rename',
+        actor: caller.principal,
+        credential: caller.credential.id,
+        request: shown.request,
+        ip: shown.ip,
+        // Each fork's pages find it too.
+        objects: [...new Set([`project:${place.id}`, `environment:${environment.id}`, ...(mine ? [`environment:${named.id}`] : []), `principal:${caller.principal}`, `credential:${caller.credential.id}`,
+          ...lines.flatMap((line) => (line.secret === undefined ? [] : [`secret:${line.secret as string}`])), ...forks.map((id) => `environment:${id}`)])],
+        // `changes`: each row renamed, `aside` one moved out of the way, and each dismissal moved or ended, by environment.
+        detail: { ...(mine ? { personal: named.slug } : {}), key, to, changes: lines },
+      });
+      // Renamed onto its own name, nothing changes: the entry says it was asked.
+      if (to === key) return { writes: [], entry: entry([], []), answer: { id: row.id } };
+      if (seen.secret.some((found) => found.environmentId === environment.id && found.key === to)) return { refused: 'duplicate_key' };
+
+      const now = new Date(at);
+      const by = caller.principal;
+      // By slug, so that the entry says them in one order.
+      const forks = seen.forks.filter((fork) => fork.projectId === place.id).sort((a, b) => (a.slug < b.slug ? -1 : 1));
+      const layers = new Map([environment, ...forks].map((layer) => [layer.id, layer]));
+      const writes: Write[] = [amended(secrets, row, { key: to, updatedAt: now })];
+      const lines: Record<string, unknown>[] = [{ secret: row.id, environment: environment.id, key, to }];
+      const dismissal = (where: string, name: string) => seen.dismissed.find((found) => found.environmentId === where && found.key === name);
+      // A key live under a name a layer dismissed: the dismissal ends there.
+      const revive = (where: string, name: string) => {
+        const off = dismissal(where, name);
+        if (off === undefined || off.restoredAt !== null) return;
+        writes.push(amended(dismissedKeys, off, { restoredAt: now, restoredBy: by }));
+        lines.push({ environment: where, key: name, dismissed: false });
+      };
+      revive(environment.id, to);
+      /** A name for a personal config's key moved out of the way: one nothing on its chain holds or read, now or after this change. */
+      const asideIn = (config: Row<typeof environments>): string | undefined => {
+        const taken = new Set([to, ...seen.inherited.map((found) => found.key)]);
+        for (let layer: Row<typeof environments> | undefined = config; layer !== undefined; layer = layer.id === environment.id || layer.parentId === null ? undefined : layers.get(layer.parentId)) {
+          for (const found of seen.secret) if (found.environmentId === layer.id) taken.add(found.key);
+        }
+        for (let n = 2; `_${n}`.length <= ASIDE_SUFFIX; n++) {
+          const name = `${to.slice(0, 128 - `_${n}`.length)}_${n}`;
+          if (!taken.has(name)) return name;
+        }
+        return undefined;
+      };
+      const touched: string[] = [];
+      for (const fork of forks) {
+        const own = seen.secret.find((found) => found.environmentId === fork.id && found.key === key);
+        const taken = seen.secret.find((found) => found.environmentId === fork.id && found.key === to);
+        const before = lines.length;
+        if (taken !== undefined) {
+          if (fork.owner === null) return { refused: 'duplicate_key_below' };
+          const moved = asideIn(fork);
+          if (moved === undefined) return { refused: 'duplicate_key_below' };
+          writes.push(aside(secrets, taken, { key: moved, updatedAt: now }));
+          lines.push({ secret: taken.id, environment: fork.id, key: to, to: moved, aside: true });
+          // Live under its new name, it is no longer dismissed there; an archived one serves nothing, and the dismissal stands.
+          if (taken.archivedAt === null) revive(fork.id, moved);
+        }
+        if (own !== undefined) {
+          writes.push(amended(secrets, own, { key: to, updatedAt: now }));
+          lines.push({ secret: own.id, environment: fork.id, key, to });
+        }
+        // Its dismissal follows the key: dismissed under the old name, dismissed under the new; not, not.
+        const off = dismissal(fork.id, key);
+        if (off !== undefined && off.restoredAt === null) {
+          const there = dismissal(fork.id, to);
+          const dismissed = { dismissedAt: now, dismissedBy: by, restoredAt: null, restoredBy: null };
+          writes.push(amended(dismissedKeys, off, { restoredAt: now, restoredBy: by }));
+          writes.push(there === undefined ? put(dismissedKeys, { environmentId: fork.id, key: to, ...dismissed }) : amended(dismissedKeys, there, dismissed));
+          lines.push({ environment: fork.id, key, to, dismissed: true });
+        } else revive(fork.id, to);
+        if (lines.length > before) touched.push(fork.id);
+      }
+      // The names a personal config's key moved aside could take were read where a config reads them: one that does not hold is not guessed past.
+      if (unsealed.inherited > 0 && lines.some((line) => line.aside === true)) return { refused: 'unreadable' };
+      return { writes, entry: entry(lines, touched), answer: { id: row.id } };
+    },
+  };
+}
+
+/**
  * A folder of one environment's keys renamed, or emptied (0.14's
  * `refileSecrets`): every key filed there, archived ones too, in one
  * change, by whoever writes keys there, as filing one key takes. Half a
@@ -623,4 +795,4 @@ function referenceBreak(input: Presented & ReferenceBreak, vault: Deciding): Ope
 }
 
 /** The changes of keys and their values. */
-export const secretOperations: Operations<SecretsChanges> = { 'secret.write': secretWrite, 'secret.refile': secretRefile, 'reference.break': referenceBreak };
+export const secretOperations: Operations<SecretsChanges> = { 'secret.write': secretWrite, 'secret.rename': secretRename, 'secret.refile': secretRefile, 'reference.break': referenceBreak };

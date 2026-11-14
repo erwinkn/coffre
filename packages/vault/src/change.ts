@@ -95,10 +95,12 @@ export type Unsealed<P extends Parts> = { readonly [K in keyof P]: number };
 /**
  * One row written. A row is put in place of the one read (`was`), which has
  * its key, or as a new one; or the row read is dropped. Within one change a
- * row is written once, and a unique value one row gives up is not taken by
- * another: Postgres checks each as it goes, in no set order.
+ * row is written once. Postgres checks a unique value as it writes each
+ * row, in no set order, so a unique value one row gives up is taken by
+ * another only if the first goes `first` (`aside`): every write that goes
+ * first is made before any other.
  */
-export type Write = { table: Sealed; row: object | null; was: object | null };
+export type Write = { table: Sealed; row: object | null; was: object | null; first?: boolean };
 
 export function put<T extends Sealed>(table: T, row: Fresh<T>, was: Row<T> | null = null): Write {
   return { table, row, was };
@@ -108,6 +110,11 @@ export function put<T extends Sealed>(table: T, row: Fresh<T>, was: Row<T> | nul
 export function amended<T extends Sealed>(table: T, was: Row<T>, changes: Partial<Fresh<T>>): Write {
   const { mac: _, ...kept } = was as Row<T> & { mac: unknown };
   return put(table, { ...kept, ...changes } as Fresh<T>, was);
+}
+
+/** A row read, put back with what a change says of it, before any other write: what it gives up, a key's name, another may then take. */
+export function aside<T extends Sealed>(table: T, was: Row<T>, changes: Partial<Fresh<T>>): Write {
+  return { ...amended(table, was, changes), first: true };
 }
 
 export function drop<T extends Sealed>(table: T, was: Row<T>): Write {
@@ -371,8 +378,8 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
 
   const key = vault.keys[0]!;
   const rows: Entry['rows'][number][] = [];
-  const written = new Map<string, { table: Sealed; inserts: Wire[]; updates: Wire[]; deletes: Wire[] }>();
-  for (const { table, row, was } of plan.writes) {
+  const written = new Map<string, { table: Sealed; first: boolean; inserts: Wire[]; updates: Wire[]; deletes: Wire[] }>();
+  for (const { table, row, was, first = false } of plan.writes) {
     if (was !== null && !read.has(was)) throw new Error(`a change of ${shapeOf(table).name} replaces a row its decision did not read`);
     const name = nameOf(table, row ?? was!);
     if (row !== null && was !== null && nameOf(table, was) !== name) throw new Error(`a change of ${name} moves its key`);
@@ -380,8 +387,8 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
     const mac = row === null ? null : seal(key, table, row);
     rows.push({ row: name, was: was === null ? null : (was as { mac: Buffer }).mac.toString('hex'), now: mac?.toString('hex') ?? null });
     const shape = shapeOf(table);
-    const group = written.get(shape.name) ?? { table, inserts: [], updates: [], deletes: [] };
-    written.set(shape.name, group);
+    const group = written.get(`${first} ${shape.name}`) ?? { table, first, inserts: [], updates: [], deletes: [] };
+    written.set(`${first} ${shape.name}`, group);
     if (row === null) group.deletes.push(toWire(table, was!, shape.key));
     else (was === null ? group.inserts : group.updates).push({ ...toWire(table, row), mac: `\\x${mac!.toString('hex')}` });
   }
@@ -465,20 +472,31 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
   // else is written only if it was not spent before: each write below selects from it, and so writes nothing without it.
   const when = sql`${new Date(dated).toISOString()}::timestamptz`;
   if (once !== undefined) statements.push(sql`spent AS (INSERT INTO spent_id_tokens (hash, spent_at) SELECT decode(${once.toString('hex')}, 'hex'), ${when} FROM same WHERE same.ok ON CONFLICT DO NOTHING RETURNING hash)`);
-  const made = once === undefined ? sql`same WHERE same.ok` : sql`same, spent WHERE same.ok`;
+  const gates = once === undefined ? sql`same` : sql`same, spent`;
+  const made = sql`${gates} WHERE same.ok`;
   // With everything else or not at all, as each write below. Never put back: a later date the row has stays.
   if (used !== undefined) statements.push(sql`used AS (UPDATE ${bindings} SET last_used_at = ${when} FROM ${made} AND ${bindings}.id = ${used.id} AND (${bindings}.last_used_at IS NULL OR ${bindings}.last_used_at < ${when}))`);
   const fromRows = (table: PgTable, wires: Wire[]) => sql`jsonb_populate_recordset(null::${table}, ${JSON.stringify(wires)}::jsonb) j, ${made}`;
-  for (const { table, inserts, updates, deletes } of written.values()) {
+  // The writes that go first, then the others, which each read how many rows those wrote: none of them can write a row
+  // before every one of those has been written, so a unique value given up first is free for them.
+  const firsts: string[] = [];
+  const groups = [...written.values()].sort((a, b) => Number(b.first) - Number(a.first));
+  for (const { table, first, inserts, updates, deletes } of groups) {
     const shape = shapeOf(table);
-    const from = (wires: Wire[]) => fromRows(table, wires);
+    const after = first || firsts.length === 0 ? made : sql`${gates}, (SELECT count(*) FROM (${sql.join(firsts.map((name) => sql`SELECT FROM ${sql.raw(name)}`), sql` UNION ALL `)}) f) firsts WHERE same.ok`;
+    const from = (wires: Wire[]) => sql`jsonb_populate_recordset(null::${table}, ${JSON.stringify(wires)}::jsonb) j, ${after}`;
     const onKey = sql.join(shape.key.map(({ name }) => sql`${table}.${id(name)} = j.${id(name)}`), sql` AND `);
     const stored = shape.columns.filter((column) => !column.generated);
     // A row keeps its key, and what only says when it was last seen, which a use may have moved on since the read.
     const set = shape.columns.filter((column) => (column.sealed || column.name === 'mac') && !column.primary);
-    if (inserts.length > 0) statements.push(sql`w${sql.raw(String(statements.length))} AS (INSERT INTO ${table} (${list(stored)}) SELECT ${list(stored, 'j')} FROM ${from(inserts)})`);
-    if (updates.length > 0) statements.push(sql`w${sql.raw(String(statements.length))} AS (UPDATE ${table} SET (${list(set)}) = ROW(${list(set, 'j')}) FROM ${from(updates)} AND ${onKey})`);
-    if (deletes.length > 0) statements.push(sql`w${sql.raw(String(statements.length))} AS (DELETE FROM ${table} USING ${from(deletes)} AND ${onKey})`);
+    const write = (statement: SQL) => {
+      const name = `w${statements.length}`;
+      if (first) firsts.push(name);
+      statements.push(sql`${sql.raw(name)} AS (${statement}${first ? sql` RETURNING 1` : sql``})`);
+    };
+    if (inserts.length > 0) write(sql`INSERT INTO ${table} (${list(stored)}) SELECT ${list(stored, 'j')} FROM ${from(inserts)}`);
+    if (updates.length > 0) write(sql`UPDATE ${table} SET (${list(set)}) = ROW(${list(set, 'j')}) FROM ${from(updates)} AND ${onKey}`);
+    if (deletes.length > 0) write(sql`DELETE FROM ${table} USING ${from(deletes)} AND ${onKey}`);
   }
   // In the statement that writes its secret's row: the two are there together, or neither.
   if (versions.length > 0) {
