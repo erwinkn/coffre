@@ -16,4 +16,12 @@ export COFFRE_TEST_DATABASE="$(node --input-type=module -e '
 trap 'node --conditions=coffre:source scripts/test-databases.mjs cleanup "$COFFRE_TEST_DATABASE"' EXIT
 ./scripts/setup-test-database.sh
 
-node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@" "scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts"
+# Every test file but 0.14's that do not build on 0.16 yet, which packages/server/tsconfig.json lists.
+# Listed first, so that its failure stops the run (set -e) rather than leave node
+# --test with no file, which would discover every test, the excluded too. A read
+# loop, not mapfile: macOS's Bash 3.2 has none.
+list="$(node scripts/test-files.mjs "scripts/*.test.mjs" "packages/*/test/**/*.test.ts" "dev/**/test/*.test.ts" "examples/**/test/*.test.ts")"
+files=()
+while IFS= read -r file; do files+=("$file"); done <<< "$list"
+
+node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@" "${files[@]}"
