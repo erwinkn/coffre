@@ -303,6 +303,9 @@ function settingOf(seen: ServiceSeen): Scope | null {
  */
 function manages(caller: Asking, seen: ServiceSeen, unsealed: Unsealed<ReturnType<typeof serviceParts> & ReturnType<typeof callerParts>>, member: string, at: number): boolean | 'tampered' {
   if (runs(caller)) return true;
+  // A credential with a scope manages no service, as 0.14.7 gave a non-person no setting (`serviceSettingFor`): a
+  // service's token that holds `grant.manage` would make another's tokens, or a new one of its own past its revocation.
+  if (!onSession(caller)) return false;
   if (unsealed.held + unsealed.places + unsealed.beside > 0) return 'tampered';
   const account = serviceOf(seen, member, at);
   const setting = settingOf(seen);
@@ -739,13 +742,12 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
         }
         // Nothing it is given later reaches a token made before: it needs a grant first.
         if (scope.length === 0) return { refused: 'no_grants' };
-        issued = [];
-        for (const { role, place, path } of scope) {
-          const grant: ScopeGrant = { ...issuedGrant({ projectId: place.projectId, environmentId: place.environmentId ?? null, role }, policy), sensitive: ownsProject(issuer, place.projectId) };
-          // The role as it is now, all the grant keeps: the caller gives it, and the service holds, every permission of it.
-          if (!issuesCredential(issuer, settingOf(seen), caller.principal, account, [{ role, place }])) return NO_ACCESS;
-          issued.push({ grant, path });
-        }
+        // The role as it is now, all each grant keeps: the caller gives it, and the service holds, every permission of it.
+        if (!issuesCredential(issuer, settingOf(seen), caller.principal, account, scope)) return NO_ACCESS;
+        issued = scope.map(({ role, place, path }) => ({
+          grant: { ...issuedGrant({ projectId: place.projectId, environmentId: place.environmentId ?? null, role }, policy), sensitive: ownsProject(issuer, place.projectId) },
+          path,
+        }));
       }
 
       const now = new Date(at);

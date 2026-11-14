@@ -342,6 +342,19 @@ test("who manages a service makes its tokens: who runs the instance, or a person
   assert.equal((await minted()).row, undefined);
 });
 
+test("a service's token manages no service, even one whose scope holds grant.manage: it makes no token, of another or of itself, and ends none but its own service's", async () => {
+  // ops is an Admin of market, and so is its token's scope: on a session, that would manage ci.
+  const ops = 'token:ops';
+  const admin = ['grant.manage', 'project.manage'];
+  const token = credential('ops-token', ops, { scope: JSON.stringify([{ projectId: ids.market, environmentId: null, role: 'admin', permissions: { normal: admin, protected: admin } }]), createdBy: root });
+  await write(world, ...rows('principals', principal(ops)), ...rows('grants', grant(ops, 'admin', { project: { id: ids.market } })), ...rows('credentials', token));
+  for (const member of [ci, ops]) assert.deepEqual(await vault.change(serviceToken('ops-token', member, null, 366 * 24 * 60)), { refused: 'no_access' }, member);
+  assert.equal((await minted()).row, undefined);
+  assert.deepEqual(await vault.change({ ...shown('ops-token'), op: 'credential.end', credential: ids['ci-token']!, of: { member: ci } } as Asked<'credential.end'>), { refused: 'unknown_credential' });
+  assert.equal((await rowsOf<{ revoked_at: Date | null }>(world.owner, sql`SELECT revoked_at FROM credentials WHERE id = ${ids['ci-token']}::uuid`))[0]!.revoked_at, null);
+  assert.deepEqual(await checked(), []);
+});
+
 test("a service's grant taken away while a token is made widens nothing: the token holds its sealed scope, each grant one its maker holds", async () => {
   // The prod grant hidden, Bo, a Developer of dev, manages ci: the read says it holds dev alone.
   const putBack = await hidden('grants', sql`principal = ${ci} AND environment_id = ${ids.prod}::uuid`);
