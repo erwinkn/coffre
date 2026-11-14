@@ -18,9 +18,10 @@ import { after, before, test } from 'node:test';
 import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 
-import { signin, SigninError, type SigninProvider } from '@coffre/core/identity';
+import { createProof, generateProofKey, type ProofKey } from '@coffre/client/dpop';
+import { canonicalClaims, signin, SigninError, type SigninProvider } from '@coffre/core/identity';
 import { rowsOf } from '@coffre/db/dialect';
-import { credential, emptyDatabase, environment, grant, identity, instance, principal, project, role, rows, secret, user, value, write } from '@coffre/vault/testing';
+import { binding, credential, emptyDatabase, environment, grant, identity, instance, principal, project, role, rows, secret, user, value, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
@@ -28,6 +29,7 @@ import { propertySettings } from '../../../scripts/property-settings.ts';
 import '../src/api/router.ts';
 import { routes } from '../src/api/routes.ts';
 import { unservedRoutes } from '../src/api/routes/unserved.ts';
+import { processGates } from '../src/gate.ts';
 import { aesGcm, credentialProxy, header, hmac, postgres, privateKey, sigv4 } from '../src/plugins/credential-proxy.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
@@ -87,11 +89,18 @@ const proxy = credentialProxy({
   verifiers: { hook: hmac('SOURCE_REGISTRY_KEY', { encoding: 'hex' }) },
   ciphers: { box: aesGcm('BOX_KEY', { keyEncoding: 'hex' }) },
 });
-const app = await openApp({ auth: signin({ providers: [acme], workloads, mcp }), transport, workloads: {}, plugins: [proxy] });
+// The workload gates, in process: what holds a session's proofs to their nonce, once each.
+const gates = processGates();
+const app = await openApp({ auth: signin({ providers: [acme], workloads, mcp }), transport, workloads: {}, gates, plugins: [proxy] });
 const { world } = app;
 
 const [ada, bo, cy, dee, eve] = [user('ada'), user('bo'), user('cy'), user('dee'), user('eve')];
 const ci = 'token:ci';
+/** A workload of market's, `agent`, signing in with its key under a key its binding carries: no issuer is asked. */
+const agent = 'token:agent';
+const AGENTS = 'https://agents.acme.example';
+const agentKeys = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+const AGENT_JWKS = JSON.stringify({ keys: [{ ...agentKeys.publicKey.export({ format: 'jwk' }), kid: 'agent', alg: 'ES256', use: 'sig' }] });
 /** What a CI job reveals: seven keys of the environment it reads. */
 const SEVEN = ['CLOUDFLARE_API_TOKEN', 'SCALEWAY_SECRET_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'SOURCE_REGISTRY_KEY', 'GITHUB_RELEASE_APP_CLIENT_ID', 'GITHUB_RELEASE_APP_PRIVATE_KEY'];
 const PENDING = '__Host-coffre_signin';
@@ -138,9 +147,13 @@ before(async () => {
       role(true, 'owner', ['secret.read', 'secret.use', 'secret.write', 'environment.manage', 'project.manage', 'grant.manage', 'audit.read']),
       role(true, 'auditor', ['audit.read'], []),
       role(true, 'member', [])),
-    ...rows('principals', principal(ada), principal(bo), principal(cy, { role: 'owner' }), principal(dee), principal(eve), principal(ci)),
+    ...rows('principals', principal(ada), principal(bo), principal(cy, { role: 'owner' }), principal(dee), principal(eve), principal(ci), principal(agent)),
     ...rows('policy', instance()),
-    ...rows('grants', grant(ada, 'viewer', { environment: dev }), grant(ci, 'viewer', { project: market }), grant(bo, 'lead', { project: market })),
+    ...rows('grants', grant(ada, 'viewer', { environment: dev }), grant(ci, 'viewer', { project: market }), grant(bo, 'lead', { project: market }), grant(agent, 'viewer', { project: market })),
+    ...rows('bindings', binding(agent, {
+      profile: 'custom', issuer: AGENTS, jwksUri: `sha256:${createHash('sha256').update(AGENT_JWKS).digest('hex')}`, jwks: AGENT_JWKS,
+      claims: canonicalClaims({ sub: 'agent' }), scope: JSON.stringify([{ projectId: market.id, environmentId: dev.id, role: 'viewer' }]), policy: '{}',
+    })),
     ...rows('identities', cys),
     ...rows('credentials',
       ...[ada, bo, cy, dee, eve].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who)), credential('ci-token', ci, { scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) }),
@@ -148,6 +161,7 @@ before(async () => {
       credential('cy-dev', cy, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: dev.id, role: 'viewer' }]) })),
   );
   for (let i = 0; i < 21; i++) await api('bo-cli', 'PATCH', '/secrets/market/busy', { KEY: `fake-history-${i}` });
+  agentKey = await generateProofKey();
   // A round first, unmeasured: the database's migrations, which the app asks once, are no request's cost.
   await costs();
 });
@@ -204,6 +218,27 @@ function podToken(key = cluster): string {
   return `${input}.${sign('sha256', Buffer.from(input), { key: key.privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`;
 }
 
+/** The agent's key, and the round's session of it. */
+let agentKey: ProofKey;
+let agentSession = '';
+/** The agent's ID token, a new one each time: its binding's tokens are spent once. */
+function agentToken(): string {
+  const now = Math.floor(Date.now() / 1000);
+  const input = `${b64({ alg: 'ES256', kid: 'agent', typ: 'JWT' })}.${b64({ iss: AGENTS, sub: 'agent', aud: PUBLIC_URL, iat: now - 10, exp: now + 290, jti: randomUUID() })}`;
+  return `${input}.${sign('sha256', Buffer.from(input), { key: agentKeys.privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`;
+}
+/** `POST /api/auth/workload` as the agent, with its key's proof. */
+const agentSignIn = async () => app.request('/api/auth/workload', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', dpop: await createProof(agentKey, { method: 'POST', url: `${PUBLIC_URL}/api/auth/workload` }) },
+  body: JSON.stringify({ service: 'agent', proof: { oidc: agentToken() } }),
+});
+/** A request as the round's session, with a proof of its key under its gate's current nonce. */
+const asAgent = async (method: string, path: string) => app.request(path, {
+  method,
+  headers: { authorization: `DPoP ${agentSession}`, dpop: await createProof(agentKey, { method, url: `${PUBLIC_URL}${path}`, token: agentSession, nonce: await gates(agent).nonce() }) },
+});
+
 /** A route's budget: the vault's calls, by name, and the app's statements, a transaction one. */
 type Budget = { calls: string[]; statements: number };
 type Entry = Budget & {
@@ -230,9 +265,7 @@ const release = { name: 'Release', description: 'Ships.', permissions: ['secret.
  * made and the versions it wrote.
  *
  * Not served yet, and priced here once they are: a workload's session
- * approved, a binding's enrollments, a workload's own exchange
- * (`POST /api/auth/workload`), and the credential proxy's presigning,
- * signing, verifying and ciphers.
+ * approved, and a binding's enrollments.
  */
 const requests: Record<string, Entry> = {
   // A caller's own view: one `caller`, then the page's statements, scoped by its answer.
@@ -298,6 +331,13 @@ const requests: Record<string, Entry> = {
     calls: ['change'], statements: 0,
   },
   'POST /api/auth/logout': { request: () => app.request('/api/auth/logout', { method: 'POST', headers: { authorization: `Bearer ${collected}` } }), calls: ['change'], statements: 0 },
+  // A workload's session. Its sign-in: one statement, the service's live bindings on the issuer, then one change under
+  // the keys its binding carries, and one statement naming its places by path. Each of its requests: one statement, its
+  // row by its token's hash for its gate and key, before the request's own; however many sessions there are.
+  'POST /api/auth/workload': { request: () => take<{ token: string }>(agentSignIn(), (body) => (agentSession = body.token)), calls: ['change'], statements: 2, fixed: true },
+  'GET /projects, as a workload session': { request: () => asAgent('GET', '/api/projects'), calls: ['caller'], statements: 3, fixed: true },
+  'POST /api/auth/workload/renew': { request: () => asAgent('POST', '/api/auth/workload/renew'), calls: ['change'], statements: 1, fixed: true },
+  'POST /api/auth/logout, a workload session': { request: () => asAgent('POST', '/api/auth/logout'), calls: ['change'], statements: 1, fixed: true },
   'GET /auth/signin/:provider': {
     request: async () => {
       account = { subject: `acme-eve-${round}`, email: 'eve@acme.example' };
@@ -612,6 +652,8 @@ test('a request runs the same statements, and a caller reads the same rows of th
   // The policy changed, again and again: prod unprotected, then protected again; roles made.
   for (let i = 0; i < 20; i++) await asOwner('PATCH', '/projects/market/prod', { protected: i % 2 === 1 });
   for (let i = 0; i < 5; i++) await asOwner('PUT', `/roles/grown-${i}`, { ...release, name: `Grown ${i}` });
+  // The agent's sessions, standing beside the round's: its row is still found by its token's hash alone.
+  for (let i = 0; i < 20; i++) assert.equal((await agentSignIn()).status, 200);
   // Tokens: ci's, and personal ones of Cy's scoped to one place each.
   for (let i = 0; i < 10; i++) {
     await asOwner('POST', `/members/${ci}/tokens`, { label: `grown-${i}`, expiresInDays: 1 });

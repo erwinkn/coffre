@@ -473,7 +473,8 @@ function tokenUnbind(input: Presented & TokenUnbind, vault: Deciding): Operation
   const read = {
     ...callerParts(shown.token, projectsOf(member)),
     ...serviceParts(member),
-    binding: part(bindings, sql`${bindings.id} = ${id}::uuid`),
+    // Not `binding`, which is the caller's own: a workload's session stands on it (callerParts).
+    unbound: part(bindings, sql`${bindings.id} = ${id}::uuid`),
   };
   type Read = Seen<typeof read>;
   return {
@@ -485,7 +486,7 @@ function tokenUnbind(input: Presented & TokenUnbind, vault: Deciding): Operation
       if (Object.values(unsealed).some((count) => count > 0)) return { refused: 'tampered' };
       const manager = manages(caller, seen, unsealed, member, at);
       if (manager !== true) return manager === 'tampered' ? { refused: 'tampered' } : NO_ACCESS;
-      const [row] = seen.binding;
+      const [row] = seen.unbound;
       const account = seen.account.find((other) => other.id === member);
       // One of another service's, revoked, or of a generation before the service was last removed, is no live binding of its.
       if (row === undefined || row.principal !== member || row.revokedAt !== null || (account !== undefined && row.generation !== account.generation)) return { refused: 'unknown_binding' };

@@ -48,7 +48,7 @@ export type TestApp = {
    * they answered. `statements` counts a transaction as one.
    */
   readonly sent: { readonly statements: number; readonly rows: number };
-  /** A request, as a deployment's Start app answers one: coffre's middleware around coffre's route. */
+  /** A request, as a deployment's Start app answers one: coffre's middleware around coffre's route. `path` on `PUBLIC_URL`, or a whole URL, one the platform handed over on another host. */
   request(path: string, init?: RequestInit): Promise<Response>;
   /**
    * A WebSocket asked for, as a Durable Object admits one on Workers
@@ -140,7 +140,7 @@ export async function openApp({ database, auth = signin({ providers: [github({ c
     tracked,
     sent,
     request(path, init) {
-      const request = new Request(`${PUBLIC_URL}${path}`, init);
+      const request = new Request(/^https?:\/\//.test(path) ? path : `${PUBLIC_URL}${path}`, init);
       // As Start answers it: the middleware, then the route it hands the context on to.
       return scope.respond(request, (page) => page.coffre.route(request));
     },
