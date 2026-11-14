@@ -173,7 +173,7 @@ test('a plan and a list show every claim in full', () => {
     { ...plan, scope: null, id: 'b0', label: null, createdAt: '2026-09-03T22:00:00.000Z', createdBy: 'lead@acme.example', lastUsedAt: null },
   ]);
   assert.match(listed, /^b1  prod  \(added by lead@acme.example 2026-10-03, never used\)\n  profile  github\n/);
-  assert.match(listed, /\n  reaches  all its account holds\n$/, 'one of 0.4 the app has not sealed yet');
+  assert.match(listed, /\n  reaches  nothing\n$/, 'one of 0.4 never sealed, which the upgrade carries: it reaches nothing, as its exchange gives');
 });
 
 test('uploaded keys show by kid, or by thumbprint without one; replacing them names each binding replaced', () => {

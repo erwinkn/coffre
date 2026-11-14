@@ -271,7 +271,7 @@ export function scopeFrom(values: string[] | undefined, flag = '--scope'): Recor
   }));
 }
 
-/** A token's or a binding's scope in words; null for one 0.4 made, not sealed yet, which reaches all its account holds. */
+/** A token's scope in words. 0.16 lists one with none as `{}`, nothing; null is an older server's, for one it had not sealed yet. A binding's null reaches nothing (`describeBinding`). */
 export function reaches(scope: Record<string, string> | null): string {
   return scope === null ? 'all its account holds' : credentialScopeInWords(scope);
 }
@@ -736,7 +736,7 @@ export function keysLine(binding: Pick<BindingPlan, 'jwksUri' | 'keys'>): string
 /** A binding's policy as the server shows it: `checkPolicy`'s, with `reads` by path and key name. */
 export type PolicyView = PolicyRequest & { keyAudience?: true };
 
-/** A binding, as the lines describing it take it: a plan, a saved one, and a workload's with its policy. */
+/** A binding, as the lines describing it take it: a plan, a saved one, and a workload's with its policy. A null scope, one 0.4 made and never sealed, reaches nothing. */
 type Described = Pick<BindingPlan, 'profile' | 'issuer' | 'jwksUri' | 'keys' | 'claims'> & { scope: BindingPlan['scope'] | null; policy?: PolicyView | null };
 
 /** A binding, or a plan for one, as lines: what it trusts, every claim in full, and a workload's policy. */
@@ -746,7 +746,7 @@ export function describeBinding(binding: Described): string[] {
   // A proof that is no ID token has no issuer to ask, and no keys.
   const urn = (Object.values(PROFILE_URNS) as string[]).includes(binding.issuer);
   const signer = urn ? [] : [`  issuer   ${binding.issuer}`, `  keys     ${keysLine(binding)}`];
-  return [`  profile  ${binding.profile}`, ...signer, ...claims, `  reaches  ${reaches(binding.scope)}`, ...policyLines(binding.profile, binding.policy ?? null)];
+  return [`  profile  ${binding.profile}`, ...signer, ...claims, `  reaches  ${credentialScopeInWords(binding.scope ?? {})}`, ...policyLines(binding.profile, binding.policy ?? null)];
 }
 
 /**

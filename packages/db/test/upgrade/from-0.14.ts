@@ -122,6 +122,8 @@ const CY = 'user:cy@acme.example';
 const DEPLOY = 'token:ci:deploy';
 const CY_SERVICE = 'token:cy@acme.example';
 const BINDING_SERVICE = `token:binding:${id(301)}`;
+/** The scope 0.14's app sealed binding 303 with: CI's grant, a Viewer of market/prod. */
+const SEALED = JSON.stringify([{ projectId: id(1), environmentId: id(11), role: 'viewer' }]);
 const COFFRE = 'token:coffre';
 const SIGNIN_SERVICE = 'token:system:signin';
 // And one named as Ada's principal, which must not take the revocation her `token.unbind` gives binding 302.
@@ -244,12 +246,14 @@ const SEED = `
     -- Cy's account from before his last removal, which 0.14's second transaction never revoked, and the one he signs in with now.
     (${u(603)}, 'github', ${h(4)}, '1003', 'x', 1, '${CY}', 'cy@acme.example', 'cy@acme.example', NULL, NULL),
     (${u(604)}, 'github', ${h(4)}, '1004', 'x', 2, '${CY}', 'cy@acme.example', 'cy@acme.example', NULL, NULL);
-  INSERT INTO service_bindings (id, auth_mac, principal, generation, profile, issuer, jwks_uri, claims, created_by, revoked_at, revoked_by) VALUES
-    (${u(301)}, ${h(4)}, '${API}', 0, 'kubernetes', 'https://k8s.example', 'sha256:00', '{}', 'ada@acme.example', NULL, NULL),
-    (${u(302)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', 'ada@acme.example', NULL, NULL),
-    (${u(303)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', 'ada@acme.example', NULL, NULL),
+  -- A binding of 0.4 never used since has no scope, which 0.14's app sealed with its account's grants at its next use
+  -- (0003_credential_scopes); 303's was sealed.
+  INSERT INTO service_bindings (id, auth_mac, principal, generation, profile, issuer, jwks_uri, claims, scope, created_by, revoked_at, revoked_by) VALUES
+    (${u(301)}, ${h(4)}, '${API}', 0, 'kubernetes', 'https://k8s.example', 'sha256:00', '{}', NULL, 'ada@acme.example', NULL, NULL),
+    (${u(302)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', NULL, 'ada@acme.example', NULL, NULL),
+    (${u(303)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', '${SEALED}', 'ada@acme.example', NULL, NULL),
     -- Revoked in 0.14.7's app, which wrote who by their bare id.
-    (${u(304)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', 'ada@acme.example', now(), 'ada@acme.example');
+    (${u(304)}, ${h(4)}, '${CI}', 0, 'github', 'https://token.actions.githubusercontent.com', 'https://token.actions.githubusercontent.com/.well-known/jwks', '{}', NULL, 'ada@acme.example', now(), 'ada@acme.example');
   INSERT INTO enrollments (id, auth_mac, binding_id, code_hash, code_hint, scope, created_by, expires_at) VALUES
     (${u(401)}, ${h(4)}, ${u(301)}, ${h(41)}, 'coffre_enr_…aaaa', '[]', '${CI}', now() + interval '30 days'),
     (${u(402)}, ${h(4)}, ${u(301)}, ${h(42)}, 'coffre_enr_…bbbb', '[]', '${CI}', now() + interval '30 days');
@@ -450,6 +454,17 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
       { id: id(506), created_by: ADA, revoked_by: 'coffre' },
       { id: id(507), created_by: ADA, revoked_by: 'system:signin' },
       { id: id(701), created_by: ADA, revoked_by: null },
+    ]);
+  });
+
+  await t.test("bindings: a scope 0.14 sealed is kept as it was, and one of 0.4 it never sealed stays none, which reaches nothing", async () => {
+    // 0.16 gives no binding the grants its service holds: a null scope issues credentials that reach nothing (schema.ts,
+    // `bindings.scope`; the vault's `scopeOf`), and the binding is made again to reach anything.
+    assert.deepEqual(await rows(`SELECT id, scope FROM bindings ORDER BY id`), [
+      { id: id(301), scope: null },
+      { id: id(302), scope: null },
+      { id: id(303), scope: SEALED },
+      { id: id(304), scope: null },
     ]);
   });
 

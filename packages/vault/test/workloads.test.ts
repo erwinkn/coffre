@@ -236,6 +236,15 @@ test('a binding with a policy makes sessions, not CI tokens; one of an older gen
   assert.deepEqual(await checked(), []);
 });
 
+test("a binding of 0.4 with no scope, as the upgrade from 0.14 carries one its app never sealed, issues a credential that reaches nothing", async () => {
+  // 0.14 sealed it with its service's grants at its next use; 0.16 gives a binding nothing its service holds.
+  await amend(world, 'bindings', sql`${bindings.id} = ${main.id}`, { scope: null });
+  assert.equal(await refusal(exchange(idToken(), 'run-1')), 'made');
+  const [row] = await issued();
+  assert.equal(row!.scope, '[]');
+  assert.deepEqual(await who('run-1'), { principal: DEPLOY, kind: 'service', scope: [] });
+});
+
 test('more bindings on an issuer than a service may hold: none of them answers, as in 0.14', async () => {
   const more = Array.from({ length: 14 }, (_, n) => binding(DEPLOY, { claims: canonicalClaims({ repository_id: String(100 + n) }), scope: '[]', createdAt: new Date(Date.UTC(2026, 5, 1, n)) }));
   await write(world, ...rows('bindings', ...more));

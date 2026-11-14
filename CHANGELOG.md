@@ -97,6 +97,14 @@
   without `--apply`) answers 0.14.7's `KeysPlan`: the keys as checked, the
   bindings on the issuer they would replace, and the places whose sensitive
   values the new bindings would withhold. It was 501.
+- **No word for a handle from before 0.9.** One that names no
+  environment is answered as one whose environment is gone (409), no
+  longer told to run `coffre run` again: 0.16 upgrades only from 0.14.7,
+  and a handle lasts a week at most.
+- **A binding with no scope says it reaches nothing.** One of 0.4 never
+  sealed, which the upgrade carries as it is, issues credentials that
+  reach nothing; `coffre trust` and the service page said "all its
+  account holds", as the Trust dialog did of one it replaces.
 - **The vault is told of workloads too.** It decides each CI run's
   sign-in now, on its own configuration: a deployment that trusts
   workloads adds `workloads: {}` to `vault(env => …)` in

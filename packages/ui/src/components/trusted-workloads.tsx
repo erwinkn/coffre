@@ -13,6 +13,7 @@ import {
   listedIds,
   listingGap,
   planned,
+  reached,
   summary,
   type Form,
   type GitHubLookup,
@@ -86,7 +87,7 @@ export function TrustedWorkloads({ serviceId, bindings, grants }: { serviceId: s
                             </span>
                           </span>
                         </td>
-                        <td>{binding.scope === null ? 'All its account holds' : credentialScopeInWords(binding.scope)}</td>
+                        <td>{reached(binding.scope)}</td>
                         <td className="nowrap">
                           <span className="cell-stack">
                             <Timestamp iso={binding.createdAt} />
@@ -379,12 +380,12 @@ function Exposure({ events }: { events: string[] }) {
 
 /** What the bindings a plan replaces reached, beside what the new one reaches: the same, unless the person chose again. */
 function Reached({ plan, bindings }: { plan: BindingPlan; bindings: BindingView[] }) {
-  const reached = [...new Set(plan.replaces.flatMap((replaced) => {
+  const before = [...new Set(plan.replaces.flatMap((replaced) => {
     const scope = bindings.find((binding) => binding.id === replaced.id)?.scope;
-    return scope === undefined ? [] : [scope === null ? 'all its account holds' : credentialScopeInWords(scope)];
+    return scope === undefined ? [] : [reached(scope)];
   }))];
-  if (reached.every((words) => words === credentialScopeInWords(plan.scope))) return <> This one reaches what {plan.replaces.length === 1 ? 'it' : 'they'} did.</>;
-  return <> {plan.replaces.length === 1 ? 'It' : 'They'} reached {reached.join('; ')}: this one reaches what it says above.</>;
+  if (before.every((words) => words === credentialScopeInWords(plan.scope))) return <> This one reaches what {plan.replaces.length === 1 ? 'it' : 'they'} did.</>;
+  return <> {plan.replaces.length === 1 ? 'It' : 'They'} reached {before.join('; ')}: this one reaches what it says above.</>;
 }
 
 function TrustWorkload({ serviceId, grants, bindings }: { serviceId: string; grants: HeldGrant[]; bindings: BindingView[] }) {
