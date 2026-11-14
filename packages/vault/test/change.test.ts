@@ -11,7 +11,7 @@ import { and, eq, is, not, sql, type SQL } from 'drizzle-orm';
 import { PgTable } from 'drizzle-orm/pg-core';
 
 import { failureOf } from '../src/failure.ts';
-import { Busy, CHANGE_LOCK, change, commit, drop, part, prepare, put, written, type Operation, type Parts, type Refusal, type Seen, type Write } from '../src/change.ts';
+import { Busy, CHANGE_LOCK, change, commit, drop, part, prepare, put, weigh, written, type Operation, type Parts, type Refusal, type Seen, type Write } from '../src/change.ts';
 import { entryOf, type Said } from '../src/entry.ts';
 import { keyOf, nameOf, sealedBy, shapeOf, type Fresh, type Row, type Sealed } from '../src/rows.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
@@ -439,6 +439,81 @@ test('a change that is a use of a binding moves its last use on, to its entry\'s
   );
   // Through it all, only the binding used: the service's other one never was.
   assert.deepEqual([await lastUse(), (await seenOf(bindings, eq(bindings.id, idle.id)))[0]!.lastUsedAt], [moved, null]);
+});
+
+test('a change weighed answers what it would, in one round trip, and writes nothing: no row, no entry, no proof spent, no binding used', async () => {
+  const api = 'token:api';
+  const bound = binding(api);
+  await done(writing(put(principals, member(ada, 'owner')), put(principals, member(bo, 'owner')), put(principals, member(api)), put(bindings, bound)));
+  const state = async () => ({
+    rows: await rowsOf(vault.owner, sql`SELECT id, role, status, generation, encode(mac, 'hex') AS mac FROM principals ORDER BY id`),
+    entries: (await rowsOf<{ n: number }>(vault.owner, sql`SELECT count(*)::int AS n FROM log_pending`))[0]!.n,
+    spent: (await rowsOf<{ n: number }>(vault.owner, sql`SELECT count(*)::int AS n FROM spent_id_tokens`))[0]!.n,
+    used: (await rowsOf<{ at: string | null }>(vault.owner, sql`SELECT last_used_at AS at FROM bindings`)).map(({ at }) => at),
+    woken: vault.woken.length,
+  });
+  const before = await state();
+
+  // Through a proxy that counts round trips: the read, and no write behind it.
+  const sent: string[][] = [];
+  const proxy = await postgresProxy(VAULT_URL, { onSync: (statements) => sent.push(statements.map((text) => text.trimStart().slice(0, 12))) });
+  const through = await openDatabase(proxy.url);
+  try {
+    const counted = { ...vault, db: through.db };
+    await weigh(counted, setRole(ada, bo, 'member'));
+    const trips = proxy.trips;
+    sent.length = 0;
+    assert.deepEqual(await weigh(counted, setRole(ada, bo, 'member')), { answer: 'member' });
+    assert.equal(proxy.trips - trips, 1);
+    assert.deepEqual(sent, [['begin isolat', 'SELECT set_c', 'SELECT part,', 'commit']]);
+  } finally {
+    await through.close();
+    await proxy.close();
+  }
+  assert.deepEqual(await state(), before);
+
+  // One that spends a proof and is a use of a binding: neither happens, and the change made after is the first to spend it.
+  const proof = randomBytes(32);
+  const read = { binding: part(bindings, eq(bindings.id, bound.id)), who: part(principals, eq(principals.id, bo)) };
+  const exchange: Operation<typeof read, string> = {
+    read,
+    decide: ({ binding: [found], who: [was] }) => ({ writes: [put(principals, member(bo, 'admin'), was!)], once: proof, used: found!, entry: said('token.exchange', api), answer: 'admin' }),
+  };
+  assert.deepEqual([await weigh(vault, exchange), await weigh(vault, exchange)], [{ answer: 'admin' }, { answer: 'admin' }]);
+  assert.deepEqual(await state(), before);
+  assert.deepEqual(await change(vault, exchange), { answer: 'admin' });
+  // Weighed again once spent, it still answers: the write alone sees the proofs spent.
+  assert.deepEqual([await weigh(vault, exchange), await change(vault, exchange)], [{ answer: 'admin' }, { refused: 'replayed' }]);
+
+  // A check runs, and a decision that writes around its read is a fault, as for a change.
+  let checks = 0;
+  assert.deepEqual(await weigh(vault, { read: nothing, check: async () => ((checks += 1), 'seen'), decide: (_seen, _at, _unsealed, checked) => ({ writes: [], entry: said('test'), answer: checked }) }), { answer: 'seen' });
+  assert.equal(checks, 1);
+  const [found] = await seenOf(bindings);
+  await assert.rejects(weigh(vault, { read: nothing, decide: () => ({ writes: [], used: found!, entry: said('test'), answer: null }) }), /a binding its decision read/);
+});
+
+test('a change weighed and refused is refused as the change is, and logged as one: once a minute, with the change\'s own refusals', async () => {
+  await done(writing(put(principals, member(ada, 'owner')), put(principals, member(bo))));
+  const denied = (operation: ReturnType<typeof setRole>, actor: string) => ({
+    ...operation,
+    denied: (_seen: unknown, _at: number, refusal: Refusal) => ({ action: 'member.role', actor, credential: null, request: null, ip: null, objects: [], detail: { refused: refusal.refused } }),
+  });
+  const logged = async () => (await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(vault.owner, sql`SELECT kept, body, mac FROM log_pending ORDER BY id`)).map((row) => entryOf(vault.keys, row)!);
+  const before = (await logged()).length;
+  vault.woken.length = 0;
+
+  assert.deepEqual(await weigh(vault, denied(setRole(bo, ada, 'removed'), bo)), { refused: 'not_owner' });
+  assert.deepEqual((await logged()).slice(before).map((entry) => [entry.action, entry.actor, entry.detail]), [['member.role', bo, { refused: 'not_owner' }]]);
+  assert.equal(vault.woken.length, 1);
+  // The change itself, refused within the minute, and weighed again: the one entry stands for them all.
+  assert.deepEqual(await change(vault, denied(setRole(bo, ada, 'removed'), bo)), { refused: 'not_owner' });
+  assert.deepEqual(await weigh(vault, denied(setRole(bo, ada, 'removed'), bo)), { refused: 'not_owner' });
+  assert.equal((await logged()).length, before + 1);
+  // The last Owner weighs their own demotion: the refusal the change would give, from the rows as they are.
+  assert.deepEqual(await weigh(vault, setRole(ada, ada, 'member')), { refused: 'last_owner' });
+  assert.deepEqual(await weigh(vault, setRole(ada, bo, 'owner')), { answer: 'owner' });
+  assert.equal((await seenOf(principals, eq(principals.id, bo)))[0]!.role, 'member');
 });
 
 test('a check runs between a change\'s read and its decision, on the rows read, and again each time the change starts over', async () => {

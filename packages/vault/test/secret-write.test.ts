@@ -111,6 +111,58 @@ test('a write gives each key its next version, makes the keys the environment la
   assert.equal(by!.by, ada);
 });
 
+test('a write weighed answers what the write would, and writes nothing; a refusal is the write\'s, logged as one', async () => {
+  const [entries, versions] = [await count('log_pending'), await count('secret_versions')];
+  const ask = writing('ada-cli', { DATABASE_URL: 'postgres://new', NEW_KEY: ['on', 'plain'] });
+  // Through JSON, as over any transport: the versions each key would be at, and their natures.
+  const weighed = await vault.weigh(ask);
+  assert.deepEqual(weighed, { answer: { keys: { DATABASE_URL: { version: 2, nature: 'secret' }, NEW_KEY: { version: 1, nature: 'plain' } } } });
+  assert.deepEqual([await count('log_pending'), await count('secret_versions'), world.woken.length], [entries, versions, 0]);
+  const before = await vault.use(reveal('ada-cli', ['DATABASE_URL', 'NEW_KEY']));
+  assert.ok(!('refused' in before));
+  assert.deepEqual(before.values.map((item) => ('refused' in item ? item.refused : item.value)), ['postgres://old', 'unknown_key']);
+  // Made after, the write answers the same.
+  assert.deepEqual(await vault.change(ask), weighed);
+  // A viewer's: refused as their write is, and the one entry says so for both.
+  const logged = await count('log_pending');
+  assert.deepEqual(await vault.weigh(writing('bo-cli', { DATABASE_URL: 'x' })), await vault.change(writing('bo-cli', { DATABASE_URL: 'x' })));
+  assert.deepEqual(await vault.weigh(writing('bo-cli', { DATABASE_URL: 'x' })), { refused: 'no_access' });
+  assert.equal(await count('log_pending'), logged + 1);
+  // An operation the contract has not is a fault, as for a change; and so is one nobody asks, whose proof a weighing would try and not spend.
+  await assert.rejects(vault.weigh({ ...ask, op: 'nope' } as never), /an operation the contract has/);
+  for (const op of ['signin', 'device.start', 'device.redeem', 'token.exchange', 'workload.signin']) await assert.rejects(vault.weigh({ request: 'req-1', ip: '192.0.2.7', op } as never), /a change nobody asks is not weighed/);
+});
+
+test('a write weighed asks the key service nothing, whatever it would seal or open: the write alone does', async () => {
+  // Each call to a key service is paired with an entry (docs/keys.md), and a weighing writes none.
+  const asked: string[] = [];
+  const keks = new Proxy(world.keks, {
+    get(target, name) {
+      const value: unknown = Reflect.get(target, name, target);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        if (name === 'wrap' || name === 'unwrap') asked.push(name);
+        return (value as (...args: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
+  const counted = openLocalVault(world.db, { ...world, keks }, { wake: world.wake, now: world.now });
+  assert.ok('answer' in (await counted.change(writing('ada-cli', { DATABASE_URL: 'postgres://new' }))));
+  assert.deepEqual(asked, ['wrap']);
+  asked.length = 0;
+  // A value to seal, and a version to open and seal again.
+  const ask = { ...writing('ada-cli', { NEW_KEY: 'fresh' }), keys: [{ key: 'NEW_KEY', value: 'fresh', nature: 'secret' as const }, { key: 'DATABASE_URL', restore: 1 }] };
+  const versions = await count('secret_versions');
+  assert.deepEqual(await counted.weigh(ask), { answer: { keys: { NEW_KEY: { version: 1, nature: 'secret' }, DATABASE_URL: { version: 3, nature: 'secret' } } } });
+  assert.deepEqual([asked, await count('secret_versions')], [[], versions]);
+  // A version that does not open is the write's to refuse: a weighing never opened it.
+  await world.owner.execute(sql`UPDATE secret_versions SET wrapped_dek = '\\x00' || wrapped_dek WHERE secret_id = ${url.id} AND version = 1`);
+  assert.ok('answer' in (await counted.weigh(ask)));
+  assert.deepEqual(asked, []);
+  assert.deepEqual(await counted.change(ask), { refused: 'unreadable' });
+  assert.match(asked.join(), /unwrap/);
+});
+
 test('a write is refused to whoever may not write there, with one answer, and writes nothing', async () => {
   const before = [await count('log_pending'), await count('secret_versions')];
   const refused = async (label: string, more: Partial<SecretWrite> = {}) => vault.change(writing(label, { DATABASE_URL: 'x' }, more));

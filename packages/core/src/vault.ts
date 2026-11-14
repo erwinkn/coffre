@@ -55,6 +55,16 @@ export interface Vault {
    * its input. All of it, or none.
    */
   change<O extends Change['op']>(input: Asked<O>): Promise<{ answer: Answers[O] } | Refused>;
+  /**
+   * What `change` would answer, as of now, with nothing written: the same
+   * read and the same decision, so a dry run (`?dryRun=1`) is no second
+   * copy of a rule. The change made after reads and decides again, and
+   * alone tells a version it opens that does not open (`unreadable`). One
+   * refused is logged as the change refused is; one that would be made
+   * leaves nothing. Only what a caller asks is weighed: a sign-in or an
+   * exchange rests on a proof, which this would try without spending.
+   */
+  weigh<O extends Exclude<Change['op'], Unasked | WorkloadsUnasked>>(input: Asked<O>): Promise<{ answer: Answers[O] } | Refused>;
 }
 
 /** Where a request came from, which every call carries. */
