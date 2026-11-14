@@ -37,16 +37,6 @@ export function tombstone(slug: SQLWrapper): SQL {
   return sql`${slug} LIKE ${`%${TOMBSTONE}%`}`;
 }
 
-/** A condition read as a boolean. */
-export function truth(condition: SQL): SQL<boolean> {
-  return condition.mapWith((value) => Number(value) === 1);
-}
-
-/** How many rows an insert, update or delete touched. */
-export function changedRows(result: unknown): number {
-  return (result as { count?: number | null }).count ?? 0;
-}
-
 /**
  * The network's codes for a server that is not there, postgres.js's for a
  * connection lost, cut short or never made, and Postgres's for one shutting
@@ -163,16 +153,6 @@ export const SNAPSHOT = { isolationLevel: 'repeatable read', accessMode: 'read o
  */
 export function clock(db: Queryable): SQL<string> {
   return sql<string>`CURRENT_TIMESTAMP`;
-}
-
-/**
- * The database clock as milliseconds since the epoch, as the statement runs:
- * Postgres's `clock_timestamp()`, not `CURRENT_TIMESTAMP`, which is the
- * transaction's start and would date an entry that waited for the log's lock
- * before one written while it waited. Read it in a statement after the lock.
- */
-export function clockMillis(db: Queryable): SQL<number> {
-  return sql`(extract(epoch from clock_timestamp()) * 1000)::bigint`.mapWith(Number);
 }
 
 /**

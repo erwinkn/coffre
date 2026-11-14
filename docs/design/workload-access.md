@@ -1780,7 +1780,9 @@ line of registration after the owner has merged:
   in `cli/commands.ts` (`enroll`, `approve`, `freeze`, `unfreeze`, `serve`).
   Owners then edit only their own files.
 - **Proofs plug into the exchange.** PR 1a's exchange dispatches by proof
-  kind through `PROOFS` in `api/workloads.ts`:
+  kind through `PROOFS`, in 0.14's `api/workloads.ts` (0.16 has no such
+  table: the vault checks each proof with the pure functions of
+  `packages/core/src/identity/proofs.ts`, [0.16.md](0.16.md#operations)):
 
   ```ts
   type ProofKind = {
