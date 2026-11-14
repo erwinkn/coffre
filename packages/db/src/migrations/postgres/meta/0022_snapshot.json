@@ -2593,24 +2593,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "recipe": {
-          "name": "recipe",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "pair_id": {
-          "name": "pair_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "pair_half": {
-          "name": "pair_half",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "plaintext": {
           "name": "plaintext",
           "type": "text",
@@ -2664,10 +2646,6 @@
         "secret_versions_auth_tag_check": {
           "name": "secret_versions_auth_tag_check",
           "value": "octet_length(\"secret_versions\".\"auth_tag\") = 16"
-        },
-        "secret_versions_pair_check": {
-          "name": "secret_versions_pair_check",
-          "value": "(\"secret_versions\".\"pair_id\" IS NULL) = (\"secret_versions\".\"pair_half\" IS NULL) AND (\"secret_versions\".\"pair_half\" IS NULL OR \"secret_versions\".\"pair_half\" IN ('private', 'public'))"
         },
         "secret_versions_plain_check": {
           "name": "secret_versions_plain_check",
@@ -2743,6 +2721,30 @@
         "source_id": {
           "name": "source_id",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "nature": {
+          "name": "nature",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recipe": {
+          "name": "recipe",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pair_id": {
+          "name": "pair_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pair_half": {
+          "name": "pair_half",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
@@ -2853,6 +2855,18 @@
         "secrets_source_check": {
           "name": "secrets_source_check",
           "value": "\"secrets\".\"source_id\" IS NULL OR (\"secrets\".\"source_id\" <> \"secrets\".\"id\" AND \"secrets\".\"current_version\" IS NULL)"
+        },
+        "secrets_nature_check": {
+          "name": "secrets_nature_check",
+          "value": "(\"secrets\".\"nature\" IS NULL) = (\"secrets\".\"current_version\" IS NULL) AND (\"secrets\".\"nature\" IS NULL OR \"secrets\".\"nature\" IN ('plain', 'secret', 'sensitive'))"
+        },
+        "secrets_recipe_check": {
+          "name": "secrets_recipe_check",
+          "value": "(\"secrets\".\"recipe\" IS NULL AND \"secrets\".\"pair_id\" IS NULL) OR \"secrets\".\"current_version\" IS NOT NULL"
+        },
+        "secrets_pair_check": {
+          "name": "secrets_pair_check",
+          "value": "(\"secrets\".\"pair_id\" IS NULL) = (\"secrets\".\"pair_half\" IS NULL) AND (\"secrets\".\"pair_half\" IS NULL OR \"secrets\".\"pair_half\" IN ('private', 'public'))"
         },
         "secrets_folder_check": {
           "name": "secrets_folder_check",

@@ -84,14 +84,14 @@ const KEK = new LocalKekProvider(Buffer.alloc(32, 7), 'k');
 const SIGNING = deriveLogKey('vault', Buffer.alloc(32, 8));
 const bytes = (value: Buffer) => `'\\x${value.toString('hex')}'`;
 /** A version as 0.14 wrote it, envelope format 1: secrets 101 and 102 are in market/prod, the rest in billing/prod. */
-async function version(n: number, secret: number, number: number, more: { erased?: boolean; plaintext?: string; sensitive?: boolean } = {}): Promise<string> {
+async function version(n: number, secret: number, number: number, more: { erased?: boolean; plaintext?: string; sensitive?: boolean; recipe?: string; pair?: [id: number, half: string] } = {}): Promise<string> {
   const [project, environment] = secret <= 102 ? [1, 11] : [2, 21];
   const ids = { projectId: id(project), environmentId: id(environment), secretId: id(secret) };
   const dek = freshDek();
   const sealed = encrypt(Buffer.from(more.plaintext ?? `value ${n}`), ids, dek);
   const wrapped = await KEK.wrap(dek, { ...ids, ...(more.sensitive ? { sensitive: true } : {}) });
   const [ciphertext, key] = more.erased ? [Buffer.alloc(0), Buffer.alloc(0)] : [sealed.ciphertext, wrapped.bytes];
-  return `(${u(n)}, ${u(secret)}, ${number}, 1, ${bytes(ciphertext)}, ${bytes(sealed.iv)}, ${bytes(sealed.authTag)}, ${bytes(key)}, 'local', 'k', '1', '${ADA}', ${text(more.plaintext)}, ${more.sensitive ?? false})`;
+  return `(${u(n)}, ${u(secret)}, ${number}, 1, ${bytes(ciphertext)}, ${bytes(sealed.iv)}, ${bytes(sealed.authTag)}, ${bytes(key)}, 'local', 'k', '1', '${ADA}', ${text(more.plaintext)}, ${more.sensitive ?? false}, ${text(more.recipe)}, ${more.pair === undefined ? 'NULL, NULL' : `${u(more.pair[0])}, '${more.pair[1]}'`})`;
 }
 /** An entry 0.14's vault wrote, under its MAC: what the adoption reads of the archive. */
 function vouched(seq: number, action: string, metadata: object): string {
@@ -122,17 +122,19 @@ const SEED = `
     (${u(103)}, ${u(2)}, ${u(21)}, 'DATABASE_URL', 0), (${u(104)}, ${u(2)}, ${u(21)}, 'OLD_REFERENCE', 0), (${u(105)}, ${u(2)}, ${u(21)}, 'FORGED_REFERENCE', 0),
     (${u(106)}, ${u(2)}, ${u(21)}, 'VALUE_THEN_ENDED_REFERENCE', 2), (${u(107)}, ${u(2)}, ${u(21)}, 'VALUE_THEN_REFERENCE', 1),
     (${u(108)}, ${u(2)}, ${u(21)}, 'ENDED_OVER_UNENDED', 0), (${u(109)}, ${u(2)}, ${u(21)}, 'REFERENCE_THEN_VALUE', 1);
-  INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, plaintext, sensitive) VALUES
+  INSERT INTO secret_versions (id, secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, created_by, plaintext, sensitive, recipe, pair_id, pair_half) VALUES
     ${(
       await Promise.all([
         version(1011, 101, 1, { sensitive: true }),
-        version(1021, 102, 1),
+        // An older version's recipe leaves with the versions' column.
+        version(1021, 102, 1, { recipe: 'bytes:32:hex' }),
         version(1022, 102, 2, { plaintext: 'pk_live' }),
         // An erased version, of a place since deleted: 0.14 empties its ciphertext and its wrapped key.
         version(1061, 106, 1, { erased: true }),
         version(1062, 106, 2),
         version(1071, 107, 1),
-        version(1091, 109, 1),
+        // A key pair's private half, made by a recipe.
+        version(1091, 109, 1, { recipe: 'ecdsa:p-256', pair: [1099, 'private'] }),
       ])
     ).join(',\n    ')};
   UPDATE secrets SET current_version_id = ${u(1011)} WHERE id = ${u(101)};
@@ -326,6 +328,12 @@ test('a 0.14 database upgrades in place, only with coffre offline, and every row
       { key: 'DATABASE_URL', id: id(1011) },
       { key: 'REFERENCE_THEN_VALUE', id: id(1091) },
       { key: 'STRIPE_KEY', id: id(1022) },
+    ]);
+    // How a current value is kept and was made is on its secret's row, as 0.14's version said it, for the adoption to vouch for.
+    assert.deepEqual(await rows(`SELECT key, nature, recipe, pair_id, pair_half FROM secrets WHERE nature IS NOT NULL OR recipe IS NOT NULL ORDER BY key`), [
+      { key: 'DATABASE_URL', nature: 'sensitive', recipe: null, pair_id: null, pair_half: null },
+      { key: 'REFERENCE_THEN_VALUE', nature: 'secret', recipe: 'ecdsa:p-256', pair_id: id(1099), pair_half: 'private' },
+      { key: 'STRIPE_KEY', nature: 'plain', recipe: null, pair_id: null, pair_half: null },
     ]);
     // An erased version stays erased: the adoption has nothing of it to encrypt again.
     assert.deepEqual(await rows(`SELECT octet_length(ciphertext) AS ciphertext, octet_length(wrapped_dek) AS wrapped FROM secret_versions WHERE id = ${u(1061)}`), [{ ciphertext: 0, wrapped: 0 }]);

@@ -12,6 +12,7 @@ import { CHANGE_LOCK, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, seal, shapeOf, toWire, type Wire } from './rows.ts';
 import { ADOPTION, MIRRORED, type Signer } from './signer.ts';
+import { natureOf } from './value.ts';
 
 /**
  * The vault's adoption of a database (docs/design/0.16.md, "Upgrade from
@@ -26,7 +27,8 @@ import { ADOPTION, MIRRORED, type Signer } from './signer.ts';
  *    the configuration names;
  * 2. wraps each version's data key again, as envelope format 2, which names
  *    its number and whether it is plain;
- * 3. MACs every starred row;
+ * 3. MACs every starred row, writing on each secret's row, in the same
+ *    statement, the nature its current value opened as;
  * 4. writes the log's first entry, which pins 0.14's chain and counts what
  *    it adopted.
  *
@@ -93,9 +95,13 @@ export async function adopt(signer: Signer, vault: Pick<Running, 'db' | 'keys' |
       await tx.execute(sql`UPDATE secret_versions v SET envelope_version = 2, wrapped_dek = decode(j.dek, 'hex'), kek_provider = j.provider, kek_id = j.kek, kek_version = j.version
         FROM jsonb_to_recordset(${JSON.stringify(wrapped)}::jsonb) AS j(id uuid, dek text, provider text, kek text, version text) WHERE v.id = j.id`);
     }
-
+    // A secret's row says what its current value is as the value opened, whatever the migration or a writer since left
+    // there, written in the statement that writes its MAC (`sealAll`). One it did not open, erased or never 0.14's, is
+    // taken as sensitive, the nature that hands it to the fewest.
+    const opened = new Map(wrapped.map(({ secret, number, nature }) => [`${secret} ${number}`, nature]));
+    const natures: Amend = { columns: ['nature'], row: (row) => ({ ...row, nature: row.currentVersion === null ? null : (opened.get(`${String(row.id)} ${String(row.currentVersion)}`) ?? 'sensitive') }) };
     const counts: Record<string, number> = { secret_versions: wrapped.length };
-    for (const table of MIRRORED) counts[shapeOf(table).name] = await sealAll(tx, vault.keys[0]!, table);
+    for (const table of MIRRORED) counts[shapeOf(table).name] = await sealAll(tx, vault.keys[0]!, table, table === secrets ? natures : undefined);
     const [last] = await tx.select({ seq: auditArchive.seq, hash: auditArchive.hash }).from(auditArchive).orderBy(desc(auditArchive.seq)).limit(1);
     const first = pending(
       vault.keys[0]!,
@@ -117,17 +123,28 @@ export async function adopted(db: Database): Promise<boolean> {
   return signed;
 }
 
-/** MAC every row of `table` as it stands: how many. One statement to read them, one to write their MACs. */
-async function sealAll(tx: Transaction, key: Running['keys'][number], table: (typeof MIRRORED)[number]): Promise<number> {
+/** What the adoption writes on each row of a table as it seals it: those columns, by name, as `row` gives them. */
+type Amend = { columns: readonly string[]; row: (row: Record<string, unknown>) => Record<string, unknown> };
+
+/**
+ * MAC every row of `table` as it stands, with what `amend` writes on it: how
+ * many. One statement to read them, one to write their MACs and those
+ * columns. A row a writer changes between the two is left with a MAC over
+ * what was read, which it no longer holds: no row.
+ */
+async function sealAll(tx: Transaction, key: Running['keys'][number], table: (typeof MIRRORED)[number], amend?: Amend): Promise<number> {
   const shape = shapeOf(table);
+  const written = shape.columns.filter(({ name }) => amend?.columns.includes(name) === true);
   const found = await rowsOf<{ row: Wire }>(tx, sql`SELECT to_jsonb(${table}) AS row FROM ${table}`);
   if (found.length === 0) return 0;
   const macs = found.map(({ row: wire }) => {
-    const row = fromWire(table, wire);
-    return { ...toWire(table, row, shape.key), mac: `\\x${seal(key, table, row).toString('hex')}` };
+    const read: object = fromWire(table, wire);
+    const row = amend === undefined ? read : amend.row(read as Record<string, unknown>);
+    return { ...toWire(table, row, [...shape.key, ...written]), mac: `\\x${seal(key, table, row).toString('hex')}` };
   });
   const onKey = sql.join(shape.key.map(({ name }) => sql`${table}.${sql.identifier(name)} = j.${sql.identifier(name)}`), sql` AND `);
-  await tx.execute(sql`UPDATE ${table} SET mac = j.mac FROM jsonb_populate_recordset(null::${table}, ${JSON.stringify(macs)}::jsonb) j WHERE ${onKey}`);
+  const set = sql.join([sql`mac = j.mac`, ...written.map(({ name }) => sql`${sql.identifier(name)} = j.${sql.identifier(name)}`)], sql`, `);
+  await tx.execute(sql`UPDATE ${table} SET ${set} FROM jsonb_populate_recordset(null::${table}, ${JSON.stringify(macs)}::jsonb) j WHERE ${onKey}`);
   return found.length;
 }
 
@@ -138,7 +155,9 @@ async function sealAll(tx: Transaction, key: Running['keys'][number], table: (ty
  * number and, for one 0.14 marked plain, as plain. 0.14 knew a plain value
  * only by its `plaintext` column, which nothing protects, so one is taken as
  * plain only if its value is that column's. A version 0.14 erased, with no
- * ciphertext and no key, has nothing to wrap, and keeps its label.
+ * ciphertext and no key, has nothing to wrap, and keeps its label. With
+ * each, its nature as it opened, which its secret's row takes when it is
+ * the current one.
  */
 async function wrapAgain(tx: Transaction, keks: Config['keks']) {
   const versions = await tx
@@ -167,7 +186,7 @@ async function wrapAgain(tx: Transaction, keks: Config['keks']) {
         value.fill(0);
         if (!same) throw new Error(`${what} is marked plain, and its value is not its plaintext column: someone wrote the row behind 0.14`);
         const again = await keks.wrap(dek, { ...named, version: version.version, ...(plain ? { plain: true as const } : {}) });
-        return { id: version.id, dek: again.bytes.toString('hex'), provider: again.kekProvider, kek: again.kekId, version: again.kekVersion };
+        return { id: version.id, dek: again.bytes.toString('hex'), provider: again.kekProvider, kek: again.kekId, version: again.kekVersion, secret: version.secretId, number: version.version, nature: natureOf(version) };
       } finally {
         dek.fill(0);
       }

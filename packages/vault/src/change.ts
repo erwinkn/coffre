@@ -9,7 +9,7 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 
 import { pending, type Entry, type Said } from './entry.ts';
 import { fromWire, nameOf, seal, sealedBy, shapeOf, toWire, type Fresh, type Key, type Row, type Sealed, type Wire } from './rows.ts';
-import { contextOf } from './value.ts';
+import { contextOf, natureOf } from './value.ts';
 
 /**
  * A change: anything that writes (docs/design/0.16.md, "Operations"). Every
@@ -107,7 +107,8 @@ export function drop<T extends Sealed>(table: T, was: Row<T>): Write {
  * A value a change writes: its version's row but for the encryption, and
  * its text. It is the current version of a secret the same change writes,
  * in an environment the change read or makes: those two rows say what its
- * encryption names, and nothing the operation says beside them.
+ * encryption names, and nothing the operation says beside them. Its nature
+ * is the one the secret's row says.
  */
 export type Value = { version: Omit<Row<typeof secretVersions>, keyof Envelope>; text: Buffer };
 
@@ -314,6 +315,8 @@ export async function prepare<P extends Parts, A>(vault: Running, operation: Ope
     if (held === undefined || place === undefined || place.projectId !== held.projectId || held.currentVersion !== version.version || held.versions !== version.version) {
       throw new Error('a change writes a value as the current version of a secret it writes, in an environment of its project that it read');
     }
+    // What the secret's row says of its value, which a change reads, is what the value is sealed as.
+    if (held.nature !== natureOf(version)) throw new Error(`a value sealed as ${natureOf(version)} is the current version of a secret whose row says ${held.nature}`);
     if (version.plaintext !== null && version.plaintext !== text.toString('utf8')) throw new Error("a plain value's copy is the value");
     versions.push(toWire(secretVersions, { ...version, ...(await sealValue(text, contextOf(held, version, place.owner), vault.keks)) }));
   }

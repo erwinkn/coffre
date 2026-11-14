@@ -253,17 +253,33 @@ UPDATE secrets AS secret SET current_version = version.version
 --> statement-breakpoint
 ALTER TABLE secrets DROP COLUMN current_version_id;
 --> statement-breakpoint
+-- How its current value is kept and was made moves to the secret's row, which carries a MAC, so that a change reads it:
+-- its nature, which its version's row keeps too, as the version's encryption names it, and its recipe and pair, which
+-- leave the versions. Taken here as 0.14's rows say them; the vault's adoption writes the nature again from the value it
+-- opens (docs/design/0.16.md, "The steps").
+ALTER TABLE secrets ADD COLUMN nature text, ADD COLUMN recipe text, ADD COLUMN pair_id uuid, ADD COLUMN pair_half text;
+--> statement-breakpoint
+UPDATE secrets AS secret
+   SET nature = CASE WHEN version.sensitive THEN 'sensitive' WHEN version.plaintext IS NOT NULL THEN 'plain' ELSE 'secret' END,
+       recipe = version.recipe, pair_id = version.pair_id, pair_half = version.pair_half
+  FROM secret_versions version
+ WHERE version.secret_id = secret.id AND version.version = secret.current_version;
+--> statement-breakpoint
+ALTER TABLE secret_versions DROP COLUMN recipe, DROP COLUMN pair_id, DROP COLUMN pair_half;
+--> statement-breakpoint
 DROP INDEX secrets_lookup_idx, secret_versions_secret_idx;
 --> statement-breakpoint
 ALTER TABLE secrets
     ADD CONSTRAINT secrets_versions_check CHECK (versions >= 0 AND (current_version IS NULL OR (current_version = versions AND versions > 0))),
     ADD CONSTRAINT secrets_source_check CHECK (source_id IS NULL OR (source_id <> id AND current_version IS NULL)),
+    ADD CONSTRAINT secrets_nature_check CHECK ((nature IS NULL) = (current_version IS NULL) AND (nature IS NULL OR nature IN ('plain', 'secret', 'sensitive'))),
+    ADD CONSTRAINT secrets_recipe_check CHECK ((recipe IS NULL AND pair_id IS NULL) OR current_version IS NOT NULL),
+    ADD CONSTRAINT secrets_pair_check CHECK ((pair_id IS NULL) = (pair_half IS NULL) AND (pair_half IS NULL OR pair_half IN ('private', 'public'))),
     ADD CONSTRAINT secrets_source_id_fkey FOREIGN KEY (source_id) REFERENCES secrets (id) ON DELETE RESTRICT;
 --> statement-breakpoint
 CREATE INDEX secrets_source_idx ON secrets (source_id) WHERE source_id IS NOT NULL;
 --> statement-breakpoint
 ALTER TABLE secret_versions
-    ADD CONSTRAINT secret_versions_pair_check CHECK ((pair_id IS NULL) = (pair_half IS NULL) AND (pair_half IS NULL OR pair_half IN ('private', 'public'))),
     ADD CONSTRAINT secret_versions_plain_check CHECK (plaintext IS NULL OR NOT sensitive);
 --> statement-breakpoint
 -- Whether an environment is protected is the newest `policy.change`'s to say, which the vault reads when it adopts.
