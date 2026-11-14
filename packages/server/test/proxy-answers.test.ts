@@ -10,11 +10,14 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, mock, test } from 'node:test';
 
+import { CoffreError } from '@coffre/client';
+import { credential as proxied } from '@coffre/client/credential';
 import { generateToken } from '@coffre/core/identity';
 import { rowsOf } from '@coffre/db/dialect';
 import { amend, credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, value, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 
+import type { PluginContext } from '../src/plugins.ts';
 import { basic, credentialProxy, header, jwt, prefix, query, sigv4, type Credential, type CredentialProxyOptions, type Egress } from '../src/plugins/credential-proxy.ts';
 import { setSecurityHeaders } from '../src/security-headers.ts';
 import { openApp, PUBLIC_URL } from './app-fixture.ts';
@@ -386,4 +389,40 @@ test("a use's log entry names the host the value went to and whether through the
   const entries = (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`)).map((row) => JSON.parse(row.body) as { detail: Record<string, unknown> });
   const used = entries.find((entry) => entry.detail.credential === 'schumann')!;
   assert.deepEqual([used.detail.host, used.detail.egress], ['api.schumann.example', true]);
+});
+
+test("credential(name).fetch, the app's helper, sends the handle as x-coffre-handle, which the proxy swaps for the key; a request without it sends nothing", async () => {
+  const plan = (await (await planOf(handle)).json()) as { credentials: Record<string, string> };
+  const asked: Headers[] = [];
+  const helper = proxied('schumann', { COFFRE_CREDENTIALS: JSON.stringify(plan.credentials), COFFRE_HANDLE: handle }, async (input, init) => {
+    asked.push(new Headers(init?.headers));
+    return app.request(input.replace(PUBLIC_URL, ''), init);
+  });
+  const got = await helper.fetch('/companies?q=acme', { headers: { accept: 'application/json' } });
+  assert.equal(got.status, 200, await got.clone().text());
+  assert.deepEqual([asked[0]!.get('x-coffre-handle'), asked[0]!.get('accept')], [handle, 'application/json']);
+  assert.deepEqual([sent.length, sent[0]!.url.href, sent[0]!.headers.get('x-api-key'), sent[0]!.headers.has('x-coffre-handle')], [1, 'https://api.schumann.example/v1/companies?q=acme', KEY, false]);
+  // The same URL with no handle anywhere: refused, and nothing goes.
+  assert.equal((await app.request(new URL(plan.credentials.schumann!).pathname + '/companies')).status, 401);
+  assert.equal(sent.length, 1);
+});
+
+test("the proxy's own 503 says when to ask again, and only when coffre could not answer for a moment", async () => {
+  /** A context whose vault use fails with `error`, and that answers nothing else a forwarded request does not ask. */
+  const failing = (error: CoffreError) => new Proxy({} as PluginContext, {
+    get: (_target, name) => {
+      if (name === 'workload') return async () => null;
+      if (name === 'use') return async () => Promise.reject(error);
+      if (name === 'publicUrl') return PUBLIC_URL;
+      return undefined;
+    },
+  });
+  const answer = (context: PluginContext) => proxy.routes!.fetch(new Request(`${PUBLIC_URL}/use/market/dev/schumann/companies`, { headers: { 'x-api-key': handle } }), context);
+  const moment = await answer(failing(new CoffreError(503, 'unavailable', 'coffre cannot check who you are right now')));
+  assert.deepEqual([moment.status, moment.headers.get('retry-after'), moment.headers.get('coffre-proxy')], [503, '5', 'refused']);
+  const lasting = await answer(failing(new CoffreError(503, 'unavailable', 'the vault holds another key', 'wrong_kek')));
+  assert.deepEqual([lasting.status, lasting.headers.get('retry-after')], [503, null]);
+  const refused = await answer(failing(new CoffreError(403, 'forbidden', 'no', 'unavailable')));
+  assert.deepEqual([refused.status, refused.headers.get('retry-after')], [403, null]);
+  assert.equal(sent.length, 0);
 });

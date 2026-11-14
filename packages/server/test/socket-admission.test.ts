@@ -1,7 +1,7 @@
 // A WebSocket's admission when the database cannot take the question: the
 // door's (`schemaReady`) or the plugin's own. No database here: the runtime's
 // is one that fails every query as told.
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { CoffreRuntime } from '../src/runtime.ts';
@@ -36,4 +36,33 @@ test('a plugin that meets a full pool while it admits is 503 with Retry-After to
   const broken = await admitSocket(new Request(`${ORIGIN}/sockets/x`), runtimeOf(poolFull, async () => Promise.reject(new Error('a bug')), true), null);
   assert.ok(broken instanceof Response);
   assert.deepEqual([broken.status, await broken.text()], [500, 'the plugin failed']);
+});
+
+test('a plugin that takes 20 s to admit a WebSocket, as under a burst of runs at once, is let in; one undecided at 45 s is refused, 503 with Retry-After', async () => {
+  let decide: ((answer: Response) => void) | undefined;
+  const runtime = runtimeOf(poolFull, () => new Promise<Response>((resolve) => (decide = resolve)), true);
+  const admit = () => admitSocket(new Request(`${ORIGIN}/sockets/x`), runtime, null) as Promise<Response>;
+  const turn = () => new Promise((resolve) => setImmediate(resolve));
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const slow = admit();
+    while (decide === undefined) await turn();
+    mock.timers.tick(20_000);
+    decide(new Response('admitted'));
+    assert.equal(await (await slow).text(), 'admitted');
+    decide = undefined;
+    let settled = false;
+    const stuck = admit().finally(() => (settled = true));
+    while (decide === undefined) await turn();
+    mock.timers.tick(44_999);
+    await turn();
+    assert.equal(settled, false, 'still deciding a moment before 45 s');
+    mock.timers.tick(1);
+    await turn();
+    assert.equal(settled, true, 'refused at 45 s');
+    const refused = await stuck;
+    assert.deepEqual([refused.status, refused.headers.get('retry-after'), await refused.text()], [503, '5', 'coffre took too long to decide']);
+  } finally {
+    mock.timers.reset();
+  }
 });
