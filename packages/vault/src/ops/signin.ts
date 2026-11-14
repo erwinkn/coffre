@@ -51,16 +51,16 @@ function signin(input: Asked<'signin'>, vault: Deciding): Operation<Parts, Answe
     // Whoever it is bound to, and whoever its emails name: each by its key.
     holder: part(principals, sql`${principals.id} IN (SELECT i.principal FROM identities i WHERE ${bound})`),
     named: part(principals, sql`${principals.id} = ANY(${sql.param(named)}::text[])`),
-    // The accounts those the emails name sign in with already.
-    theirs: part(identities, sql`${identities.principal} = ANY(${sql.param(named)}::text[]) AND ${identities.revokedAt} IS NULL`),
+    // The accounts of those the emails name, revoked ones too: one revoked behind the vault is still found, and is not the vault's.
+    theirs: part(identities, sql`${identities.principal} = ANY(${sql.param(named)}::text[])`),
     replaced: part(credentials, replaces === null ? sql`false` : sql`${credentials.tokenHash} = decode(${replaces}, 'hex')`),
   };
   return {
     read,
     decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
-      // A row written behind the vault is not a row that is absent: an account hidden would bind again, a member hidden
-      // would be passed over for the next email, an account of theirs hidden would let a second one in. None signs in.
-      if (unsealed.account + unsealed.holder + unsealed.named + unsealed.theirs > 0) return { refused: 'tampered' };
+      // A row written behind the vault is not a row that is absent: an account that is not the vault's is not a new
+      // one, nor its member nobody.
+      if (unsealed.account + unsealed.holder > 0) return { refused: 'tampered' };
       const now = new Date(at);
       const writes: Write[] = [];
       const detail: Record<string, unknown> = { kind: 'browser', verified: 'app', provider, issuer, subject, emails };
@@ -92,12 +92,14 @@ function signin(input: Asked<'signin'>, vault: Deciding): Operation<Parts, Answe
         writes.push(amended(identities, identity, { lastSignInAt: now, email: emails[0] ?? identity.email }));
         identityId = identity.id;
       } else {
+        // Nor is a member passed over for the next email, or without an account, for a row of theirs that is not the vault's.
+        if (unsealed.named + unsealed.theirs > 0) return { refused: 'tampered' };
         const id = named.find((other) => members.some((row) => row.id === other) || vault.owners.includes(other.slice('user:'.length)));
         if (id === undefined) return { refused: 'not_registered' };
         who = memberOf(id)!;
         if (who.status !== 'active') return { refused: 'deactivated' };
         // One who signs in with another account already links this one from a session of theirs. An account of a generation before their last removal is dead, and no account of theirs.
-        if (seen.theirs.some((other) => other.principal === who!.id && other.generation === who!.generation)) return { refused: 'account_mismatch' };
+        if (seen.theirs.some((other) => other.principal === who!.id && other.generation === who!.generation && other.revokedAt === null)) return { refused: 'account_mismatch' };
         writes.push(put(identities, { id: ids.identity, provider, subject, issuerHash: issuer, generation: who.generation, principal: who.id, email: emails[0] ?? null, createdAt: now, createdBy: who.id, lastSignInAt: now, revokedAt: null, revokedBy: null }));
         identityId = ids.identity;
         detail.bound = id.slice('user:'.length);

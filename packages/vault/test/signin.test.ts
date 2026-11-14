@@ -256,14 +256,20 @@ test('a row written behind the vault is not a row that is absent: a sign-in that
   const before = (await entries()).length;
   const edit = (table: string, where: string) => world.owner.execute(sql`UPDATE ${sql.identifier(table)} SET mac = decode(repeat('00', 36), 'hex') WHERE ${sql.raw(where)}`);
   const okta = (subject: string, ...emails: string[]): Account => ({ ...github(subject, ...emails), provider: 'okta' });
+  // Cy's row, removed and edited. Bo, whose account says who he is, signs in whatever else his provider lists.
+  await edit('principals', `id = '${cy}'`);
+  assert.ok(!('refused' in await vault.change(signin(github('gh-bo', 'cy@acme.example', 'bo@acme.example'), 'bo-web-2'))));
+  // An account of Bo's marked revoked behind the vault, the edit that would take it out of a read of his live ones: no second account is bound for it.
+  await world.owner.execute(sql`UPDATE identities SET revoked_at = now() WHERE subject = 'gh-bo'`);
+  assert.deepEqual(await vault.change(signin(okta('okta-bo', 'bo@acme.example'), 'x-web')), { refused: 'tampered' });
+  await world.owner.execute(sql`UPDATE identities SET revoked_at = NULL WHERE subject = 'gh-bo'`);
   // Bo's account, edited: it is not his to sign in with, nor free for another to be bound in its place, to him or through his address.
   await edit('identities', "subject = 'gh-bo'");
   assert.deepEqual(await vault.change(signin(github('gh-bo', 'bo@acme.example'), 'x-web')), { refused: 'tampered' });
   assert.deepEqual(await vault.change(signin(github('gh-bo'), 'x-web')), { refused: 'tampered' }, 'by the account alone, with no email that names him');
   assert.deepEqual(await vault.change(signin(okta('okta-bo', 'bo@acme.example'), 'x-web')), { refused: 'tampered' }, 'not the second account it would hide');
   assert.equal(await who('bo-web'), 'unauthenticated', 'nor do its sessions stand');
-  // Cy's row, removed and edited: not passed over for the next email, which names Ada.
-  await edit('principals', `id = '${cy}'`);
+  // Cy's row is not passed over for the next email, which names Ada.
   assert.deepEqual(await vault.change(signin(github('gh-cy', 'cy@acme.example', 'ada@acme.example'), 'x-web')), { refused: 'tampered' });
   // Nor made anew for an Owner the configuration names, over the row that is there.
   assert.deepEqual(await owned.change(signin(github('gh-cy', 'cy@acme.example'), 'x-web')), { refused: 'tampered' });
@@ -272,7 +278,7 @@ test('a row written behind the vault is not a row that is absent: a sign-in that
   assert.deepEqual(await vault.change(signin(github('gh-dee'), 'x-web')), { refused: 'tampered' });
   // Ada, whom none of it touches, signs in.
   assert.ok(!('refused' in await vault.change(signin(github('gh-ada', 'ada@acme.example'), 'ada-web'))));
-  assert.deepEqual([await who('x-web'), (await entries()).length], ['unauthenticated', before + 1]);
+  assert.deepEqual([await who('x-web'), (await entries()).length], ['unauthenticated', before + 2]);
   assert.equal((await rowsOf(world.owner, sql`SELECT 1 FROM ${credentials} WHERE ${credentials.tokenHash} = ${tokenOf('x-web')}`)).length, 0);
   // The signer says which rows.
   assert.deepEqual(await checked(), ['row', 'row', 'row']);
