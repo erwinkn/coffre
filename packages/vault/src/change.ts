@@ -3,7 +3,7 @@ import type { KekRegistry } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
 import { gaveUpCode } from '@coffre/db/dialect';
 import { later, laterRows } from '@coffre/db/later';
-import { environments, secrets, secretVersions } from '@coffre/db/schema';
+import { bindings, environments, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 
@@ -127,8 +127,12 @@ export type Denied = Omit<Said, 'kept' | 'actor'> & { actor: string };
  * SHA-256 of what was signed (`spent_id_tokens`, the one table a change
  * writes that carries no MAC and no decision reads): the change is made
  * only if that hash was never spent, and is refused `replayed` otherwise.
+ * `used` is a trust binding the decision read, which the change is a use
+ * of: its last use moves on to the entry's date, in the change's own
+ * statement, so if and only if the change is made. No MAC covers that date
+ * (rows.ts), so the row stays as every other change read it.
  */
-export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; once?: Buffer; entry: Said; answer: A };
+export type Plan<A> = { writes: readonly Write[]; values?: readonly Value[]; once?: Buffer; used?: Row<typeof bindings>; entry: Said; answer: A };
 
 export type Operation<P extends Parts, A, C = undefined> = {
   read: P;
@@ -315,6 +319,12 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
     else (was === null ? group.inserts : group.updates).push({ ...toWire(table, row), mac: `\\x${mac!.toString('hex')}` });
   }
   // What it read and left, by the MAC it carried: the same twice.
+  const { once, used } = plan;
+  if (used !== undefined) {
+    if (!read.has(used)) throw new Error('a change is a use of a binding its decision read');
+    // Postgres writes a row once in a statement: which of two writes it kept would be anyone's guess.
+    if (rows.some((other) => other.row === nameOf(bindings, used))) throw new Error(`a change that writes ${nameOf(bindings, used)} does not move its last use on too`);
+  }
   for (const [row, name] of read) {
     const mac = (row as { mac: Buffer }).mac.toString('hex');
     if (!rows.some((other) => other.row === name)) rows.push({ row: name, was: mac, now: mac });
@@ -347,11 +357,13 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
   // The same rows, read again by the same conditions: one that changed, went or came since makes the lists differ.
   const again = sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || encode(${table}.mac, 'hex') FROM ${table} WHERE ${where}`), sql` UNION ALL `);
   const statements: SQL[] = [sql`same AS (SELECT (SELECT coalesce(array_agg(x ORDER BY x COLLATE "C"), '{}') FROM (${again}) seen (x)) = ${sql.param(tokens.sort())}::text[] AS ok)`];
-  const { once } = plan;
   // Spent only if the rows have not moved, so that a change that starts over does not find its own; and then everything
   // else is written only if it was not spent before: each write below selects from it, and so writes nothing without it.
-  if (once !== undefined) statements.push(sql`spent AS (INSERT INTO spent_id_tokens (hash, spent_at) SELECT decode(${once.toString('hex')}, 'hex'), ${new Date(dated).toISOString()}::timestamptz FROM same WHERE same.ok ON CONFLICT DO NOTHING RETURNING hash)`);
+  const when = sql`${new Date(dated).toISOString()}::timestamptz`;
+  if (once !== undefined) statements.push(sql`spent AS (INSERT INTO spent_id_tokens (hash, spent_at) SELECT decode(${once.toString('hex')}, 'hex'), ${when} FROM same WHERE same.ok ON CONFLICT DO NOTHING RETURNING hash)`);
   const made = once === undefined ? sql`same WHERE same.ok` : sql`same, spent WHERE same.ok`;
+  // With everything else or not at all, as each write below. Never put back: a later date the row has stays.
+  if (used !== undefined) statements.push(sql`used AS (UPDATE ${bindings} SET last_used_at = ${when} FROM ${made} AND ${bindings}.id = ${used.id} AND (${bindings}.last_used_at IS NULL OR ${bindings}.last_used_at < ${when}))`);
   const fromRows = (table: PgTable, wires: Wire[]) => sql`jsonb_populate_recordset(null::${table}, ${JSON.stringify(wires)}::jsonb) j, ${made}`;
   for (const { table, inserts, updates, deletes } of written.values()) {
     const shape = shapeOf(table);

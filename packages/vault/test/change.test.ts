@@ -15,7 +15,7 @@ import { entryOf, type Said } from '../src/entry.ts';
 import { keyOf, nameOf, sealedBy, shapeOf, type Fresh, type Row, type Sealed } from '../src/rows.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 import { emptyDatabase, openTestVault, VAULT_URL } from './database.ts';
-import { credential } from './world.ts';
+import { binding, credential } from './world.ts';
 
 const { bindings, credentials, deviceLogins, dismissedKeys, enrollmentCodes, environments, grants, identities, oauthClients, policy, principals, projects, roles, secrets } = schema;
 
@@ -347,6 +347,53 @@ test('a change that spends a proof is made once: a second is refused `replayed` 
   // A proof is its hash's 32 bytes, as a Buffer: anything else is told before a write.
   await assert.rejects(change(vault, promote('admin', randomBytes(16))), /32 bytes/);
   await assert.rejects(change(vault, promote('admin', new Uint8Array(32) as Buffer)), /32 bytes/);
+});
+
+test('a change that is a use of a binding moves its last use on, to its entry\'s date, if and only if it is made', async () => {
+  const api = 'token:api';
+  const bound = binding(api);
+  await done(writing(put(principals, member(api)), put(principals, member(ada)), put(bindings, bound)));
+  const read = { binding: part(bindings, eq(bindings.id, bound.id)), who: part(principals, eq(principals.id, ada)) };
+  const exchange = (to: string, once?: Buffer): Operation<typeof read, string> => ({
+    read,
+    decide: ({ binding: [found], who: [was] }) => ({ writes: [put(principals, member(ada, to), was!)], once, used: found!, entry: said('token.exchange', api), answer: to }),
+  });
+  const lastUse = async () => (await rowsOf<{ at: string | null }>(vault.owner, sql`SELECT last_used_at AS at FROM bindings`)).map(({ at }) => (at === null ? null : new Date(at).getTime()))[0];
+  const entryAt = async () => (JSON.parse((await rowsOf<{ body: string }>(vault.owner, sql`SELECT body FROM log_pending ORDER BY id DESC LIMIT 1`))[0]!.body) as { at: number }).at;
+
+  // Decided, then a row it read moves: not made, and the binding was not used.
+  const lost = await prepare(vault, exchange('admin'));
+  await done({ read: { who: read.who }, decide: ({ who: [was] }) => ({ writes: [put(principals, member(ada, 'auditor'), was!)], entry: said('role.auditor', ada), answer: null }) });
+  assert.deepEqual([await written(vault, lost as never), await lastUse()], ['moved', null]);
+  // Made: the entry's date, and the row is still the vault's, as every change that read it found it.
+  const proof = randomBytes(32);
+  const [other, mine] = [await prepare(vault, exchange('owner')), await prepare(vault, exchange('admin', proof))];
+  vault.tick(1000);
+  assert.equal(await written(vault, mine as never), 'made');
+  assert.deepEqual([await lastUse(), (await seenOf(bindings)).length], [await entryAt(), 1]);
+  assert.equal(await lastUse(), vault.now() - 1000, 'dated as the change was decided');
+  // One that read the binding before that use is not stopped by it: only by the member's row, which the first wrote.
+  assert.equal(await written(vault, other as never), 'moved');
+  const beside = await prepare(vault, { read: { binding: read.binding }, decide: ({ binding: [found] }: Pick<Seen<typeof read>, 'binding'>) => ({ writes: [], used: found!, entry: said('token.renew', api), answer: null }) });
+  vault.tick(1000);
+  assert.deepEqual(await change(vault, { read: { binding: read.binding }, decide: ({ binding: [found] }) => ({ writes: [], used: found!, entry: said('token.renew', api), answer: null }) }), { answer: null });
+  const moved = await lastUse();
+  assert.equal(moved, vault.now());
+  // The older one lands after: made, since the row's MAC is the one it read, and the later date stays.
+  assert.deepEqual([await written(vault, beside as never), await lastUse()], ['made', moved]);
+  // A proof spent before: refused, and no use.
+  vault.tick(1000);
+  assert.deepEqual([await change(vault, exchange('member', proof)), await lastUse()], [{ refused: 'replayed' }, moved]);
+  // A refusal is no use either.
+  assert.deepEqual([await change(vault, { read, decide: () => ({ refused: 'frozen' }) }), await lastUse()], [{ refused: 'frozen' }, moved]);
+  // The binding is one the decision read, and one the change does not write as well.
+  const [found] = await seenOf(bindings);
+  await assert.rejects(change(vault, { read: nothing, decide: () => ({ writes: [], used: found!, entry: said('test'), answer: null }) }), /a binding its decision read/);
+  await assert.rejects(
+    change(vault, { read, decide: ({ binding: [it] }: Seen<typeof read>) => ({ writes: [put(bindings, { ...bound, label: 'CI' }, it!)], used: it!, entry: said('test'), answer: null }) }),
+    /does not move its last use on too/,
+  );
+  assert.equal(await lastUse(), moved);
 });
 
 test('a check runs between a change\'s read and its decision, on the rows read, and again each time the change starts over', async () => {
