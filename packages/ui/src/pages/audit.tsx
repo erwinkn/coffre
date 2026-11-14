@@ -64,7 +64,16 @@ export function AuditPage() {
   };
   const signed = result.head === null ? null : `${absolute(result.head.signedAt, false)} UTC`;
   const holes = result.holes ?? [];
-  const missing = holes.reduce((sum, hole) => sum + hole.kept + hole.aging, 0);
+  // Kept entries are never pruned, so a kept one missing is removed; an aging
+  // one may have been pruned while the page read the log.
+  const gone = (kind: 'kept' | 'aging') => {
+    const found = holes.filter((hole) => hole[kind] > 0);
+    const count = found.reduce((sum, hole) => sum + hole[kind], 0);
+    const places = found.length === 1 ? where(found[0]!) : `, in ${found.length} places`;
+    return { count, places, entries: `${count.toLocaleString('en')} ${count === 1 ? 'entry' : 'entries'}` };
+  };
+  const removed = gone('kept');
+  const pruned = gone('aging');
   const shown = lines(result.entries);
   const filters = { decision, actorId };
 
@@ -78,6 +87,7 @@ export function AuditPage() {
             <ProofStatus
               head={result.head}
               counts={counts}
+              pruned={pruned.count > 0}
               checking={entries.isFetching}
               onCheck={() => void entries.refetch()}
             />
@@ -97,13 +107,21 @@ export function AuditPage() {
         </div>
       )}
 
-      {missing > 0 && (
+      {removed.count > 0 && (
+        <div style={{ marginBottom: '1.25rem' }}>
+          <Notice tone="bad">
+            <strong>Treat this as an incident.</strong> The log lacks {removed.entries} the vault’s head numbers
+            {removed.places}. Nothing prunes these entries: something with direct access to the database removed them.
+          </Notice>
+        </div>
+      )}
+
+      {pruned.count > 0 && (
         <div style={{ marginBottom: '1.25rem' }}>
           <Notice tone="warn">
-            The log lacks {missing.toLocaleString('en')} {missing === 1 ? 'entry' : 'entries'} the vault’s head numbers
-            {holes.length === 1 ? where(holes[0]!) : `, in ${holes.length} places`}. A prune while the page read the log
-            does this, and checking again settles it; entries that stay missing were removed by something with direct
-            access to the database.
+            The log lacks {pruned.entries} the vault’s head numbers{pruned.places}, all of the kind it prunes with
+            age. A prune while the page read the log does this, and checking again settles it; entries that stay missing
+            were removed by something with direct access to the database.
           </Notice>
         </div>
       )}
@@ -390,11 +408,14 @@ function where(hole: { above: number | null; below: number | null }): string {
 function ProofStatus({
   head,
   counts,
+  pruned,
   checking,
   onCheck,
 }: {
   head: Head;
   counts: Record<Proof, number>;
+  /** The log lacks entries a prune may have taken while the page read it, which checking again settles. */
+  pruned: boolean;
   /** The page is being asked again. */
   checking: boolean;
   onCheck: () => void;
@@ -440,13 +461,14 @@ function ProofStatus({
             align="end"
             label={`Past the head the vault signed at ${signed}, of ${head.size.toLocaleString('en')} entries: signed since, or put there by something with direct access to the database. Checking again, against a newer head, settles the first.`}
           >
-            <button type="button" className="chain-note" role="status">
+            <button type="button" className="chain-note">
               {plural(counts.unproven)} not proven
             </button>
           </Toggletip>
           {again}
         </>
       )}
+      {pruned && counts.unproven === 0 && again}
       {counts.proven > 0 && (
         <Toggletip
           align="end"
