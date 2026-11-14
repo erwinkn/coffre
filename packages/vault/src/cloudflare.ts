@@ -49,7 +49,8 @@ export type WorkersVaultConfig = VaultConfig & {
 
 /** The signer's object, as the configuration names it. */
 function signerNameOf({ signerName = SIGNER }: WorkersVaultConfig): string {
-  if (typeof signerName !== 'string' || signerName === '') throw new Error(`signerName names the signer's object, a text that is not empty; got ${JSON.stringify(signerName)}`);
+  // Cloudflare gives an object a name longer than 1,024 bytes no `id.name`, and the fence would refuse it.
+  if (typeof signerName !== 'string' || signerName === '' || new TextEncoder().encode(signerName).length > 1024) throw new Error(`signerName names the signer's object, a text of 1 to 1,024 bytes; got ${JSON.stringify(signerName)}`);
   return signerName;
 }
 

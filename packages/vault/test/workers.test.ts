@@ -179,6 +179,21 @@ test("a database restored, deployed with a new `signerName`: the vault calls tha
   }
 });
 
+test('a `signerName` of 1,024 bytes names the signer, whose object Cloudflare gives that name; one of 1,025 is refused, as Cloudflare would give it none', { timeout: 120_000 }, async () => {
+  await instance();
+  for (const [signerName, fits] of [['é'.repeat(512), true], ['é'.repeat(512) + 'x', false]] as const) {
+    const vault = await freshVault(VAULT_URL, { signerName });
+    try {
+      const done = await vault.write('bo-cli', 'market/prod', { KEY_0: signerName.length.toString() });
+      if (fits) assert.deepEqual([done.status, (await vault.status()).adopted], [200, true]);
+      // Refused at once, rather than an object the fence takes for another, and `adopting` for good.
+      else assert.match((done.body as unknown as { error: string }).error, /^signerName names the signer's object, a text of 1 to 1,024 bytes/);
+    } finally {
+      await vault.stop();
+    }
+  }
+});
+
 test('a fresh database is adopted at the first call, a sign-in, which is answered: the Owner the configuration names signs in at the first try', { timeout: 120_000 }, async () => {
   await emptyDatabase(world.owner);
   const vault = await freshVault(VAULT_URL);
