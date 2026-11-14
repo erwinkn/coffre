@@ -5,7 +5,7 @@
 // reads the credential's row to find the place it uses and, for a workload's
 // session, its gate (docs/design/0.16.md, "What the app reads of a workload,
 // and decides nothing on"), and the vault decides on its own rows.
-import { CoffreError } from '@coffre/client';
+import { CoffreError, type CoffreClient } from '@coffre/client';
 import { hashToken, type BindingPolicy, type Constraints, type GateCount } from '@coffre/core/identity';
 import type { Peeked, Presented, Used as VaultUsed } from '@coffre/core/vault';
 import { isUnreachable } from '@coffre/db/dialect';
@@ -13,8 +13,11 @@ import { isUnreachable } from '@coffre/db/dialect';
 import { ApiError, refusal, toErrorBody } from './api/errors.ts';
 import { stopOf } from './api/routes/secrets.ts';
 import { routedCredential, type RoutedCredential } from './db/queries/sessions.ts';
+import { exchangeToken } from './exchange.ts';
+import { tokenClient } from './fetch-api.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { dpopToken, gated, SessionRefused, sessionProof, sessionStopped, unknown } from './sessions.ts';
+import { logout } from './signin.ts';
 
 /** One plugin, as its constructor returns it: `credentialProxy({ … })`. */
 export type CoffrePlugin = {
@@ -52,9 +55,30 @@ export type Socket = Pipe & { startTls(servername: string): Promise<Pipe> };
 /** TCP out, as the platform opens it; `signal` gives up a dial still under way. */
 export type Connect = (host: string, port: number, signal?: AbortSignal) => Promise<Socket>;
 
-/** What a plugin's route answers with: where coffre is, and the values a request's credential may use. */
+/** What a plugin's route answers with: where coffre is, the values a request's credential may use, and the API as a token's holder. */
 export type PluginContext = {
   publicUrl: string;
+  /**
+   * The API as whoever `token` names, which the plugin read from its
+   * request: a service, personal or CLI token, sent as a bearer token,
+   * never a cookie, which coffre alone reads. In process (`tokenClient`):
+   * the vault is asked about the token once, by the first call that needs
+   * to know, for all of them; each call costs what the same call over HTTP
+   * does. Behind Access, refused as any bearer token is. A refusal, the
+   * token's included, throws a `CoffreError`.
+   */
+  api(token: string): CoffreClient;
+  /**
+   * The request as a workload's sign-in, `POST /api/auth/oidc` on the
+   * plugin's own request, in process (`exchangeToken`): its limits first,
+   * then the body, read only to its limit, which `asked` says in the API's
+   * words, `{ service, token }`; then the token checked and spent, and a
+   * credential of the service for five minutes. A refusal throws a
+   * `CoffreError`; a body that does not say what the API's would, 400.
+   */
+  exchange(asked: (body: unknown) => { service: unknown; token: unknown }): Promise<{ token: string; expiresAt: string }>;
+  /** End the credential `token` is, as `POST /api/auth/logout` with it as a bearer token does (`logout`). A refusal throws a `CoffreError`. */
+  signOut(token: string): Promise<void>;
   /**
    * Values of the environment `path` names, `market/dev` or `market/dev@me`,
    * for whoever `caller` is: a handle (`coffre_use_…`) the plugin read from
@@ -201,10 +225,10 @@ export function checkPlugins(plugins: readonly CoffrePlugin[]): readonly CoffreP
 }
 
 /** The plugin's answer to a request under its prefix; null when no plugin takes the path. */
-export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response> | null {
+export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): Promise<Response> | null {
   const { pathname } = new URL(request.url);
   const routes = runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
-  return routes === undefined ? null : routes.fetch(request, pluginContext(request, runtime, sourceIp));
+  return routes === undefined ? null : routes.fetch(request, pluginContext(request, runtime, sourceIp, track));
 }
 
 /** The plugin's answer to a WebSocket asked for under its prefix; null when no plugin takes it. */
@@ -233,6 +257,13 @@ function thrown(error: ApiError): CoffreError {
 async function workloadRefused(response: Response): Promise<WorkloadRefused> {
   const body = (await response.clone().json()) as { error?: string; message?: string; reason?: string };
   return new WorkloadRefused(response.status, body.error ?? 'error', body.message ?? response.statusText, body.reason, response);
+}
+
+/** A route's answer as a plugin takes it: its body, or its refusal thrown, as the client throws the API's. */
+async function answered(response: Response): Promise<unknown> {
+  const body = (await response.json().catch(() => ({}))) as { error?: string; message?: string; reason?: string };
+  if (!response.ok) throw new CoffreError(response.status, body.error ?? 'error', body.message ?? response.statusText, body.reason);
+  return body;
 }
 
 /**
@@ -300,11 +331,17 @@ function placeOf(path: string): { project: string; environment: string; mine: bo
 /** What a workload caller stands on, kept by the context of the request it was made for: `use` takes back only those. */
 type Standing = { token: string; proof: string; sourceIp: string | null };
 
-function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: string | null): PluginContext {
+function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): PluginContext {
   // The workload callers this request's context made: the only ones its `use` takes.
   const standings = new WeakMap<WorkloadUse, Standing>();
   return {
     publicUrl: runtime.publicUrl,
+    api: (token) => tokenClient(token, runtime, sourceIp),
+    exchange: async (asked) => (await answered(await exchangeToken(request, runtime, sourceIp, track, asked))) as { token: string; expiresAt: string },
+    signOut: async (token) => {
+      const ending = new Request(`${runtime.publicUrl}/api/auth/logout`, { method: 'POST', headers: { authorization: `Bearer ${token}` } });
+      await answered(await logout(ending, runtime, sourceIp, track, undefined));
+    },
     handle: async (handle) => {
       const row = await routed(runtime, hashToken(handle));
       if (row === null || row.kind !== 'handle') throw thrown(new ApiError('unauthenticated', 'that handle is unknown, expired or revoked'));

@@ -43,7 +43,7 @@ const PATHS: Record<string, { method: 'GET' | 'POST'; handler: Handler; browserF
   '/api/auth/logout': { method: 'POST', handler: logout },
   '/auth/signout': { method: 'POST', handler: signOut, browserForm: true },
   // A CI run's exchange (exchange.ts): its platform's ID token, for a five-minute token of its service.
-  '/api/auth/oidc': { method: 'POST', handler: exchangeToken },
+  '/api/auth/oidc': { method: 'POST', handler: (request, runtime, sourceIp, track) => exchangeToken(request, runtime, sourceIp, track) },
   // MCP's OAuth (mcp/http.ts): the metadata clients read first, then the token, registration and revocation endpoints;
   // and the endpoint its access tokens are for (mcp/endpoint.ts).
   '/.well-known/oauth-protected-resource': { method: 'GET', handler: protectedResource },
@@ -93,7 +93,7 @@ export async function coffreRoute(request: Request, runtime: CoffreRuntime, sour
     return step === 'signin' ? startSignin(request, runtime, id) : finishSignin(request, runtime, sourceIp, id);
   }
   // A plugin's paths, the credential proxy's `/use` among them.
-  return pluginRoute(request, runtime, sourceIp);
+  return pluginRoute(request, runtime, sourceIp, track);
 }
 
 /** What a page renders with: this response's nonce, the API as the visitor, and how they have the pages drawn. */

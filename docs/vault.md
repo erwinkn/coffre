@@ -39,8 +39,9 @@ export const Route = createFileRoute('/v1/$')({ ...plugin });
 
 Build and deploy. The mount is `secret`, as in Vault, and
 `vaultKv({ mount: 'kv' })` changes it. The adapter needs coffre's own
-sign-in. Behind Cloudflare Access, a Vault token would have to be Access's
-own short-lived assertion, which these tools cannot get.
+sign-in. Behind Cloudflare Access, which 0.16.0 serves to browsers alone,
+it refuses every token before anything is read (403), as the API refuses
+the CLI's.
 
 ## Paths
 
@@ -120,10 +121,12 @@ audit entry for each environment it opens values in, naming the keys:
 one for a plain environment, plus one per parent for a fork that
 inherits, and per source for references into another environment.
 
-A secret that is not there answers 404. That happens for an environment or
-a key that does not exist, or one that was archived or deleted. ESO reads a
-404 as the secret gone, and with `deletionPolicy: Delete` it deletes its
-target. A `property` the environment lacks is different: the read of
+A key that is not there answers 404: one that does not exist, or was
+archived or deleted. ESO reads a 404 as the secret gone, and with
+`deletionPolicy: Delete` it deletes its target. An environment that is not
+there answers 403, as one the token cannot read does: the vault does not
+say which, so ESO reports an error and keeps its target (0.14 answered
+404). A `property` the environment lacks is different: the read of
 `market/prod` succeeds, and ESO reports that the property is missing and
 keeps the target. To have a key's archiving remove it from the target,
 read the key by its own path, so that its absence is the 404:
@@ -303,5 +306,5 @@ For one key, template the path:
 `dev/vault-kv/main.go` makes ESO's calls through HashiCorp's own Go client
 against `pnpm dev`. It is a manual check, kept for when a client changes,
 and the test suite does not run it. Its header comment says how to run it.
-[0.14.7's vault-kv test](https://github.com/erwinkn/coffre/blob/v0.14.7/packages/server/test/vault-kv.test.ts) sent the same requests in its
-suite.
+`packages/server/test/vault-kv.test.ts` and `vault-kv-login.test.ts` send
+the same requests in the suite.

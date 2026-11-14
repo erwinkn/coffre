@@ -53,7 +53,7 @@ import { IssuerUnavailable, verifyWithKeys } from './workloads/keys.ts';
  * Not yet: 0.14.7's count of what one binding issued a minute (60), which
  * the service's gate keeps in 0.16, with the workload's sessions.
  */
-export async function exchangeToken(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): Promise<Response> {
+export async function exchangeToken(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}, asked: ExchangeAsked = (body) => body): Promise<Response> {
   const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
   if (workloads === null) return errorResponse(notFound('this instance trusts no workloads'));
   // A strict instance issues no bearer credential to a service: its workloads sign in with a key.
@@ -65,13 +65,21 @@ export async function exchangeToken(request: Request, runtime: CoffreRuntime, so
   if (inFlight >= MAX_IN_FLIGHT) return refuse('busy', 'too many exchanges under way: try again shortly', 429);
   inFlight++;
   try {
-    return await exchanged(request, runtime, workloads, sourceIp, track);
+    return await exchanged(request, runtime, workloads, sourceIp, track, asked);
   } catch (error) {
     return errorResponse(error);
   } finally {
     inFlight--;
   }
 }
+
+/**
+ * What a request's body asks for, `{ service, token }`, in the words of
+ * whoever sent it: the API's own, or a plugin's (`PluginContext.exchange`),
+ * Vault's `{ role, jwt }`. Read after admission, from the body read to its
+ * limit; what it gives is held to `exchangeBody` as the API's is.
+ */
+export type ExchangeAsked = (body: unknown) => unknown;
 
 /** An exchange's body: the service and the token, and nothing else, in at most this many bytes. */
 const EXCHANGE_BODY_BYTES = 16 * 1024;
@@ -115,8 +123,8 @@ const WORDS: Record<string, string> = {
 /** The vault's words a run is told in 0.14.7's: `unknown_key` is a secret's key in the vault's, a signing key's on the wire. */
 const SAID: Record<string, string> = { unknown_signer: 'unknown_key' };
 
-async function exchanged(request: Request, runtime: CoffreRuntime, workloads: WorkloadsConfig, sourceIp: string | null, track: (work: Promise<unknown>) => void): Promise<Response> {
-  const body = exchangeBody.parse(await readLimitedJson(request, EXCHANGE_BODY_BYTES));
+async function exchanged(request: Request, runtime: CoffreRuntime, workloads: WorkloadsConfig, sourceIp: string | null, track: (work: Promise<unknown>) => void, asked: ExchangeAsked): Promise<Response> {
+  const body = exchangeBody.parse(asked(await readLimitedJson(request, EXCHANGE_BODY_BYTES)));
   let decoded: DecodedToken;
   try {
     decoded = decodeWorkloadToken(body.token);
