@@ -91,9 +91,8 @@ Then sign in at `PUBLIC_URL` as the Owner, the first time, and from a terminal:
 coffre login https://secrets.example.com
 ```
 
-Point a monitor at `<PUBLIC_URL>/readyz`: it turns red while the database
-lacks this version's migrations. The signer's alerts are the vault's
-`alert` setting.
+Point a monitor at `<PUBLIC_URL>/readyz`: it turns red when the audit log
+stops taking writes or the vault stops checkpointing it.
 
 Everything coffre keeps is in the database: secrets, members, grants and
 the audit log. Back it up as one, keep the escrowed keys apart from it, and

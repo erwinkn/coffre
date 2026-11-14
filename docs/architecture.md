@@ -330,7 +330,7 @@ token is not, and `/mcp` takes nothing but one. A tool's call is API calls
 in process, as its person, through this same table (`fetchApi`, as a page's
 render): the request carries its connection (`via`), which the router holds
 to a table of the scope each route needs (`ROUTE_SCOPES`), and which every
-entry it writes names, the vault's as their `credentialId`. A tool that
+entry it writes names, as `via` in its detail. A tool that
 changes something makes no change when called: it opens a row in
 `mcp_approvals`, its tool and arguments, and the person decides it on
 `/approvals/<id>`, whose Approve, an ordinary row of the table, makes the
@@ -428,8 +428,11 @@ access; the app's login only reads ([Four rules](design/0.16.md#four-rules)). So
 Users page, a project's Access tab and a member's page read the rows
 directly, scoped by the caller's answer: a list is a display, not a
 decision. The app cannot check a row's MAC, so a row changed around the
-vault lists as stored; the vault refuses it at its first use, and the
-signer finds it within about a minute ([What it promises](design/0.16.md#what-it-promises)).
+vault lists as stored. The vault refuses it at its first use if its MAC
+no longer covers it. The signer compares only MACs, against its own copy
+of each: within about a minute it finds a row added, deleted or put back
+from an older copy, but not one edited under its old MAC, which only the
+vault's refusal catches ([What it promises](design/0.16.md#what-it-promises)).
 
 ### Transports
 
@@ -516,8 +519,9 @@ to its own copy of the row's MAC and alerts on what differs. `GET
 - **Access granted around the vault.** Every row that turns into access
   carries the vault's MAC. A grant written straight into the database fails
   it, and the vault refuses to decide on it (`tampered`). A genuine old row
-  put back is honoured until the signer, holding its own copy of every
-  such MAC, alerts within about a minute ([What it promises](design/0.16.md#what-it-promises)).
+  put back is honoured: the signer, holding its own copy of every such MAC,
+  alerts within about a minute, but the alert revokes nothing, so the row
+  stays in force until an operator acts on it ([What it promises](design/0.16.md#what-it-promises)).
 
 What it does not stop: an app fully taken over can act as anyone who already
 has access. The vault makes that loud rather than impossible: the key never
@@ -593,11 +597,12 @@ credentials are kept, since the runtime logins delete nothing; a CI run
 adds two small rows.
 
 **Which run did what.** Every entry a request on such a credential writes
-names it, as `credentialId` in its metadata, which the vault copies from
-its call's correlation and never decides on. The exchange's entry names the same credential, with
-the run's claims. A credential an entry acts on (one a sign-in opens, a
-token issued, a session revoked) is its `targetCredentialId`, so revoking
-another run's credential is the caller's act, never that run's. So a secret read leads back to its run in one indexed
+names it as its `credential`: the one the vault authenticated from the
+token the call presented, not an ID the app passes. The exchange's entry
+names the same credential, with the run's claims. A credential an entry
+acts on (one a sign-in opens, a token issued, a session revoked) is in its
+detail, as `credential`, so revoking another run's credential is the
+caller's act, never that run's. So a secret read leads back to its run in one indexed
 read, whatever became of the credential's row, and the audit page shows the
 run under the actor ("acme/api run 7001 at 3f2a9c1"): what the issuer
 asserted, not proof of which run sent the request.
@@ -760,12 +765,15 @@ Each limit is stated here once; the other documents link to it.
   more than 50 secrets cannot be read in one call.
 - **A vault key cannot be retired yet.** A new vault key wraps new versions only; every
   older version still needs the vault key that wrapped it, configured in
-  `previousKeks` and escrowed, until a rewrap command exists.
+  `previousKeks` and escrowed, until a rewrap command exists. With local
+  keys, the signing key a previous vault key stands for still verifies
+  rows and entries, whenever they were signed ([keys](keys.md#a-local-key)).
 - **A holder of the vault's signing key can forge its rows and entries.** A
   copied database alone cannot. With a local vault key, the signing key
   comes from the vault key: whoever holds it, and can write the database,
   can forge members and grants, besides reading every value.
 - **The app key cannot be rotated yet** ([still to design](design/0.16.md#still-to-design)).
 - **A MAC proves a row is genuine, not current.** Putting back a genuine old
-  sign-in row can undo one sign-out until the signer's alert, within about a
-  minute; a member's removal still ends it, through the generation.
+  sign-in row can undo one sign-out. The signer alerts within about a
+  minute, but the credential works until it expires or an operator acts;
+  a member's removal still ends it, through the generation.

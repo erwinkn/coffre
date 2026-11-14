@@ -42,22 +42,19 @@ kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },                    // vault-2
 previousKeks: [{ id: env.OLD_VAULT_KEY_ID, key: env.OLD_VAULT_KEY }], // vault-2026-04-01-3m4n5p
 ```
 
-New values are wrapped under the new vault key. At its first call, the vault
-moves to the key it derives from the new vault key: it seals every member row
-again under it, and writes a `key.rotate` entry, its first under that key.
-The old vault key
-still opens what it wrapped, and still verifies what the vault wrote before
-the rotation, so it stays configured for good: without it, the old entries no
-longer verify.
+New values are wrapped under the new vault key, and the old one still opens
+what it wrapped, so it stays configured until a rewrap command exists. With
+local keys and no `signingKey`, the vault signs new rows and entries with the
+key the new vault key stands for, and verifies with the keys every
+configured vault key stands for, the previous ones included: rows and
+entries signed before the rotation keep verifying.
 
-A replaced vault key stays configured to verify the past, and can't vouch for
-anything after the rotation. An entry or a member row under
-its keys after that point fails verification, so a vault key replaced because it
-leaked forges nothing from then on. What was forged with it before the
-rotation verifies like the rest; that is the leak's window. A vault still
-running with the old vault key, as for the seconds a deploy takes, writes nothing
-after the rotation: its calls fail until it is replaced. And a vault key, once
-replaced, cannot come back as `kek`: the vault refuses to write under it.
+0.16 sets no cutoff on those previous keys, and seals nothing again: a row
+or entry signed with a previous vault key's signing key verifies whenever it
+was signed, even with a `signingKey` set. So a vault key replaced because it
+leaked can still forge rows and entries for as long as it stays configured,
+which it must to open what it wrapped. The signer still finds a forged row
+within about a minute: its MAC is not the one in the signer's copy.
 
 ## Check your escrow
 
