@@ -177,6 +177,10 @@ export const secretRoutes = {
    * key it does not hold, or one with no value, is left out unnamed. Any
    * other key that cannot be read refuses the whole read, rather than run
    * without it.
+   *
+   * `versions` says, for each value in `values`, the number of the version
+   * it opened: a reference's, its source's, as the listing shows it. The
+   * page keeps a revealed value only while that equals the row's number.
    */
   ...route('POST /reveals', {
     input: z.object({ path: readPath, keys: z.array(secretKey).min(1).max(MOST_READ).optional() }).strict(),
@@ -194,8 +198,9 @@ export const secretRoutes = {
         upstream: null,
       });
       if ('refused' in answer) throw refusal(answer.refused, one === undefined ? named : `${named}/${one}`);
-      // A null-prototype record: a key named __proto__ is a key like any other.
+      // Null-prototype records: a key named __proto__ is a key like any other.
       const values: Record<string, string> = Object.create(null);
+      const versions: Record<string, number> = Object.create(null);
       const read: { key: string; secret: string; version: number }[] = [];
       const left: Record<string, string[]> = { sensitive: [], use_only: [] };
       // One key is refused whole with why; a whole environment, as `stopOf` says.
@@ -205,10 +210,11 @@ export const secretRoutes = {
         if ('refused' in item) left[item.refused]?.push(item.key);
         else {
           values[item.key] = item.value;
+          versions[item.key] = item.version;
           read.push(item);
         }
       }
-      return { operationId: ctx.shown.request, values: { ...values }, sensitive: left.sensitive!, useOnly: left.use_only!, version: one === undefined ? versionOf(read) : null };
+      return { operationId: ctx.shown.request, values: { ...values }, versions: { ...versions }, sensitive: left.sensitive!, useOnly: left.use_only!, version: one === undefined ? versionOf(read) : null };
     },
   }),
 

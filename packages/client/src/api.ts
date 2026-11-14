@@ -14,6 +14,9 @@ export type Api = {
       values: {
         [key: string]: string;
       };
+      versions: {
+        [key: string]: number;
+      };
       sensitive: string[];
       useOnly: string[];
       version: string | null;

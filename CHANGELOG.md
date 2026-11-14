@@ -27,6 +27,14 @@
   depends on `pg` or `pg-connection-string` any more, and a deployment
   installs no driver. Database URLs are read as before, TLS included.
 
+- **A reveal says which version it opened.** `POST /api/reveals` answers
+  `versions`, each value's version number beside `values` (a reference's,
+  its source's), from the vault's one answer, at no extra cost. The
+  environment page keeps a revealed value, or an edit's starting value,
+  only while that number is the row's: a read that opened a newer version
+  than the listing showed refetches the listing first, and one the listing
+  has moved past by then hides, where it was shown under the number the
+  row had when clicked.
 - **A key marked in place, as one change.** `coffre mark` (`{ "KEY": {
   "sensitivity" } }` alone in a write) is served again: the value is kept
   as the key's next version, with its first date, recipe and pair. A

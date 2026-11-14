@@ -95,7 +95,7 @@ async function cost<T>(run: () => Promise<T>): Promise<[T, string[], number]> {
 test("a reveal answers the values the vault opened, and the vault's entry names the request", async () => {
   const [status, body] = await reveal('ada-cli', 'market/prod/DATABASE_URL');
   assert.equal(status, 200, JSON.stringify(body));
-  assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', values: { DATABASE_URL: 'postgres://märkt' }, sensitive: [], useOnly: [], version: null });
+  assert.deepEqual({ ...body, operationId: 'x' }, { operationId: 'x', values: { DATABASE_URL: 'postgres://märkt' }, versions: { DATABASE_URL: 1 }, sensitive: [], useOnly: [], version: null });
   assert.match(String(body.operationId), /^[0-9a-f-]{36}$/);
   // The vault's entry names the request by the id the app answered with.
   const [entry] = await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id DESC LIMIT 1`);
@@ -104,6 +104,27 @@ test("a reveal answers the values the vault opened, and the vault's entry names 
   await reveal('ada-cli', 'market/prod', ['FLAG']);
   const [ran] = await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id DESC LIMIT 1`);
   assert.ok(ran!.body.includes('"purpose":"run"'), ran!.body);
+});
+
+test("a reveal says the version each value opened, as the listing numbers its row: a reference's is its source's", async () => {
+  const write = async (patch: Record<string, unknown>) => (await answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify(patch) }))))[0];
+  assert.equal(await write({ LINK: { ref: 'market/prod/DATABASE_URL' } }), 200);
+  assert.equal(await write({ DATABASE_URL: 'postgres://v2' }), 200);
+  world.memory.reads.clear();
+  const [, listed] = await answered(app.request('/api/secrets/market/prod', as('ada-cli')));
+  const rows = listed.keys as { key: string; version: number | null; reference: { version: number | null } | null }[];
+  const numbered = Object.fromEntries(rows.map((row) => [row.key, row.reference === null ? row.version : row.reference.version]));
+  assert.deepEqual([numbered.DATABASE_URL, numbered.LINK], [2, 2]);
+  // One key, and the reference: its source's number, as the page's row shows it.
+  const [[status, one], calls, statements] = await cost(() => reveal('ada-cli', 'market/prod/LINK'));
+  assert.equal(status, 200, JSON.stringify(one));
+  assert.deepEqual([one.values, one.versions], [{ LINK: 'postgres://v2' }, { LINK: 2 }]);
+  // Said from the vault's one answer: no other call, and no statement of the app's.
+  assert.deepEqual([calls, statements], [['use'], 0]);
+  // A whole environment: one number for each value it hands, and none for what it leaves out.
+  const [, whole] = await reveal('ada-cli', 'market/prod');
+  assert.deepEqual(whole.versions, { DATABASE_URL: 2, FLAG: numbered.FLAG, LINK: 2 });
+  assert.deepEqual(Object.keys(whole.versions as object).sort(), Object.keys(whole.values as object).sort());
 });
 
 test('every answer carries coffre\'s security headers, a refusal\'s too', async () => {
