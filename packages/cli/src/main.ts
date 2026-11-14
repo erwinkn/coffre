@@ -204,6 +204,18 @@ function fail(message: string): never {
   process.exit(1);
 }
 
+/**
+ * A command that reads what 0.16 deleted, refused by name until it is moved
+ * (docs/design/0.16.md, "Build order", the core's step: `coffre restore`'s
+ * check of a backup). `coffre backup`, `coffre restore` and `coffre verify
+ * backup` read 0.14's audit log, its chain head and its envelopes, which
+ * the 0.16 schema does not hold; their code stays in backup.ts and
+ * restore.ts, to be moved, and loads for none of them.
+ */
+function notIn016(command: string): never {
+  fail(`coffre ${command} is not in 0.16 yet: it reads 0.14's audit log and envelopes, which a 0.16 database does not hold`);
+}
+
 function attempt<T>(step: () => T): T {
   try {
     return step();
@@ -2026,8 +2038,7 @@ async function verify(args: string[]): Promise<void> {
       if (more.length > 0) fail('usage: coffre verify log');
       return verifyLog();
     case 'backup':
-      // Its own chunk, as restore's: the database driver loads only for it.
-      return (await import('./restore.ts')).verifyBackup(more);
+      return notIn016('verify backup');
     default:
       process.stderr.write(`coffre: no check named ${check}\n${VERIFY_USAGE}\n`);
       process.exit(2);
@@ -2109,8 +2120,8 @@ const COMMANDS: Record<Command, (args: string[]) => unknown> = {
   setup: async (args) => (await import('./setup.ts')).setup(args),
   update: async (args) => (await import('./update.ts')).update(args),
   migrate: async (args) => (await import('./migrate.ts')).migrate(args),
-  backup: async (args) => (await import('./backup.ts')).backup(args),
-  restore: async (args) => (await import('./restore.ts')).restore(args),
+  backup: () => notIn016('backup'),
+  restore: () => notIn016('restore'),
   login,
   logout,
   whoami,
