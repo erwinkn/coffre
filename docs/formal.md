@@ -432,7 +432,7 @@ for a binding, and for a seal, where the code said so and let it be.
 One principal reads, on two credentials at once, with a local key or a
 key service, while a clock runs. Each decision counts the distinct keys
 of the principal's `secret.read` entries stamped inside the window, with
-those it would release (`snapshot.postgres.ts`). The code reads them from
+those it would release (0.14's `snapshot.postgres.ts`, gone in 0.16). The code reads them from
 `vault_releases`, which a trigger keeps from those entries in their own
 transaction, under the same head: the model's count of the log is what the
 table holds.

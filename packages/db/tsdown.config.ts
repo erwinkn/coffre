@@ -16,8 +16,6 @@ export default defineConfig({
     hyperdrive: 'src/hyperdrive.ts',
     connect: 'src/connect.ts',
     migrate: 'src/migrate.ts',
-    log: 'src/log.ts',
-    grants: 'src/grants.ts',
     'postgres-platform-node': 'src/postgres-js/platform.node.ts',
     'postgres-platform-workerd': 'src/postgres-js/platform.workerd.ts',
   },

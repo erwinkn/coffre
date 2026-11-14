@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 
 import { DEFAULT_POLICY, EVERYWHERE, type Holdings } from '@coffre/core/access';
 
-import { keyRefusals, sensitiveRefusals, type Reader } from '../src/decide.ts';
-import type { EnvironmentRow } from '../src/store.ts';
+import { keyRefusals, sensitiveRefusals, type EnvironmentRow, type Reader } from '../src/decide.ts';
 
 // The vault's per-key decision, which formal/lean holds to its model on
 // generated cases (`pnpm formal:lean`); these are the cases it found.

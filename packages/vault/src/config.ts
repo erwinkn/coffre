@@ -16,9 +16,8 @@ export const DEFAULT_BULK_LIMIT: BulkLimit = { count: 1000, windowMs: 15 * 60_00
 
 /**
  * The longest bulk limit window: a day. The releases a window counts are
- * kept a day and an hour (migration 0021's `prune_vault_releases`,
- * `RELEASES_KEPT_MS`), so every window up to it, and one widened
- * since, counts exactly.
+ * kept a day and an hour (migration 0021's `prune_vault_releases`), so
+ * every window up to it, and one widened since, counts exactly.
  */
 export const MAX_BULK_WINDOW_MINUTES = 24 * 60;
 
