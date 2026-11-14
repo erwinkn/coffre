@@ -8,7 +8,7 @@ import {
   assumedRole, canonicalClaims, checkPolicy, hardEnd, matchAwsAnswer, matchIdToken, oldestMatching, policyText, readIdToken, runClaims, sessionRefusal, signatureRefusal, timesRefusal,
   type DecodedToken, type ProofBinding, type ProofFor, type VerifiedUnder,
 } from '@coffre/core/identity';
-import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
+import { exportJWK, FlattenedSign, generateKeyPair, SignJWT, type JWK } from 'jose';
 
 const NOW = Date.UTC(2026, 10, 14, 12);
 const at = (seconds: number) => Math.floor(NOW / 1000) + seconds;
@@ -174,7 +174,7 @@ test('a signature is verified under the keys a binding carries: unknown_signer f
     const { privateKey, publicKey } = await generateKeyPair(alg, { extractable: true });
     const jwk: JWK = { ...(await exportJWK(publicKey)), alg, ...(kid === undefined ? {} : { kid }) };
     const sign = (header: Record<string, unknown> = {}) => new SignJWT({ iss: 'i', sub: 's', aud: ORIGIN, iat: at(0), exp: at(60) }).setProtectedHeader({ alg, ...(kid === undefined ? {} : { kid }), ...header }).sign(privateKey);
-    return { jwk, sign };
+    return { jwk, sign, key: privateKey };
   };
   const [a, b] = [await keyed('RS256', 'a'), await keyed('ES256', 'b')];
   const set = JSON.stringify({ keys: [a.jwk, b.jwk] });
@@ -192,6 +192,12 @@ test('a signature is verified under the keys a binding carries: unknown_signer f
   const hs = await new SignJWT({ sub: 's' }).setProtectedHeader({ alg: 'HS256', kid: 'a' }).sign(new TextEncoder().encode('a'.repeat(32)));
   assert.equal(await signatureRefusal(hs, set), 'malformed');
   assert.equal(await signatureRefusal('a.b.c', set), 'malformed');
+  // Signed over an unencoded payload (RFC 7797): jose verifies it, but its payload is no claims object, whatever it decodes to.
+  const raw = part({ iss: 'i', sub: 's', aud: ORIGIN, iat: at(0), exp: at(60) });
+  const unencoded = await new FlattenedSign(new TextEncoder().encode(raw)).setProtectedHeader({ alg: 'RS256', kid: 'a', b64: false, crit: ['b64'] }).sign(a.key);
+  const detached = `${unencoded.protected}.${raw}.${unencoded.signature}`;
+  assert.equal(await signatureRefusal(detached, set), 'malformed');
+  assert.deepEqual(readIdToken(detached), { refused: 'malformed' });
   assert.equal(await signatureRefusal(await a.sign(), 'not json'), 'malformed');
 });
 

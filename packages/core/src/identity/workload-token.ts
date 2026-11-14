@@ -79,6 +79,8 @@ export function decodeWorkloadToken(token: string): DecodedToken {
     return value as Record<string, unknown>;
   };
   const [header, claims] = [json(parts[0]!), json(parts[1]!)];
+  // An extension the signer requires to be understood, `b64: false`'s unencoded payload above all, is one this reader does not: it reads `alg` and `kid` alone.
+  if (header.crit !== undefined) throw malformed('names a critical header extension');
   for (const name of ['iss', 'sub'] as const) {
     if (typeof claims[name] !== 'string' || claims[name] === '') throw malformed(`has no ${name}, as a nonempty string`);
   }

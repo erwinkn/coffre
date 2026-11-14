@@ -247,10 +247,13 @@ export function matchIdToken<B extends ProofBinding>(token: DecodedToken, bindin
  * the key the token names, and `malformed` for any other failure, a
  * signature that does not verify under it included. The algorithms are
  * fixed, and nothing is taken from the header but `alg` and `kid`; a set
- * with several keys the header could name tries each. It checks no claim:
- * the times and the audience are `matchIdToken`'s.
+ * with several keys the header could name tries each. A token that does
+ * not read as one (`readIdToken`), an unencoded payload's included, is
+ * `malformed` before any key is tried. It checks no claim: the times and
+ * the audience are `matchIdToken`'s.
  */
 export async function signatureRefusal(token: string, jwks: string): Promise<'unknown_signer' | 'malformed' | null> {
+  if ('refused' in readIdToken(token)) return 'malformed';
   let keys: JSONWebKeySet;
   try {
     keys = JSON.parse(jwks) as JSONWebKeySet;
