@@ -210,27 +210,27 @@ test('a deleted entry is a hole on a page of the whole log, by tree; a filtered 
 test("the judgment `coffre verify instance` and conformance share holds these pages as they are: an edit failed, a deletion missing, an entry past the head no fault", async () => {
   /** What the judge finds on a page, as counts. */
   const judged = async (query = '') => {
-    const { head, numbered, proven, failed, misplaced, missing } = judgeProofs((await page('aud-cli', query))[0] as unknown as Parameters<typeof judgeProofs>[0]);
-    return { size: head?.size ?? null, numbered, proven, failed: failed.length, misplaced: misplaced.length, missing: missing?.length ?? null };
+    const { head, numbered, proven, failed, misplaced, missing, racing } = judgeProofs((await page('aud-cli', query))[0] as unknown as Parameters<typeof judgeProofs>[0]);
+    return { size: head?.size ?? null, numbered, proven, failed: failed.length, misplaced: misplaced.length, missing: missing?.length ?? null, racing };
   };
-  assert.deepEqual(await judged('?detail=1&limit=200'), { size: 10, numbered: 10, proven: 10, failed: 0, misplaced: 0, missing: 0 });
+  assert.deepEqual(await judged('?detail=1&limit=200'), { size: 10, numbered: 10, proven: 10, failed: 0, misplaced: 0, missing: 0, racing: false });
   // Signed since the vault's read: past the head, honestly unproven, and nothing a page waits on is numbered past it.
   const [old] = await rowsOf<Record<string, unknown>>(world.owner, sql`SELECT * FROM log_head`);
   assert.equal((await call('cy-cli', 'PATCH', '/secrets/market/prod', { LATE: 'l1' }))[0], 200);
   await sign();
   await world.owner.execute(sql`UPDATE log_head SET size = ${old!.size}, kept_size = ${old!.kept_size}, kept_root = ${old!.kept_root}, aging_size = ${old!.aging_size}, aging_root = ${old!.aging_root}, aging_from = ${old!.aging_from}, signed_at = ${old!.signed_at}, mac = ${old!.mac}`);
-  assert.deepEqual(await judged('?detail=1'), { size: 10, numbered: 10, proven: 10, failed: 0, misplaced: 0, missing: 0 });
+  assert.deepEqual(await judged('?detail=1'), { size: 10, numbered: 10, proven: 10, failed: 0, misplaced: 0, missing: 0, racing: false });
   // Edited within the head: failed, and not counted as misplaced too.
   await world.owner.execute(sql`UPDATE log SET body = replace(body, '"slug":"shop"', '"slug":"shoq"') WHERE body LIKE '%"action":"project.create"%' AND kept`);
-  assert.deepEqual(await judged('?detail=1'), { size: 10, numbered: 10, proven: 9, failed: 1, misplaced: 0, missing: 0 });
-  // Deleted within the head: what the stretch lacks, which a filtered page cannot say.
+  assert.deepEqual(await judged('?detail=1'), { size: 10, numbered: 10, proven: 9, failed: 1, misplaced: 0, missing: 0, racing: false });
+  // Deleted within the head: what the stretch lacks, which a filtered page cannot say, and a kept entry no pruning removes, so no race.
   const written = (await log()).find((entry) => entry.action === 'secret.write' && entry.kept && entry.seq < Number(old!.size))!;
   await world.owner.execute(sql`DELETE FROM log WHERE seq = ${written.seq}`);
-  assert.deepEqual(await judged('?detail=1'), { size: 10, numbered: 9, proven: 8, failed: 1, misplaced: 0, missing: 1 });
+  assert.deepEqual(await judged('?detail=1'), { size: 10, numbered: 9, proven: 8, failed: 1, misplaced: 0, missing: 1, racing: false });
   assert.equal((await judged('?path=market')).missing, null);
-  // No head: nothing numbered, which a caller waits on, then fails.
+  // No head: nothing numbered, a race a caller waits out, then fails.
   await world.owner.execute(sql`DELETE FROM log_head`);
-  assert.deepEqual(await judged('?detail=1'), { size: null, numbered: 0, proven: 0, failed: 0, misplaced: 0, missing: null });
+  assert.deepEqual(await judged('?detail=1'), { size: null, numbered: 0, proven: 0, failed: 0, misplaced: 0, missing: null, racing: true });
 });
 
 test('pages tile the log: each goes on from the last, a hole at the edge between two is found on the second', async () => {

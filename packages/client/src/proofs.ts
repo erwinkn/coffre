@@ -17,17 +17,26 @@ export type ProofJudgment = {
   misplaced: AuditEntryView[];
   /** What the page's stretch lacks, by the trees' counts: null when it cannot say, on a page that is not of the whole log, or with no head. */
   missing: Page['holes'];
+  /**
+   * A page to ask again before judging it, as a race between the head's read and the log's can leave it, honestly:
+   * a batch signed in between puts every listed entry past the head, and a pruning committed in between leaves the
+   * older head counting uses it removed, a stretch lacking aging entries alone. A fresh page past the race says neither.
+   */
+  racing: boolean;
 };
 
 export function judgeProofs(page: Page): ProofJudgment {
   const { head, entries } = page;
   const within = (entry: AuditEntryView) => head !== null && entry.seq < head.size;
+  const numbered = entries.filter(within).length;
+  const pruned = page.holes !== null && page.holes.length > 0 && page.holes.every((hole) => hole.kept === 0);
   return {
     head,
-    numbered: entries.filter(within).length,
+    numbered,
     proven: entries.filter((entry) => entry.proof === 'proven').length,
     failed: entries.filter((entry) => entry.proof === 'failed'),
     misplaced: entries.filter((entry) => entry.proof !== 'failed' && within(entry) !== (entry.proof === 'proven')),
     missing: page.holes,
+    racing: numbered === 0 || pruned,
   };
 }

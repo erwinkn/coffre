@@ -181,9 +181,10 @@ function or the Worker's log.
 In 0.16 the audit page proves each entry it lists against the head
 the vault signed: `audit proven` requires every entry the head numbers
 proven, only those past it not, and the page's stretch lacking none
-(`judgeProofs`, which `coffre verify instance` shares; it waits for a head that numbers an
-entry on the page: a batch signed between the head's read and the log's can
-leave the whole page past it), and `audit page proofs` that the page is sent
+(`judgeProofs`, which `coffre verify instance` shares; it asks again while
+the page races its head: a batch signed between the head's read and the log's
+can leave the whole page past it, and a pruning committed in between can
+leave the older head counting aging entries it removed), and `audit page proofs` that the page is sent
 with them rendered, each row's proof in `data-proof`, at least one proven
 and none failed (it asks again while every row is past the head, for the
 same race). `coffre verify
@@ -280,7 +281,7 @@ Signed in as anyone else, it says so and stops before it makes anything.
 | owner | The session is an admin's or owner's of the whole instance |
 | setup | What step 1 and 2 found and made, a fresh canary and a fresh credential |
 | token, token reveal, token scan, token scope | The token tier, as the fresh credential |
-| owner log proofs | The newest 200 entries of the whole log: those the head numbers proven against it, none past it proven, none failed, and the page's stretch lacking no entry of either tree. It asks again for up to 90 s while every entry listed is past the head, signed since the vault's read |
+| owner log proofs | The newest 200 entries of the whole log: those the head numbers proven against it, none past it proven, none failed, and the page's stretch lacking no entry of either tree. It asks again for up to 90 s, each request held to that wait too, while the page races its head: every entry listed past it, signed since the vault's read, or only aging entries missing, pruned since |
 | clean-up | The credential revoked, your session left as it was; what stays |
 
 What stays, for the next run: the project, the environment with its canary,

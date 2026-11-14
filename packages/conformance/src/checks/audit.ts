@@ -67,13 +67,16 @@ export async function revealAudited(deployment: Deployment, { admin, reader }: P
  */
 export async function auditProven({ admin }: People): Promise<string> {
   let judged: ProofJudgment | undefined;
-  // A batch the signer publishes between the vault reading its head and the
-  // app reading the log can put every entry listed past the head, honestly
-  // unproven; so wait for a page its head numbers an entry of.
-  await until('a head the vault signed that numbers a listed entry', async () => {
+  // A batch the signer publishes, or a pruning committed, between the vault
+  // reading its head and the app reading the log can leave a page honestly
+  // racing (`judgeProofs`): asked again until it is not, and judged as it
+  // last read if it still is.
+  await until('a page past the race between its head and its log', async () => {
     judged = judgeProofs(await admin.api.audit.list({ detail: '1', limit: 200 }));
-    return judged.numbered > 0;
-  }, 90);
+    return !judged.racing;
+  }, 90).catch((error: unknown) => {
+    if (judged === undefined) throw error;
+  });
   const { head, proven, failed, misplaced, missing } = judged!;
   expect(head !== null, 'the audit page has no head');
   expect(failed.length === 0, 'entries the head numbers do not prove against it', failed.slice(0, 5));
