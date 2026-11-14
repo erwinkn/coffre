@@ -1,19 +1,25 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
+import { randomBytes, randomUUID } from 'node:crypto';
+
 import { inclusionProof, leafHash, nodesFrom, tileMap, verifyInclusion } from '@coffre/core/log';
 import { rowsOf } from '@coffre/db/dialect';
+import { credentials, deviceLogins, enrollmentCodes } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
+import { put } from '../src/change.ts';
 import { pending } from '../src/entry.ts';
-import { checked } from '../src/rows.ts';
+import { checked, nameOf, type Fresh } from '../src/rows.ts';
 import { headText, Signer, type Finding, type Store } from '../src/signer.ts';
 import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
+import * as world from './world.ts';
 
 /**
  * The signer's minute after its check (upkeep.ts), on Postgres: the oldest
- * uses pruned, a block at a time, and a slice of the log re-checked against
- * what was signed, against a database writer and a signer that dies.
+ * uses pruned, a block at a time, a slice of the log re-checked against
+ * what was signed, and the rows that lapsed deleted, against a database
+ * writer and a signer that dies.
  */
 const vault = await openTestVault();
 after(() => vault.close());
@@ -281,4 +287,110 @@ test('a minute whose upkeep fails is not checked: a writer who holds what it rea
   }
   assert.deepEqual(await minute(), []);
   assert.equal(signer.checked, vault.now());
+});
+
+const HOUR = 60 * 60_000;
+const ada = world.user('ada');
+const ci = 'token:ci';
+/** When, from the vault's clock now. */
+const since = (ms: number) => new Date(vault.now() + ms);
+const login = (expiresAt: Date): Fresh<typeof deviceLogins> => ({
+  id: randomUUID(), deviceCodeHash: randomBytes(32), userCode: randomUUID().slice(0, 9), clientLabel: null, clientIp: null, createdAt: since(-3 * DAY), expiresAt,
+  decidedAt: null, decision: null, generation: 0, principal: null, consumedAt: null,
+});
+const code = (of: { id: string }, expiresAt: Date): Fresh<typeof enrollmentCodes> => ({
+  id: randomUUID(), bindingId: of.id, codeHash: randomBytes(32), codeHint: 'coffre_enr_…', scope: '{}', createdAt: since(-3 * DAY), createdBy: ci, createdWith: null, expiresAt, supersededAt: null,
+});
+/** ID tokens spent and MCP approvals, which carry no MAC: rows the owner writes. */
+async function plain(spent: Date[], approvals: { of: string; expiresAt: Date }[]): Promise<void> {
+  if (spent.length > 0) await vault.owner.execute(sql`INSERT INTO spent_id_tokens (hash, spent_at) SELECT sha256(convert_to(gen_random_uuid()::text, 'UTF8')), s::timestamptz FROM jsonb_array_elements_text(${JSON.stringify(spent)}::jsonb) AS s`);
+  for (const { of, expiresAt } of approvals) {
+    await vault.owner.execute(sql`INSERT INTO mcp_approvals (id, connection_id, tool, arguments, digest, status, created_at, expires_at)
+      VALUES (${randomUUID()}, ${of}, 'archive_secret', '{}', sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'pending', ${new Date(expiresAt.getTime() - 5 * 60_000).toISOString()}, ${expiresAt.toISOString()})`);
+  }
+}
+/** What is left of each kind: ids, sorted; spent ID tokens by count. */
+const remaining = async () =>
+  (
+    await rowsOf<{ credentials: string[] | null; logins: string[] | null; codes: string[] | null; spent: number; approvals: string[] | null; waiting: number }>(
+      vault.owner,
+      sql`SELECT (SELECT array_agg(id::text ORDER BY id) FROM credentials) AS credentials, (SELECT array_agg(id::text ORDER BY id) FROM device_logins) AS logins,
+        (SELECT array_agg(id::text ORDER BY id) FROM enrollment_codes) AS codes, (SELECT count(*)::int FROM spent_id_tokens) AS spent,
+        (SELECT array_agg(id::text ORDER BY id) FROM mcp_approvals) AS approvals, (SELECT count(*)::int FROM log_pending) AS waiting`,
+    )
+  )[0]!;
+const ids = (...rows: { id: string }[]) => rows.map(({ id }) => id).sort();
+/** A credential live for a month: the clock runs on across tests, past the fixtures' own expiry. */
+const live = (label: string, more: Partial<Fresh<typeof credentials>> = {}) => world.credential(label, ada, { expiresAt: since(30 * DAY), ...more });
+
+test('the rows that lapsed go a day past their expiry, by a change the mirror follows, and the next minute finds nothing; a code once no credential names it', async () => {
+  const binding = world.binding(ci);
+  const [stale, lately, codeNamed, codeLive, codeFree] = [since(-2 * DAY), since(-2 * HOUR), since(-2 * DAY), since(30 * DAY), since(-2 * DAY)];
+  const [named, lasting, free] = [code(binding, codeNamed), code(binding, codeLive), code(binding, codeFree)];
+  const old = world.credential('old', ada, { expiresAt: stale });
+  const recent = world.credential('recent', ada, { expiresAt: lately });
+  const kept = live('kept');
+  const workload = world.session('w', binding, { enrollmentId: named.id, expiresAt: lately });
+  const mcp = live('mcp', { kind: 'mcp', client: '{}' });
+  const [oldLogin, recentLogin] = [login(stale), login(lately)];
+  await world.write(vault, ...world.rows('principals', world.principal(ada), world.principal(ci)), ...world.rows('bindings', binding),
+    put(enrollmentCodes, named), put(enrollmentCodes, lasting), put(enrollmentCodes, free),
+    ...world.rows('credentials', old, recent, kept, workload, mcp), put(deviceLogins, oldLogin), put(deviceLogins, recentLogin));
+  await plain([since(-3 * HOUR), since(-HOUR)], [{ of: mcp.id, expiresAt: stale }, { of: mcp.id, expiresAt: lately }]);
+  const approvals = (await remaining()).approvals!;
+
+  assert.deepEqual(await minute(), []);
+  assert.deepEqual(await remaining(), {
+    credentials: ids(recent, kept, workload, mcp), logins: ids(recentLogin), codes: ids(named, lasting), spent: 1,
+    approvals: (await rowsOf<{ id: string }>(vault.owner, sql`SELECT id::text FROM mcp_approvals WHERE expires_at = ${lately.toISOString()}`)).map(({ id }) => id), waiting: 0,
+  });
+  assert.equal(approvals.length, 2);
+  const [entry] = await rowsOf<{ kept: boolean; body: string }>(vault.owner, sql`SELECT kept, body FROM log WHERE body::jsonb ->> 'action' = 'upkeep.expire'`);
+  assert.equal(entry?.kept, false, 'under the tree that ages out');
+  assert.deepEqual(JSON.parse(entry.body).objects, [`credential:${old.id}`, `device_login:${oldLogin.id}`, `enrollment_code:${free.id}`]);
+  assert.deepEqual(await minute(), [], 'the mirror followed');
+
+  // A day on: the sessions and the login go, then, once nothing names it, the code.
+  vault.tick(DAY);
+  assert.deepEqual(await minute(), []);
+  assert.deepEqual(await remaining(), { credentials: ids(kept, mcp), logins: null, codes: ids(named, lasting), spent: 0, approvals: null, waiting: 0 });
+  assert.deepEqual(await minute(), []);
+  assert.deepEqual((await remaining()).codes, ids(lasting));
+});
+
+test('a minute deletes 100 of each kind at most, the oldest first', async () => {
+  const connection = live('mcp', { kind: 'mcp', client: '{}' });
+  const lapsed = Array.from({ length: 250 }, (_, n) => world.credential(`c${n}`, ada, { expiresAt: since(-2 * DAY - n * 60_000) }));
+  await world.write(vault, ...world.rows('principals', world.principal(ada)), ...world.rows('credentials', connection, ...lapsed));
+  await plain(Array.from({ length: 250 }, () => since(-3 * HOUR)), Array.from({ length: 250 }, () => ({ of: connection.id, expiresAt: since(-2 * DAY) })));
+  const counts = async () => {
+    const { credentials: left, spent, approvals } = await remaining();
+    return [left!.length - 1, spent, approvals?.length ?? 0];
+  };
+  for (const left of [150, 50, 0]) {
+    assert.deepEqual(await minute(), []);
+    assert.deepEqual(await counts(), [left, left, left]);
+    // The oldest first: what is left of the credentials expired last.
+    assert.deepEqual((await remaining()).credentials, ids(connection, ...lapsed.slice(0, left)));
+  }
+});
+
+test('a credential whose expiry a writer moved back stays: under its MAC, it is not the vault\'s', async () => {
+  const moved = live('moved');
+  await world.write(vault, ...world.rows('principals', world.principal(ada)), ...world.rows('credentials', moved));
+  assert.deepEqual(await minute(), []);
+  await vault.owner.update(credentials).set({ expiresAt: since(-2 * DAY) }).where(sql`id = ${moved.id}`);
+  assert.deepEqual(await minute(), []);
+  assert.deepEqual((await remaining()).credentials, ids(moved));
+});
+
+test('the upkeep\'s entry is expected: a writer who deletes it before it is signed is found', async () => {
+  const old = world.credential('old', ada, { expiresAt: since(-2 * DAY) });
+  await world.write(vault, ...world.rows('principals', world.principal(ada)), ...world.rows('credentials', old));
+  vault.tick(60_000);
+  assert.equal(await signer.run(true), true, 'its entry waits, and the signer runs again at once');
+  await vault.owner.execute(sql`DELETE FROM log_pending`);
+  while (await signer.run(false));
+  assert.deepEqual((await signer.take()).map(({ found }) => found), ['missing']);
+  assert.deepEqual(await minute(), [{ found: 'row', of: nameOf(credentials, old) }], 'and the credential it deleted is not what the log says');
 });

@@ -1,7 +1,7 @@
 import { seal as sealValue, type Envelope } from '@coffre/core/envelope';
 import type { KekRegistry } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
-import { gaveUpCode, rowsOf } from '@coffre/db/dialect';
+import { gaveUpCode } from '@coffre/db/dialect';
 import { later, laterRows } from '@coffre/db/later';
 import { environments, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
@@ -220,8 +220,9 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
 export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'keys'>, read: P): Promise<{ seen: Seen<P>; named: Map<object, string>; tokens: string[] }> {
   const parts = Object.entries(read);
   if (parts.length === 0) throw new Error('a read names at least one part');
-  // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts).
-  const found = await rowsOf<{ part: string; row: Wire }>(
+  // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts). Bounded as a
+  // change's write is: a lock someone holds on a table it reads makes the call busy, and never holds it, nor the signer's upkeep.
+  const found = await bounded<{ part: string; row: Wire }>(
     vault.db,
     sql`SELECT part, row, clock_timestamp() AS read_at FROM (${sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `)}) parts`,
   );

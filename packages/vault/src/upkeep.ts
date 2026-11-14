@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 
 import { HASH_SIZE, inclusionProof, nodesFrom, leafHash, tileKey, tilesFor, verifyInclusion, WIDTH, type Edge } from '@coffre/core/log';
+import { credentials, deviceLogins, enrollmentCodes } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
+import { change, drop, part, type Running } from './change.ts';
 import type { Entry } from './entry.ts';
 import type { Finding, Signing, Tree } from './signer.ts';
 
@@ -28,6 +30,10 @@ const PRUNE_MOST = 40;
  */
 const RECHECK = 3;
 const DAY_MS = 24 * 60 * 60_000;
+/** The most rows of each kind one minute deletes: a CI run leaves a session and a spent ID token, so 144,000 runs a day. */
+const DELETE_MOST = 100;
+/** An exchange refuses an ID token issued over an hour ago, so one spent two hours ago guards nothing. */
+const SPENT_MS = 2 * 60 * 60_000;
 
 /** A statement of the signer's, bounded as its own are. */
 type Ask = <Row>(statement: SQL) => Promise<Row[]>;
@@ -141,4 +147,36 @@ export async function recheck(ask: Ask, now: number, trees: Record<Tree, Edge>, 
   }
   const held = blocks.length === 0 ? [] : await read(ask, trees, blocks);
   return { found: held.flatMap(({ lost }) => lost.map((of) => ({ found: 'lost' as const, of }))), walk: { tree, block, since, ends } };
+}
+
+/**
+ * The rows that lapsed, the oldest first, a batch of each: credentials,
+ * device logins and enrollment codes a day past their expiry, in one change
+ * whose entry the signer holds to its mirror, as any other; an enrollment
+ * code once no credential names it. Then, by a statement with no entry, the
+ * rows that carry no MAC and that nothing reads again: ID tokens spent two
+ * hours ago, MCP approvals a day past their expiry. The change's entry, if
+ * it made one, waits to be signed: its hash.
+ */
+export async function expire(vault: Omit<Running, 'wake'>, ask: Ask): Promise<Buffer | null> {
+  const at = vault.now();
+  const before = sql`${new Date(at - DAY_MS).toISOString()}::timestamptz`;
+  // By the expiry a row's MAC covers: one a writer moved back is not the vault's, and stays.
+  const oldest = <T extends typeof credentials | typeof deviceLogins | typeof enrollmentCodes>(table: T, more = sql``) =>
+    part(table, sql`${table.id} IN (SELECT e.id FROM ${table} e WHERE e.expires_at < ${before}${more} ORDER BY e.expires_at, e.id LIMIT ${DELETE_MOST})`);
+  const read = { credentials: oldest(credentials), logins: oldest(deviceLogins), codes: oldest(enrollmentCodes, sql` AND NOT EXISTS (SELECT 1 FROM credentials c WHERE c.enrollment_id = e.id)`) };
+  let hash: Buffer | null = null;
+  await change({ ...vault, wake: (committed) => (hash = committed) }, {
+    read,
+    decide: ({ credentials: sessions, logins, codes }) => {
+      const writes = [...sessions.map((row) => drop(credentials, row)), ...logins.map((row) => drop(deviceLogins, row)), ...codes.map((row) => drop(enrollmentCodes, row))];
+      if (writes.length === 0) return { refused: 'none' };
+      const objects = [...sessions.map(({ id }) => `credential:${id}`), ...logins.map(({ id }) => `device_login:${id}`), ...codes.map(({ id }) => `enrollment_code:${id}`)];
+      return { writes, entry: { kept: false, action: 'upkeep.expire', actor: null, credential: null, request: null, ip: null, objects, detail: {} }, answer: null };
+    },
+  });
+  await ask(sql`WITH spent AS (DELETE FROM spent_id_tokens WHERE hash IN (SELECT hash FROM spent_id_tokens WHERE spent_at < ${new Date(at - SPENT_MS).toISOString()}::timestamptz LIMIT ${DELETE_MOST})),
+    approvals AS (DELETE FROM mcp_approvals WHERE id IN (SELECT id FROM mcp_approvals WHERE expires_at < ${before} LIMIT ${DELETE_MOST}))
+    SELECT 1`);
+  return hash;
 }
