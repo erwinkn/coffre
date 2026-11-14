@@ -1,10 +1,12 @@
 import { allows, EVERYWHERE, isCredentialScope, isInstanceRole, isScope, scopeWithReads, type CredentialScope, type Holdings, type Permission, type Policy, type RoleDefinition } from '@coffre/core/access';
 import { addressWithin, checkConstraints, type BindingPolicy, type Constraints } from '@coffre/core/identity';
 import { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
+import type { Called } from '@coffre/core/vault';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { part, type Denied, type Refusal, type Seen } from './change.ts';
+import { keep, part, readParts, type Denied, type Refusal, type Running, type Seen } from './change.ts';
 import type { Row } from './rows.ts';
+import type { Memory } from './use.ts';
 
 /**
  * Who is asking (docs/design/0.16.md, "A use"): from a credential's rows,
@@ -231,12 +233,15 @@ export const live = (row: { slug: string; archivedAt: Date | null }) => row.arch
  * grants elsewhere decide nothing here. With them, the environments that
  * weigh on what they hold there: those the projects protect, and those a
  * grant of theirs is on. So no operation has to remember them, and one
- * protected or unprotected meanwhile starts the change over.
+ * protected or unprotected meanwhile starts the change over. `projects`
+ * null is every project: all they hold, for `caller`, which decides no
+ * change and writes no entry.
  */
-export function callerParts(token: Buffer, projects: SQL) {
+export function callerParts(token: Buffer, projects: SQL | null) {
   const hash = sql`decode(${token.toString('hex')}, 'hex')`;
   const own = (column: string) => sql`(SELECT c.${sql.identifier(column)} FROM credentials c WHERE c.token_hash = ${hash})`;
-  const here = sql`(g.project_id IN ${projects} OR g.environment_id IN (SELECT e.id FROM environments e WHERE e.project_id IN ${projects}))`;
+  const here = projects === null ? sql`true` : sql`(g.project_id IN ${projects} OR g.environment_id IN (SELECT e.id FROM environments e WHERE e.project_id IN ${projects}))`;
+  const within = projects === null ? sql`true` : sql`${environments.projectId} IN ${projects}`;
   return {
     credential: part(credentials, sql`${credentials.tokenHash} = ${hash}`),
     principal: part(principals, sql`${principals.id} = ${own('principal')}`),
@@ -245,7 +250,7 @@ export function callerParts(token: Buffer, projects: SQL) {
     // The roles those grants name, and the member's own in the instance: a role with no row is no role.
     role: part(roles, sql`(NOT ${roles.instance} AND ${roles.id} IN (SELECT g.role FROM grants g WHERE g.principal = ${own('principal')} AND ${here})) OR (${roles.instance} AND ${roles.id} = (SELECT p.role FROM principals p WHERE p.id = ${own('principal')}))`),
     // A deleted environment protects nothing: its tombstone is left out.
-    places: part(environments, sql`(${environments.projectId} IN ${projects} AND ${environments.protected} AND strpos(${environments.slug}, '~') = 0) OR ${environments.id} IN (SELECT g.environment_id FROM grants g WHERE g.principal = ${own('principal')} AND ${here})`),
+    places: part(environments, sql`(${within} AND ${environments.protected} AND strpos(${environments.slug}, '~') = 0) OR ${environments.id} IN (SELECT g.environment_id FROM grants g WHERE g.principal = ${own('principal')} AND ${here})`),
     // What a trust binding issued names it, and a narrowed session the sessions above it: only what is shaped like ids is cast.
     binding: part(bindings, sql`${bindings.id} = (SELECT CASE WHEN c.created_by ~ '^binding:${ID}$' THEN substr(c.created_by, 9)::uuid END FROM credentials c WHERE c.token_hash = ${hash})`),
     ancestor: part(credentials, sql`${credentials.id} = ANY(ARRAY(SELECT above.id::uuid FROM credentials c, jsonb_array_elements_text(CASE WHEN c.kind = 'workload' AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id) WHERE c.token_hash = ${hash}))`),
@@ -311,4 +316,55 @@ export function refusedTo<S extends Seen<ReturnType<typeof callerParts>>>(
       detail: { ...where, refused: refusal.refused },
     };
   };
+}
+
+/** A credential's last use is moved on at most this often. */
+const TOUCHED_MS = 5 * 60_000;
+
+/**
+ * When the credential was last used, and from where: its row's own
+ * statement, since it shares one with nothing a change may lock. It only
+ * says when, so it never costs the call: a row a change holds is skipped,
+ * not waited for, a failure is dropped, and a later time is never put back.
+ */
+export async function touch(vault: Pick<Running, 'db'> & { memory: Memory }, credential: Row<typeof credentials>, ip: string | null, at: number): Promise<void> {
+  const { touched } = vault.memory;
+  if (Math.max(credential.lastUsedAt?.getTime() ?? -Infinity, touched.get(credential.id)?.at ?? -Infinity) + TOUCHED_MS > at) return;
+  const when = sql`${new Date(at).toISOString()}::timestamptz`;
+  const free = sql`SELECT id FROM credentials WHERE id = ${credential.id} AND (last_used_at IS NULL OR last_used_at < ${when}) FOR NO KEY UPDATE SKIP LOCKED`;
+  await vault.db.execute(sql`UPDATE credentials SET last_used_at = ${when}, last_used_ip = ${ip} WHERE id IN (${free})`).then(() => keep(touched, credential.id, { at }, at - TOUCHED_MS), () => {});
+}
+
+/** A caller's rows as one read found them, and when: what `caller` remembers, under the token's hash. */
+export type CallerRead = { at: number; seen: Seen<ReturnType<typeof callerParts>> };
+
+/**
+ * `caller` (docs/design/0.16.md, "Who a request is"): who a request's
+ * credential is and all it holds, for the app to scope a page's queries
+ * with. One read, of every project, remembered as a use's rows are and
+ * decided on again at each call. It opens and changes nothing, and logs
+ * nothing: a use and a change read their caller themselves.
+ */
+export async function caller(vault: Pick<Running, 'db' | 'keys' | 'now'> & { memory: Memory; workloads: Workloads }, shown: Shown & { token: Buffer }): Promise<Called | Refusal> {
+  const { memory } = vault;
+  const key = shown.token.toString('hex');
+  const now = vault.now();
+  let found = memory.callers.get(key);
+  // Fresh only between its read and the memory's length after it: a clock set back makes nothing fresher.
+  if (found !== undefined && !(now >= found.at && now < found.at + memory.seconds * 1000)) found = undefined;
+  found ??= { at: now, seen: (await readParts(vault, callerParts(shown.token, null))).seen };
+  const at = vault.now();
+  const asking = callerFrom(found.seen, shown, vault.workloads, at);
+  // A session that stands and is stopped is told why, as at a use; a narrowed one reaches no page.
+  const refused = asking === null ? 'unauthenticated' : (asking.workload?.stop ?? (asking.workload?.narrowed === true ? 'narrowed' : null));
+  if (asking === null || refused !== null) {
+    // Not remembered: the next call reads again, and is given what has changed since.
+    memory.callers.delete(key);
+    return { refused: refused! };
+  }
+  await touch(vault, asking.credential, shown.ip, at);
+  // Unless a newer read of the same is there already: a slow call does not put its older rows back over it.
+  if (memory.seconds > 0 && !((memory.callers.get(key)?.at ?? -Infinity) > found.at)) keep(memory.callers, key, found, at - memory.seconds * 1000);
+  const { id, kind, expiresAt } = asking.credential;
+  return { principal: asking.principal, credential: { id, kind, expiresAt: expiresAt.toISOString() }, holds: asking.holds };
 }
