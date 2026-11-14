@@ -230,8 +230,8 @@ export async function references(deployment: Deployment, { admin, reader, leaver
     });
     try {
       const forgedRead = await outcome(reader.api.secrets.reveal(`${DEV}/${FORGED}`));
-      // A row the vault did not write is no row to it: the key is not there, and nothing is read through it.
-      expect(['404 no_value', '404 not_found'].includes(forgedRead), `a reference row the vault never made was read: ${forgedRead}`);
+      // A row the vault did not write is no row to it: the key is not there (0.16's `unknown_key`), and nothing is read through it.
+      expect(forgedRead === '404 unknown_key', `a reference row the vault never made was read: ${forgedRead}`);
     } finally {
       await using(deployment.database(), (sql) => query(sql, 'DELETE FROM secrets WHERE id = $1', [forged]));
     }

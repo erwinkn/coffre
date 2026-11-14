@@ -485,8 +485,11 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
     return changed();
   }, PUBLISHED_SECONDS).catch(() => undefined);
   expect(changed(), 'the changes are not each made once, via the client and its approval', once);
-  const decisions = entries.filter((entry) => entry.action === 'mcp.approve').map((entry) => `${entry.decision} ${entry.reason ?? ''}`.trim()).sort();
-  expect(JSON.stringify(decisions) === JSON.stringify(['allow', 'allow', 'allow', 'allow', 'deny approved', 'deny changed']), 'the decisions, and the two refused, are not in the log', decisions);
+  // 0.16 logs a change's Approve as the change itself, naming its approval, and no `mcp.approve` beside it (that is a
+  // shown value's alone); the app refuses a decision already made or for another digest before the vault, which writes
+  // nothing (docs/design/0.16.md, "Where 0.14.7 answered otherwise"). 0.14.7 logged four approvals and those two refusals.
+  const decisions = entries.filter((entry) => entry.action === 'mcp.approve' || entry.action === 'mcp.deny').map((entry) => `${entry.action} ${entry.decision} ${entry.reason ?? ''}`.trim());
+  expect(decisions.length === 0, 'an approved change or a refused decision wrote an entry of its own', decisions);
   return `Read stepped up to Write, saying how as its result; Write ticked beyond what was asked; with Write, the link without URL elicitation and an elicitation with it; nothing changed until ${changer.email} approved on coffre's page, another person, another site and a CLI session refused, a replayed requestState refused; each change made once, via the client and its approval; a value typed on the page only, and one coffre made reaching no one`;
 }
 
