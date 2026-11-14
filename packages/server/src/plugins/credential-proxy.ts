@@ -978,14 +978,8 @@ function sessionToken(request: Request): string | null {
 
 const SESSION = /^DPoP\s+(coffre_wl_\S+)$/i;
 
-/**
- * The request's workload (`PluginContext.workload`), its refusal as the
- * answer, or null for no workload. A credential whose rule sends its key
- * under the DPoP scheme (`header('authorization', 'DPoP {TOKEN}')`) has the
- * app send its handle there: that is a handle's request, and no session's.
- */
+/** The request's workload (`PluginContext.workload`), its refusal as the answer, or null for no workload. */
 async function workloadOf(request: Request, coffre: PluginContext, at: WorkloadAt): Promise<WorkloadUse | Response | null> {
-  if (sessionToken(request) === null && /^DPoP\s/i.test(request.headers.get('authorization') ?? '')) return null;
   return refused(coffre.workload(request, at));
 }
 

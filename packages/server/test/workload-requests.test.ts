@@ -13,7 +13,7 @@ import { after, beforeEach, test } from 'node:test';
 import { createProof, generateProofKey, thumbprint, type ProofKey } from '@coffre/client/dpop';
 import { generateToken, github, signin } from '@coffre/core/identity';
 import { rowsOf } from '@coffre/db/dialect';
-import { amend, binding, emptyDatabase, environment, grant, instance, principal, project, role, rows, session, tokenOf, write } from '@coffre/vault/testing';
+import { amend, binding, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, session, tokenOf, value, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 
 import { processGates, type Gates } from '../src/gate.ts';
@@ -288,4 +288,23 @@ test("a session the vault stops is answered as 0.14.7 answered it, at its caller
   } finally {
     await noReads.close();
   }
+});
+
+test("a session's dry run never tells it whether its guess at a value it only uses is right: that one is `changed`, and one its binding lists is compared", async () => {
+  const stripe = value(world, secret(prod, 'STRIPE_KEY'), 'sk_live_0123');
+  const hook = value(world, secret(prod, 'WEBHOOK'), 'whsec_0123');
+  const flag = value(world, secret(prod, 'FLAG'), 'on', { plain: true });
+  // A session that writes on market, its binding listing WEBHOOK, with the grant of its own at prod a binding that lists gets.
+  const writes = JSON.stringify([{ projectId: market.id, environmentId: null, role: 'developer' }, { projectId: market.id, environmentId: prod.id, role: 'viewer' }]);
+  const bound = binding(DEPLOY, { policy: JSON.stringify({ reads: { [prod.id]: { keys: [hook.id] } } }), scope: writes });
+  const key = await generateProofKey();
+  const token = generateToken('workload');
+  const row = session(token, bound, { jkt: await thumbprint(key.jwk), scope: writes, places: JSON.stringify([{ environmentId: prod.id }]), expiresAt: new Date(Date.now() + 3_600_000) });
+  await write(world, ...rows('secrets', stripe, hook, flag), ...rows('bindings', bound), ...rows('credentials', row));
+  const path = '/api/secrets/market/prod?dryRun=1';
+  const proof = await createProof(key, { method: 'PATCH', url: `${PUBLIC_URL}${path}`, token, nonce: await nonceOf(DEPLOY) });
+  const guessed = { STRIPE_KEY: 'sk_live_0123', WEBHOOK: 'whsec_0123', FLAG: { value: 'on', sensitivity: 'plain' } };
+  const answer = await read(await app.request(path, { method: 'PATCH', headers: { authorization: `DPoP ${token}`, dpop: proof, 'content-type': 'application/json' }, body: JSON.stringify(guessed) }));
+  assert.equal(answer.status, 200, JSON.stringify(answer.body));
+  assert.deepEqual(answer.body, { dryRun: true, keys: { STRIPE_KEY: 'changed', WEBHOOK: 'unchanged', FLAG: 'unchanged' } });
 });

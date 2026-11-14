@@ -232,6 +232,20 @@ test('a workload copies or refers to no value it only uses where it is held', as
   assert.deepEqual(await vault.change({ ...forking('pod', 'pod-made', 'guarded'), proof: 'pod' }), { refused: 'use_only' });
 });
 
+test('a workload makes a fork that inherits of what it only uses: it copies nothing, and the fork\'s keys are read at their parent, as listed there', async () => {
+  const [prod] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM environments WHERE project_id = ${market.id} AND slug = 'prod'`);
+  // A binding holds a grant of its own at each environment it lists, as one is made.
+  const scope = JSON.stringify([{ projectId: market.id, environmentId: null, role: 'maintainer' }, { projectId: market.id, environmentId: prod!.id, role: 'viewer' }]);
+  const bound = binding(api, { profile: 'kubernetes', scope, policy: JSON.stringify({ reads: { [prod!.id]: { keys: [ids.DATABASE_URL] } } }) });
+  await write(world, ...rows('bindings', bound), ...rows('credentials', session('pod', bound)));
+  const before = await counts();
+  const inheriting = { ...shown('pod'), proof: 'pod', op: 'environment.create', project: 'market', environment: 'pod-made', mine: false, parent: 'prod', protected: false } as const;
+  answered(await vault.change(inheriting));
+  assert.deepEqual((await counts()).slice(1), [before[1]! + 1, before[2], before[3]], 'one environment, and no key or version');
+  assert.deepEqual(await heldIn('pod-made'), {});
+  assert.deepEqual(await given({ ...reveal('pod', 'pod-made', ['DATABASE_URL', 'STRIPE_KEY', 'ACCOUNT']), proof: 'pod' }), { DATABASE_URL: 'postgres://prod', STRIPE_KEY: 'refused: use_only', ACCOUNT: 'acct_1' });
+});
+
 /** Rows edited behind the vault, each in a fork of `from` that reads them. */
 const tampered: [string, string, () => ReturnType<typeof sql> | ReturnType<typeof sql>[]][] = [
   ['a key', 'prod', () => sql`UPDATE secrets SET folder = 'moved' WHERE id = ${ids.ACCOUNT!}`],

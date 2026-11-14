@@ -880,6 +880,16 @@ test('a workload\'s session is its key\'s: it uses what its service does, and is
   assert.equal(await got(ask('pod', 'market/prod', ['FLAG'], keyed)), 'unauthenticated');
 });
 
+test('a binding that lists "*" where a reference lives is not handed its source\'s value: a reference is listed where its value is held', async () => {
+  const { bound } = await workload({ reads: { [w.prod.id]: { keys: '*' } } });
+  assert.deepEqual(await got(ask('pod', 'market/prod', ['LINK', 'DATABASE_URL', 'FLAG'], keyed)), { LINK: 'refused: use_only', DATABASE_URL: 'postgres://prod', FLAG: 'on' });
+  // Listing the source where billing holds it, a session of the same service is handed it through the reference.
+  const scope = JSON.stringify([...JSON.parse(bound.scope!), { projectId: w.billing.id, environmentId: w.billed.id, role: 'viewer' }]);
+  const listing = binding(bound.principal, { profile: 'kubernetes', scope, policy: JSON.stringify({ reads: { [w.prod.id]: { keys: '*' }, [w.billed.id]: { keys: [w.token.id] } } }) });
+  await write(vault, ...rows('bindings', listing), ...rows('credentials', session('pod-2', listing)));
+  assert.deepEqual(await got(ask('pod-2', 'market/prod', ['LINK'], { proof: 'pod-2' })), { LINK: 'billing-token' });
+});
+
 test('a session that stands and is stopped is told why, writes nothing, and serves again once that is lifted', async () => {
   const { api, bound, pod } = await workload({ approve: true, sources: ['10.0.0.0/8'] });
   const inside = { ...keyed, ip: '10.1.2.3' };
