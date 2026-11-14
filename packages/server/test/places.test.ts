@@ -24,7 +24,7 @@ const ci = 'token:ci';
  * market, filed in Payments: prod (keys A and B, C archived), staging,
  * protected (S), fork, which inherits from prod and dismissed B (D), old,
  * archived, and Ada's personal config of prod (OWN; GONE, archived). fork's
- * dismissal of A was restored. billing, in Payments too: prod, whose LINK reads market's A. shelf, archived.
+ * dismissal of A was restored. fork's override of A and Ada's of B are archived (reset): each reads prod's again. billing, in Payments too: prod, whose LINK reads market's A. shelf, archived.
  *
  * Ada views market, Bo maintains it (its environments and the project), Dee
  * owns it by a grant and keeps a config of prod too, Gus stewards its
@@ -49,7 +49,7 @@ beforeEach(async () => {
     world,
     ...rows('projects', market, billing, shelf),
     ...rows('environments', prod, staging, fork, old, adas, dees, billed, environment(shelf, 'prod')),
-    ...rows('secrets', a, secret(prod, 'B'), secret(prod, 'C', { archivedAt: new Date(0) }), secret(staging, 'S'), secret(fork, 'D'), secret(old, 'O'), secret(adas, 'OWN'), secret(adas, 'GONE', { archivedAt: new Date(0) }), secret(billed, 'LINK', { sourceId: a.id })),
+    ...rows('secrets', a, secret(prod, 'B'), secret(prod, 'C', { archivedAt: new Date(0) }), secret(staging, 'S'), secret(fork, 'D'), secret(old, 'O'), secret(adas, 'OWN'), secret(adas, 'GONE', { archivedAt: new Date(0) }), secret(fork, 'A', { archivedAt: new Date(0) }), secret(adas, 'B', { archivedAt: new Date(0) }), secret(billed, 'LINK', { sourceId: a.id })),
     ...rows('dismissedKeys', dismissed(fork, 'B'), { ...dismissed(fork, 'A'), restoredAt: new Date(0), restoredBy: dismissed(fork, 'A').dismissedBy }),
     ...rows('roles',
       role(false, 'viewer', ['secret.read'], []),
@@ -209,13 +209,18 @@ test('an environment, an inheriting fork and a personal config are made by one c
   assert.equal((await call('ada-cli', 'PUT', '/projects/market/fork@me'))[0], 200);
   for (const path of ['market/qa2', 'market/staging@me', 'billing/qa', 'nope/qa']) assert.deepEqual(refused(await call('ada-cli', 'PUT', `/projects/${path}`)), NO_ACCESS, path);
   assert.deepEqual(refused(await call('bo-cli', 'PUT', '/projects/market/prod')), [409, 'conflict', 'exists']);
+  // A fork of itself is the vault's to refuse: prod is there, and qa9 is no parent.
+  app.calls.length = 0;
+  assert.deepEqual(refused(await call('bo-cli', 'PUT', '/projects/market/prod', { from: 'prod', inherit: true })), [409, 'conflict', 'exists']);
+  assert.deepEqual(refused(await call('bo-cli', 'PUT', '/projects/market/qa9', { from: 'qa9', inherit: true })), NO_ACCESS);
+  assert.deepEqual(app.calls, ['change', 'change']);
   // An archived parent is no parent.
   assert.deepEqual(refused(await call('bo-cli', 'PUT', '/projects/market/f5', { from: 'old', inherit: true })), NO_ACCESS);
 
   app.calls.length = 0;
   const shapes: [string, unknown, number][] = [
     ['market/copy', { from: 'prod' }, 501], ['market/copy', { from: 'prod', references: true }, 501],
-    ['market/copy', { inherit: true }, 400], ['market/copy', { from: 'prod', inherit: true, references: true }, 400], ['market/prod', { from: 'prod', inherit: true }, 409],
+    ['market/copy', { inherit: true }, 400], ['market/copy', { from: 'prod', inherit: true, references: true }, 400],
     ['market/settings', {}, 400], ['market/Qa', {}, 400], ['market/prod@me', { from: 'prod' }, 400], ['market/prod@me', { inherit: false }, 400], ['market/qa', { from: 'Prod', inherit: true }, 400],
   ];
   for (const [path, input, expected] of shapes) assert.equal((await call('bo-cli', 'PUT', `/projects/${path}`, input))[0], expected, `${path} ${JSON.stringify(input)}`);

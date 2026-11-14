@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { keyCounts, personalConfigs, places, type PlaceRow } from '../../db/queries/places.ts';
 import { can, permissionsAt, placeOf, projectsReached } from '../caller.ts';
 import type { ApiContext } from '../context.ts';
-import { ApiError, badRequest, conflict, refusal } from '../errors.ts';
+import { ApiError, badRequest, refusal } from '../errors.ts';
 import { route } from '../route.ts';
 
 /**
@@ -218,7 +218,6 @@ export const placeRoutes = {
       if (from === undefined && (input.inherit === true || input.references === true)) throw badRequest('a fork names the environment it forks: `from`');
       if (input.inherit === true && input.references === true) throw badRequest('a fork inherits its parent, or holds references to it: not both');
       if (from !== undefined && input.inherit !== true) throw notServed(`a fork that ${input.references === true ? 'holds references to' : 'copies'} its parent's values (\`inherit\` makes one that inherits them)`);
-      if (from === params.environment) throw conflict('an environment cannot be forked into itself');
       const made = await changed(ctx, { op: 'environment.create', project, environment: params.environment, mine: false, parent: from ?? null, protected: false }, path);
       return {
         environment: { slug: params.environment, name: params.environment, archivedAt: null, protected: made.protected },

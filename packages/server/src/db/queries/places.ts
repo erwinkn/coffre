@@ -57,9 +57,9 @@ const CHAIN = 4;
 
 /**
  * How many keys each of `environments` holds, as a read of it resolves
- * them: its own, and for a fork those it inherits, the nearest
- * environment's row deciding, archived or not, and none past a key the
- * fork dismissed. With, for each of their projects, how many names those
+ * them: its own, and for a fork those it inherits, the nearest live row
+ * deciding (an archived one, an override reset, is passed over, as a use
+ * passes it), and none past a key the fork dismissed. With, for each of their projects, how many names those
  * of `environments` that are also in `counted` hold between them: the same
  * key in dev and prod is one. One statement, whatever the instance holds;
  * the rows it reads are the keys of those environments and their chains.
@@ -76,11 +76,11 @@ export async function keyCounts(db: Queryable, environments: readonly string[], 
         WHERE e.parent_id IS NOT NULL AND chain.depth < ${CHAIN}
       ),
       resolved AS (
-        SELECT DISTINCT ON (chain.environment_id, held.key) chain.environment_id, chain.project_id, held.key, held.live
+        SELECT DISTINCT ON (chain.environment_id, held.key) chain.environment_id, chain.project_id, held.key, held.kind = 0 AS live
         FROM chain CROSS JOIN LATERAL (
-          SELECT s.key, s.archived_at IS NULL AS live, 0 AS kind FROM secrets s WHERE s.project_id = chain.project_id AND s.environment_id = chain.layer
+          SELECT s.key, 0 AS kind FROM secrets s WHERE s.project_id = chain.project_id AND s.environment_id = chain.layer AND s.archived_at IS NULL
           UNION ALL
-          SELECT d.key, false, 1 FROM dismissed_keys d WHERE d.environment_id = chain.layer AND d.restored_at IS NULL
+          SELECT d.key, 1 FROM dismissed_keys d WHERE d.environment_id = chain.layer AND d.restored_at IS NULL
         ) held
         ORDER BY chain.environment_id, held.key, chain.depth, held.kind
       )
