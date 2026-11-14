@@ -89,6 +89,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   }
 
   async use(input: UseInput) { return this.#call((vault) => vault.use(input)); }
+  async caller(input: Presented) { return this.#call((vault) => vault.caller(input)); }
   async change<O extends Change['op']>(input: Presented & Extract<Change, { op: O }>) { return this.#call((vault) => vault.change(input)); }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */

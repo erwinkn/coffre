@@ -212,35 +212,46 @@ export async function bounded<Row>(db: Database, statement: SQL, { first, runMs 
 const id = (name: string) => sql.identifier(name);
 const list = (names: readonly { name: string }[], of?: string) => sql.join(names.map(({ name }) => (of === undefined ? id(name) : sql`${id(of)}.${id(name)}`)), sql`, `);
 
-/** A change's read and its decision. */
-export async function prepare<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<Prepared<A> | (Refusal & { said?: Denied | null })> {
-  const parts = Object.entries(operation.read);
-  if (parts.length === 0) throw new Error('a change reads at least its caller');
+/**
+ * Parts read in one statement: each part's rows whose MAC is the vault's,
+ * `named` by table and key, and `tokens`, every row the statement found by
+ * its part and MAC, the vault's or not.
+ */
+export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'keys'>, read: P): Promise<{ seen: Seen<P>; named: Map<object, string>; tokens: string[] }> {
+  const parts = Object.entries(read);
+  if (parts.length === 0) throw new Error('a read names at least one part');
   // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts).
   const found = await rowsOf<{ part: string; row: Wire }>(
     vault.db,
     sql`SELECT part, row, clock_timestamp() AS read_at FROM (${sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `)}) parts`,
   );
-  // After the read: the entry's date is the decision's, and the write is sent next.
-  const at = vault.now();
   const seen = Object.fromEntries(parts.map(([name]) => [name, [] as object[]]));
   /** Each row read, with its name. One that several parts found is one object each time. */
-  const read = new Map<object, string>();
+  const named = new Map<object, string>();
   const tokens: string[] = [];
   for (const { part: name, row: wire } of found) {
-    const { table } = operation.read[name]!;
+    const { table } = read[name]!;
     const row = fromWire(table, wire) as Row<Sealed> & { mac: Buffer };
     tokens.push(`${name}:${row.mac.toString('hex')}`);
     if (sealedBy(vault.keys, table, row) === undefined) continue;
     seen[name]!.push(row);
-    read.set(row, nameOf(table, row));
+    named.set(row, nameOf(table, row));
   }
-  const plan = operation.decide(seen as Seen<P>, at);
+  return { seen: seen as Seen<P>, named, tokens };
+}
+
+/** A change's read and its decision. */
+export async function prepare<P extends Parts, A>(vault: Running, operation: Operation<P, A>): Promise<Prepared<A> | (Refusal & { said?: Denied | null })> {
+  const parts = Object.entries(operation.read);
+  const { seen, named: read, tokens } = await readParts(vault, operation.read);
+  // After the read: the entry's date is the decision's, and the write is sent next.
+  const at = vault.now();
+  const plan = operation.decide(seen, at);
   if ('refused' in plan) {
     // What the log says of it is the operation's to say, and never costs the refusal: one that cannot be said is not logged.
     let said: Denied | null | undefined;
     try {
-      said = operation.denied?.(seen as Seen<P>, at, plan);
+      said = operation.denied?.(seen, at, plan);
     } catch (error) {
       console.error('coffre: a refused change was not logged', error);
     }

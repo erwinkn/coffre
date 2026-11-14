@@ -2,6 +2,7 @@ import { PURPOSES, type Answers, type Change, type Presented, type UseInput, typ
 import type { Database } from '@coffre/db';
 
 import type { ResolvedVaultConfig } from './config.ts';
+import { caller } from './caller.ts';
 import { change, type Operation, type Parts } from './change.ts';
 import { OPERATIONS } from './ops/index.ts';
 import { presented, text } from './ops/input.ts';
@@ -64,6 +65,9 @@ export function openVault(db: Database, prepared: PreparedVault, { wake, now = D
       const answer = await use(serving, asked(input));
       if ('refused' in answer) return answer;
       return { ...answer, values: answer.values.map((value) => ('refused' in value ? value : { ...value, value: value.value.toString('utf8') })) };
+    },
+    async caller(input) {
+      return caller(serving, presented(input));
     },
     async change<O extends Change['op']>(input: Presented & Extract<Change, { op: O }>) {
       if (!Object.hasOwn(OPERATIONS, input.op)) throw new TypeError('a change names an operation the contract has');

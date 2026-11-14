@@ -276,7 +276,7 @@ test('what a database writer does to a value or a place is not honoured', async 
   await rename('market', 'swap');
   await rename('billing', 'market');
   await rename('swap', 'billing');
-  await vault.owner.execute(sql`INSERT INTO grants (id, principal, project_id, role, granted_at, granted_by) VALUES (gen_random_uuid(), ${dee}, ${w.market.id}, 'viewer', now(), ${dee})`);
+  await vault.owner.execute(sql`INSERT INTO grants (id, principal, generation, project_id, role, granted_at, granted_by) VALUES (gen_random_uuid(), ${dee}, 0, ${w.market.id}, 'viewer', now(), ${dee})`);
   assert.equal(await got(ask('dee', 'market/prod', ['FLAG'])), 'no_access');
 });
 
