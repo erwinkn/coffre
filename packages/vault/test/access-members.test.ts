@@ -262,6 +262,20 @@ test('a removal deletes the member\'s grants and moves their generation on, whic
   assert.deepEqual(await remove('fay-cli', fay), { answer: { revoked: 0 } });
 });
 
+test('a grant hidden from a removal and put back once the member is brought back reaches nothing: it is of the generation the removal ended', async () => {
+  // The writer the design assumes deletes Bo's grants before the removal, which finds none to drop, and puts them back, MACs and all, after.
+  const [{ hidden }] = (await rowsOf<{ hidden: string }>(world.owner, sql`WITH gone AS (DELETE FROM grants WHERE principal = ${bo} RETURNING *) SELECT json_agg(gone)::text AS hidden FROM gone`)) as [{ hidden: string }];
+  assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 0 } });
+  await world.owner.execute(sql`INSERT INTO grants SELECT * FROM json_populate_recordset(NULL::grants, ${hidden}::json)`);
+  assert.deepEqual(await restore('fay-cli', bo), { answer: { role: 'member', scope: null } });
+  assert.deepEqual(await row(bo), { id: bo, status: 'active', role: 'member', scope: null, generation: 1 });
+  assert.deepEqual(await rowsOf(world.owner, sql`SELECT generation FROM grants WHERE principal = ${bo}`), [{ generation: 0 }, { generation: 0 }]);
+  await write(world, ...rows('credentials', credential('bo-again', bo, { generation: 1 })));
+  world.tick(2000);
+  assert.equal(await uses('bo-again'), 'no_access', 'a session of this membership holds none of the grants of the one before');
+  assert.equal(await uses('bo-cli'), 'unauthenticated', 'nor does the session of the one before stand');
+});
+
 test('a removed member whose rows are deleted around the vault is admitted anew in generation 0, their old session put back stands for it, and the signer finds the entry false history', async () => {
   // The design's adversary deletes rows (docs/design/0.16.md, "What it promises"): the decision cannot tell
   // such a member from a newcomer, but its entry says the row it made replaced none, and the signer's
