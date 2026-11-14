@@ -5,7 +5,7 @@ import tsParser from '@typescript-eslint/parser';
 
 const noDrizzle = {
   regex: '^drizzle-orm(/|$)',
-  message: 'Every query lives in packages/server/src/db/queries.ts; add or extend one there.',
+  message: 'Every query of the server lives in packages/server/src/db; add or extend one there.',
 };
 
 const parsing = {

@@ -443,11 +443,19 @@ async function run(
   }
 }
 
-/** Whether the database holds data: coffre's log has an entry. Before the first migration, it holds none. */
+/** coffre's logs: 0.16's, its entries before and after the signer numbers them, and 0.14's, as 0.16 keeps it and as 0.14 wrote it. */
+const LOGS = ['log_pending', 'log', 'audit_archive', 'audit_log'];
+
+/** Whether the database holds data: one of coffre's logs has an entry. Before the first migration, it holds none. */
 async function holdsData(client: PostgresClient): Promise<boolean> {
-  const [migrated] = await client.unsafe<{ migrated: boolean }[]>("SELECT to_regclass('public.audit_log') IS NOT NULL AS migrated");
-  if (!migrated!.migrated) return false;
-  return (await client.unsafe<{ used: boolean }[]>('SELECT EXISTS (SELECT 1 FROM audit_log) AS used'))[0]!.used;
+  const [row] = await client.unsafe<{ present: string[] }[]>(
+    "SELECT coalesce(array_agg(name), '{}') AS present FROM unnest($1::text[]) AS name WHERE to_regclass('public.' || name) IS NOT NULL",
+    [LOGS],
+  );
+  const present = row!.present;
+  if (present.length === 0) return false;
+  const any = present.map((name) => `EXISTS (SELECT 1 FROM ${name})`).join(' OR ');
+  return (await client.unsafe<{ used: boolean }[]>(`SELECT ${any} AS used`))[0]!.used;
 }
 
 /** The database as Cloudflare's checks take it (`Database`). */
@@ -587,22 +595,23 @@ const BOUNDARY = [
     // The backup login's, through coffre_backup: --backup-login granted it.
     what: 'read the log',
     expected: { app: true, vault: true, backup: true },
-    sql: 'SELECT 1 FROM audit_log LIMIT 1',
-    privilege: "has_table_privilege($1, 'public.audit_log', 'SELECT')",
+    sql: 'SELECT 1 FROM log LIMIT 1',
+    privilege: "has_table_privilege($1, 'public.log', 'SELECT')",
   },
   {
+    // The vault writes every table; the app reads them, and asks the vault for every change.
     what: 'write members',
     expected: { app: false, vault: true, backup: false },
     // A whole row, so that only a privilege can refuse it.
-    sql: `INSERT INTO vault_members (principal, status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
-          VALUES ('user:coffre-setup@probe.invalid', 'active', false, 0, 0, 'system:coffre-setup', 0, 'system:coffre-setup', 0, decode(repeat('00', 32), 'hex'))`,
-    privilege: "has_table_privilege($1, 'public.vault_members', 'INSERT')",
+    sql: `INSERT INTO principals (id, status, role, generation, created_at, created_by, status_changed_at, status_changed_by)
+          VALUES ('user:coffre-setup@probe.invalid', 'active', 'member', 0, now(), 'system:coffre-setup', now(), 'system:coffre-setup')`,
+    privilege: "has_table_privilege($1, 'public.principals', 'INSERT')",
   },
   {
-    what: 'delete log entries',
-    expected: { app: false, vault: false, backup: false },
-    sql: 'DELETE FROM audit_log',
-    privilege: "has_table_privilege($1, 'public.audit_log', 'DELETE')",
+    what: 'write the log',
+    expected: { app: false, vault: true, backup: false },
+    sql: `INSERT INTO log_pending (kept, body, mac) VALUES (false, '{}', decode(repeat('00', 36), 'hex'))`,
+    privilege: "has_table_privilege($1, 'public.log_pending', 'INSERT')",
   },
   {
     what: 'create tables',

@@ -278,7 +278,7 @@ async function refused(where: string, databaseUrl: string, address: string, down
 const verifiers = (cluster = CLUSTER) =>
   asSuperuser('postgres', async (client) => [...await client.unsafe("SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'coffre_%' ORDER BY rolname")], cluster);
 
-/** A database on the cluster that holds data: coffre's log has an entry, as far as setup can tell. */
+/** A database on the cluster that holds data: 0.14's log has an entry, unmigrated, as far as setup can tell. */
 async function inUse(name: string): Promise<string> {
   await asSuperuser('postgres', (client) => client.unsafe(`CREATE DATABASE ${name}`));
   await asSuperuser(name, (client) => client.unsafe('CREATE TABLE audit_log (seq bigint); INSERT INTO audit_log VALUES (0)'));
@@ -343,8 +343,7 @@ test('a database that comes to hold data while setup asks its questions: setup r
     const { text, code, writes } = await refused('late-used', `${OTHER_CLUSTER}/setup_domain_late_used`, 'late-used.acme.test', 0, 'already holds data', () =>
       // Its first entry, written while setup waits.
       asSuperuser('setup_domain_late_used', (client) =>
-        client.unsafe(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
-          VALUES (0, 'vault', 'vault:probe', 0, 'system:vault', 'key.check', 'allow', '{}', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'))`),
+        client.unsafe(`INSERT INTO log_pending (kept, body, mac) VALUES (true, '{"action":"key.check"}', decode(repeat('00', 36), 'hex'))`),
       OTHER_CLUSTER),
     );
     assert.equal(code, 1, text);

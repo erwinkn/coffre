@@ -1,9 +1,9 @@
 \set ON_ERROR_STOP on
 
 -- What the backup login may do, through its group coffre_backup: read every
--- row, the audit log's through its policy, and nothing else
--- (0019_backup_role.sql). Run as coffre_backup_login, with
--- -v entries=<the audit log's row count>.
+-- row and nothing else (0019_backup_role.sql, and 0022_smaller_vault.sql for
+-- 0.16's tables). Run as coffre_backup_login, with
+-- -v entries=<the log's row count>.
 
 DO $$
 BEGIN
@@ -41,7 +41,7 @@ DECLARE
 BEGIN
     FOR relation IN
         SELECT c.oid::regclass AS name, c.relkind,
-               (SELECT quote_ident(attname) FROM pg_attribute WHERE attrelid = c.oid AND attnum > 0 AND NOT attisdropped ORDER BY attnum LIMIT 1) AS col
+               (SELECT quote_ident(attname) FROM pg_attribute WHERE attrelid = c.oid AND attnum > 0 AND NOT attisdropped AND attgenerated = '' AND attidentity = '' ORDER BY attnum LIMIT 1) AS col
           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE n.nspname IN ('public', 'drizzle') AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
     LOOP
@@ -77,7 +77,7 @@ BEGIN
 END
 $$;
 
--- No function that writes as its owner, as pruning spent tokens does.
+-- No function that writes as its owner.
 DO $$
 BEGIN
     IF EXISTS (
@@ -86,11 +86,6 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'the backup login may run a SECURITY DEFINER function';
     END IF;
-    BEGIN
-        PERFORM prune_consumed_tokens(1000);
-        RAISE EXCEPTION 'the backup login pruned spent tokens';
-    EXCEPTION WHEN insufficient_privilege THEN NULL;
-    END;
 END
 $$;
 
@@ -122,22 +117,12 @@ BEGIN
 END
 $$;
 
--- The audit log reads through its policy, never around it: with row-level
--- security off, Postgres refuses the query rather than bypass the policy.
-SET row_security = off;
-DO $$
-BEGIN
-    PERFORM count(*) FROM audit_log;
-    RAISE EXCEPTION 'the backup login read the audit log with row-level security off';
-EXCEPTION WHEN insufficient_privilege THEN NULL;
-END
-$$;
-SET row_security = on;
+-- And the log reads whole: every entry the owner counted.
 SELECT set_config('coffre.entries', :'entries', false) \gset
 DO $$
 BEGIN
-    IF (SELECT count(*) FROM audit_log) <> current_setting('coffre.entries')::bigint THEN
-        RAISE EXCEPTION 'the backup login reads % of % audit entries', (SELECT count(*) FROM audit_log), current_setting('coffre.entries');
+    IF (SELECT count(*) FROM log) <> current_setting('coffre.entries')::bigint THEN
+        RAISE EXCEPTION 'the backup login reads % of % log entries', (SELECT count(*) FROM log), current_setting('coffre.entries');
     END IF;
 END
 $$;

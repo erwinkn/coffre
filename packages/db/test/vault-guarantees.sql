@@ -1,215 +1,181 @@
--- Adversarial checks through the vault's login, coffre_vault_runtime.
+-- Adversarial checks through the vault's login, coffre_vault_runtime, a
+-- member of coffre_vault.
 --
--- The vault writes members and grants, appends to the audit log as itself,
--- and reads what it decides on. Every block below asserts something it must
--- NOT be able to do fails. A passing run prints only 'PASS' lines.
+-- In 0.16 the vault writes every row (docs/design/0.16.md, "Four rules"):
+-- 0022_smaller_vault.sql grants coffre_vault SELECT, INSERT, UPDATE and
+-- DELETE on each of 0.16's tables, SELECT alone on audit_archive, 0.14's log,
+-- never written again, and the use of log_pending's sequence. Every block
+-- below asserts that it holds exactly that, and that what it must NOT be
+-- able to do fails. A passing run prints only 'PASS' lines.
 
 \set ON_ERROR_STOP on
 \set QUIET on
 
 \echo '--- running through the vault login ---'
 
--- 1. The vault may append to the audit log, as itself.
-INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-VALUES (1, 'vault', 'vault:fixture', 0, 'user:admin@acme.example', 'secret.read', 'allow',
-        decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('bb', 32), 'hex'));
-\echo 'PASS: coffre_vault can append to audit_log'
-
--- 1b. Which keeps its releases, through the log alone: this entry names no key, so it counts as one of its own.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM vault_releases WHERE principal = 'user:admin@acme.example' AND key = 'entry:1' AND released_at = 0) THEN
-        RAISE EXCEPTION 'FAIL: the vault''s read was not kept in vault_releases';
-    END IF;
-    RAISE NOTICE 'PASS: a vault read is kept in vault_releases, which the vault reads';
-END
-$$;
-
--- 1c. And forgets, through the function made for it (0021), only those a day and an hour old: never one a window
--- may count, whatever it asks.
-INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-VALUES (2, 'vault', 'vault:fixture', (extract(epoch from clock_timestamp()) * 1000)::bigint, 'user:admin@acme.example', 'secret.read', 'allow',
-        decode(repeat('bb', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('dd', 32), 'hex'));
+-- 1. Exactly these tables write, every other only reads, and none truncates,
+-- references or triggers: a table added changes this list in the same change.
 DO $$
 DECLARE
-    pruned integer;
+    writes constant text[] := ARRAY[
+        'projects', 'environments', 'secrets', 'secret_versions', 'dismissed_keys',
+        'principals', 'grants', 'roles', 'policy',
+        'identities', 'bindings', 'credentials',
+        'device_logins', 'enrollment_codes', 'spent_id_tokens', 'oauth_clients', 'mcp_approvals',
+        'log_pending', 'log', 'log_index', 'log_tiles', 'log_head', 'exposures'];
+    relation record;
+    writable boolean;
 BEGIN
-    SELECT prune_vault_releases(1000) INTO pruned;
-    IF pruned <> 1 OR EXISTS (SELECT 1 FROM vault_releases WHERE key = 'entry:1') THEN
-        RAISE EXCEPTION 'FAIL: prune_vault_releases did not forget the release at time 0 (pruned %)', pruned;
+    IF EXISTS (SELECT 1 FROM unnest(writes) AS name WHERE to_regclass('public.' || name) IS NULL) THEN
+        RAISE EXCEPTION 'FAIL: a table the vault writes is missing: %',
+            (SELECT string_agg(name, ', ') FROM unnest(writes) AS name WHERE to_regclass('public.' || name) IS NULL);
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM vault_releases WHERE key = 'entry:2') THEN
-        RAISE EXCEPTION 'FAIL: prune_vault_releases forgot a release made just now';
+    FOR relation IN
+        SELECT c.oid::regclass AS name, c.relname
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    LOOP
+        IF NOT has_table_privilege(relation.name, 'SELECT') THEN
+            RAISE EXCEPTION 'FAIL: coffre_vault cannot read %', relation.name;
+        END IF;
+        EXECUTE format('SELECT count(*) FROM %s', relation.name);
+        writable := relation.relname = ANY (writes);
+        IF has_table_privilege(relation.name, 'INSERT') <> writable
+           OR has_table_privilege(relation.name, 'UPDATE') <> writable
+           OR has_table_privilege(relation.name, 'DELETE') <> writable
+           OR has_any_column_privilege(relation.name, 'INSERT, UPDATE') <> writable THEN
+            RAISE EXCEPTION 'FAIL: coffre_vault % write %', CASE WHEN writable THEN 'cannot' ELSE 'may' END, relation.name;
+        END IF;
+        IF has_table_privilege(relation.name, 'TRUNCATE, REFERENCES, TRIGGER')
+           OR has_any_column_privilege(relation.name, 'REFERENCES') THEN
+            RAISE EXCEPTION 'FAIL: coffre_vault may truncate, reference or trigger on %', relation.name;
+        END IF;
+    END LOOP;
+    RAISE NOTICE 'PASS: coffre_vault reads every table, writes exactly 0.16''s, and truncates none';
+END
+$$;
+
+-- 2. Tried: no table truncates, and 0.14's archive takes no write.
+DO $$
+DECLARE
+    relation record;
+    attempt text;
+BEGIN
+    FOR relation IN
+        SELECT c.oid::regclass AS name
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind = 'r'
+    LOOP
+        BEGIN
+            EXECUTE format('TRUNCATE %s', relation.name);
+            RAISE EXCEPTION 'FAIL: coffre_vault truncated %', relation.name;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    FOREACH attempt IN ARRAY ARRAY[
+        'INSERT INTO audit_archive DEFAULT VALUES',
+        'UPDATE audit_archive SET actor = ''user:someone.else@acme.example''',
+        'DELETE FROM audit_archive'
+    ] LOOP
+        BEGIN
+            EXECUTE attempt;
+            RAISE EXCEPTION 'FAIL: coffre_vault ran %', attempt;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    RAISE NOTICE 'PASS: coffre_vault empties no table, and leaves 0.14''s archive as the upgrade wrote it';
+END
+$$;
+
+-- 3. It numbers what it appends through log_pending's sequence, and sets no
+-- sequence; and runs no function as its owner.
+DO $$
+BEGIN
+    IF NOT has_sequence_privilege('log_pending_id_seq', 'USAGE') THEN
+        RAISE EXCEPTION 'FAIL: coffre_vault cannot append to log_pending';
     END IF;
-    RAISE NOTICE 'PASS: coffre_vault prunes only releases a day and an hour old, through prune_vault_releases';
+    IF EXISTS (
+        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND CASE WHEN c.relkind = 'S' THEN has_sequence_privilege(c.oid, 'UPDATE') ELSE false END
+    ) THEN
+        RAISE EXCEPTION 'FAIL: coffre_vault may set a sequence';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname IN ('public', 'drizzle') AND p.prosecdef AND has_function_privilege(p.oid, 'EXECUTE')
+    ) THEN
+        RAISE EXCEPTION 'FAIL: coffre_vault may run a SECURITY DEFINER function';
+    END IF;
+    RAISE NOTICE 'PASS: coffre_vault appends through log_pending''s sequence, and runs no function as its owner';
 END
 $$;
 
--- 2. Only as itself.
+-- 4. What a change writes, as the vault writes it: admit a member, set their
+-- role and scope, grant, revoke, append an entry; rolled back.
 DO $$
 BEGIN
-    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-    VALUES (2, 'app', 'app:fixture', 0, 'user:x@acme.example', 'secret.read', 'allow',
-            decode(repeat('aa', 32), 'hex'), decode(repeat('99', 32), 'hex'), decode(repeat('cc', 32), 'hex'));
-    RAISE EXCEPTION 'FAIL: coffre_vault appended an entry as the app';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_vault cannot append as the app';
+    BEGIN
+        INSERT INTO principals (id, status, role, generation, created_at, created_by, status_changed_at, status_changed_by)
+        VALUES ('user:ada@acme.example', 'active', 'member', 0, now(), 'user:admin@acme.example', now(), 'user:admin@acme.example');
+        UPDATE principals SET role = 'developer', scope = '{"projects":"all","environments":{"only":["dev"]}}' WHERE id = 'user:ada@acme.example';
+        INSERT INTO grants (id, principal, generation, environment_id, role, granted_at, granted_by)
+        VALUES (gen_random_uuid(), 'user:ada@acme.example', 0, '22222222-2222-2222-2222-222222222222', 'viewer', now(), 'user:admin@acme.example');
+        DELETE FROM grants WHERE principal = 'user:ada@acme.example';
+        INSERT INTO log_pending (kept, body, mac) VALUES (true, '{}', decode(repeat('00', 36), 'hex'));
+        RAISE EXCEPTION 'written' USING ERRCODE = 'C0FFE';
+    EXCEPTION
+        WHEN SQLSTATE 'C0FFE' THEN NULL;
+    END;
+    RAISE NOTICE 'PASS: coffre_vault admits, sets a role and its scope, grants, revokes and appends';
 END
 $$;
 
--- 3. The vault may not rewrite or remove an entry.
+-- 5. A grant names exactly one place, and a role by its id: which roles a
+-- place takes is the vault's to decide (docs/design/roles.md), the table
+-- holds a grant to a role named by an id and nothing else.
 DO $$
+DECLARE
+    attempt text;
 BEGIN
-    UPDATE audit_log SET actor = 'user:someone.else@acme.example' WHERE seq = 0;
-    RAISE EXCEPTION 'FAIL: coffre_vault was able to UPDATE audit_log';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_vault cannot UPDATE audit_log';
+    FOREACH attempt IN ARRAY ARRAY[
+        'INSERT INTO grants (id, principal, generation, project_id, environment_id, role, granted_at, granted_by)
+         VALUES (gen_random_uuid(), ''user:admin@acme.example'', 0, ''11111111-1111-1111-1111-111111111111'',
+                 ''22222222-2222-2222-2222-222222222222'', ''viewer'', now(), ''user:admin@acme.example'')',
+        'INSERT INTO grants (id, principal, generation, role, granted_at, granted_by)
+         VALUES (gen_random_uuid(), ''user:admin@acme.example'', 0, ''viewer'', now(), ''user:admin@acme.example'')',
+        'INSERT INTO grants (id, principal, generation, environment_id, role, granted_at, granted_by)
+         VALUES (gen_random_uuid(), ''user:admin@acme.example'', 0, ''22222222-2222-2222-2222-222222222222'',
+                 ''Not a role'', now(), ''user:admin@acme.example'')'
+    ] LOOP
+        BEGIN
+            EXECUTE attempt;
+            RAISE EXCEPTION 'FAIL: a grant was accepted: %', attempt;
+        EXCEPTION
+            WHEN check_violation THEN NULL;
+        END;
+    END LOOP;
+    RAISE NOTICE 'PASS: a grant names exactly one place, and a role by its id';
 END
 $$;
 
+-- 6. A secret cannot claim an environment that belongs to another project.
 DO $$
+DECLARE
+    other_project uuid := gen_random_uuid();
 BEGIN
-    DELETE FROM audit_log;
-    RAISE EXCEPTION 'FAIL: coffre_vault was able to DELETE from audit_log';
+    INSERT INTO projects (id, slug, name, created_at) VALUES (other_project, 'other', 'Other', now());
+    INSERT INTO secrets (id, project_id, environment_id, key, created_at, updated_at, versions)
+    VALUES (gen_random_uuid(), other_project, '22222222-2222-2222-2222-222222222222', 'DATABASE_URL', now(), now(), 0);
+    RAISE EXCEPTION 'FAIL: a secret referenced an environment outside its project';
 EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_vault cannot DELETE from audit_log';
+    WHEN foreign_key_violation THEN
+        RAISE NOTICE 'PASS: environment must belong to the secret''s project';
 END
 $$;
 
--- 4. The vault writes members and grants, and deletes only a grant.
-INSERT INTO vault_members (principal, status, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac)
-VALUES ('user:ada@acme.example', 'active', 0, 'user:admin@acme.example', 0, 'user:admin@acme.example', 1,
-        decode(repeat('00', 32), 'hex'));
-UPDATE vault_members SET role = 'developer', scope = '{"projects":"all","environments":{"only":["dev"]}}' WHERE principal = 'user:ada@acme.example';
-UPDATE vault_members SET status = 'removed', role = 'member', scope = NULL, generation = generation + 1 WHERE principal = 'user:ada@acme.example';
-INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by)
-VALUES ('user:ada@acme.example', '22222222-2222-2222-2222-222222222222', 'viewer', 0, 'user:admin@acme.example');
-DELETE FROM vault_grants WHERE principal = 'user:ada@acme.example';
-\echo 'PASS: coffre_vault can admit, set a role and its scope, remove, grant and revoke'
-
-DO $$
-BEGIN
-    DELETE FROM vault_members;
-    RAISE EXCEPTION 'FAIL: coffre_vault was able to delete a member';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_vault cannot delete a member';
-END
-$$;
-
-DO $$
-BEGIN
-    UPDATE vault_members SET principal = 'user:eve@acme.example';
-    RAISE EXCEPTION 'FAIL: coffre_vault was able to change who a member is';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_vault cannot change who a member is';
-END
-$$;
-
--- 5. A grant names exactly one place, and a role the catalogue allows there.
-DO $$
-BEGIN
-    INSERT INTO vault_grants (principal, project_id, environment_id, role, granted_at, granted_by)
-    VALUES ('user:ada@acme.example', '11111111-1111-1111-1111-111111111111',
-            '22222222-2222-2222-2222-222222222222', 'viewer', 0, 'user:admin@acme.example');
-    RAISE EXCEPTION 'FAIL: a grant named two places';
-EXCEPTION
-    WHEN check_violation THEN
-        RAISE NOTICE 'PASS: a grant names exactly one place';
-END
-$$;
-
--- Which roles an environment takes is the vault's to decide, by the policy (docs/design/roles.md): the table holds a
--- grant to a role named by an id, one that ships or one an Owner made, and nothing else.
-DO $$
-BEGIN
-    INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by)
-    VALUES ('user:ada@acme.example', '22222222-2222-2222-2222-222222222222', 'Not a role', 0, 'user:admin@acme.example');
-    RAISE EXCEPTION 'FAIL: a grant named no role id';
-EXCEPTION
-    WHEN check_violation THEN
-        RAISE NOTICE 'PASS: a grant names a role by its id';
-END
-$$;
-
--- 5b. On every project, a grant names neither id, and an environment slug at most.
-DO $$
-BEGIN
-    INSERT INTO vault_grants (principal, project_id, environment_slug, role, granted_at, granted_by)
-    VALUES ('user:ada@acme.example', '11111111-1111-1111-1111-111111111111', 'dev', 'viewer', 0, 'user:admin@acme.example');
-    RAISE EXCEPTION 'FAIL: a slug was named with a project';
-EXCEPTION
-    WHEN check_violation THEN
-        RAISE NOTICE 'PASS: a slug names environments on every project only';
-END
-$$;
-
-
-
-DO $$
-BEGIN
-    INSERT INTO vault_grants (principal, environment_slug, role, granted_at, granted_by)
-    VALUES ('user:ada@acme.example', 'Dev', 'viewer', 0, 'user:admin@acme.example');
-    RAISE EXCEPTION 'FAIL: a grant named no slug';
-EXCEPTION
-    WHEN check_violation THEN
-        RAISE NOTICE 'PASS: an environment slug is a slug';
-END
-$$;
-
-DO $$
-BEGIN
-    INSERT INTO vault_grants (principal, role, granted_at, granted_by)
-    VALUES ('user:ada@acme.example', 'viewer', 0, 'user:admin@acme.example'),
-           ('user:ada@acme.example', 'owner', 0, 'user:admin@acme.example');
-    RAISE EXCEPTION 'FAIL: a member held two grants on every project';
-EXCEPTION
-    WHEN unique_violation THEN
-        RAISE NOTICE 'PASS: one grant per member on every project';
-END
-$$;
-
--- 6. The vault reads what it decides on, and writes none of it.
-SELECT count(*) FROM projects;
-SELECT count(*) FROM secret_versions;
-DO $$
-BEGIN
-    UPDATE projects SET name = 'renamed';
-    RAISE EXCEPTION 'FAIL: coffre_vault was able to change a project';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_vault cannot change a project';
-END
-$$;
-
-DO $$
-BEGIN
-    INSERT INTO secret_versions (secret_id, version, envelope_version, ciphertext, iv, auth_tag, wrapped_dek,
-                                 kek_provider, kek_id, kek_version, created_by)
-    VALUES (gen_random_uuid(), 1, 1, '\x00', decode(repeat('00', 12), 'hex'), decode(repeat('00', 16), 'hex'),
-            '\x00', 'local', 'k', '1', 'user:x@acme.example');
-    RAISE EXCEPTION 'FAIL: coffre_vault was able to write a secret version';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_vault cannot write a secret version';
-END
-$$;
-
--- 7. Nor the app's sign-in rows, nor any table of its own.
-DO $$
-BEGIN
-    DELETE FROM credentials;
-    RAISE EXCEPTION 'FAIL: coffre_vault was able to touch credentials';
-EXCEPTION
-    WHEN insufficient_privilege THEN
-        RAISE NOTICE 'PASS: coffre_vault cannot touch credentials';
-END
-$$;
-
+-- 7. The vault login cannot create database objects.
 DO $$
 BEGIN
     CREATE TABLE vault_must_not_create_objects (id integer);
@@ -220,43 +186,22 @@ EXCEPTION
 END
 $$;
 
--- 8. Nor read the app's sign-in rows, empty any table, rewrite a
--- grant, become the app, or create temporary objects. It may restore a
--- member's created_at and created_by, from its own log, when it starts a
--- tampered member over.
+DO $$
+BEGIN
+    CREATE TEMP TABLE vault_must_not_create_temp (id integer);
+    RAISE EXCEPTION 'FAIL: coffre_vault was able to create a temporary table';
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'PASS: coffre_vault cannot create temporary tables';
+END
+$$;
+
+-- 8. Nor become the app, or the backups.
 DO $$
 DECLARE
     statement text;
 BEGIN
-    FOREACH statement IN ARRAY ARRAY[
-        'SELECT * FROM identities',
-        'SELECT * FROM credentials',
-        'SELECT * FROM enrollments',
-        'SELECT * FROM device_authorizations',
-        'SELECT * FROM service_bindings',
-        'SELECT * FROM consumed_tokens',
-        'SELECT prune_consumed_tokens(1)',
-        'SELECT * FROM capped_alerts',
-        'SELECT * FROM secret_references',
-        'SELECT * FROM dismissed_keys',
-        'UPDATE projects SET folder = folder',
-        'UPDATE secrets SET folder = folder',
-        'SELECT * FROM oauth_clients',
-        'SELECT * FROM mcp_connections',
-        'SELECT * FROM mcp_approvals',
-            'DELETE FROM identities',
-        'DELETE FROM device_authorizations',
-        'TRUNCATE vault_members',
-        'TRUNCATE vault_grants',
-        'TRUNCATE audit_log',
-        'UPDATE vault_grants SET role = role',
-        'INSERT INTO vault_releases VALUES (''user:admin@acme.example'', ''forged'', 0)',
-        'UPDATE vault_releases SET released_at = 0',
-        'DELETE FROM vault_releases',
-        'TRUNCATE vault_releases',
-        'SET ROLE coffre_app',
-        'CREATE TEMP TABLE vault_must_not_create_temp (id integer)'
-    ] LOOP
+    FOREACH statement IN ARRAY ARRAY['SET ROLE coffre_app', 'SET ROLE coffre_backup'] LOOP
         BEGIN
             EXECUTE statement;
             RAISE EXCEPTION 'FAIL: coffre_vault was able to run: %', statement;
@@ -264,7 +209,7 @@ BEGIN
             WHEN insufficient_privilege THEN NULL;
         END;
     END LOOP;
-    RAISE NOTICE 'PASS: coffre_vault reads no sign-in row, empties nothing, rewrites no grant or release, and acts as no one else';
+    RAISE NOTICE 'PASS: coffre_vault acts as no one else';
 END
 $$;
 

@@ -9,79 +9,6 @@ import {
   TEST_RUNTIME_DATABASE_URL,
 } from './connections.ts';
 
-const EXPECTED_UPDATE_COLUMNS = [
-  'audit_chain_head.head_hash',
-  'audit_chain_head.next_seq',
-  // A capped alert's last time, moved on when it is raised again (T98).
-  'capped_alerts.raised_at',
-  // A workload's session: approved by a person, where its binding asks, and renewed (docs/design/workload-access.md).
-  'credentials.approved_at',
-  'credentials.approved_by',
-  'credentials.auth_mac',
-  'credentials.expires_at',
-  'credentials.last_used_at',
-  'credentials.last_used_ip',
-  'credentials.revoked_at',
-  'credentials.revoked_by',
-  // Once, to seal a token of 0.4 with its account's grants; its MAC covers it.
-  'credentials.scope',
-  'device_authorizations.auth_mac',
-  'device_authorizations.consumed_at',
-  'device_authorizations.decided_at',
-  'device_authorizations.decision',
-  'device_authorizations.generation',
-  'device_authorizations.principal',
-  'dismissed_keys.dismissed_at',
-  'dismissed_keys.dismissed_by',
-  'dismissed_keys.restored_at',
-  'dismissed_keys.restored_by',
-  // An enrollment code's MAC, signed again by the app key's rotation (T105): nothing else of a code changes.
-  'enrollments.auth_mac',
-  'environments.archived_at',
-  'environments.name',
-  'environments.slug',
-  'identities.auth_mac',
-  'identities.email',
-  'identities.last_sign_in_at',
-  'identities.revoked_at',
-  'identities.revoked_by',
-  'mcp_approvals.decided_at',
-  'mcp_approvals.outcome',
-  'mcp_approvals.reported_at',
-  'mcp_approvals.status',
-  'mcp_connections.auth_mac',
-  'mcp_connections.code_challenge',
-  'mcp_connections.code_expires_at',
-  'mcp_connections.last_used_at',
-  'mcp_connections.last_used_ip',
-  'mcp_connections.refresh_hash',
-  'mcp_connections.refresh_previous_hash',
-  'mcp_connections.revoked_at',
-  'mcp_connections.revoked_by',
-  'oauth_clients.auth_mac',
-  'oauth_clients.revoked_at',
-  'projects.archived_at',
-  'projects.folder',
-  'projects.name',
-  'projects.slug',
-  // A deleted place's versions are erased, a plain one's plaintext too, and that is all a version ever takes.
-  'secret_versions.ciphertext',
-  'secret_versions.plaintext',
-  'secret_versions.wrapped_dek',
-  'secrets.archived_at',
-  'secrets.current_version',
-  'secrets.current_version_id',
-  'secrets.folder',
-  'secrets.key',
-  'secrets.updated_at',
-  // A binding changes in place only in its label, last use and revocation, and once its scope (as a token's), with the MAC that covers them.
-  'service_bindings.auth_mac',
-  'service_bindings.label',
-  'service_bindings.last_used_at',
-  'service_bindings.revoked_at',
-  'service_bindings.revoked_by',
-  'service_bindings.scope',
-];
 
 test(
   'Drizzle migrations preserve the restricted runtime database identity',
@@ -148,18 +75,19 @@ test(
       );
       assert.equal(ownership.object_count, 0);
 
-      const updateColumns = await owner.unsafe<{ column_name: string; table_name: string }[]>(
-        `SELECT table_name, column_name
+      // In 0.16 the app writes nothing: every change is the vault's (docs/design/0.16.md, "Tables"). Its
+      // group holds SELECT and nothing else, on no table and no column of one.
+      const writes = await owner.unsafe<{ privilege: string }[]>(
+        `SELECT format('%s.%s', table_name, privilege_type) AS privilege
+           FROM information_schema.table_privileges
+          WHERE grantee = 'coffre_app' AND table_schema = 'public' AND privilege_type <> 'SELECT'
+         UNION ALL
+         SELECT format('%s.%s.%s', table_name, column_name, privilege_type)
            FROM information_schema.column_privileges
-          WHERE grantee = 'coffre_app'
-            AND table_schema = 'public'
-            AND privilege_type = 'UPDATE'
-          ORDER BY table_name, column_name`,
+          WHERE grantee = 'coffre_app' AND table_schema = 'public' AND privilege_type <> 'SELECT'
+          ORDER BY 1`,
       );
-      assert.deepEqual(
-        updateColumns.map((row) => `${row.table_name}.${row.column_name}`),
-        EXPECTED_UPDATE_COLUMNS,
-      );
+      assert.deepEqual(writes.map(({ privilege }) => privilege), []);
     } finally {
       await runtime.end();
       await owner.end();

@@ -4,7 +4,7 @@
 # coffre_backup_login, made by a superuser as a host's control plane would,
 # which a migrate run by the non-superuser owner grants the group only when
 # --backup-login names it. Runs with nothing to apply, two at once, change
-# nothing; the login then dumps the whole database, every audit entry
+# nothing; the login then dumps the whole database, every log entry
 # included, the dump restores to the same rows, and it writes nothing. A role
 # that does not exist, or an owner that may not grant the group, fails the run.
 set -euo pipefail
@@ -159,11 +159,14 @@ done
 as_owner -d postgres -c 'CREATE DATABASE backed_up'
 migrate backed_up >/dev/null
 
-# Rows in every table the fixture fills, and entries by both authors.
+# Rows in every table the fixture fills, and entries in both of the log's
+# trees, and in 0.14's archive.
 as_owner -d backed_up < packages/db/test/schema-fixture.sql
 as_owner -d backed_up <<'SQL'
-INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
-SELECT seq, CASE WHEN seq % 2 = 0 THEN 'app' ELSE 'vault' END, 'fixture', seq, 'system:fixture', 'secret.read', 'allow',
+INSERT INTO log (seq, kept, leaf, body)
+SELECT seq, seq % 2 = 0, seq / 2, format('{"seq":%s}', seq) FROM generate_series(1, 40) AS seq;
+INSERT INTO audit_archive (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
+SELECT seq, CASE WHEN seq % 2 = 0 THEN 'app' ELSE 'vault' END, 'fixture', seq, 'system:fixture', 'secret.read', 'allow', '{}',
        sha256(int8send(seq - 1)), sha256(int8send(seq)), sha256(int8send(seq))
   FROM generate_series(1, 40) AS seq;
 SQL
@@ -302,7 +305,7 @@ diff "$scratch/before.versions" "$scratch/after.versions"
 grep -qx 'coffre_backup|f|t|f|f|f|f|f' "$scratch/after.roles" || { echo 'coffre_backup is not a group with no login and no unsafe rights' >&2; exit 1; }
 grep -qx 'coffre_backup|coffre_backup_login|migration_owner|f|t|f' "$scratch/after.roles" || { echo 'migrate did not grant coffre_backup_login its group' >&2; exit 1; }
 
-entries="$(as_owner -d backed_up -At -c 'SELECT count(*) FROM audit_log')"
+entries="$(as_owner -d backed_up -At -c 'SELECT count(*) FROM log')"
 as_backup psql -X -v ON_ERROR_STOP=1 -q -v entries="$entries" -d backed_up < packages/db/test/backup-guarantees.sql
 
 # The backup, exactly as docs/restore.md takes it, restored as that page does.
@@ -325,10 +328,9 @@ SQL
 rows backed_up >"$scratch/backed_up.rows"
 rows restored >"$scratch/restored.rows"
 diff "$scratch/backed_up.rows" "$scratch/restored.rows"
-grep -qx "audit_log|$entries|.*" "$scratch/restored.rows" || { echo 'the restore lacks audit entries' >&2; exit 1; }
+grep -qx "log|$entries|.*" "$scratch/restored.rows" || { echo 'the restore lacks log entries' >&2; exit 1; }
 catalog restored >"$scratch/restored.catalog"
 diff "$scratch/after.catalog" "$scratch/restored.catalog"
-grep -q '^audit_log|audit_log_backup_read|SELECT|{coffre_backup}|true|$' "$scratch/restored.catalog" || { echo 'the restore lacks the backup read policy' >&2; exit 1; }
 # An owner without ADMIN OPTION on the group, which someone else took away:
 # a run that names the login fails, saying why; one that names none succeeds.
 as_superuser -c 'REVOKE ADMIN OPTION FOR coffre_backup FROM migration_owner GRANTED BY postgres CASCADE'
@@ -339,4 +341,4 @@ if migrate backed_up --backup-login coffre_backup_login >"$scratch/refused.log" 
     exit 1
 fi
 migrate backed_up >/dev/null
-echo 'coffre_backup_login dumps every row, the audit log whole, and writes nothing'
+echo 'coffre_backup_login dumps every row, the log whole, and writes nothing'

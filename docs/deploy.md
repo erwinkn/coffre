@@ -50,9 +50,8 @@ flag, where the shell's history and other users could read it. Then:
    login becomes a member of `coffre_backup`, which reads every row and
    writes none.
 3. It connects as each login and checks the boundary, in transactions it
-   rolls back: each can read the log; the vault's login can write members,
-   and neither of the others can; none can delete log entries or create
-   tables.
+   rolls back: each can read the log; the vault's login can write members
+   and the log, and neither of the others can; none can create tables.
 4. It shows six values on a screen of their own, the terminal's alternate
    screen, which leaves nothing in the scrollback. For the app, the app key
    and its database URL. For the vault, the vault ID, the vault key and its

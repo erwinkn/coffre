@@ -24,7 +24,7 @@ test('ESLint keeps server functions out of the pages', async () => {
   );
 });
 
-test('ESLint keeps drizzle queries in the server\'s and the vault\'s database layers', async () => {
+test('ESLint keeps drizzle queries in the server\'s database layer and the vault', async () => {
   const source = "import { eq } from 'drizzle-orm';";
   for (const filePath of [
     'packages/ui/src/lib/example.ts',
@@ -33,13 +33,15 @@ test('ESLint keeps drizzle queries in the server\'s and the vault\'s database la
     'packages/core/src/example.ts',
     'packages/client/src/example.ts',
     'packages/cli/src/example.ts',
-    'packages/vault/src/vault.ts',
-    'packages/vault/src/cloudflare.ts',
   ]) {
     assert.equal((await lintImport(source, filePath))[0]?.ruleId, 'no-restricted-imports', filePath);
   }
   assert.deepEqual(await lintImport(source, 'packages/server/src/db/example.ts'), []);
-  assert.deepEqual(await lintImport(source, 'packages/vault/src/store.ts'), []);
+  // In 0.16 an operation names its rows with Drizzle's conditions (`Operation`, in the vault's src/change.ts):
+  // Drizzle is the vault's throughout, as eslint.config.mjs says.
+  for (const filePath of ['packages/vault/src/change.ts', 'packages/vault/src/ops/example.ts']) {
+    assert.deepEqual(await lintImport(source, filePath), [], filePath);
+  }
 });
 
 test('ESLint keeps opening a database from a URL in the vault\'s Node entry, out of the Worker', async () => {

@@ -545,6 +545,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'\\x'::bytea"
+        },
+        "code_hash": {
+          "name": "code_hash",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -649,6 +655,22 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "credentials_client_idx": {
+          "name": "credentials_client_idx",
+          "columns": [
+            {
+              "expression": "(\"client\"::jsonb ->> 'id')",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"credentials\".\"client\" IS NOT NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -704,6 +726,13 @@
           "columns": [
             "token_hash"
           ]
+        },
+        "credentials_code_hash_key": {
+          "name": "credentials_code_hash_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "code_hash"
+          ]
         }
       },
       "policies": {},
@@ -739,6 +768,10 @@
         "credentials_mac_check": {
           "name": "credentials_mac_check",
           "value": "octet_length(\"credentials\".\"mac\") IN (0, 36)"
+        },
+        "credentials_code_hash_check": {
+          "name": "credentials_code_hash_check",
+          "value": "\"credentials\".\"code_hash\" IS NULL OR (\"credentials\".\"kind\" = 'mcp' AND octet_length(\"credentials\".\"code_hash\") = 32)"
         }
       },
       "isRLSEnabled": false

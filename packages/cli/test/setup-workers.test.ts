@@ -591,8 +591,7 @@ test("--reset-passwords on a database too small for both Hyperdrive configs: set
 test('a Worker without its key over a database in use: setup stops before changing anything', { skip }, async () => {
   const client = postgresClient(url, { max: 1 });
   try {
-    await client.unsafe(`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash)
-      VALUES (0, 'vault', 'vault:probe', 0, 'system:vault', 'key.check', 'allow', '{}', decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'), decode(repeat('00', 32), 'hex'))`);
+    await client.unsafe(`INSERT INTO log_pending (kept, body, mac) VALUES (true, '{"action":"key.check"}', decode(repeat('00', 36), 'hex'))`);
   } finally {
     await client.end();
   }
