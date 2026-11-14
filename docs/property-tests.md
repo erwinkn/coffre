@@ -128,10 +128,6 @@ database; `pnpm test` runs each on its private clone too.
   resolve to the same keys by name (`resolveKeys`), row by row
   (`inheritedRows`) and as read (`readableValues`), each from the nearest
   environment that holds or removed it.
-- **Audit visibility** (`audit-visibility-properties.test.ts`): the log a
-  caller pages through is exactly the entries about the places they read,
-  both sides of a reference's, less a protected environment's their role
-  leaves out, with no gaps or repeats and the hidden counts right.
 - **Natures** (`natures-properties.test.ts`): a random world built through
   the API, then a random list of changes; after each, every session and
   credential reads every environment every way the API offers, and no value

@@ -33,14 +33,11 @@
     "test/history-import.test.ts",
     "test/environment-version.test.ts",
 
-    // The audit page and the member report's lists (W419); the client generator still reads its named types from
-    // api/access.ts, api/members.ts and api/settings.ts.
-    "src/api/audit.ts",
+    // The member report's lists (W419); the client generator still reads its named types from api/access.ts,
+    // api/members.ts and api/settings.ts.
     "src/api/access.ts",
     "src/api/members.ts",
     "src/api/settings.ts",
-    "test/audit-keys.test.ts",
-    "test/audit-visibility-properties.test.ts",
     "test/roles-api.test.ts",
     "test/secrets-api.test.ts",
     "test/vault-api.test.ts",
