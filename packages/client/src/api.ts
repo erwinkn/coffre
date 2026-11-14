@@ -38,6 +38,8 @@ export type Api = {
         replaces?: string;
       } | {
         ref: string;
+      } | {
+        sensitivity: "plain" | "secret" | "sensitive";
       };
     };
     output: {

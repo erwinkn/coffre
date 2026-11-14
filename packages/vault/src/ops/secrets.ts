@@ -7,13 +7,13 @@ import { dismissedKeys, environments, projects, secrets, secretVersions } from '
 import { sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, live, refusedTo, type Asking } from '../caller.ts';
-import { amended, aside, part, put, type Operation, type Parts, type Refusal, type Seen, type Value, type Write } from '../change.ts';
+import { amended, aside, copying, overweight, part, put, type Operation, type Parts, type Refusal, type Seen, type Value, type Write } from '../change.ts';
 import type { Fresh, Row } from '../rows.ts';
 import { natureOf } from '../value.ts';
 import type { Deciding } from '../vault.ts';
 import type { Operations } from './index.ts';
 import { KEY, MOST_KEYS, presented, text } from './input.ts';
-import { chainOf } from './places.ts';
+import { chainOf, owns } from './places.ts';
 
 /** The app's own bounds (its routes'): a value's length in characters, and a request's body, which every value of a write came in; and the keys of one write (`MOST_KEYS`). */
 const VALUE_LENGTH = 64 * 1024;
@@ -21,6 +21,9 @@ const WRITE_BYTES = 1024 * 1024;
 /** The most a value weighs in UTF-8, 3 bytes a UTF-16 unit: what a version restored counts for, which is read only after the count. */
 const VALUE_BYTES = 3 * VALUE_LENGTH;
 const NATURES = ['secret', 'sensitive', 'plain'];
+/** The natures from the loosest to the strictest: who sees a value, whoever lists it, whoever reads it, or no person. */
+const STRICTNESS: readonly Nature[] = ['plain', 'secret', 'sensitive'];
+const stricterOf = (a: Nature, b: Nature) => (STRICTNESS.indexOf(a) >= STRICTNESS.indexOf(b) ? a : b);
 /** The most a version's number is, as Postgres keeps it. */
 const MOST_VERSION = 2 ** 31 - 1;
 /** How many environments a key is inherited through, as a use reads them (use.ts). */
@@ -118,7 +121,9 @@ function valid(item: KeyWrite): boolean {
   if (item.generated !== undefined || item.replaces !== undefined) return false;
   if (item.restore !== undefined) return Number.isSafeInteger(item.restore) && item.restore >= 1 && item.restore <= MOST_VERSION && item.nature === undefined && item.ref === undefined && item.archived !== true;
   if (item.ref !== undefined) return located(item.ref) && item.nature === undefined && item.archived !== true;
-  return item.nature === undefined && (item.archived !== undefined || item.folder !== undefined);
+  // A mark goes alone.
+  if (item.nature !== undefined) return NATURES.includes(item.nature) && item.archived === undefined && item.folder === undefined;
+  return item.archived !== undefined || item.folder !== undefined;
 }
 
 /**
@@ -245,7 +250,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
   const config = { id: randomUUID(), slug: configSlug(environmentSlug) };
   const pairs = new Map(items.flatMap((item) => (item.generated?.pair === undefined ? [] : [[item.generated.pair.private, randomUUID()] as const])));
   const needs = new Set<Permission>(items.flatMap((item): Permission[] => [
-    ...(item.value !== undefined || item.restore !== undefined || item.ref !== undefined || item.folder !== undefined || item.inherit !== undefined ? ['secret.write' as const] : []),
+    ...(item.value !== undefined || item.nature !== undefined || item.restore !== undefined || item.ref !== undefined || item.folder !== undefined || item.inherit !== undefined ? ['secret.write' as const] : []),
     ...(item.archived === undefined ? [] : ['secret.archive' as const]),
     ...(item.archived === false || item.restore !== undefined || item.inherit === false ? ['secret.read' as const] : []),
   ]));
@@ -255,6 +260,9 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
   const bare = items.flatMap((item) => ((item.value !== undefined && item.nature === undefined) || item.restore !== undefined ? [item.key] : []));
   // The keys whose parents decide: one reset, or made live (a reset one written over stops being one), whose dismissal ends.
   const inheriting = items.flatMap((item) => ([item.value, item.restore, item.ref, item.inherit].some((said) => said !== undefined) || item.archived === false ? [item.key] : []));
+  // The keys marked, whose value is kept: one the environment does not hold is told inherited from one it does not have at all.
+  const marks = items.flatMap((item) => (item.value === undefined && item.nature !== undefined ? [item.key] : []));
+  const resolving = [...inheriting, ...marks];
   const restores = items.flatMap((item) => (item.restore === undefined ? [] : [{ key: item.key, version: item.restore }]));
   const replacing = items.flatMap((item) => (typeof item.replaces === 'string' ? [item.replaces] : []));
   const refs = items.flatMap((item) => (item.ref === undefined ? [] : [{ key: item.key, to: item.ref }]));
@@ -267,13 +275,18 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
   // The environment and those it inherits from, where its parents decide: what a value is written over may be a parent's.
   // A personal config's start at the environment too, where it has none yet; and they are one more.
   const chain = sql`(WITH RECURSIVE chain (id, parent_id, depth) AS (
-    SELECT e.id, e.parent_id, 0 FROM environments e WHERE ${inheriting.length > 0 || mine ? sql`true` : sql`false`} AND (e.id = ${here} OR e.id = ${named})
+    SELECT e.id, e.parent_id, 0 FROM environments e WHERE ${resolving.length > 0 || mine ? sql`true` : sql`false`} AND (e.id = ${here} OR e.id = ${named})
     UNION SELECT e.id, e.parent_id, chain.depth + 1 FROM environments e JOIN chain ON e.id = chain.parent_id WHERE chain.depth < ${MAX_PARENTS + (mine ? 1 : 0)}
   ) SELECT id FROM chain)`;
   // The references that read a key this write archives or makes a reference, from wherever they are held.
   const readers = sql`(SELECT r.id FROM secrets r WHERE r.source_id IN (SELECT s.id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(stopping)}::text[])))`;
   // Where each source is said to be, found by slugs: the decision holds every row found to what it is asked, by its MAC.
   const sourcePlaces = sql`(SELECT e.id FROM environments e JOIN projects p ON p.id = e.project_id WHERE (p.slug, e.slug) IN (SELECT * FROM unnest(${sql.param(refs.map((ref) => ref.to.project))}::text[], ${sql.param(refs.map((ref) => ref.to.environment))}::text[])))`;
+  // The value each key marked holds now, read only if it is no more than a change copies: not one already of the nature
+  // asked, which is left as it is and copies nothing.
+  const marked = copying(sql`(${secretVersions.secretId}, ${secretVersions.version}) IN (SELECT s.id, s.current_version FROM secrets s
+    JOIN unnest(${sql.param(marks)}::text[], ${sql.param(marks.map((key) => byKey.get(key)!.nature!))}::text[]) AS m (key, nature) ON m.key = s.key
+    WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.current_version IS NOT NULL AND s.nature IS DISTINCT FROM m.nature)`);
   const read = {
     ...callerParts(shown.token, sql`(SELECT p.id FROM projects p WHERE p.slug = ANY(${sql.param(slugs)}::text[]))`),
     project: part(projects, sql`${projects.slug} = ANY(${sql.param(slugs)}::text[])`),
@@ -282,8 +295,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
     // Not the environment's own row: a personal config the caller has none of yet is none, and its environment is a parent.
     parent: part(environments, sql`${environments.id} IN ${chain} AND ${environments.id} IS DISTINCT FROM ${here}`),
     // What a key is passed down where the environment holds none, or reset it: a parent's, unless dismissed on the way.
-    inherited: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} IN ${chain} AND ${secrets.environmentId} IS DISTINCT FROM ${here} AND ${secrets.key} = ANY(${sql.param(inheriting)}::text[])`),
-    dismissed: part(dismissedKeys, sql`${dismissedKeys.environmentId} IN ${chain} AND ${dismissedKeys.key} = ANY(${sql.param(inheriting)}::text[])`),
+    inherited: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} IN ${chain} AND ${secrets.environmentId} IS DISTINCT FROM ${here} AND ${secrets.key} = ANY(${sql.param(resolving)}::text[])`),
+    dismissed: part(dismissedKeys, sql`${dismissedKeys.environmentId} IN ${chain} AND ${dismissedKeys.key} = ANY(${sql.param(resolving)}::text[])`),
     // What a key written with no nature refers to, its own or the one it inherits, if a reference: its value's nature is the source's.
     source: part(secrets, sql`${secrets.id} IN (SELECT s.source_id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id IN ${chain} AND s.key = ANY(${sql.param(bare)}::text[]))`),
     // Each key a reference is made to, and where it is.
@@ -293,11 +306,22 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
     reader: part(secrets, sql`${secrets.id} IN ${readers}`),
     readerPlace: part(environments, sql`${environments.id} IN (SELECT r.environment_id FROM secrets r WHERE r.id IN ${readers})`),
     readerProject: part(projects, sql`${projects.id} IN (SELECT r.project_id FROM secrets r WHERE r.id IN ${readers})`),
-    // Each version restored, and its key's newest: by number, as the key's sealed row counts them.
+    // Each version restored, its key's newest, by number, as the key's sealed row counts them; and the copy of the value
+    // restored that says its nature, of the same first date, which a mark or a restore made: the newest. Unless two values
+    // may share that date, which a version past the first written at it (`created_at = first_written_at`) says, a value
+    // written in the same millisecond or after the clock went back: then the strictest, as it cannot be told which is whose.
     version: part(secretVersions, sql`(${secretVersions.secretId}, ${secretVersions.version}) IN (SELECT s.id, r.version FROM secrets s
       JOIN unnest(${sql.param(restores.map((each) => each.key))}::text[], ${sql.param(restores.map((each) => each.version))}::int[]) AS r (key, version) ON r.key = s.key
       WHERE s.project_id = ${project} AND s.environment_id = ${here}
-      UNION SELECT s.id, s.versions FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(restores.map((each) => each.key))}::text[]))`),
+      UNION SELECT s.id, s.versions FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ANY(${sql.param(restores.map((each) => each.key))}::text[])
+      UNION SELECT f.secret_id, (SELECT c.version FROM secret_versions c WHERE c.secret_id = f.secret_id AND c.first_written_at = f.first_written_at
+          ORDER BY CASE WHEN EXISTS (SELECT 1 FROM secret_versions o JOIN secret_versions e ON e.secret_id = o.secret_id AND e.first_written_at = o.first_written_at AND e.version < o.version
+            WHERE o.secret_id = f.secret_id AND o.first_written_at = f.first_written_at AND o.created_at = o.first_written_at)
+          THEN c.sensitive::int * 2 + (c.plaintext IS NULL)::int ELSE 0 END DESC, c.version DESC LIMIT 1)
+        FROM secret_versions f JOIN secrets s ON s.id = f.secret_id
+        JOIN unnest(${sql.param(restores.map((each) => each.key))}::text[], ${sql.param(restores.map((each) => each.version))}::int[]) AS r (key, version) ON r.key = s.key AND r.version = f.version
+        WHERE s.project_id = ${project} AND s.environment_id = ${here})`),
+    marked: marked.part,
     // Each version a value replaces, by its id: the decision holds it to the sealed row of what the key reads now.
     replaced: part(secretVersions, sql`${secretVersions.id} = ANY(${sql.param(replacing)}::uuid[])`),
   };
@@ -307,16 +331,23 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
     const environment = place && seen.environment.find((row) => row.projectId === place.id && row.slug === environmentSlug && live(row));
     return { place, environment, config: environment && seen.environment.find((row) => row.parentId === environment.id && row.owner !== null && !row.slug.includes('~')) };
   };
+  const refused = refusedTo('secret.write', shown, vault.workloads, {
+    where: { project: projectSlug, environment: environmentSlug },
+    objects: (seen: Seen<typeof read>) => {
+      const { place, environment, config: own } = placed(seen);
+      return [...(place === undefined ? [] : [`project:${place.id}`]), ...[environment, own].flatMap((row) => (row === undefined ? [] : [`environment:${row.id}`]))];
+    },
+  });
   return {
     read,
-    denied: refusedTo('secret.write', shown, vault.workloads, {
-      where: { project: projectSlug, environment: environmentSlug },
-      objects: (seen: Seen<typeof read>) => {
-        const { place, environment, config: own } = placed(seen);
-        return [...(place === undefined ? [] : [`project:${place.id}`]), ...[environment, own].flatMap((row) => (row === undefined ? [] : [`environment:${row.id}`]))];
-      },
-    }),
-    decide(seen: Seen<typeof read>, at: number, unsealed) {
+    // What the values marked weigh, read beside them.
+    ...(marks.length > 0 ? { beside: { weighed: marked.weighed } } : {}),
+    // A loosening refused is logged as one, as 0.14.7 did.
+    denied: (seen: Seen<typeof read>, at: number, refusal: Refusal) => {
+      const said = refused(seen, at, refusal);
+      return said !== null && refusal.refused === 'not_owner' ? { ...said, action: 'secret.loosen' } : said;
+    },
+    decide(seen: Seen<typeof read>, at: number, unsealed, _checked, beside) {
       const caller = callerFrom(seen, shown, vault.workloads, at);
       if (caller === null) return { refused: 'unauthenticated' };
       if (caller.workload?.stop != null) return { refused: caller.workload.stop };
@@ -328,6 +359,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       if (place === undefined || named === undefined || named.owner !== null) return { refused: 'no_access' };
       const denied = deniedIn(caller, named, mine, needs);
       if (denied !== undefined) return denied;
+      // Past what a change copies, the values marked were not read: too much, not gone.
+      if (marks.length > 0 && overweight(beside?.weighed)) return { refused: 'too_much_to_copy' };
       /** Where the keys are: the environment named, or the caller's config of it, which a value makes where they have none. */
       let environment: Fresh<typeof environments> = named;
       let made: Fresh<typeof environments> | undefined;
@@ -400,8 +433,49 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
       const outcomes: [string, KeyOutcome][] = [];
       const referring = new Set<string>();
       const versions = new Map(seen.version.map((row) => [`${row.secretId} ${row.version}`, row]));
+      const current = new Map(seen.marked.map((row) => [`${row.secretId} ${row.version}`, row]));
+      let loosened = false;
       for (const { key, value, nature: asked, generated, replaces, restore, ref, archived, folder, inherit } of items) {
         const was = held.get(key) ?? null;
+        if (value === undefined && asked !== undefined) {
+          // A mark, of a value the environment holds: one it inherits, or a reference's, is marked where it is held.
+          if (was === null) {
+            const down = passedDown(key, 'read');
+            if (down === undefined) return { refused: 'unreadable' };
+            return { refused: down === null ? 'unknown_key' : 'inherited_key' };
+          }
+          if (was.archivedAt !== null) return { refused: 'archived' };
+          if (was.sourceId !== null) return { refused: 'is_reference' };
+          if (was.currentVersion === null || was.nature === null) return { refused: 'no_value' };
+          if (asked === was.nature) {
+            answered.push([key, { version: was.currentVersion, nature: asked }]);
+            outcomes.push([key, 'unchanged']);
+            continue;
+          }
+          // Looser takes the value written again, never a flip of the one stored; but an Owner of the project makes a
+          // sensitive value a secret in place, a value they read anyway, through a service account they give read.
+          if (stricterOf(asked, was.nature) === was.nature) {
+            if (asked === 'plain') return { refused: 'looser' };
+            if (!owns(caller, place.id)) return { refused: 'not_owner' };
+            loosened = true;
+          }
+          // Its value, which the engine opens as its version's labels say (a relabelled one does not open: unreadable), and
+          // seals as the key's next version: what its encryption names, its nature and its number, changes. Its first date,
+          // its recipe and its pair are the value's, which is the same.
+          const from = current.get(`${was.id} ${was.currentVersion}`);
+          if (from === undefined) return { refused: 'unreadable' };
+          const { mac: _, ...kept } = was;
+          const version = kept.versions + 1;
+          const secret = { ...kept, versions: version, currentVersion: version, updatedAt: now, nature: asked };
+          sealed.push({ version: { id: fresh.get(key)!.version, secretId: was.id, version, createdAt: now, createdBy: caller.principal, sensitive: asked === 'sensitive', firstWrittenAt: from.firstWrittenAt, plaintext: null }, copy: from });
+          answered.push([key, { version, nature: asked }]);
+          outcomes.push([key, 'changed']);
+          writes.push(put(secrets, secret, was));
+          leaves.set(secret.id, secret);
+          // `was`: the nature it had; `kept`: the version whose value it is.
+          lines.push({ key, secret: was.id, version, nature: asked, was: was.nature, kept: was.currentVersion });
+          continue;
+        }
         // Only a value or a reference makes a key: there is nothing else to archive, file, restore or reset.
         if (was === null && value === undefined && ref === undefined) return { refused: 'unknown_key' };
         // A reset, or its undoing, is of a key a parent passes down: anything else is an archiving, which takes more.
@@ -446,11 +520,22 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
           // reference, or one broken), only the version's row says it, under no MAC: its encryption is held to it (`vouched`).
           const unsaid = restore !== undefined && kept.currentVersion !== kept.versions ? newest : undefined;
           if (unsaid !== undefined && unsaid !== from) vouched.push(unsaid);
+          // The copy of the value restored that the read found to say its nature, by its first date, a mark's or a restore's: it
+          // comes back no looser than that, as 0.14.7 found it by its ciphertext. A value made sensitive in place is sensitive
+          // in its older versions too. Of the versions of that date read, the strictest, the newest of those: the copy the
+          // read picked, or the newest of the key, which is that copy when of that date. Each one's encryption is held to it.
+          // Its first date has no MAC: one moved or deleted behind the vault hides the copy (docs/design/0.16.md, "A version is restored").
+          const dated = from === undefined ? [] : seen.version.filter((row) => row.secretId === kept.id && row.firstWrittenAt.getTime() === from.firstWrittenAt.getTime());
+          const copy = from && dated.reduce((pick, row) => {
+            const [a, b] = [natureOf(row), natureOf(pick)];
+            return a !== b ? (stricterOf(a, b) === a ? row : pick) : row.version > pick.version ? row : pick;
+          }, from);
+          for (const row of dated) if (row !== from && row !== unsaid) vouched.push(row);
           const sticks = natures.some((row) => row?.nature === 'sensitive') || unsaid?.sensitive === true;
           // In a personal config, a value typed over a plain one, its own or the one it reads now, stays plain: nobody but its owner lists it (0.14.7's `bareLevel`).
           // A generated one is a secret.
           const plain = generated === undefined && environment.owner !== null && natures.at(-1)?.nature === 'plain';
-          const nature: Nature = asked ?? (sticks ? 'sensitive' : from !== undefined ? natureOf(from) : plain ? 'plain' : 'secret');
+          const nature: Nature = asked ?? (sticks ? 'sensitive' : from !== undefined ? stricterOf(natureOf(from), natureOf(copy!)) : plain ? 'plain' : 'secret');
           const version = kept.versions + 1;
           // Typed or restored, it has no recipe for Regenerate, and is in no pair; generated, the recipe it was made by, and its half of its pair.
           const pair = generated?.pair === undefined ? null : { id: pairs.get(generated.pair.private)!, half: key === generated.pair.private ? 'private' : 'public' };
@@ -536,7 +621,8 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
         vouched,
         entry: {
           kept: true,
-          action: 'secret.write',
+          // A change that makes any key looser is its own action, which no reader of the log takes for a write.
+          action: loosened ? 'secret.loosen' : 'secret.write',
           actor: caller.principal,
           credential: caller.credential.id,
           request: shown.request,

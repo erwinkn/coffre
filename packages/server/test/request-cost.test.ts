@@ -421,6 +421,9 @@ const requests: Record<string, Entry> = {
   'PATCH /secrets/:project/:environment/:key, renamed': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy/KEY', { key: 'RENAMED' }), calls: ['change'], statements: 0 },
   'PATCH /secrets/:project/:environment/:key, renamed back': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy/RENAMED', { key: 'KEY' }), calls: ['change'], statements: 0 },
   'PATCH /secrets/:project/:environment, a reference': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy', { LINK: { ref: 'market/dev/DATABASE_URL' } }), calls: ['change'], statements: 0 },
+  // A key's nature marked: its value opened and sealed again in the vault's one change, and as strict already, nothing.
+  'PATCH /secrets/:project/:environment, marked': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy', { KEY: { sensitivity: 'sensitive' } }), calls: ['change'], statements: 0 },
+  'PATCH /secrets/:project/:environment?dryRun=1, a mark': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy?dryRun=1', { KEY: { sensitivity: 'sensitive' } }), calls: ['weigh'], statements: 0 },
   'DELETE /secrets/:project/:environment/:key/reference': { request: () => api('bo-cli', 'DELETE', '/secrets/market/busy/LINK/reference'), calls: ['change'], statements: 0 },
   // A project of each round's own, since one that is there is refused: no caller above reaches it.
   'PUT /projects/:project': { request: () => api('cy-cli', 'PUT', `/projects/shop-${round}`, {}), calls: ['change'], statements: 0 },

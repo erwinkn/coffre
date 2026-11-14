@@ -364,6 +364,37 @@ test("dismissing a missing key, and restoring it, as 0.14.7 answered: one vault 
   assert.deepEqual((await dismissals('bo-cli', 'market/prod', Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`K_${i}`, true]))))[0][0], 200);
 });
 
+test("marking keys' natures in place, as 0.14.7 answered: one vault change and no statement of the app's; looser only by an Owner, to a secret", async () => {
+  const marks = (label: string, path: string, patch: unknown, query = '') => cost(() => call(label, 'PATCH', `/secrets/${path}${query}`, patch));
+  const nature = async (path: string, key: string) => {
+    const [, body] = await call('bo-cli', 'GET', `/secrets/${path}`);
+    return (body.keys as { key: string; sensitivity: string | null; version: number | null }[]).find((entry) => entry.key === key);
+  };
+  // Bo, who maintains market, makes B (plain) a secret and A sensitive; S is sensitive already. Beside them, a value written.
+  const [[status, body], calls, statements] = await marks('bo-cli', 'market/prod', { B: { sensitivity: 'secret' }, A: { sensitivity: 'sensitive' }, S: { sensitivity: 'sensitive' }, NEW: 'fake-new' });
+  assert.deepEqual([status, body.keys, calls, statements], [200, { B: { version: 2, sensitivity: 'secret' }, A: { version: 2, sensitivity: 'sensitive' }, S: { version: 1, sensitivity: 'sensitive' }, NEW: { version: 1, sensitivity: 'secret' } }, ['change'], 0]);
+  assert.deepEqual([(await nature('market/prod', 'B'))?.sensitivity, (await nature('market/prod', 'A'))?.sensitivity], ['secret', 'sensitive']);
+  // A dry run says it would change, and writes nothing: one weighing.
+  const [[weighed, would], weighCalls] = await marks('bo-cli', 'market/prod', { NEW: { sensitivity: 'sensitive' } }, '?dryRun=1');
+  assert.deepEqual([weighed, would.keys, weighCalls], [200, { NEW: 'changed' }, ['weigh']]);
+  assert.equal((await nature('market/prod', 'NEW'))?.sensitivity, 'secret');
+  // Looser: a sensitive value a secret, by an Owner alone; plain, by nobody.
+  const [notOwner] = await marks('bo-cli', 'market/prod', { S: { sensitivity: 'secret' } });
+  assert.deepEqual(refused(notOwner), [409, 'conflict', 'not_owner']);
+  assert.match(notOwner[1].message!, /unless an Owner of the project makes it one in place/);
+  assert.deepEqual((await marks('cy-cli', 'market/prod', { S: { sensitivity: 'secret' } }))[0][1].keys, { S: { version: 2, sensitivity: 'secret' } });
+  assert.deepEqual(refused((await marks('cy-cli', 'market/prod', { A: { sensitivity: 'plain' } }))[0]), [409, 'conflict', 'looser']);
+  // Only a value the environment holds: a reference, a key dev inherits, a key with no value, an archived one.
+  for (const [path, key, answer] of [['market/prod', 'R', [409, 'conflict', 'is_reference']], ['market/dev', 'R', [409, 'conflict', 'inherited_key']],
+    ['market/prod', 'E', [404, 'not_found', 'no_value']], ['market/prod', 'C', [409, 'conflict', 'archived']]] as const) {
+    assert.deepEqual(refused((await marks('bo-cli', path, { [key]: { sensitivity: 'sensitive' } }))[0]), answer, `${path}/${key}`);
+  }
+  // Viewing takes no writing; a nature that is none is a 400, which asks the vault nothing.
+  assert.deepEqual(refused((await marks('ada-cli', 'market/prod', { A: { sensitivity: 'sensitive' } }))[0]), NO_ACCESS);
+  const [bad, badCalls] = await marks('bo-cli', 'market/prod', { A: { sensitivity: 'public' } });
+  assert.deepEqual([bad[0], badCalls], [400, []]);
+});
+
 /** A version, and a reveal of the whole environment, by the same caller: the same answer, or the same refusal. */
 async function sameAsRead(label: string, path: string): Promise<string | null> {
   const [[status, body], calls] = await cost(() => call(label, 'GET', `/projects/${path}/version`));

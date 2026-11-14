@@ -21,6 +21,17 @@
   depends on `pg` or `pg-connection-string` any more, and a deployment
   installs no driver. Database URLs are read as before, TLS included.
 
+- **A key marked in place, as one change.** `coffre mark` (`{ "KEY": {
+  "sensitivity" } }` alone in a write) is served again: the value is kept
+  as the key's next version, with its first date, recipe and pair. A
+  request that makes any key looser, a sensitive value made a secret by an
+  Owner of the project, is logged as one `secret.loosen` entry naming every
+  key, where 0.14.7 logged one entry a key. A key with no value is a 404
+  `no_value`, where 0.14.7 answered 409. One request marks 8 MiB of stored
+  values at most, and a fork copies as much at most, `too_much_to_copy`
+  (409), with nothing written: mark fewer keys at once, or fork by
+  references or inheritance. A restore comes back no looser than the
+  value's newest copy, a mark's included.
 - **A restored version comes back as typed.** Restoring a version a recipe
   made, or one half of a key pair, writes it as a value typed by hand:
   Regenerate no longer makes its next one by that recipe, and the pair's
