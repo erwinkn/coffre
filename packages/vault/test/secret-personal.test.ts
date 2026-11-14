@@ -66,6 +66,8 @@ const given = async (label: string, keys: string[], more: Partial<UseInput> = {}
   return answer.values.map((item) => ('refused' in item ? item.refused : item.value));
 };
 const configs = async () => rowsOf<{ slug: string; owner: string; parent: string }>(world.owner, sql`SELECT e.slug, e.owner, p.slug AS parent FROM environments e JOIN environments p ON p.id = e.parent_id WHERE e.owner IS NOT NULL AND e.archived_at IS NULL ORDER BY e.owner`);
+/** A key's id in the one personal config a test writes in. */
+const idOf = async (key: string) => (await rowsOf<{ id: string }>(world.owner, sql`SELECT s.id FROM secrets s JOIN environments e ON e.id = s.environment_id WHERE e.owner IS NOT NULL AND s.key = ${key}`))[0]!.id;
 const count = async (table: 'log_pending' | 'secret_versions' | 'environments') => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM ${sql.identifier(table)}`))[0]!.n;
 const written = async () => {
   const [row] = await rowsOf<{ kept: boolean; body: string; mac: Buffer }>(world.owner, sql`SELECT kept, body, mac FROM log_pending WHERE kept ORDER BY id DESC LIMIT 1`);
@@ -74,7 +76,7 @@ const written = async () => {
 
 test("a person's first value in their config of an environment makes it, in the same change, and they alone then read it", async () => {
   // A Viewer keeps a local value: the config takes reading the environment, nothing more.
-  assert.deepEqual(await vault.change(mine('bo-cli', typed({ LOCAL: 'mine', DATABASE_URL: 'postgres://bo' }))), { answer: { keys: { LOCAL: { version: 1, nature: 'secret' }, DATABASE_URL: { version: 1, nature: 'secret' } } } });
+  assert.deepEqual(await vault.change(mine('bo-cli', typed({ LOCAL: 'mine', DATABASE_URL: 'postgres://bo' }))), { answer: { keys: { LOCAL: { version: 1, nature: 'secret' }, DATABASE_URL: { version: 1, nature: 'secret' } }, outcomes: { LOCAL: 'added', DATABASE_URL: 'added' } } });
   const [made] = await configs();
   assert.match(made!.slug, /^prod-p-[0-9a-f]{8}$/);
   assert.deepEqual({ ...made, slug: undefined }, { slug: undefined, owner: bo, parent: 'prod' });
@@ -91,7 +93,7 @@ test("a person's first value in their config of an environment makes it, in the 
 
   // The next write is in the same config.
   const before = await count('environments');
-  assert.deepEqual(await vault.change(mine('bo-cli', typed({ LOCAL: 'again' }))), { answer: { keys: { LOCAL: { version: 2, nature: 'secret' } } } });
+  assert.deepEqual(await vault.change(mine('bo-cli', typed({ LOCAL: 'again' }))), { answer: { keys: { LOCAL: { version: 2, nature: 'secret' } }, outcomes: { LOCAL: { compare: { secret: await idOf('LOCAL'), version: 1 } } } } });
   assert.equal(await count('environments'), before);
   assert.equal((await written()).detail.made, undefined);
   assert.deepEqual(await given('bo-cli', ['LOCAL']), ['again']);
@@ -106,12 +108,12 @@ test('two first writes at once make one config', async () => {
 
 test("a value typed with no nature in a config is as strict as what the key reads now, and a plain one stays plain: nobody but its owner lists it", async () => {
   assert.deepEqual(await vault.change(mine('ada-cli', typed({ FLAG: 'off', DATABASE_URL: 'postgres://ada', TOKEN: 'mine', NEW: 'x' }))), {
-    answer: { keys: { FLAG: { version: 1, nature: 'plain' }, DATABASE_URL: { version: 1, nature: 'secret' }, TOKEN: { version: 1, nature: 'sensitive' }, NEW: { version: 1, nature: 'secret' } } },
+    answer: { keys: { FLAG: { version: 1, nature: 'plain' }, DATABASE_URL: { version: 1, nature: 'secret' }, TOKEN: { version: 1, nature: 'sensitive' }, NEW: { version: 1, nature: 'secret' } }, outcomes: { FLAG: 'added', DATABASE_URL: 'added', TOKEN: 'added', NEW: 'added' } },
   });
   // Its own plain value stays plain, until a write says otherwise.
-  assert.deepEqual(await vault.change(mine('ada-cli', typed({ FLAG: 'on again' }))), { answer: { keys: { FLAG: { version: 2, nature: 'plain' } } } });
-  assert.deepEqual(await vault.change(mine('ada-cli', [{ key: 'FLAG', value: 'hidden', nature: 'secret' }])), { answer: { keys: { FLAG: { version: 3, nature: 'secret' } } } });
-  assert.deepEqual(await vault.change(mine('ada-cli', typed({ FLAG: 'still hidden' }))), { answer: { keys: { FLAG: { version: 4, nature: 'secret' } } } });
+  assert.deepEqual(await vault.change(mine('ada-cli', typed({ FLAG: 'on again' }))), { answer: { keys: { FLAG: { version: 2, nature: 'plain' } }, outcomes: { FLAG: { compare: { secret: await idOf('FLAG'), version: 1 } } } } });
+  assert.deepEqual(await vault.change(mine('ada-cli', [{ key: 'FLAG', value: 'hidden', nature: 'secret' }])), { answer: { keys: { FLAG: { version: 3, nature: 'secret' } }, outcomes: { FLAG: 'changed' } } });
+  assert.deepEqual(await vault.change(mine('ada-cli', typed({ FLAG: 'still hidden' }))), { answer: { keys: { FLAG: { version: 4, nature: 'secret' } }, outcomes: { FLAG: { compare: { secret: await idOf('FLAG'), version: 3 } } } } });
   // Nobody is handed a sensitive value back, in a config either.
   assert.deepEqual(await given('ada-cli', ['FLAG', 'TOKEN']), ['still hidden', 'sensitive']);
 });
@@ -150,23 +152,23 @@ test("a credential scoped to one environment writes in its owner's config of tha
 test("a config's keys are archived, brought back, filed, restored and refiled as anywhere, by its owner", async () => {
   await vault.change(mine('ada-cli', typed({ A: 'one' })));
   await vault.change(mine('ada-cli', typed({ A: 'two', B: 'b' })));
-  assert.deepEqual(await vault.change(mine('ada-cli', [{ key: 'A', restore: 1 }])), { answer: { keys: { A: { version: 3, nature: 'secret' } } } });
+  assert.deepEqual(await vault.change(mine('ada-cli', [{ key: 'A', restore: 1 }])), { answer: { keys: { A: { version: 3, nature: 'secret' } }, outcomes: { A: 'changed' } } });
   assert.deepEqual(await given('ada-cli', ['A']), ['one']);
-  assert.deepEqual(await vault.change(mine('ada-cli', [{ key: 'A', folder: 'local' }, { key: 'B', folder: 'local' }])), { answer: { keys: {} } });
+  assert.deepEqual(await vault.change(mine('ada-cli', [{ key: 'A', folder: 'local' }, { key: 'B', folder: 'local' }])), { answer: { keys: {}, outcomes: { A: 'changed', B: 'changed' } } });
   const refile = (label: string, more: Partial<SecretRefile> = {}): Presented & SecretRefile => ({ ...shown(label), op: 'secret.refile', project: 'market', environment: 'prod', mine: true, folder: 'local', to: 'mine', ...more });
   assert.deepEqual(await vault.change(refile('ada-cli')), { answer: { moved: ['A', 'B'] } });
   assert.equal((await written()).detail.personal, 'prod');
   // Bo has no config, so no folder, prod's own neither, which a Viewer files nothing in; a service account none at all; and prod's own folders are not hers.
-  assert.deepEqual(await vault.change({ ...mine('ada-cli', [{ key: 'DATABASE_URL', folder: 'shared' }]), mine: false }), { answer: { keys: {} } });
+  assert.deepEqual(await vault.change({ ...mine('ada-cli', [{ key: 'DATABASE_URL', folder: 'shared' }]), mine: false }), { answer: { keys: {}, outcomes: { DATABASE_URL: 'changed' } } });
   assert.deepEqual(await vault.change(refile('bo-cli', { folder: 'shared' })), { refused: 'no_folder' });
   assert.deepEqual(await rowsOf(world.owner, sql`SELECT folder FROM secrets WHERE environment_id = ${prod.id} AND key = 'DATABASE_URL'`), [{ folder: 'shared' }]);
   assert.deepEqual(await vault.change(refile('bo-cli', { folder: 'mine' })), { refused: 'no_folder' });
   assert.deepEqual(await vault.change(refile('api-token', { folder: 'mine' })), { refused: 'not_a_person' });
   assert.deepEqual(await vault.change(refile('ada-viewer', { folder: 'mine' })), { refused: 'no_access' });
   assert.deepEqual(await vault.change(refile('ada-cli', { folder: 'mine', mine: false })), { refused: 'no_folder' });
-  assert.deepEqual(await vault.change(mine('ada-cli', [{ key: 'A', archived: true }])), { answer: { keys: {} } });
+  assert.deepEqual(await vault.change(mine('ada-cli', [{ key: 'A', archived: true }])), { answer: { keys: {}, outcomes: { A: 'archived' } } });
   assert.deepEqual(await given('ada-cli', ['A']), ['unknown_key']);
-  assert.deepEqual(await vault.change(mine('ada-cli', [{ key: 'A', archived: false }])), { answer: { keys: {} } });
+  assert.deepEqual(await vault.change(mine('ada-cli', [{ key: 'A', archived: false }])), { answer: { keys: {}, outcomes: { A: 'changed' } } });
   assert.deepEqual(await given('ada-cli', ['A', 'B']), ['one', 'b']);
   const keys = await rowsOf(world.owner, sql`SELECT s.key, s.folder FROM secrets s JOIN environments e ON e.id = s.environment_id WHERE e.owner = ${ada} ORDER BY s.key`);
   assert.deepEqual(keys, [{ key: 'A', folder: 'mine' }, { key: 'B', folder: 'mine' }]);
