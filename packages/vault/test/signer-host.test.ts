@@ -44,6 +44,7 @@ const start = () =>
       },
     }),
     now: vault.now,
+    keepUsesDays: 90,
     alert: async (alert) => {
       if (down.alert) throw new Error('the alert could not be sent');
       await sending?.();
@@ -313,7 +314,7 @@ test('the alarm for the next run is set before an alert is sent, and an alert th
 
 test('with no alert configured, what is found goes to the log, once', async (t) => {
   const logged = t.mock.method(console, 'error', () => {});
-  host = new SignerHost({ storage, alone: (run) => run(), keys: vault.keys, db: vault.db, now: vault.now });
+  host = new SignerHost({ storage, alone: (run) => run(), keys: vault.keys, db: vault.db, now: vault.now, keepUsesDays: 90 });
   await host.status();
   await forge(1);
   vault.tick(CHECK_MS);

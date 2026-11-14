@@ -45,6 +45,8 @@ export type ResolvedVaultConfig = {
   bulkLimit: BulkLimit;
   memorySeconds: number;
   workloads: Workloads;
+  /** How long the signer keeps a use, in days; null keeps every one. */
+  keepUsesDays: number | null;
 };
 
 /**
@@ -99,6 +101,12 @@ export type VaultConfig = {
    * session.
    */
   workloads?: { noReads?: boolean; useOnly?: boolean };
+  /**
+   * How long the log keeps a use, in days: 90 unless set, and `null` keeps
+   * every one (docs/design/0.16.md, "How long the log is kept"). Changes are
+   * kept for good.
+   */
+  log?: { keepUsesDays?: number | null };
   /**
    * Where the signer's alerts go: what it found in the database that the
    * vault did not write, or that it has stopped checking (docs/design/0.16.md,
@@ -196,6 +204,7 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
     memorySeconds: checkMemory(config.memorySeconds ?? DEFAULT_MEMORY_SECONDS),
     workloads: config.workloads === undefined ? null : { noReads: config.workloads.noReads === true, useOnly: config.workloads.useOnly === true },
+    keepUsesDays: checkKeepUsesDays(config.log?.keepUsesDays),
   };
 }
 
@@ -223,6 +232,12 @@ function signingKeys(given: string | undefined, keks: { provider: KekProvider; s
   return [signing, ...derived].filter((key, i, all) => all.findIndex((other) => other.equals(key)) === i);
 }
 
+
+function checkKeepUsesDays(days: number | null | undefined): number | null {
+  if (days === undefined) return 90;
+  if (days !== null && !(Number.isFinite(days) && days > 0)) throw new Error(`log.keepUsesDays must be a number of days above 0, or null to keep every use; got ${String(days)}`);
+  return days;
+}
 
 function checkBulkLimit({ count, windowMinutes }: { count: number; windowMinutes: number }): BulkLimit {
   if (!Number.isInteger(count) || count < 1 || !(windowMinutes > 0) || windowMinutes > MAX_BULK_WINDOW_MINUTES) {

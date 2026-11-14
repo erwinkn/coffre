@@ -111,7 +111,8 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
 export const CoffreSigner = signerObject((env: object) => {
   if (configure === null) throw new Error('the vault Worker must export default vault(…)');
   const config = configure(env as never);
-  return { database: config.database, signingKeys: resolveVaultConfig(config).signingKeys, alert: config.alert };
+  const { signingKeys, keepUsesDays } = resolveVaultConfig(config);
+  return { database: config.database, signingKeys, keepUsesDays, alert: config.alert };
 });
 
 /** The vault Worker's default export, `VaultEntrypoint`, configured from its `env`. */

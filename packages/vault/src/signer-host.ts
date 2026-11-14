@@ -52,6 +52,7 @@ export type Hosting = {
   /** The signer's database, for as long as the host lasts: on Workers, a client that opens with a query and closes once idle. */
   db: Database;
   now(): number;
+  keepUsesDays: number | null;
   /** Where an alert goes. Without one, the process's log. */
   alert?: ((alert: SignerAlert) => void | Promise<void>) | undefined;
 };
@@ -76,7 +77,7 @@ const SAYS: Record<Alerted['found'], string> = {
   rewritten: 'a change replaced this row, or was decided on it, and it was not the row the log says',
   row: 'this row is not what the log says: changed, put back, deleted, or written behind the vault',
   cut: 'this tree of the log does not end with the entry signed last',
-  lost: 'an entry signed is not in the log as it was signed',
+  lost: 'an entry signed, or a block of them, is not in the log as it was signed',
   stopped: 'the signer has completed no check of the database since then: its runs fail, or entries keep it waiting',
 };
 /** How many findings an alert's text names: the rest are counted, and all are in `findings`. */
@@ -124,7 +125,7 @@ export class SignerHost {
     if (this.#signer === null || this.#signer.dead) {
       await this.#on.alone(async () => {
         if (this.#signer !== null && !this.#signer.dead) return;
-        const signer = await Signer.open({ db: this.#on.db, keys: this.#on.keys, now: this.#on.now, store: this.#store });
+        const signer = await Signer.open({ db: this.#on.db, keys: this.#on.keys, now: this.#on.now, store: this.#store, keepUsesDays: this.#on.keepUsesDays });
         this.#alarm = await this.#on.storage.getAlarm();
         this.#signer = signer;
       });

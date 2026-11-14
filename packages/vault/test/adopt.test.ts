@@ -29,7 +29,7 @@ const config = { keks: vault.keks, owners: ['root@acme.example'], signingKeys: [
 const [ada, root] = [user('ada'), user('root')];
 
 let store: ReturnType<typeof memoryStore>;
-const signer = () => Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store });
+const signer = () => Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store, keepUsesDays: 90 });
 /** The adoption, by the signer the object opens from its storage. */
 const adopting = async (by?: Signer) => adopt(by ?? (await signer()), vault, config);
 /** A signer told of what the vault committed, run once: what it found. */

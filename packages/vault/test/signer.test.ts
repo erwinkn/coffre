@@ -28,7 +28,7 @@ const named = (id: string) => JSON.stringify(['principals', id]);
 
 let store: ReturnType<typeof memoryStore>;
 let signer: Signer;
-const open = () => Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store });
+const open = () => Signer.open({ db: vault.db, keys: vault.keys, now: vault.now, store, keepUsesDays: 90 });
 
 beforeEach(async () => {
   await emptyDatabase(vault.owner);
@@ -383,8 +383,8 @@ test('an entry that is nobody\'s is refused and removed, alone; one changed betw
   await vault.owner.execute(sql`UPDATE log_pending SET body = replace(body, 'member.role', 'member.gone')`);
   await signer.move();
   assert.deepEqual(await signer.take(), [{ found: 'lost', of: hash }]);
-  // What is left of it is nobody's, and the tree holds a leaf the log does not.
-  assert.deepEqual(kinds(await run()), ['cut', 'forged']);
+  // What is left of it is nobody's, and the tree holds a leaf the log does not, which the re-check of old entries names again.
+  assert.deepEqual(kinds(await run()), ['cut', 'forged', 'lost']);
 });
 
 test('a row planted where an entry is about to go does not stop the signer: the entry is lost, and said so', async () => {
@@ -403,27 +403,27 @@ test('a row planted where an entry is about to go does not stop the signer: the 
   await vault.owner.execute(sql`INSERT INTO log (seq, kept, leaf, body) VALUES (1, true, 1, '{}')`);
   await signer.move();
   assert.deepEqual(await signer.take(), [{ found: 'lost', of: second }]);
-  // It goes on: the next entry is numbered and moved. The log then ends as signed, so the full run has nothing to add:
-  // what was planted before its end was said when it was lost, and is the re-check of old entries' to find again (D222).
+  // It goes on: the next entry is numbered and moved. The log then ends as signed, so the check has nothing to add:
+  // what was planted before its end was said when it was lost, and the re-check of old entries finds it again (D222).
   await member(cy, 'member');
   assert.deepEqual(await run(false), []);
   assert.deepEqual((await logged()).map((entry) => entry.seq), [1, 2, 1000000]);
-  assert.deepEqual(await run(), []);
+  assert.deepEqual(await run(), [{ found: 'lost', of: first }, { found: 'lost', of: second }]);
 });
 
-test('a run is two round trips, its read and its move, each bounded; only one runs at a time, and what it found outlasts its failure', async () => {
+test('a run is two round trips, its read and its move, and a minute\'s three, with the re-check\'s read, each bounded; only one runs at a time, and what it found outlasts its failure', async () => {
   const sent: string[][] = [];
   const proxy = await postgresProxy(VAULT_URL, { onSync: (statements) => sent.push(statements.map((text) => text.trimStart())) });
   const through = await openDatabase(proxy.url);
   try {
-    signer = await Signer.open({ db: through.db, keys: vault.keys, now: vault.now, store });
+    signer = await Signer.open({ db: through.db, keys: vault.keys, now: vault.now, store, keepUsesDays: 90 });
     await signer.run(false);
     await member(ada, 'owner');
     sent.length = 0;
     // The rows and the entries that wait are of one moment: one statement reads both. Each goes with the bound on its waits.
     assert.deepEqual(await run(), []);
     const bounded = (statement: string) => ['begin isolat', 'SELECT set_c', statement, 'commit'];
-    assert.deepEqual(sent.map((group) => group.map((text) => text.slice(0, 12))), [bounded('SELECT parts'), bounded('WITH taken A')]);
+    assert.deepEqual(sent.map((group) => group.map((text) => text.slice(0, 12))), [bounded('SELECT parts'), bounded('WITH taken A'), bounded('SELECT l.kep')]);
     // With the database's clock, so that no pooler answers the read from a cache.
     assert.match(sent[0]![2]!, /^SELECT parts\.\*, clock_timestamp\(\)/);
     const first = signer.run(true);
@@ -477,7 +477,7 @@ test('a run is two round trips, its read and its move, each bounded; only one ru
     assert.deepEqual(await run(), []);
     assert.equal(signer.checked, vault.now());
     vault.tick(5000);
-    assert.equal((await Signer.open({ db: through.db, keys: vault.keys, now: vault.now, store })).checked, vault.now() - 5000);
+    assert.equal((await Signer.open({ db: through.db, keys: vault.keys, now: vault.now, store, keepUsesDays: 90 })).checked, vault.now() - 5000);
   } finally {
     await through.close();
     await proxy.close();
