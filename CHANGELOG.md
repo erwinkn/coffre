@@ -60,8 +60,9 @@
   which Cloudflare resets past 30 seconds (5 seconds at 10,000 versions on
   the local key): one cut off says so in the log and in `status` at the
   next try, and an instance it does not fit waits for 0.16.x. A signer
-  whose storage was empty and took a database that was not says so once
-  in the log and in `status` (`took`): the upgrade does at its adoption,
+  whose storage was empty and adopted a database that was not says so
+  once in the log and in `status` (`took`), though not when it signs an
+  adoption entry it found pending: the upgrade does at its adoption,
   and at any other time it means the storage was lost, and the database
   is taken as it stands. Keep the vault down and restore a backup taken
   before the loss (`docs/restore.md`, "If the signer's storage is lost").
