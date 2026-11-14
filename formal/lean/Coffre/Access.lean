@@ -266,6 +266,11 @@ def ownsProject (h : Holdings) (project : String) : Bool :=
 
 def ownsInstance (role : String) (s : Scope) : Bool := role == "owner" && unscoped s
 
+def protectedWithin (pol : Policy) (x : Place) : List Place :=
+  match x.env with
+  | some _ => []
+  | none => ((pol.protectedIn.get? x.project).getD []).map fun (id, slug) => ⟨x.project, some (id, slug)⟩
+
 def administers (role : String) : Bool := role == "admin" || role == "owner"
 
 def mayManageAccess (h : Holdings) (x : Place) : Bool := allows h .grantManage x
@@ -284,8 +289,9 @@ def givesService (h : Holdings) (setting : Option Scope) (role : String) (x : Pl
     | some d, some s =>
       !d.normal.isEmpty && h.cred.isNone && inScope s x &&
         d.normal.all (allows h · x) &&
-        -- A grant on a whole project: each permission of the role in the giver's protected column (D241, option A).
-        (x.env.isSome || (d.normal.filter (!·.projectOnly)).all ((heldColumns h x).prot.contains ·))
+        -- A grant on a whole project: the role held in each environment the policy protects there (D241).
+        (protectedWithin h.policy x).all fun t =>
+          (d.normal.filter (!·.projectOnly)).all (allows h · t)
 
 structure ServiceAccount where
   grants : List (String × Place)

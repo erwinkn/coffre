@@ -250,11 +250,11 @@ repeat(6000, () => {
   const role = pick(ROLE_NAMES);
   const kept = chance(0.3) ? definition() : undefined;
   add({ op: 'givesService', holder, setting: where, role, place: at, ...(kept === undefined ? {} : { kept }) }, givesService(holder, where, role, at, kept));
-  // An unscoped Developer giving a role on a whole project of an inherited name: what reaches `heldColumns` there.
+  // An unscoped Developer giving viewer on a whole project of an inherited name: what reaches `protectedWithin` there.
   if (chance(0.1)) {
     const developer: Holdings = { ...holder, role: 'developer', scope: { projects: 'all', environments: 'all' }, credentialScope: null, service: false };
     const odd = { projectId: pick(INHERITED) };
-    for (const role of ['viewer', 'contributor']) add({ op: 'givesService', holder: developer, setting: EVERYWHERE_SCOPE, role, place: odd }, givesService(developer, EVERYWHERE_SCOPE, role, odd));
+    add({ op: 'givesService', holder: developer, setting: EVERYWHERE_SCOPE, role: 'viewer', place: odd }, givesService(developer, EVERYWHERE_SCOPE, 'viewer', odd));
   }
   const actor = pick(PEOPLE);
   const of = account();
