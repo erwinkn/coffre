@@ -722,7 +722,13 @@ a path or query that carries the handle is refused. S3's URLs leave the
 payload unsigned, as its own presigner does; any other service's sign the
 empty body a GET has.
 Each URL is one use in the log, naming the path and its lifetime, never
-served from the cache. Uploads are not presigned: they go through the proxy.
+served from the cache; on 0.16, one `use` of the vault, logged once a minute
+for its key, its path and lifetime no longer named (`docs/design/0.16.md`,
+"The proxy"). "Never past the handle" is the vault's word there, the use's
+`expiresAt`: the credential's effective end, not a grant that ends sooner, a
+revoke or a freeze. Once made, a URL is the upstream's: revoking the handle,
+freezing the credential or losing the grant stops the next ask, never a URL
+already handed out, which lasts to its end, on 0.14.7 as on 0.16. Uploads are not presigned: they go through the proxy.
 The SDK's own `getSignedUrl` signs with the handle, so it needs replacing
 by the helper where the app presigns.
 

@@ -2,17 +2,24 @@
 // app asks it to encrypt or decrypt, `credential(name).encrypt(plaintext, aad)`. Here both directions against Node's
 // createCipheriv, Equisafe's three stored formats, each built as its backend builds it, one answer for every failed
 // decrypt, the key's length checked after decoding, and no plaintext, AAD or key in the log, an error or the console.
-import test from 'node:test';
+//
+// 0.14.7's assertions, on 0.16 (docs/design/0.16.md, "The proxy"): each encrypt or decrypt is one `use` of the vault,
+// naming the cipher as its upstream, and the proxy keeps no key; the vault logs a credential's use of a key once a
+// minute, `secret.read` with `detail.credential` the cipher's name.
 import assert from 'node:assert/strict';
 import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from 'node:crypto';
+import { after, beforeEach, test } from 'node:test';
 
-import { credential } from '@coffre/client/credential';
+import { credential as proxied } from '@coffre/client/credential';
+import { generateToken } from '@coffre/core/identity';
+import { rowsOf } from '@coffre/db/dialect';
+import { credential, emptyDatabase, environment, grant, instance, principal, project, rewrite, role, rows, secret, value, write } from '@coffre/vault/testing';
+import { sql } from 'drizzle-orm';
 
-import { auditLog } from '@coffre/db/schema';
-import { clientFor } from './api-fixture.ts';
-import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
-import { checkPlugins } from '../src/plugins.ts';
 import { aesGcm, credentialProxy, hmac, privateKey, type CredentialProxyOptions, type Encoding } from '../src/plugins/credential-proxy.ts';
+import { openApp, PUBLIC_URL } from './app-fixture.ts';
+
+const ADA = 'user:ada';
 
 // Equisafe's two root keys, and the AES keys its backend derives from them, each stored in coffre as its 32 bytes in hex.
 const ROOT_ENCRYPTION_KEY = 'equisafe-root-encryption-key-7c1f0e9a';
@@ -41,30 +48,15 @@ const options: CredentialProxyOptions = {
   verifiers: { yousign: hmac('YOUSIGN_WEBHOOK_SECRET', { encoding: 'hex' }) },
 };
 
-/** What the console says while a test runs, every line of it. */
-const said: string[] = [];
+const app = await openApp({ plugins: [credentialProxy(options)] });
+const { world } = app;
+after(() => app.close());
 
-useMcp(async () => {
-  runtime.plugins = checkPlugins([credentialProxy(options)]);
-  said.length = 0;
-  const root = clientFor(deps, ROOT);
-  await root.members.add(`user:${DEV}`);
-  await root.projects.create('market');
-  for (const env of ['dev', 'bad']) await root.environments.create(`market/${env}`);
-  await root.secrets.set('market/dev', {
-    PAYER_SESSION_KEY: KEYS.PAYER_SESSION_KEY.toString('hex'),
-    BILLING_TOKEN_KEY: KEYS.BILLING_TOKEN_KEY.toString('hex'),
-    POLICY_SIGNATURE_KEY: { value: KEYS.POLICY_SIGNATURE_KEY.toString('hex'), sensitivity: 'sensitive' },
-    SMALL_KEY: KEYS.SMALL_KEY.toString('base64url'),
-    WIDE_KEY: KEYS.WIDE_KEY.toString('base64'),
-    IFRAME_TOKEN_SECRET: 'iframe_secret_0123456789',
-    YOUSIGN_WEBHOOK_SECRET: 'ys_whsec_0123456789',
-  });
-  // Keys of 31 and 33 bytes, one outside its alphabet, and one a passphrase: none is AES-256's.
-  await root.secrets.set('market/bad', { ...BAD });
-  await root.access.set(`user:${DEV}`, { market: 'developer' });
-});
+const market = project('market');
+const dev = environment(market, 'dev');
+const bad = environment(market, 'bad');
 
+// Keys of 31 and 33 bytes, one outside its alphabet, and one a passphrase: none is AES-256's.
 const BAD = {
   PAYER_SESSION_KEY: KEYS.PAYER_SESSION_KEY.subarray(0, 31).toString('hex'),
   BILLING_TOKEN_KEY: Buffer.concat([KEYS.BILLING_TOKEN_KEY, Buffer.from([7])]).toString('hex'),
@@ -72,11 +64,58 @@ const BAD = {
   SMALL_KEY: ROOT_ENCRYPTION_KEY,
 };
 
-/** What `coffre run` gives the app for `path`: its environment, with the handle. */
-async function run(path = 'market/dev'): Promise<Record<string, string>> {
-  const made = await route('/api/handles', { method: 'POST', headers: { authorization: `Bearer ${await sessionFor(DEV)}`, 'content-type': 'application/json' }, body: JSON.stringify({ label: 'run', paths: [path] }) });
-  const handle = ((await made.json()) as { token: string }).token;
-  const plan = (await (await route(`/use/${path}`, { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string>; credentials: Record<string, string> };
+/** market/bad's SMALL_KEY, which a test writes again. */
+let badSmall: { id: string };
+
+/** What the console says while a test runs, every line of it. */
+const said: string[] = [];
+
+beforeEach(async () => {
+  await emptyDatabase(world.owner);
+  for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
+  said.length = 0;
+  answered.length = 0;
+  const badRows = Object.entries(BAD).map(([key, text]) => value(world, secret(bad, key), text));
+  badSmall = badRows.find((row) => row.key === 'SMALL_KEY')!;
+  await write(
+    world,
+    ...rows('policy', instance()),
+    ...rows('roles', role(true, 'owner', ['secret.read']), role(true, 'member', []), role(false, 'developer', ['secret.read', 'secret.use', 'secret.write']), role(false, 'viewer', ['secret.read', 'secret.use'])),
+    ...rows('projects', market),
+    ...rows('environments', dev, bad),
+    ...rows('principals', principal(ADA)),
+    ...rows('grants', grant(ADA, 'developer', { project: market })),
+    ...rows(
+      'secrets',
+      value(world, secret(dev, 'PAYER_SESSION_KEY'), KEYS.PAYER_SESSION_KEY.toString('hex')),
+      value(world, secret(dev, 'BILLING_TOKEN_KEY'), KEYS.BILLING_TOKEN_KEY.toString('hex')),
+      value(world, secret(dev, 'POLICY_SIGNATURE_KEY'), KEYS.POLICY_SIGNATURE_KEY.toString('hex'), { sensitive: true }),
+      value(world, secret(dev, 'SMALL_KEY'), KEYS.SMALL_KEY.toString('base64url')),
+      value(world, secret(dev, 'WIDE_KEY'), KEYS.WIDE_KEY.toString('base64')),
+      value(world, secret(dev, 'IFRAME_TOKEN_SECRET'), 'iframe_secret_0123456789'),
+      value(world, secret(dev, 'YOUSIGN_WEBHOOK_SECRET'), 'ys_whsec_0123456789'),
+      ...badRows,
+    ),
+  );
+  await world.owner.execute(sql`DELETE FROM log_pending`);
+  await app.request('/livez');
+  await app.request('/api/me', { headers: { authorization: 'Bearer nobody' } });
+  app.calls.length = 0;
+  app.inputs.length = 0;
+});
+
+/** What `coffre run` gives the app for `path`: a handle of Ada's made for it, and its plan's environment, with the handle. */
+async function run(place = dev): Promise<Record<string, string>> {
+  const handle = generateToken('handle');
+  await write(world, ...rows('credentials', credential(handle, ADA, {
+    kind: 'handle',
+    scope: JSON.stringify([{ projectId: market.id, environmentId: place.id, role: 'viewer' }]),
+    places: JSON.stringify([{ environmentId: place.id, personal: false }]),
+    expiresAt: new Date(Date.now() + 3_600_000),
+  })));
+  const answer = await app.request(`/use/market/${place.slug}`, { headers: { authorization: `Bearer ${handle}` } });
+  assert.equal(answer.status, 200, await answer.clone().text());
+  const plan = (await answer.json()) as { env: Record<string, string>; credentials: Record<string, string> };
   return { ...plan.env, COFFRE_CREDENTIALS: JSON.stringify(plan.credentials), COFFRE_HANDLE: handle };
 }
 
@@ -84,8 +123,8 @@ async function run(path = 'market/dev'): Promise<Record<string, string>> {
 const answered: string[] = [];
 
 const used = (env: Record<string, string>, name: string) =>
-  credential(name, env, async (input, init) => {
-    const answer = await route(input.replace(ORIGIN, ''), init);
+  proxied(name, env, async (input, init) => {
+    const answer = await app.request(input.replace(PUBLIC_URL, ''), init);
     const text = await answer.text();
     answered.push(`${answer.status} ${JSON.stringify([...answer.headers])} ${text}`);
     return new Response(text, { status: answer.status, headers: answer.headers });
@@ -93,11 +132,14 @@ const used = (env: Record<string, string>, name: string) =>
 
 /** The JSON endpoint as anyone holding the handle asks it: status and body as text. */
 async function ask(env: Record<string, string>, body: unknown, path = '/use/market/dev'): Promise<[number, string]> {
-  const answer = await route(path, { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const answer = await app.request(path, { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const text = await answer.text();
   answered.push(`${answer.status} ${JSON.stringify([...answer.headers])} ${text}`);
   return [answer.status, text];
 }
+
+/** The vault's log entries not yet signed in, each its body parsed. */
+const pending = async () => (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`)).map(({ body }) => JSON.parse(body) as { action: string; credential: string; detail: { purpose?: string; credential?: string; keys?: { key: string }[] } });
 
 const b64u = (bytes: Uint8Array | string) => Buffer.from(bytes).toString('base64url');
 
@@ -137,10 +179,12 @@ test("coffre encrypts as Node's createCipheriv('aes-256-gcm') does, and decrypts
   const [one, two] = [await payer.encrypt('same', 'aad'), await payer.encrypt('same', 'aad')];
   assert.notDeepEqual(one.iv, two.iv);
   assert.notDeepEqual(one.ciphertext, two.ciphertext);
-  // No caller gives the IV: one sent is refused, never used.
+  // No caller gives the IV: one sent is refused, never used, and the vault is not asked.
+  const before = app.calls.length;
   const [status, text] = await ask(env, { encrypt: { credential: 'payer-session', plaintext: b64u('x'), iv: b64u(Buffer.alloc(12)) } });
   assert.equal(status, 400, text);
   assert.match(text, /draws its own IV/);
+  assert.deepEqual(app.calls.slice(before), []);
 });
 
 test("Equisafe's three stored formats decrypt through coffre once each derived key is stored as hex, and coffre's encrypts are theirs again", async () => {
@@ -185,10 +229,12 @@ test('a flipped bit in the tag, the IV, the AAD or the ciphertext, or another ke
     await asked({}, 'billing-tokens'), await asked({}, 'policy-signatures'),
   ];
   for (const one of answers) assert.deepEqual(one, [200, '{"plaintext":null}']);
-  // And with the success's headers: only whether the body holds a plaintext tells them apart.
-  const headers = answered.slice(-11).map((line) => line.slice(4, line.indexOf(']] ') + 2));
+  // And with the success's headers: only whether the body holds a plaintext tells them apart. (Each response's CSP
+  // carries a nonce of its own, drawn at random, which tells nothing.)
+  const headers = answered.slice(-11).map((line) => line.slice(4, line.indexOf(']] ') + 2).replace(/'nonce-[^']*'/, "'nonce'"));
   for (const one of headers) assert.equal(one, headers[0]);
-  // Malformed asks are 400s, not decrypts: not base64url, an IV that is not 12 bytes, a tag that is not 16.
+  // Malformed asks are 400s, not decrypts: not base64url, an IV that is not 12 bytes, a tag that is not 16. None asks the vault.
+  const before = app.calls.length;
   for (const decrypt of [
     { iv: '!!', ciphertext: b64u(good.ciphertext), tag: b64u(good.tag) },
     { iv: b64u(good.iv.subarray(1)), ciphertext: b64u(good.ciphertext), tag: b64u(good.tag) },
@@ -201,6 +247,7 @@ test('a flipped bit in the tag, the IV, the AAD or the ciphertext, or another ke
     assert.equal((await ask(env, { decrypt: { credential: 'payer-session', ...decrypt } }))[0], 400, JSON.stringify(decrypt));
   }
   assert.equal((await ask(env, { encrypt: { credential: 'payer-session', plaintext: 'not base64url!' } }))[0], 400);
+  assert.deepEqual(app.calls.slice(before), []);
 });
 
 test("a cipher takes its maxBytes, the plaintext with its AAD, and no more: 413; JSON's 1 MiB is its ceiling", async () => {
@@ -208,6 +255,7 @@ test("a cipher takes its maxBytes, the plaintext with its AAD, and no more: 413;
   const small = used(env, 'small');
   assert.equal((await small.encrypt(Buffer.alloc(32))).ciphertext.length, 32);
   assert.equal((await small.encrypt(Buffer.alloc(20), Buffer.alloc(12))).ciphertext.length, 20);
+  const before = app.calls.length;
   for (const [plaintext, aad] of [[33, 0], [20, 13]] as const) {
     const [status, text] = await ask(env, { encrypt: { credential: 'small', plaintext: b64u(Buffer.alloc(plaintext)), aad: b64u(Buffer.alloc(aad)) } });
     assert.equal(status, 413, text);
@@ -215,13 +263,14 @@ test("a cipher takes its maxBytes, the plaintext with its AAD, and no more: 413;
   }
   const [status] = await ask(env, { decrypt: { credential: 'small', iv: b64u(Buffer.alloc(12)), ciphertext: b64u(Buffer.alloc(33)), tag: b64u(Buffer.alloc(16)) } });
   assert.equal(status, 413);
+  assert.deepEqual(app.calls.slice(before), [], 'refused before the vault is asked');
   // 64 KiB unless set.
   assert.equal((await used(env, 'payer-session').encrypt(Buffer.alloc(64 * 1024))).ciphertext.length, 64 * 1024);
   assert.equal((await ask(env, { encrypt: { credential: 'payer-session', plaintext: b64u(Buffer.alloc(64 * 1024 + 1)) } }))[0], 413);
 });
 
 test('a key of 31 or 33 bytes, outside its encoding, or a passphrase is a 409 that names the key and never its value', async () => {
-  const env = await run('market/bad');
+  const env = await run(bad);
   for (const [name, key] of [['payer-session', 'PAYER_SESSION_KEY'], ['billing-tokens', 'BILLING_TOKEN_KEY'], ['policy-signatures', 'POLICY_SIGNATURE_KEY'], ['small', 'SMALL_KEY']] as const) {
     for (const body of [{ encrypt: { credential: name, plaintext: b64u('x') } }, { decrypt: { credential: name, iv: b64u(Buffer.alloc(12)), ciphertext: '', tag: b64u(Buffer.alloc(16)) } }]) {
       const [status, text] = await ask(env, body, '/use/market/bad');
@@ -230,13 +279,21 @@ test('a key of 31 or 33 bytes, outside its encoding, or a passphrase is a 409 th
       assert.ok(!text.includes(BAD[key]) && !text.includes(BAD[key].slice(4, 20)), `${key}'s value in ${text}`);
     }
   }
+  // A key the environment lacks is no key of the wrong length: the use says what is missing.
+  const [missing, lacks] = await ask(env, { encrypt: { credential: 'wide', plaintext: b64u('x') } }, '/use/market/bad');
+  assert.equal(missing, 409, lacks);
+  assert.match(lacks, /market\/bad holds no WIDE_KEY, which wide needs/);
   // Base64 and base64url keys that decode cleanly to 31 and 33 bytes: their 409 comes from the length alone.
-  const root = clientFor(deps, ROOT);
+  let wide: ReturnType<typeof value> | null = null;
   for (const length of [31, 33]) {
     const bytes = Buffer.alloc(length, 0x5a);
     const values = { SMALL_KEY: bytes.toString('base64url'), WIDE_KEY: bytes.toString('base64') };
-    await root.secrets.set('market/bad', values);
-    const fresh = await run('market/bad');
+    await rewrite(world, badSmall, values.SMALL_KEY);
+    if (wide === null) {
+      wide = value(world, secret(bad, 'WIDE_KEY'), values.WIDE_KEY);
+      await write(world, ...rows('secrets', wide));
+    } else await rewrite(world, wide, values.WIDE_KEY);
+    const fresh = await run(bad);
     for (const [name, key] of [['small', 'SMALL_KEY'], ['wide', 'WIDE_KEY']] as const) {
       const [status, text] = await ask(fresh, { encrypt: { credential: name, plaintext: b64u('x') } }, '/use/market/bad');
       assert.equal(status, 409, text);
@@ -249,6 +306,7 @@ test('a key of 31 or 33 bytes, outside its encoding, or a passphrase is a 409 th
 test('a cipher is no signer, verifier or credential, and none of those is a cipher: a 404 that says which map holds the name', async () => {
   const env = await run();
   const msg = b64u('m');
+  const before = app.calls.length;
   const expect = async (body: unknown, pattern: RegExp) => {
     const [status, text] = await ask(env, body);
     assert.equal(status, 404, text);
@@ -261,44 +319,44 @@ test('a cipher is no signer, verifier or credential, and none of those is a ciph
   await expect({ encrypt: { credential: 'nope', plaintext: msg } }, /encrypt names a cipher of this instance's/);
   await assert.rejects(used(env, 'iframe-token').encrypt('x'), /encrypt names a cipher/);
   // A cipher's URL, as a credential's would be, reaches nothing; nor does a raw sign name it.
-  const path = await route('/use/market/dev/payer-session/x', { headers: { 'x-coffre-handle': env.COFFRE_HANDLE! } });
+  const path = await app.request('/use/market/dev/payer-session/x', { headers: { 'x-coffre-handle': env.COFFRE_HANDLE! } });
   assert.equal(path.status, 404);
   assert.match(await path.text(), /payer-session is a cipher, which reaches no upstream/);
-  const raw = await route('/use/market/dev?sign=payer-session', { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/octet-stream', 'content-length': '1' }, body: 'x' });
+  const raw = await app.request('/use/market/dev?sign=payer-session', { method: 'POST', headers: { authorization: `Bearer ${env.COFFRE_HANDLE}`, 'content-type': 'application/octet-stream', 'content-length': '1' }, body: 'x' });
   assert.equal(raw.status, 404);
   assert.match(await raw.text(), /payer-session is a cipher/);
+  assert.deepEqual(app.calls.slice(before), [], 'no name of the wrong kind asks the vault');
 });
 
-test('a cipher is logged once a minute per handle and name, the vault asked once; no plaintext, AAD, IV or key in the log, an error or the console', async () => {
+test("each encrypt and decrypt is one use, the cipher named, and logged by the vault once a minute per handle and key; no plaintext, AAD, IV or key in the log, an error or the console", async () => {
   const lines = ['log', 'info', 'warn', 'error', 'debug'] as const;
   const original = Object.fromEntries(lines.map((line) => [line, console[line]]));
   for (const line of lines) console[line] = (...args: unknown[]) => void said.push(args.map((arg) => (arg instanceof Error ? `${arg.message} ${arg.stack}` : typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' '));
   answered.length = 0;
   const PLAINTEXT = 'card-4242-4242-4242-4242';
   const AAD = 'workspace-aad-91c2';
-  const unwrap = deps.vault.unwrap.bind(deps.vault);
-  let unwrapped = 0;
-  deps.vault.unwrap = (async (...args: Parameters<typeof unwrap>) => {
-    unwrapped++;
-    return unwrap(...args);
-  }) as typeof unwrap;
   const ivs: string[] = [];
   try {
     const env = await run();
     const payer = used(env, 'payer-session');
+    const before = app.calls.length;
     for (let i = 0; i < 4; i++) {
       const sealed = await payer.encrypt(PLAINTEXT, AAD);
       ivs.push(b64u(sealed.iv), Buffer.from(sealed.iv).toString('hex'));
       assert.equal(Buffer.from((await payer.decrypt(sealed, AAD))!).toString(), PLAINTEXT);
       assert.equal(await payer.decrypt({ ...sealed, tag: new Uint8Array(16) }, AAD), null);
     }
-    assert.equal(unwrapped, 1, 'one opening, then the cache');
-    const uses = (await entries('credential.use')).filter((entry) => entry.metadata.cipher === true);
-    assert.deepEqual(uses.map((entry) => [entry.metadata.credential, entry.metadata.purpose]), [['payer-session', 'use']]);
+    // Nothing is kept: every request asks the vault again, each time naming the cipher.
+    assert.deepEqual(app.calls.slice(before), Array.from({ length: 12 }, () => 'use'));
+    const inputs = app.inputs.slice(before) as { keys: string[]; purpose: string; upstream: string }[];
+    for (const input of inputs) assert.deepEqual([input.keys, input.purpose, input.upstream], [['PAYER_SESSION_KEY'], 'use', 'payer-session']);
+    // Twelve uses, one entry: the vault's once a minute.
+    const entries = (await pending()).filter((entry) => entry.action === 'secret.read' && entry.detail.purpose === 'use');
+    assert.deepEqual(entries.map((entry) => [entry.detail.credential, entry.detail.keys!.map((key) => key.key)]), [['payer-session', ['PAYER_SESSION_KEY']]]);
     // Errors of every kind, each carrying the plaintext and AAD: none says them back.
-    const bad = await run('market/bad');
+    const broken = await run(bad);
     for (const name of ['payer-session', 'small', 'iframe-token', 'yousign', 'nope']) {
-      for (const [handle, path] of [[env, '/use/market/dev'], [bad, '/use/market/bad']] as const) {
+      for (const [handle, path] of [[env, '/use/market/dev'], [broken, '/use/market/bad']] as const) {
         await ask(handle, { encrypt: { credential: name, plaintext: b64u(PLAINTEXT.repeat(3)), aad: b64u(AAD) } }, path);
         await ask(handle, { encrypt: { credential: name, plaintext: b64u(PLAINTEXT), aad: b64u(AAD), iv: b64u(Buffer.alloc(12)) } }, path);
         await ask(handle, { decrypt: { credential: name, iv: b64u('short'), ciphertext: b64u(PLAINTEXT), tag: b64u(AAD), aad: b64u(AAD) } }, path);
@@ -306,10 +364,13 @@ test('a cipher is logged once a minute per handle and name, the vault asked once
       }
     }
   } finally {
-    deps.vault.unwrap = unwrap;
     for (const line of lines) console[line] = original[line]!;
   }
-  const log = (await db.owner.select().from(auditLog)).map((row) => JSON.stringify(row, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value)));
+  const log = [
+    ...(await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`)).map((row) => row.body),
+    ...(await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log ORDER BY seq`)).map((row) => row.body),
+  ];
+  assert.ok(log.length > 0, 'the log holds the uses');
   // What coffre said that is no decrypt's own answer: its errors and refusals, the log, the console.
   const errors = answered.filter((one) => !one.startsWith('200 '));
   assert.ok(errors.length > 30, `${errors.length} errors`);

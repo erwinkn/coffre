@@ -164,6 +164,8 @@ export type UseAsked = { path: string; keys: readonly string[]; purpose: 'use' |
 export type Used = {
   values: Record<string, string>;
   plain: string[];
+  /** The credential's effective end, the vault's (`Used.expiresAt` in `@coffre/core/vault`): what a presigned URL lasts no longer than. */
+  expiresAt: string;
   environment: { path: string; personal: boolean };
   workload: { policy: BindingPolicy; constraints: Constraints | null } | null;
 };
@@ -404,6 +406,7 @@ function usedOf(answer: VaultUsed, asked: UseAsked, mine: boolean, word: (error:
   return {
     values,
     plain,
+    expiresAt: answer.expiresAt,
     environment: { path: asked.path.replace(/@me$/, ''), personal: mine },
     workload: answer.workload === null ? null : { policy: answer.workload.policy, constraints: answer.workload.constraints },
   };

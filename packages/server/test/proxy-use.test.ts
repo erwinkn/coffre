@@ -258,11 +258,12 @@ test('a handle on a session route, or a session token as a bearer, is no session
   assert.equal(sent.length, 0);
 });
 
-test("what the proxy does not serve on 0.16 yet answers 501, and the root says the credentials", async () => {
+test("the root says the credentials; a POST that asks for nothing to be made is a 400, and asks the vault nothing", async () => {
   const root = await app.request('/use');
   assert.deepEqual(await root.json(), { proxy: 'coffre', credentials: ['twilio', 'stripe', 's3'] });
-  // The plan is served (proxy-plan.test.ts); a presigned URL, a signature or a cipher's work is not yet.
-  assert.deepEqual(await failed(await app.request('/use/market/prod', { method: 'POST', headers: { authorization: `Bearer ${handle}` } })), [501, 'not_implemented']);
+  // What it makes is proxy-compute.test.ts's, and the plan proxy-plan.test.ts's.
+  const [refused, calls] = await cost(() => app.request('/use/market/prod', { method: 'POST', headers: { authorization: `Bearer ${handle}` } }));
+  assert.deepEqual([(await failed(refused))[0], calls], [400, []]);
 });
 
 test('through an outage of the database, a credential is routed by the row read last for it, and only then; a failure is remembered two seconds', async () => {

@@ -162,6 +162,15 @@ export type Used = {
   principal: string;
   /** The credential's id. */
   credential: string;
+  /**
+   * The credential's effective end, ISO 8601: the instant the vault starts
+   * refusing it for age, the earliest of its own end, a workload session's
+   * hard end (`notAfter`) and those of the sessions it was narrowed from.
+   * Not `Called.credential.expiresAt`, its own row's end. A grant that ends
+   * sooner, a revoke or a freeze does not move it: what a presigned URL
+   * lasts no longer than, and may outlive those, as on 0.14.7.
+   */
+  expiresAt: string;
   values: UsedValue[];
   /** For a workload's session, what only the app can hold its request to: an unsigned upload its binding must allow, a narrowed session's methods and paths. */
   workload: { binding: string; profile: string; policy: BindingPolicy; constraints: Constraints | null } | null;
@@ -200,7 +209,9 @@ export type Peeked = {
 export type Called = {
   principal: string;
   /**
-   * `expiresAt` is ISO 8601. An MCP connection's access token (kind `mcp`)
+   * `expiresAt` is ISO 8601, the row's own end: a use's `Used.expiresAt`
+   * is the effective one, which a session's hard end and the rows above it
+   * may bring sooner. An MCP connection's access token (kind `mcp`)
    * says which connection it is under and the scopes it holds, from its
    * row; no other credential has either.
    */

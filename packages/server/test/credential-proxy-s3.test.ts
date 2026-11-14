@@ -5,31 +5,35 @@
 // with the SDK's own signer (`@smithy/signature-v4`) under the real secret,
 // as S3 would, and keeps objects in memory; MinIO in Docker did the same by
 // hand (the design's section 5).
-import test, { after, before } from 'node:test';
+//
+// 0.14.7's assertions, on 0.16 (docs/design/0.16.md, "The proxy"): each
+// request through the proxy, and each presign, is one `use` of the vault,
+// which logs the pair once a minute; the log no longer names a presign's path
+// or life. Then what 0.16 adds: a presigned URL never outlasts the handle,
+// the vault's word on its end.
 import assert from 'node:assert/strict';
 import { createHash, createHmac, randomBytes, type Hash, type Hmac } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { after, beforeEach, test } from 'node:test';
 
 import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { SignatureV4 } from '@smithy/signature-v4';
 import { contentDigest } from '@coffre/client/dpop';
+import { generateToken } from '@coffre/core/identity';
+import { rowsOf } from '@coffre/db/dialect';
+import { credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, value, write } from '@coffre/vault/testing';
+import { sql } from 'drizzle-orm';
 
-import { clientFor } from './api-fixture.ts';
-import { deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
-import { coffreRoute } from '../src/app.ts';
-import { checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, sigv4 } from '../src/plugins/credential-proxy.ts';
 import { presignV4, signV4 } from '../src/plugins/sigv4.ts';
+import { openApp } from './app-fixture.ts';
 
+const ADA = 'user:ada';
 const ACCESS_KEY_ID = 'AKIAREALKEY000000001';
 const SECRET = 'real/secret+access/key0123456789ABCDEFGH';
 const REGION = 'eu-west-3';
 
-let s3: Server;
-let s3Url: string;
-let coffre: Server;
-let coffreUrl: string;
 const objects = new Map<string, string>();
 const seen: { method: string; url: string; verified: boolean; authorization: string; hash: string }[] = [];
 
@@ -73,86 +77,123 @@ async function verified(request: IncomingMessage, body: Buffer): Promise<boolean
   return bodyOk && expected.headers.authorization === authorization;
 }
 
-before(async () => {
-  s3 = createServer(async (request, response) => {
-    const chunks: Buffer[] = [];
-    try {
-      for await (const chunk of request) chunks.push(chunk as Buffer);
-    } catch {
-      // An upload the proxy stopped mid-way: S3 stores nothing of it.
-      return;
-    }
-    const body = Buffer.concat(chunks);
-    const ok = await verified(request, body);
-    seen.push({ method: request.method!, url: request.url!, verified: ok, authorization: request.headers.authorization ?? '', hash: String(request.headers['x-amz-content-sha256']) });
-    if (!ok) return response.writeHead(403, { 'content-type': 'application/xml' }).end('<Error><Code>SignatureDoesNotMatch</Code></Error>');
-    const url = new URL(request.url!, s3Url);
-    const [, bucket, ...segments] = url.pathname.split('/');
-    const key = segments.map(decodeURIComponent).filter((segment, i) => segment !== '' || i < segments.length - 1);
-    if (request.method === 'PUT') {
-      objects.set(`${bucket}/${key.join('/')}`, body.length > 1024 * 1024 ? `${body.length} bytes` : body.toString());
-      return response.writeHead(200, { etag: '"e"' }).end();
-    }
-    if (request.method === 'GET' && key.length > 0) {
-      const object = objects.get(`${bucket}/${key.join('/')}`);
-      return object === undefined ? response.writeHead(404).end() : response.writeHead(200, { 'content-type': 'text/plain' }).end(object);
-    }
-    if (request.method === 'GET' && url.searchParams.get('list-type') === '2') {
-      const keys = [...objects.keys()].filter((name) => name.startsWith(`${bucket}/`)).map((name) => name.slice(bucket!.length + 1));
-      const xml = `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>${bucket}</Name><KeyCount>${keys.length}</KeyCount><IsTruncated>false</IsTruncated>${keys.map((name) => `<Contents><Key>${name}</Key></Contents>`).join('')}</ListBucketResult>`;
-      return response.writeHead(200, { 'content-type': 'application/xml' }).end(xml);
-    }
-    response.writeHead(400).end();
-  });
-  await new Promise<void>((resolve) => s3.listen(0, '127.0.0.1', resolve));
-  s3Url = `http://127.0.0.1:${(s3.address() as AddressInfo).port}`;
-  // coffre over HTTP, as the SDK reaches it: each request handed to its routes as it came.
-  coffre = createServer(async (request, response) => {
-    const chunks: Buffer[] = [];
+const s3: Server = createServer(async (request, response) => {
+  const chunks: Buffer[] = [];
+  try {
     for await (const chunk of request) chunks.push(chunk as Buffer);
-    const headers = new Headers();
-    for (const [name, value] of Object.entries(request.headers)) if (typeof value === 'string') headers.set(name, value);
-    const body = chunks.length === 0 ? undefined : Buffer.concat(chunks);
-    const answer = (await coffreRoute(new Request(`${ORIGIN}${request.url}`, { method: request.method, headers, body }), runtime, '127.0.0.1'))!;
-    response.writeHead(answer.status, Object.fromEntries(answer.headers));
-    response.end(Buffer.from(await answer.arrayBuffer()));
-  });
-  await new Promise<void>((resolve) => coffre.listen(0, '127.0.0.1', resolve));
-  coffreUrl = `http://127.0.0.1:${(coffre.address() as AddressInfo).port}`;
+  } catch {
+    // An upload the proxy stopped mid-way: S3 stores nothing of it.
+    return;
+  }
+  const body = Buffer.concat(chunks);
+  const ok = await verified(request, body);
+  seen.push({ method: request.method!, url: request.url!, verified: ok, authorization: request.headers.authorization ?? '', hash: String(request.headers['x-amz-content-sha256']) });
+  if (!ok) return response.writeHead(403, { 'content-type': 'application/xml' }).end('<Error><Code>SignatureDoesNotMatch</Code></Error>');
+  const url = new URL(request.url!, s3Url);
+  const [, bucket, ...segments] = url.pathname.split('/');
+  const key = segments.map(decodeURIComponent).filter((segment, i) => segment !== '' || i < segments.length - 1);
+  if (request.method === 'PUT') {
+    objects.set(`${bucket}/${key.join('/')}`, body.length > 1024 * 1024 ? `${body.length} bytes` : body.toString());
+    return response.writeHead(200, { etag: '"e"' }).end();
+  }
+  if (request.method === 'GET' && key.length > 0) {
+    const object = objects.get(`${bucket}/${key.join('/')}`);
+    return object === undefined ? response.writeHead(404).end() : response.writeHead(200, { 'content-type': 'text/plain' }).end(object);
+  }
+  if (request.method === 'GET' && url.searchParams.get('list-type') === '2') {
+    const keys = [...objects.keys()].filter((name) => name.startsWith(`${bucket}/`)).map((name) => name.slice(bucket!.length + 1));
+    const xml = `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>${bucket}</Name><KeyCount>${keys.length}</KeyCount><IsTruncated>false</IsTruncated>${keys.map((name) => `<Contents><Key>${name}</Key></Contents>`).join('')}</ListBucketResult>`;
+    return response.writeHead(200, { 'content-type': 'application/xml' }).end(xml);
+  }
+  response.writeHead(400).end();
 });
+await new Promise<void>((resolve) => s3.listen(0, '127.0.0.1', resolve));
+const s3Url = `http://127.0.0.1:${(s3.address() as AddressInfo).port}`;
+
+const app = await openApp({
+  plugins: [credentialProxy({
+    credentials: {
+      s3: { upstream: s3Url, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: REGION, service: 's3' }) },
+      // The same bucket with a session token: 0.14.7 swapped the deployment's config for it, which an app made once keeps.
+      // The same bucket for HEAD alone: a presigned GET of it is refused.
+      s3head: { upstream: s3Url, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: REGION, service: 's3' }), methods: ['HEAD'] },
+      s3session: { upstream: s3Url, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: '{AWS_SESSION_TOKEN}', region: REGION, service: 's3' }) },
+    },
+    insecureUpstreams: true,
+  })],
+});
+const { world } = app;
+const route = (path: string, init?: RequestInit) => app.request(path, init);
+
+// coffre over HTTP, as the SDK reaches it: each request handed to the app as it came.
+const coffre: Server = createServer(async (request, response) => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(chunk as Buffer);
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(request.headers)) if (typeof value === 'string') headers.set(name, value);
+  const body = chunks.length === 0 ? undefined : Buffer.concat(chunks);
+  const answer = await route(request.url!, { method: request.method!, headers, ...(body === undefined ? {} : { body }) });
+  response.writeHead(answer.status, Object.fromEntries(answer.headers));
+  response.end(Buffer.from(await answer.arrayBuffer()));
+});
+await new Promise<void>((resolve) => coffre.listen(0, '127.0.0.1', resolve));
+const coffreUrl = `http://127.0.0.1:${(coffre.address() as AddressInfo).port}`;
 
 after(async () => {
   await new Promise<void>((resolve) => s3.close(() => resolve()));
   await new Promise<void>((resolve) => coffre.close(() => resolve()));
+  await app.close();
 });
 
-useMcp(
-  async () => {
-    runtime.plugins = checkPlugins([
-      credentialProxy({
-        credentials: {
-          s3: {
-            upstream: s3Url,
-            inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: REGION, service: 's3' }),
-          },
-        },
-        insecureUpstreams: true,
-      }),
-    ]);
-    objects.clear();
-    seen.length = 0;
-    const root = clientFor(deps, ROOT);
-    await root.members.add(`user:${DEV}`);
-    await root.projects.create('market');
-    await root.environments.create('market/dev');
-    await root.secrets.set('market/dev', { AWS_ACCESS_KEY_ID: ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY: { value: SECRET, sensitivity: 'sensitive' } });
-    await root.access.set(`user:${DEV}`, { market: 'developer' });
-  },
-);
+const market = project('market');
+const dev = environment(market, 'dev');
+/** A handle's scope: it reads and uses market/dev, as `POST /handles` makes it for a Developer there. */
+const ON_DEV = JSON.stringify([{ projectId: market.id, environmentId: dev.id, role: 'viewer' }]);
+
+beforeEach(async () => {
+  await emptyDatabase(world.owner);
+  for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
+  objects.clear();
+  seen.length = 0;
+  await write(
+    world,
+    ...rows('policy', instance()),
+    ...rows('roles', role(true, 'owner', ['secret.read']), role(true, 'member', []), role(false, 'developer', ['secret.read', 'secret.use', 'secret.write']), role(false, 'viewer', ['secret.read', 'secret.use'])),
+    ...rows('projects', market),
+    ...rows('environments', dev),
+    ...rows('principals', principal(ADA)),
+    ...rows('grants', grant(ADA, 'developer', { project: market })),
+    ...rows('secrets', value(world, secret(dev, 'AWS_ACCESS_KEY_ID'), ACCESS_KEY_ID), value(world, secret(dev, 'AWS_SECRET_ACCESS_KEY'), SECRET, { sensitive: true })),
+  );
+  await world.owner.execute(sql`DELETE FROM log_pending`);
+  await app.request('/livez');
+  // The app's first request reads whether it is migrated: no request's cost.
+  await app.request('/api/me', { headers: { authorization: 'Bearer nobody' } });
+  app.calls.length = 0;
+});
+
+/** A handle of Ada's for market/dev, as `coffre run` makes one, ending in `ms`. */
+async function handleFor(ms = 3_600_000): Promise<string> {
+  const handle = generateToken('handle');
+  await write(world, ...rows('credentials', credential(handle, ADA, { kind: 'handle', scope: ON_DEV, places: JSON.stringify([{ environmentId: dev.id, personal: false }]), expiresAt: new Date(Date.now() + ms) })));
+  return handle;
+}
+
+/** The vault's log entries of proxied uses not yet signed in: the credential each names, and the keys it logs. */
+async function uses(): Promise<{ credential?: string; keys: string[] }[]> {
+  const bodies = await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`);
+  return bodies.flatMap(({ body }) => {
+    const { action, detail } = JSON.parse(body) as { action?: string; detail: { purpose?: string; credential?: string; keys?: { key: string }[] } };
+    return action === 'secret.read' && detail.purpose === 'use' ? [{ ...(detail.credential === undefined ? {} : { credential: detail.credential }), keys: detail.keys!.map((key) => key.key) }] : [];
+  });
+}
+
+/** The vault's calls since `from`, `app.calls.length` then. */
+const callsSince = (from: number) => app.calls.slice(from);
 
 /** The app's S3 client, its keys from what `coffre run` gave it and its endpoint the proxy's stable URL, as an app configures one for MinIO. */
-async function appClient(): Promise<{ client: S3Client; handle: string }> {
-  const handle = (await (await route('/api/handles', { method: 'POST', headers: { authorization: `Bearer ${await sessionFor(DEV)}`, 'content-type': 'application/json' }, body: JSON.stringify({ label: 'run', paths: ['market/dev'] }) })).json() as { token: string }).token;
+async function appClient(ms?: number): Promise<{ client: S3Client; handle: string }> {
+  const handle = await handleFor(ms);
   const plan = (await (await route('/use/market/dev', { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string> };
   assert.equal(plan.env.AWS_ACCESS_KEY_ID, handle);
   const client = new S3Client({
@@ -168,8 +209,9 @@ async function appClient(): Promise<{ client: S3Client; handle: string }> {
   return { client, handle };
 }
 
-test('put, get and list through the proxy: the SDK signs with the handle, S3 sees the real key and a signature that verifies', async () => {
+test('put, get and list through the proxy: the SDK signs with the handle, S3 sees the real key and a signature that verifies; one use a request, logged once', async () => {
   const { client, handle } = await appClient();
+  const from = app.calls.length;
   await client.send(new PutObjectCommand({ Bucket: 'uploads', Key: 'kyc/a b+c.txt', Body: 'hello s3', ContentType: 'text/plain' }));
   const got = await client.send(new GetObjectCommand({ Bucket: 'uploads', Key: 'kyc/a b+c.txt' }));
   assert.equal(await got.Body!.transformToString(), 'hello s3');
@@ -184,9 +226,9 @@ test('put, get and list through the proxy: the SDK signs with the handle, S3 see
   assert.equal(seen.length, 4);
   assert.ok(seen.every((request) => request.verified), JSON.stringify(seen));
   assert.ok(seen.every((request) => !request.authorization.includes(handle)), 'the handle never reaches S3');
-  // One opening of the pair for the minute.
-  const uses = await entries('credential.use');
-  assert.deepEqual(uses.filter((entry) => entry.metadata.credential === 's3').map((entry) => entry.metadata.keys), [['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']]);
+  // Each request asks the vault again, which logs the pair once for the minute.
+  assert.deepEqual(callsSince(from), ['use', 'use', 'use', 'use']);
+  assert.deepEqual(await uses(), [{ credential: 's3', keys: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'] }]);
 });
 
 test("aws-chunked uploads and presigned URLs are refused, before anything reaches S3", async () => {
@@ -228,20 +270,21 @@ test("coffre's signer signs as the AWS SDK's does: S3's path encoded once, anoth
 });
 
 test('a key no header can carry is refused, and quoted nowhere', async () => {
-  runtime.plugins = checkPlugins([credentialProxy({ credentials: { s3: { upstream: s3Url, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: '{AWS_SESSION_TOKEN}', region: REGION, service: 's3' }) } }, insecureUpstreams: true })]);
-  await clientFor(deps, ROOT).secrets.set('market/dev', { AWS_SESSION_TOKEN: 'token-line\nbreak-0123456789' });
+  await write(world, ...rows('secrets', value(world, secret(dev, 'AWS_SESSION_TOKEN'), 'token-line\nbreak-0123456789')));
   const { handle } = await appClient();
   const logged: unknown[] = [];
   const error = console.error;
   console.error = (...args: unknown[]) => void logged.push(...args);
   let answer: Response;
   try {
-    answer = await route('/use/market/dev/s3/uploads/x', { headers: { authorization: `AWS4-HMAC-SHA256 Credential=${handle}/20261018/${REGION}/s3/aws4_request, SignedHeaders=host, Signature=00`, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' } });
+    answer = await route('/use/market/dev/s3session/uploads/x', { headers: { authorization: `AWS4-HMAC-SHA256 Credential=${handle}/20261018/${REGION}/s3/aws4_request, SignedHeaders=host, Signature=00`, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' } });
   } finally {
     console.error = error;
   }
-  assert.equal(answer.status, 409);
-  assert.equal(JSON.stringify([await answer.text(), logged.map(String)]).includes('0123456789'), false);
+  const text = await answer.text();
+  assert.equal(answer.status, 409, text);
+  assert.match(text, /s3session's value is no valid header value/);
+  assert.equal(JSON.stringify([text, logged.map(String)]).includes('0123456789'), false);
   assert.equal(seen.length, 0);
 });
 
@@ -265,8 +308,9 @@ test("coffre's presigned URLs are the AWS SDK's own, byte for byte", async () =>
   assert.equal(ours.searchParams.get('X-Amz-Signature'), theirs.query!['X-Amz-Signature'], 'execute-api');
 });
 
-test('the app asks coffre to presign a GET: the URL is the upstream\'s, with the real key\'s id, for as long as asked, logged as a use', async () => {
+test('the app asks coffre to presign a GET: the URL is the upstream\'s, with the real key\'s id, for as long as asked, one use logged', async () => {
   const { handle } = await appClient();
+  const from = app.calls.length;
   const ask = (presign: Record<string, unknown>, token = handle) =>
     route('/use/market/dev', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ presign }) });
   const answer = await ask({ credential: 's3', path: '/uploads/kyc/a%20b.pdf', expiresIn: 300, query: { 'response-content-disposition': 'attachment' } });
@@ -279,8 +323,9 @@ test('the app asks coffre to presign a GET: the URL is the upstream\'s, with the
   assert.equal(presigned.searchParams.get('X-Amz-Expires'), '300');
   assert.equal(url.includes(SECRET) || url.includes(handle), false, 'neither the secret nor the handle');
   assert.ok(Math.abs(Date.parse(expiresAt) - Date.now() - 300_000) < 5000);
-  const [use] = (await entries('credential.use')).filter((entry) => entry.metadata.presign !== undefined);
-  assert.deepEqual(use!.metadata.presign, { method: 'GET', path: '/uploads/kyc/a%20b.pdf', expiresIn: 300 });
+  // One use, naming the credential; the log no longer says the path or the life it signed.
+  assert.deepEqual(callsSince(from), ['use']);
+  assert.deepEqual(await uses(), [{ credential: 's3', keys: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'] }]);
 
   // What it does not sign: an upload, a long life, a path outside, a credential that does not sign, or without the handle.
   assert.equal((await ask({ credential: 's3', path: '/uploads/x', method: 'PUT' })).status, 400);
@@ -291,6 +336,9 @@ test('the app asks coffre to presign a GET: the URL is the upstream\'s, with the
   assert.equal((await ask({ credential: 's3', path: '/uploads/x?X-Amz-Expires=99' })).status, 400);
   assert.equal((await ask({ credential: 's3', path: '/uploads/x', query: { 'X-Amz-Expires': '99' } })).status, 400);
   assert.equal((await ask({ credential: 'nope', path: '/uploads/x' })).status, 404);
+  // A credential's own methods hold the URL's.
+  assert.equal((await ask({ credential: 's3head', path: '/uploads/x' })).status, 405);
+  assert.equal((await ask({ credential: 's3head', path: '/uploads/x', method: 'HEAD' })).status, 200);
   // No URL to share carries the handle, in its path or its query.
   assert.equal((await ask({ credential: 's3', path: `/uploads/${handle}` })).status, 400);
   assert.equal((await ask({ credential: 's3', path: '/uploads/x', query: { 'response-content-disposition': `attachment; filename=${handle}` } })).status, 400);
@@ -376,4 +424,25 @@ test('an upload past what the proxy holds streams through: 20 MiB, signed again,
   await client.send(new PutObjectCommand({ Bucket: 'uploads', Key: 'big.bin', Body: big, ContentLength: big.length }));
   assert.equal(objects.get('uploads/big.bin'), `${big.length} bytes`);
   assert.ok(seen.at(-1)!.verified);
+});
+
+test("a presigned URL never outlasts the handle: its life is cut at the handle's end, the vault's word, and a handle ending within a second signs none", async () => {
+  const ask = (handle: string) =>
+    route('/use/market/dev', { method: 'POST', headers: { authorization: `Bearer ${handle}`, 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 's3', path: '/uploads/x', expiresIn: 3600 } }) });
+  const ending = Date.now() + 120_000;
+  const short = await handleFor(120_000);
+  const answer = await ask(short);
+  assert.equal(answer.status, 200, await answer.clone().text());
+  const { url, expiresAt } = (await answer.json()) as { url: string; expiresAt: string };
+  const lasts = Number(new URL(url).searchParams.get('X-Amz-Expires'));
+  assert.ok(lasts >= 115 && lasts <= 120, `${lasts}s, not the hour asked`);
+  assert.ok(Date.parse(expiresAt) <= ending + 1000, 'never past the handle row\'s end');
+  assert.ok(Math.abs(Date.parse(expiresAt) - Date.now() - lasts * 1000) < 2000, 'expiresAt is the URL\'s own end');
+
+  const from = app.calls.length;
+  const now = await ask(await handleFor(500));
+  assert.equal(now.status, 401, await now.clone().text());
+  assert.match(((await now.json()) as { message: string }).message, /the handle ends now/);
+  assert.deepEqual(callsSince(from), ['use'], 'the vault said its end');
+  assert.equal(seen.length, 0);
 });
