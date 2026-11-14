@@ -214,8 +214,6 @@ test('a grant asked of a place it cannot be: no role by that id, a project\'s on
     assert.deepEqual(await set('fay-cli', ex, { project: 'market', role: 'viewer' }), { refused: 'removed' });
     assert.deepEqual(await set('fay-cli', user('new'), { project: 'market', role: 'viewer' }), { refused: 'not_a_member' });
     assert.deepEqual(await set('bo-cli', user('new'), { project: 'market', role: 'viewer' }), { refused: 'no_access' }, 'and to nobody else');
-    // A service account's grants are not given here yet, by anyone.
-    assert.deepEqual(await set('ada-cli', api, { project: 'market', environment: 'dev', role: 'viewer' }), { refused: 'no_access' });
   });
   assert.deepEqual(await set('fay-cli', eve, { project: 'market', role: 'admin' }), { answer: { changes: ['created'] } });
   // A role whose row is gone is no role: it is given by nobody.

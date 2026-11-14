@@ -49,21 +49,8 @@ import type { Deciding } from '../vault.ts';
 import { asking } from './asking.ts';
 import type { Operations } from './index.ts';
 import { long, presented, text } from './input.ts';
-import {
-  by,
-  definitionsOf,
-  held,
-  labelled,
-  manages,
-  projectsOf,
-  scopeAsked,
-  sealedScope,
-  serviceOf,
-  serviceParts,
-  settingOf,
-  SLUG,
-  type Wanted,
-} from './signin.ts';
+import { definitionsOf, held, manages, projectsOf, serviceOf, serviceParts, settingOf } from './services.ts';
+import { by, labelled, scopeAsked, sealedScope, SLUG, type Wanted } from './signin.ts';
 
 /** A binding's id, as the vault draws one. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
