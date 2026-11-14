@@ -1902,7 +1902,7 @@ async function offboard(args: string[]): Promise<void> {
     );
   });
 
-  if (report.apps.length > 0) {
+  if (report.apps !== null && report.apps.length > 0) {
     process.stdout.write(`\nConnected apps, which removing them disconnects (${report.apps.length})\n`);
     const width = Math.max(...report.apps.map((app) => app.name.length));
     for (const app of report.apps) {
@@ -1911,7 +1911,7 @@ async function offboard(args: string[]): Promise<void> {
     }
   }
 
-  // An instance before 0.7 lists none.
+  // An instance before 0.7 lists none; 0.16's lists them as null, below.
   const personalTokens = report.personalTokens ?? [];
   if (personalTokens.length > 0) {
     process.stdout.write(`\nPersonal tokens, which act as them and removing them revokes (${personalTokens.length})\n`);
@@ -1921,7 +1921,7 @@ async function offboard(args: string[]): Promise<void> {
     }
   }
 
-  if (report.issuedTokens.length > 0) {
+  if (report.issuedTokens !== null && report.issuedTokens.length > 0) {
     process.stdout.write(`\nBearer tokens ${they} issued to service accounts, which still work\n`);
     for (const token of report.issuedTokens) {
       const label = token.label === null ? '' : ` "${token.label}"`;
@@ -1931,13 +1931,22 @@ async function offboard(args: string[]): Promise<void> {
     }
   }
 
-  if (report.references.length > 0) {
+  if (report.references !== null && report.references.length > 0) {
     process.stdout.write(`\nReferences ${they} made: each belongs to the environment that holds it, so removing ${they === 'they' ? 'them' : 'it'} ends none. Review them; \`coffre references break\` ends one\n`);
     for (const reference of report.references) {
       const state = reference.state === 'live' ? '' : `  (${reference.state.replace('_', ' ')})`;
       process.stdout.write(`  ${reference.holder} → ${reference.source}, ${reference.createdAt.slice(0, 10)}${state}\n`);
     }
   }
+
+  // Null is "not listed", never none: say so, as a bearer token they issued may still work.
+  const unlisted = [
+    ...(report.apps === null ? ['connected apps'] : []),
+    ...(report.personalTokens === null ? ['personal tokens'] : []),
+    ...(report.issuedTokens === null ? [`bearer tokens ${they} issued`] : []),
+    ...(report.references === null ? [`references ${they} made`] : []),
+  ];
+  if (unlisted.length > 0) process.stdout.write(`\nThis instance does not list ${unlisted.join(', ')}.\n`);
 
   if (report.status === 'active' && !values.apply) {
     process.stdout.write(`\nNothing changed. Re-run with --apply to remove ${shown}.\n`);

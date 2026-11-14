@@ -702,7 +702,8 @@ export function signInWays(shell: Shell, access: MemberAccessResult): { tokens: 
  */
 export function hasAppsTab(shell: Shell, report: MemberReport): boolean {
   const found = report?.ok === true ? report.report : null;
-  return Boolean(shell.features.mcp) && shell.capabilities.runsInstance && found !== null && found.status !== 'removed';
+  // A report that does not list their apps (0.16's, so far) has nothing for the tab to show.
+  return Boolean(shell.features.mcp) && shell.capabilities.runsInstance && found !== null && found.status !== 'removed' && found.apps !== null;
 }
 
 export function managedProjects(projects: ProjectSummary[]): ProjectSummary[] {

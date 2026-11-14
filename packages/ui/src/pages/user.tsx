@@ -27,8 +27,8 @@ export function UserAppsPage() {
   const client = useCoffre();
   const member = memberRef('user', Route.useParams().user);
   const { data: report } = useSuspenseQuery(queries.report(client, member, useShell().capabilities.runsInstance));
-  // Their layout says why there is no report.
-  if (report?.ok !== true || report.report === null) return null;
+  // Their layout says why there is no report, or no tab where it lists no apps.
+  if (report?.ok !== true || report.report === null || report.report.apps === null) return null;
   return (
     <ConnectedAppsCard
       apps={report.report.apps}

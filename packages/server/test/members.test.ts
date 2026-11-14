@@ -7,8 +7,10 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
-import { credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, user, write } from '@coffre/vault/testing';
+import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
+
+import { credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, user, write } from '@coffre/vault/testing';
 
 import { openApp } from './app-fixture.ts';
 
@@ -123,8 +125,8 @@ test('an Owner of the instance lists everyone and every live grant, with scopes 
   // Where a role applies, projects by slug, to whoever runs the instance.
   assert.deepEqual([als!.scope, adas!.scope], [{ projects: { only: ['market'] }, environments: 'all' }, { projects: 'all', environments: 'all' }]);
   assert.deepEqual([adas!.tampered, adas!.declared], [false, false]);
-  // Rex was removed: listed apart, so he can be let back in. What he saw comes with the member report.
-  assert.deepEqual(listed.removed, [{ principalType: 'user', principalId: 'rex@acme.example', toRotate: null }]);
+  // Rex was removed: listed apart, so he can be let back in, with how many keys he still knows the value of.
+  assert.deepEqual(listed.removed, [{ principalType: 'user', principalId: 'rex@acme.example', toRotate: 0 }]);
 });
 
 test('a manager of a project lists the grants they manage and their members, and no scope; anyone else is refused', async () => {
@@ -362,7 +364,123 @@ test("a service account made with its grants, and given more, each one change an
 });
 
 test('what is not served yet answers 501', async () => {
-  for (const [method, path] of [['GET', `/members/${ada}`], ['GET', `/members/${ci}/bindings/${crypto.randomUUID()}/enrollments`], ['POST', `/members/${ci}/bindings/${crypto.randomUUID()}/enrollments`]] as const) {
+  for (const [method, path] of [['GET', `/members/${ci}/bindings/${crypto.randomUUID()}/enrollments`], ['POST', `/members/${ci}/bindings/${crypto.randomUUID()}/enrollments`]] as const) {
     assert.deepEqual(refused(await call('cy-cli', method, path, method === 'GET' ? undefined : {})), [501, 'not_implemented', undefined], `${method} ${path}`);
   }
+});
+
+type Exposed = { project: string; environment: string; key: string; version: number; how: 'read' | 'wrote'; at: string };
+type Report = Record<string, unknown> & { status: string; exposed: Exposed[]; rotated: number; live: Record<string, number> };
+const report = async (member: string): Promise<[Report, string[], number]> => {
+  const [[status, body], calls, statements] = await cost(() => call('cy-cli', 'GET', `/members/${member}`));
+  assert.equal(status, 200, JSON.stringify(body));
+  return [body as unknown as Report, calls, statements];
+};
+/** What a report says to rotate, `path vN how`, and how many keys it counts rotated. */
+const toRotate = async (member: string) => {
+  const [body] = await report(member);
+  return [body.exposed.map((key) => `${key.project}/${key.environment}/${key.key} v${key.version} ${key.how}`), body.rotated];
+};
+const ok = async (answer: Promise<[number, Body]>) => {
+  const [status, body] = await answer;
+  assert.equal(status, 200, JSON.stringify(body));
+};
+
+test("a member's report: the keys whose current value they read or wrote, a restore's value counted from its first write; one call to the vault and one statement", async () => {
+  // Dee writes two keys; Ada reads them.
+  await ok(call('dee-cli', 'PATCH', '/secrets/market/prod', { STRIPE_KEY: 'sk_1', DATABASE_URL: 'pg://1' }));
+  await ok(call('ada-cli', 'POST', '/reveals', { path: 'market/prod' }));
+  assert.deepEqual(await toRotate(ada), [['market/prod/DATABASE_URL v1 read', 'market/prod/STRIPE_KEY v1 read'], 0]);
+  assert.deepEqual(await toRotate(dee), [['market/prod/DATABASE_URL v1 wrote', 'market/prod/STRIPE_KEY v1 wrote'], 0]);
+
+  // Al writes a new STRIPE_KEY: rotated for both, and his to rotate, though he never read it.
+  await ok(call('al-cli', 'PATCH', '/secrets/market/prod', { STRIPE_KEY: 'sk_2' }));
+  assert.deepEqual(await toRotate(ada), [['market/prod/DATABASE_URL v1 read'], 1]);
+  assert.deepEqual(await toRotate(dee), [['market/prod/DATABASE_URL v1 wrote'], 1]);
+  assert.deepEqual(await toRotate(al), [['market/prod/STRIPE_KEY v2 wrote'], 0]);
+
+  // Al restores version 1 as version 3: Dee's value is back, and Ada saw it; Al restored a value he never knew, which is
+  // no write of his, and his own is gone.
+  await ok(call('al-cli', 'POST', '/secrets/market/prod/STRIPE_KEY/restore', { version: 1 }));
+  assert.deepEqual(await toRotate(ada), [['market/prod/DATABASE_URL v1 read', 'market/prod/STRIPE_KEY v3 read'], 0]);
+  assert.deepEqual(await toRotate(dee), [['market/prod/DATABASE_URL v1 wrote', 'market/prod/STRIPE_KEY v3 wrote'], 0]);
+  assert.deepEqual(await toRotate(al), [[], 1]);
+
+  // Fin reads billing/prod, whose LINK refers to market's DATABASE_URL: what he saw is the source's value, named as the source.
+  await ok(call('cy-cli', 'PATCH', '/secrets/billing/prod', { LINK: { ref: 'market/prod/DATABASE_URL' } }));
+  await ok(call('fin-cli', 'POST', '/reveals', { path: 'billing/prod' }));
+  assert.deepEqual(await toRotate(fin), [['market/prod/DATABASE_URL v1 read'], 0]);
+
+  // The whole report, at one call to the vault and one statement. Ada's sign-in and grants, her personal config; what
+  // 0.16 does not serve yet is null.
+  const [adas, calls, statements] = await report(ada);
+  assert.deepEqual([calls, statements], [['caller'], 1]);
+  const { exposed, ...rest } = adas;
+  assert.ok(exposed.every((key) => !Number.isNaN(Date.parse(key.at))));
+  assert.deepEqual(rest, {
+    principalType: 'user', principalId: 'ada@acme.example', status: 'active', instanceRole: 'member', scope: { projects: 'all', environments: 'all' }, declared: false,
+    removedAt: null, removedBy: null, live: { grants: 2, sessions: 1, tokens: 0, identities: 0, apps: 0 }, rotated: 0,
+    issuedTokens: null, apps: null, personalTokens: null, references: null, personal: [{ project: 'market', of: 'prod', slug: 'prod-ada' }],
+  });
+  // Al's scope, by slug. Cy's token is a token, an app connected through MCP an app; he has no personal config.
+  assert.deepEqual((await report(al))[0].scope, { projects: { only: ['market'] }, environments: 'all' });
+  await write(world, ...rows('credentials', credential('cy-app', cy, { kind: 'mcp', client: 'https://claude.ai/client.json' })));
+  const [cys] = await report(cy);
+  assert.deepEqual([cys.live, cys.personal], [{ grants: 0, sessions: 1, tokens: 1, identities: 0, apps: 1 }, []]);
+
+  // Dee leaves: what lets her in is gone, what she knows is not. The directory counts it for everyone removed, still in one statement.
+  await ok(call('cy-cli', 'DELETE', `/members/${dee}`));
+  const [dees] = await report(dee);
+  assert.deepEqual([dees.status, typeof dees.removedAt, dees.removedBy, dees.live, dees.exposed.length], ['removed', 'string', 'cy@acme.example', { grants: 0, sessions: 0, tokens: 0, identities: 0, apps: 0 }, 2]);
+  // A new DATABASE_URL takes one key off her list, which the directory counts too.
+  await ok(call('al-cli', 'PATCH', '/secrets/market/prod', { DATABASE_URL: 'pg://2' }));
+  assert.deepEqual(await toRotate(dee), [['market/prod/STRIPE_KEY v3 wrote'], 1]);
+  const [listed, listCalls, listStatements] = await directory('cy-cli');
+  assert.deepEqual([listed.removed, listCalls, listStatements], [[{ principalType: 'user', principalId: 'dee@acme.example', toRotate: 1 }, { principalType: 'user', principalId: 'rex@acme.example', toRotate: 0 }], ['caller'], 1]);
+});
+
+test("a member's report holds a read to the date the value was first written, to the millisecond, and leaves out what is archived", async () => {
+  await ok(call('dee-cli', 'PATCH', '/secrets/market/prod', { A: 'a', B: 'b', C: 'c' }));
+  await ok(call('dee-cli', 'PATCH', '/secrets/market/dev', { D: 'd' }));
+  const secrets = await rowsOf<{ key: string; id: string; first: string }>(world.owner, sql`
+    SELECT s.key, s.id, v.first_written_at::text AS first FROM secrets s JOIN secret_versions v ON v.secret_id = s.id AND v.version = s.current_version`);
+  const of = (key: string) => secrets.find((row) => row.key === key)!;
+  // Ed saw A as it was written, and B a millisecond before: A's value is his to rotate, B's not, though he saw the key.
+  await world.owner.execute(sql`INSERT INTO exposures (principal, secret_id, seen_at) VALUES
+    (${ed}, ${of('A').id}, ${of('A').first}::timestamptz), (${ed}, ${of('B').id}, ${of('B').first}::timestamptz - interval '1 millisecond'),
+    (${ed}, ${of('C').id}, ${of('C').first}::timestamptz), (${ed}, ${of('D').id}, ${of('D').first}::timestamptz)`);
+  assert.deepEqual(await toRotate(ed), [['market/dev/D v1 read', 'market/prod/A v1 read', 'market/prod/C v1 read'], 1]);
+  const [eds] = await report(ed);
+  assert.equal(Date.parse(eds.exposed[1]!.at), Date.parse(of('A').first));
+  // Dee wrote B and never read it: hers is the date she wrote it.
+  const [dees] = await report(dee);
+  assert.equal(Date.parse(dees.exposed.find((key) => key.key === 'B')!.at), Date.parse(of('B').first));
+  // Cy restores A's first value as version 2: it is the value Ed saw and Dee wrote, and Cy, who never knew it, has nothing to rotate.
+  await ok(call('cy-cli', 'POST', '/secrets/market/prod/A/restore', { version: 1 }));
+  assert.deepEqual(await toRotate(cy), [[], 0]);
+  assert.deepEqual(await toRotate(ed), [['market/dev/D v1 read', 'market/prod/A v2 read', 'market/prod/C v1 read'], 1]);
+  // An archived key, and every key of an archived environment, are none: they are listed again once they are back.
+  await world.owner.execute(sql`UPDATE secrets SET archived_at = now() WHERE id = ${of('C').id}`);
+  await world.owner.execute(sql`UPDATE environments SET archived_at = now() WHERE id = ${ids.dev}`);
+  assert.deepEqual(await toRotate(ed), [['market/prod/A v2 read'], 1]);
+  // A deleted environment's keys are none either: its slug carries the deletion's mark.
+  await world.owner.execute(sql`UPDATE environments SET archived_at = NULL, slug = 'dev~1' WHERE id = ${ids.dev}`);
+  assert.deepEqual(await toRotate(ed), [['market/prod/A v2 read'], 1]);
+  assert.deepEqual(await toRotate(dee), [['market/prod/A v2 wrote', 'market/prod/B v1 wrote'], 0]);
+  // Al writes B again, and Dee reads it: she knows its value by a read, not as its writer.
+  await ok(call('al-cli', 'PATCH', '/secrets/market/prod', { B: 'b2' }));
+  await ok(call('dee-cli', 'POST', '/reveals', { path: 'market/prod/B' }));
+  assert.deepEqual(await toRotate(dee), [['market/prod/A v2 wrote', 'market/prod/B v2 read'], 0]);
+});
+
+test("a member's report is for whoever runs the instance: anyone else is refused before any statement", async () => {
+  for (const label of ['al-cli', 'bo-cli', 'cy-token', 'ada-cli']) {
+    const [answer, calls, statements] = await cost(() => call(label, 'GET', `/members/${ada}`));
+    assert.deepEqual([...refused(answer), calls, statements], [...NO_ACCESS, ['caller'], 0], label);
+  }
+  assert.deepEqual(refused(await call('cy-cli', 'GET', '/members/user:nobody@acme.example')), [404, 'not_found', undefined]);
+  assert.deepEqual(refused(await call('cy-cli', 'GET', '/members/user:a%20b')), [400, 'bad_request', undefined]);
+  // Rex, removed, has his report, and his grant is none; so is Ivy's of before she was let back in. ci's is a service account's.
+  const [[rexs], [ivys], [cis]] = [await report(rex), await report(ivy), await report(ci)];
+  assert.deepEqual([rexs.status, rexs.live.grants, ivys.live.grants, cis.principalType, cis.live.grants], ['removed', 0, 0, 'service', 1]);
 });

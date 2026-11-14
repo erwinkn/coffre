@@ -497,6 +497,9 @@ UPDATE credentials SET created_by = CASE WHEN created_by LIKE 'binding:%' THEN c
 --> statement-breakpoint
 DROP FUNCTION pg_temp.member_014(text);
 --> statement-breakpoint
+-- Built after the rewrite above, so once: the member report reads a member's own writes through it.
+CREATE INDEX secret_versions_created_by_idx ON secret_versions (created_by, secret_id);
+--> statement-breakpoint
 DROP INDEX credentials_principal_idx;
 --> statement-breakpoint
 ALTER TABLE credentials
