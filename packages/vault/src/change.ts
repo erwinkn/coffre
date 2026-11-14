@@ -262,24 +262,43 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
  * Parts read in one statement: each part's rows whose MAC is the vault's,
  * `named` by table and key, `tokens`, every row the statement found by
  * its part and MAC, the vault's or not, and `readAt`, the database's clock
- * as it read them, in milliseconds (none when it found no row): a number,
- * which no session's settings read another way.
+ * as it read them, in milliseconds (none when it found no row, of a part
+ * or beside one): a number, which no session's settings read another way.
+ * `beside` rides in the same
+ * statement and is no part: each a query of one jsonb column, `row`, given
+ * back as read. No MAC is checked on it here, so whoever asks for one holds
+ * it to its own (the log's head, sealed as the signer seals it: caller.ts).
  */
-export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'keys'>, read: P): Promise<{ seen: Seen<P>; unsealed: Unsealed<P>; named: Map<object, string>; tokens: string[]; readAt: number | undefined }> {
+export async function readParts<P extends Parts, B extends string = never>(
+  vault: Pick<Running, 'db' | 'keys'>,
+  read: P,
+  beside?: Readonly<Record<B, SQL>>,
+): Promise<{ seen: Seen<P>; unsealed: Unsealed<P>; named: Map<object, string>; tokens: string[]; readAt: number | undefined; beside: Record<B, Wire[]> }> {
   const parts = Object.entries(read);
   if (parts.length === 0) throw new Error('a read names at least one part');
+  const asides = Object.entries<SQL>(beside ?? {});
+  if (asides.some(([name]) => Object.hasOwn(read, name))) throw new Error('what rides beside a read has a name no part has');
+  const arms = [
+    ...parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`),
+    ...asides.map(([name, query]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, aside.row FROM (${query}) aside`),
+  ];
   // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts). Bounded as a
   // change's write is: a lock someone holds on a table it reads makes the call busy, and never holds it, nor the signer's upkeep.
   const found = await bounded<{ part: string; row: Wire; read_at: number }>(
     vault.db,
-    sql`SELECT part, row, (extract(epoch FROM clock_timestamp()) * 1000)::float8 AS read_at FROM (${sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `)}) parts`,
+    sql`SELECT part, row, (extract(epoch FROM clock_timestamp()) * 1000)::float8 AS read_at FROM (${sql.join(arms, sql` UNION ALL `)}) parts`,
   );
+  const aside = Object.fromEntries(asides.map(([name]) => [name, [] as Wire[]])) as Record<B, Wire[]>;
   const seen = Object.fromEntries(parts.map(([name]) => [name, [] as object[]]));
   const unsealed = Object.fromEntries(parts.map(([name]) => [name, 0]));
   /** Each row read, with its name. One that several parts found is one object each time. */
   const named = new Map<object, string>();
   const tokens: string[] = [];
   for (const { part: name, row: wire } of found) {
+    if (Object.hasOwn(aside, name)) {
+      aside[name as B].push(wire);
+      continue;
+    }
     const { table } = read[name]!;
     const row = fromWire(table, wire) as Row<Sealed> & { mac: Buffer };
     tokens.push(`${name}:${row.mac.toString('hex')}`);
@@ -290,7 +309,7 @@ export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'ke
     seen[name]!.push(row);
     named.set(row, nameOf(table, row));
   }
-  return { seen: seen as Seen<P>, unsealed: unsealed as Unsealed<P>, named, tokens, readAt: found[0] && Number(found[0].read_at) };
+  return { seen: seen as Seen<P>, unsealed: unsealed as Unsealed<P>, named, tokens, readAt: found[0] && Number(found[0].read_at), beside: aside };
 }
 
 /** A change's read and its decision. */

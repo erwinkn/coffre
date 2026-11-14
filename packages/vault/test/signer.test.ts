@@ -4,16 +4,17 @@ import { after, beforeEach, test } from 'node:test';
 import { inclusionProof, leafHash, nodesFrom, tileMap, verifyInclusion } from '@coffre/core/log';
 import { openDatabase } from '@coffre/db/connect';
 import { rowsOf } from '@coffre/db/dialect';
-import { principals } from '@coffre/db/schema';
+import { credentials, principals } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
+import { caller } from '../src/caller.ts';
 import { change, drop, part, put } from '../src/change.ts';
 import { pending, type Pending } from '../src/entry.ts';
 import { checked } from '../src/rows.ts';
 import { headText, Signer, type Finding } from '../src/signer.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 import { emptyDatabase, memoryStore, openTestVault, VAULT_URL } from './database.ts';
-import { principal, user } from './world.ts';
+import { credential, principal, tokenOf, user } from './world.ts';
 
 /**
  * The signer against a database writer, on Postgres: each protection of
@@ -83,7 +84,7 @@ const waiting = async () => (await rowsOf<{ n: number }>(vault.owner, sql`SELECT
 async function proven(): Promise<void> {
   const [head] = await rowsOf<{ size: number; keptSize: number; keptRoot: string; agingSize: number; agingRoot: string; agingFrom: number; signedAt: number; mac: Buffer }>(
     vault.owner,
-    sql`SELECT size::int, kept_size::int AS "keptSize", encode(kept_root, 'hex') AS "keptRoot", aging_size::int AS "agingSize", encode(aging_root, 'hex') AS "agingRoot", aging_from::int AS "agingFrom", (extract(epoch FROM signed_at) * 1000)::float8 AS "signedAt", mac FROM log_head`,
+    sql`SELECT size::int, kept_size::int AS "keptSize", encode(kept_root, 'hex') AS "keptRoot", aging_size::int AS "agingSize", encode(aging_root, 'hex') AS "agingRoot", aging_from::int AS "agingFrom", round(extract(epoch FROM signed_at) * 1000)::float8 AS "signedAt", mac FROM log_head`,
   );
   assert.ok(head !== undefined && checked(vault.keys, (key) => key.entries, headText(head), head.mac) !== undefined, 'the head is under the vault\'s MAC');
   for (const kept of [true, false]) {
@@ -94,6 +95,39 @@ async function proven(): Promise<void> {
     for (const { leaf, body } of entries) assert.ok(verifyInclusion(leafHash(Buffer.from(body)), leaf, size, inclusionProof(nodes, leaf, size), Buffer.from(root, 'hex')), `leaf ${leaf}`);
   }
 }
+
+test('the head the signer wrote is the one a caller is answered, whole, and again after the next signing', async () => {
+  await member(ada, 'member');
+  // Her session, written as a change writes one, so that the signer's mirror has its row.
+  const made = await change(vault, {
+    read: { found: part(credentials, sql`false`) },
+    decide: () => ({ writes: [put(credentials, credential('ada', ada, { lastUsedAt: new Date(vault.now()) }), null)], entry: { kept: true, action: 'signin', actor: ada, credential: null, request: null, ip: null, objects: [`principal:${ada}`], detail: {} }, answer: null }),
+  });
+  assert.ok('answer' in made);
+  const asked = async () => {
+    const answer = await caller(vault, { token: tokenOf('ada'), proof: null, ip: null, head: true });
+    assert.ok(!('refused' in answer), JSON.stringify(answer));
+    return answer.head;
+  };
+  const stored = async () => (await rowsOf<{ size: number; keptSize: number; keptRoot: string; agingSize: number; agingRoot: string; agingFrom: number; signedAt: string }>(
+    vault.owner,
+    sql`SELECT size::int, kept_size::int AS "keptSize", encode(kept_root, 'hex') AS "keptRoot", aging_size::int AS "agingSize", encode(aging_root, 'hex') AS "agingRoot", aging_from::int AS "agingFrom", to_char(signed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "signedAt" FROM log_head`,
+  ))[0];
+  assert.equal(await asked(), null, 'nothing signed yet');
+  // Signed at a millisecond no binary fraction holds exactly.
+  vault.tick(1377);
+  assert.deepEqual(await run(), []);
+  const first = await asked();
+  assert.ok(first !== null && first !== undefined);
+  assert.deepEqual([first.size, first.keptSize, first.agingSize, first.signedAt], [2, 2, 0, new Date(vault.now()).toISOString()]);
+  assert.deepEqual(first, await stored());
+  await wait(reading('a'));
+  vault.tick(1);
+  assert.deepEqual(await run(), []);
+  const second = await asked();
+  assert.deepEqual(second, await stored());
+  assert.deepEqual([second?.size, second?.agingSize, second?.keptRoot], [3, 1, first.keptRoot]);
+});
 
 test('entries are numbered in the order written, each under its tree, and every one proves against the signed head', async () => {
   await member(ada, 'owner');
