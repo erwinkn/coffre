@@ -6,6 +6,7 @@ import { accessOperations } from './access.ts';
 import { placeOperations } from './places.ts';
 import { secretOperations } from './secrets.ts';
 import { signinOperations } from './signin.ts';
+import { workloadOperations } from './workloads.ts';
 
 /**
  * Changes by the name their log entry has: what each reads, and its
@@ -15,4 +16,4 @@ import { signinOperations } from './signin.ts';
 export type Operations<C extends Change> = { [K in C['op']]: (input: Asked<K>, vault: Deciding) => Operation<Parts, Answers[K], unknown> };
 
 /** Every change the vault makes: each area's are in a file of its own. */
-export const OPERATIONS: Operations<Change> = { ...secretOperations, ...placeOperations, ...accessOperations, ...signinOperations };
+export const OPERATIONS: Operations<Change> = { ...secretOperations, ...placeOperations, ...accessOperations, ...signinOperations, ...workloadOperations };
