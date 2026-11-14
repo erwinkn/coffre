@@ -1,6 +1,7 @@
 import { allows, EVERYWHERE, isCredentialScope, isInstanceRole, isScope, scopeWithReads, type CredentialScope, type Holdings, type Permission, type Policy, type RoleDefinition } from '@coffre/core/access';
 import { addressWithin, checkConstraints, type BindingPolicy, type Constraints } from '@coffre/core/identity';
 import { bindings, credentials, environments, grants, identities, policy, principals, roles } from '@coffre/db/schema';
+import { parseScopes, type McpScope } from '@coffre/core/mcp';
 import type { Called, SignedHead } from '@coffre/core/vault';
 import { sql, type SQL } from 'drizzle-orm';
 
@@ -71,6 +72,13 @@ export type Workload = {
   stop: Stop | null;
 };
 
+/**
+ * An MCP connection's access token, past its own row: the connection it is
+ * under, which it stands with, the client's id and the scopes it holds,
+ * those of its own row the connection still holds.
+ */
+export type Mcp = { connection: Row<typeof credentials>; client: string; scopes: McpScope[] };
+
 export type Caller = {
   /** `user:<email>` or `token:<name>`. */
   principal: string;
@@ -79,6 +87,8 @@ export type Caller = {
   holds: Holdings & { policy: Policy };
   /** For a workload's session; null for any other credential. */
   workload: Workload | null;
+  /** For an MCP connection's access token; null for any other credential. */
+  mcp: Mcp | null;
 };
 
 /** What a trust binding issued says so in `created_by`: `binding:<id>`, under the row's MAC. */
@@ -93,6 +103,21 @@ function parsed(json: string | null): unknown {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * An MCP credential's client, as its row holds it (JSON: its id, host,
+ * registration, redirect and scopes, as 0.14's connections were carried
+ * over): its id, its redirect and its scopes, or undefined for one that
+ * does not read as one.
+ */
+export function mcpClientOf(stored: string | null): { id: string; redirectUri: string; scopes: McpScope[] } | undefined {
+  const client = parsed(stored);
+  if (typeof client !== 'object' || client === null || Array.isArray(client)) return undefined;
+  const { id, redirectUri, scopes } = client as Record<string, unknown>;
+  if (typeof id !== 'string' || typeof redirectUri !== 'string' || typeof scopes !== 'string') return undefined;
+  const read = parseScopes(scopes);
+  return read.unknown.length > 0 ? undefined : { id, redirectUri, scopes: read.scopes };
 }
 
 /** A token's cap: one that does not read as a scope reaches nothing. */
@@ -164,6 +189,7 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
   // What the credential reaches at most: nothing past it. A session's carries no cap, and holds all its member does.
   let credentialScope: CredentialScope | null;
   let workload: Workload | null = null;
+  let mcp: Mcp | null = null;
   switch (credential.kind) {
     case 'browser':
     case 'cli':
@@ -191,7 +217,23 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
       credentialScope = scopeWithReads(cap, workload.policy.reads, listed);
       break;
     }
-    // An MCP connection's requests come with an access token, which has no row: not built yet.
+    case 'mcp': {
+      // An access token, an hour's, under the connection it was made for. The connection's own row holds its code, then
+      // its refresh token: what the client redeems, never what it shows a request.
+      if (issued) return null;
+      const above = parsed(credential.ancestors);
+      if (!Array.isArray(above) || above.length !== 1) return null;
+      // It stands while its connection does: one ended, expired or of a member removed since ends every token under it, with no write of theirs.
+      const connection = rows.ancestors.find((row) => row.id === above[0] && row.kind === 'mcp' && row.ancestors === null && row.challenge === null && row.principal === credential.principal
+        && row.generation === credential.generation && row.revokedAt === null && row.frozenAt === null && row.expiresAt.getTime() > at);
+      const own = mcpClientOf(credential.client);
+      const held = connection && mcpClientOf(connection.client);
+      if (own === undefined || held === undefined || own.id !== held.id) return null;
+      mcp = { connection: connection!, client: own.id, scopes: own.scopes.filter((scope) => held.scopes.includes(scope)) };
+      // All its person holds, as their session does: its scopes say what the client may ask, and the vault changes nothing on its word (`callerFrom`).
+      credentialScope = null;
+      break;
+    }
     default:
       return null;
   }
@@ -204,6 +246,7 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
     principal: principal.id,
     credential,
     workload,
+    mcp,
     holds: {
       // A role with no row, or one whose row is not the vault's, is no role: they hold what a member does, and run nothing.
       role: !service && isInstanceRole(principal.role) && Object.hasOwn(instanceRoles, principal.role) ? principal.role : 'member',
@@ -254,9 +297,9 @@ export function callerParts(token: Buffer, projects: SQL | null) {
     role: part(roles, sql`(NOT ${roles.instance} AND ${roles.id} IN (SELECT g.role FROM grants g WHERE g.principal = ${own('principal')} AND ${here})) OR (${roles.instance} AND ${roles.id} = (SELECT p.role FROM principals p WHERE p.id = ${own('principal')}))`),
     // A deleted environment protects nothing: its tombstone is left out.
     places: part(environments, sql`(${within} AND ${environments.protected} AND strpos(${environments.slug}, '~') = 0) OR ${environments.id} IN (SELECT g.environment_id FROM grants g WHERE g.principal = ${own('principal')} AND ${here})`),
-    // What a trust binding issued names it, and a narrowed session the sessions above it: only what is shaped like ids is cast.
+    // What a trust binding issued names it, a narrowed session the sessions above it, and an MCP access token its connection: only what is shaped like ids is cast.
     binding: part(bindings, sql`${bindings.id} = (SELECT CASE WHEN c.created_by ~ '^binding:${ID}$' THEN substr(c.created_by, 9)::uuid END FROM credentials c WHERE c.token_hash = ${hash})`),
-    ancestor: part(credentials, sql`${credentials.id} = ANY(ARRAY(SELECT above.id::uuid FROM credentials c, jsonb_array_elements_text(CASE WHEN c.kind = 'workload' AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id) WHERE c.token_hash = ${hash}))`),
+    ancestor: part(credentials, sql`${credentials.id} = ANY(ARRAY(SELECT above.id::uuid FROM credentials c, jsonb_array_elements_text(CASE WHEN c.kind IN ('workload', 'mcp') AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id) WHERE c.token_hash = ${hash}))`),
     policy: part(policy, sql`${own('kind')} = 'workload'`),
   };
 }
@@ -269,9 +312,18 @@ export type Asking = Caller & { may(permission: Permission, environment: Row<typ
  * rows read say of the change's projects: each one's protected
  * environments, listed by project too, as a decision about a whole project
  * weighs them. A handle is the proxy's, for uses: it changes nothing,
- * whatever its scope says.
+ * whatever its scope says. Nor does an MCP connection: every change it
+ * asks for waits for its person, who makes it on their own session
+ * (docs/design/0.16.md, "MCP connections"), so the vault decides none on
+ * its word, and weighs none.
  */
 export function callerFrom(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, workloads: Workloads, at: number): Asking | null {
+  const caller = standing(seen, shown, workloads, at);
+  return caller?.mcp != null ? null : caller;
+}
+
+/** The caller as `callerFrom` has them, an MCP connection too: who a page's request is (`caller`). */
+function standing(seen: Seen<ReturnType<typeof callerParts>>, shown: Shown, workloads: Workloads, at: number): Asking | null {
   const caller = callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: seen.places, binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy }, shown, workloads, at);
   if (caller === null || caller.credential.kind === 'handle') return null;
   const protectedIn: Record<string, { environmentId: string; slug: string | null }[]> = {};
@@ -392,7 +444,7 @@ export async function caller(vault: Pick<Running, 'db' | 'keys' | 'now'> & { mem
   }
   found ??= { at: now, seen: (await readParts(vault, callerParts(shown.token, null))).seen };
   const at = vault.now();
-  const asking = callerFrom(found.seen, shown, vault.workloads, at);
+  const asking = standing(found.seen, shown, vault.workloads, at);
   // A session that stands and is stopped is told why, as at a use; a narrowed one reaches no page.
   const refused = asking === null ? 'unauthenticated' : (asking.workload?.stop ?? (asking.workload?.narrowed === true ? 'narrowed' : null));
   if (asking === null || refused !== null) {
@@ -400,9 +452,11 @@ export async function caller(vault: Pick<Running, 'db' | 'keys' | 'now'> & { mem
     memory.callers.delete(key);
     return { refused: refused! };
   }
-  await touch(vault, asking.credential, shown.ip, at);
+  // An access token's use is its connection's, which Connected apps lists: the token is gone within the hour.
+  await touch(vault, asking.mcp?.connection ?? asking.credential, shown.ip, at);
   // Unless a newer read of the same is there already: a slow call does not put its older rows back over it.
   if (memory.seconds > 0 && !((memory.callers.get(key)?.at ?? -Infinity) > found.at)) keep(memory.callers, key, found, at - memory.seconds * 1000);
   const { id, kind, expiresAt } = asking.credential;
-  return { principal: asking.principal, credential: { id, kind, expiresAt: expiresAt.toISOString() }, holds: asking.holds, ...(head === undefined ? {} : { head }) };
+  const mcp = asking.mcp === null ? {} : { connection: asking.mcp.connection.id, scopes: asking.mcp.scopes };
+  return { principal: asking.principal, credential: { id, kind, expiresAt: expiresAt.toISOString(), ...mcp }, holds: asking.holds, ...(head === undefined ? {} : { head }) };
 }

@@ -51,7 +51,7 @@ const MOST_EMAILS = 20;
 /** The longest a browser's session lasts, whatever the app asks: the most a deployment's `browserSessionHours` says. */
 const BROWSER_MINUTES = 7 * 24 * 60;
 /** Who made what the vault makes of itself: an Owner its configuration names. */
-const VAULT = 'system:vault';
+export const VAULT = 'system:vault';
 
 const email = (value: unknown): value is string => text(value) && EMAIL.test(value) && value === value.toLowerCase();
 
@@ -677,10 +677,10 @@ const CLI_MINUTES = 365 * 24 * 60;
  * writes. A change nobody asks reads it, as a sign-in does: on a database
  * not adopted yet it would begin the log, and the adoption would never run.
  */
-const instancePart = () => part(policy, sql`${policy.onlyRow}`);
+export const instancePart = () => part(policy, sql`${policy.onlyRow}`);
 
 /** `adopting` before the adoption, `tampered` for an instance's row that is not the vault's; else nothing. */
-const adopted = (rows: readonly unknown[], unsealed: number): Refusal | undefined => (rows.length === 0 ? { refused: unsealed > 0 ? 'tampered' : 'adopting' } : undefined);
+export const adopted = (rows: readonly unknown[], unsealed: number): Refusal | undefined => (rows.length === 0 ? { refused: unsealed > 0 ? 'tampered' : 'adopting' } : undefined);
 
 /**
  * A CLI asks to be signed in from a browser (`DeviceStart`): one row

@@ -29,6 +29,15 @@ export const MCP_SCOPE_INFO: Record<McpScope, { label: string; description: stri
   },
 };
 
+/** How long a code waits for its client: long enough for a redirect, and no longer. */
+export const CODE_SECONDS = 60;
+/** An hour: what a leaked access token is good for, at most, unless its connection ends sooner. */
+export const ACCESS_TOKEN_MINUTES = 60;
+/** Connections a person may hold at once, codes waiting included, before Connected apps has to lose one. */
+export const MAX_CONNECTIONS = 20;
+/** Registered clients the instance keeps at most: anyone may register one, so the table has a ceiling. */
+export const MAX_CLIENTS = 10_000;
+
 /** What OAuth's `offline_access` asks for, a refresh token, every connection has: accepted and dropped. */
 const IGNORED_SCOPES = new Set(['offline_access']);
 

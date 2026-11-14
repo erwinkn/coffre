@@ -137,7 +137,7 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
     -- Read before its MAC is checked, so only what is shaped like ids is cast: a row someone else wrote is no row, not an error.
     UNION ALL SELECT 'binding', to_jsonb(t) FROM bindings t, c WHERE t.id = CASE WHEN c.created_by ~ '^binding:${ID}$' THEN substr(c.created_by, 9)::uuid END
     -- An array the statement works out once, so each id is one lookup by the key.
-    UNION ALL SELECT 'ancestor', to_jsonb(t) FROM credentials t WHERE t.id = ANY(ARRAY(SELECT above.id::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind = 'workload' AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id)))
+    UNION ALL SELECT 'ancestor', to_jsonb(t) FROM credentials t WHERE t.id = ANY(ARRAY(SELECT above.id::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind IN ('workload', 'mcp') AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id)))
     UNION ALL SELECT 'policy', to_jsonb(t) FROM policy t, c WHERE c.kind = 'workload'
     UNION ALL SELECT 'project', to_jsonb(t) FROM projects t WHERE t.id IN (SELECT project_id FROM held UNION ALL SELECT id FROM p)
     UNION ALL SELECT 'environment', to_jsonb(t) FROM environments t WHERE t.id IN (SELECT environment_id FROM held UNION ALL SELECT id FROM chain)
@@ -172,6 +172,8 @@ const NO_ACCESS: Refusal = { refused: 'no_access' };
 export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): Decided | Refusal {
   const caller = callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: seen.environment, binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy }, ask, workloads, at);
   if (caller === null) return { refused: 'unauthenticated' };
+  // An MCP client is handed values only if its person let it, at consent: reading names and history is all `read` holds.
+  if (caller.mcp !== null && !caller.mcp.scopes.includes('reveal')) return { refused: 'mcp_no_reveal' };
   const handed = ask.purpose !== 'use';
   const { workload } = caller;
   // A session that stands and is stopped is told why, before anything about the place: lifting it restores service.
@@ -333,7 +335,7 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
     keep(memory.logged, mark(fresh[0]!), { at: written }, at - LOGGED_MS);
   }
 
-  await touch(vault, caller.credential, ask.ip, at);
+  await touch(vault, caller.mcp?.connection ?? caller.credential, ask.ip, at);
   remember(memory, ask, found, at);
   const { workload } = caller;
   return { principal: caller.principal, credential: caller.credential.id, values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };

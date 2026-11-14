@@ -428,3 +428,29 @@ test('a cleanup a writer holds up fails its minute after the deletion it committ
   assert.deepEqual(found.find(({ found }) => found === 'lost'), { found: 'lost', of: leafHash(Buffer.from(body)).toString('hex') });
   assert.equal(signer.checked, vault.now());
 });
+
+test('a registered OAuth client no MCP credential names goes a week after it was made; one a connection names, a younger one and one not the vault\'s stay', async () => {
+  const week = since(-7 * DAY - HOUR);
+  const [unused, named, carried, young] = [world.oauthClient('Unused', { createdAt: week }), world.oauthClient('Named', { createdAt: week }), world.oauthClient('Carried', { createdAt: week }), world.oauthClient('Young', { createdAt: since(-6 * DAY) })];
+  const client = (id: string) => JSON.stringify({ id, host: null, registration: 'dcr', redirectUri: 'http://127.0.0.1/cb', scopes: 'read' });
+  // As the vault writes one, and as 0.14's were carried over, which jsonb wrote with a space after each colon.
+  const connection = live('mcp-a', { kind: 'mcp', client: client(named.id) });
+  const upgraded = live('mcp-b', { kind: 'mcp', client: `{"id": "${carried.id}", "host": null, "scopes": "read", "redirectUri": "http://127.0.0.1/cb", "registration": "dcr"}` });
+  // A metadata document's client names a URL; a row that is not JSON names nothing, and fails no cast.
+  const documented = live('mcp-c', { kind: 'mcp', client: '{"id":"https://claude.ai/oauth/mcp-client.json"}' });
+  const broken = live('mcp-d', { kind: 'mcp', client: `not json ${unused.id}` });
+  await world.write(vault, ...world.rows('principals', world.principal(ada)), ...world.rows('credentials', connection, upgraded, documented, broken), ...world.rows('oauthClients', unused, named, carried, young));
+  const forged = randomUUID();
+  await vault.owner.execute(sql`INSERT INTO oauth_clients (id, name, redirect_uris, created_at, mac) VALUES (${forged}, 'Forged', '[]', ${week.toISOString()}, ''::bytea)`);
+
+  // The signer finds the one not the vault's, which no decision sees, and nothing else.
+  assert.deepEqual(await minute(), [{ found: 'row', of: JSON.stringify(['oauth_clients', forged]) }]);
+  const left = await rowsOf<{ id: string }>(vault.owner, sql`SELECT id::text FROM oauth_clients ORDER BY id`);
+  assert.deepEqual(left.map(({ id }) => id), [named.id, carried.id, young.id, forged].sort());
+  const [entry] = await rowsOf<{ body: string }>(vault.owner, sql`SELECT body FROM log WHERE body::jsonb ->> 'action' = 'upkeep.expire'`);
+  assert.deepEqual(JSON.parse(entry!.body).objects, [`oauth_client:${unused.id}`]);
+  // A day on, the young one is a week old too; the connection's stays while the connection does.
+  vault.tick(DAY);
+  assert.deepEqual((await minute()).filter((finding) => finding.of !== JSON.stringify(['oauth_clients', forged])), []);
+  assert.deepEqual((await rowsOf<{ id: string }>(vault.owner, sql`SELECT id::text FROM oauth_clients ORDER BY id`)).map(({ id }) => id), [named.id, carried.id, forged].sort());
+});
