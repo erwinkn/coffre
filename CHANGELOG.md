@@ -26,6 +26,11 @@
   Workers alike, where it used node-postgres (`pg`). No package of coffre's
   depends on `pg` or `pg-connection-string` any more, and a deployment
   installs no driver. Database URLs are read as before, TLS included.
+- **`previousAuditChainKeys` is gone.** The app key signs no log entry in
+  0.16, so nothing verifies with a key it replaced: `createCoffre` no
+  longer takes the option, and a deployment that passes it fails its
+  typecheck until the line goes. `auditChainKey` stays, as the key the
+  sign-in state and Access sessions are sealed under.
 
 - **A key marked in place, as one change.** `coffre mark` (`{ "KEY": {
   "sensitivity" } }` alone in a write) is served again: the value is kept
