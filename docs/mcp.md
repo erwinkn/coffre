@@ -128,7 +128,8 @@ sessions an offboarding ends, is checked when you press Approve.
   asks you to open the page, and picks up the outcome by itself.
 - **claude.ai and Claude Desktop**, and any client that can't, gets the
   link in the tool's answer: Claude shows it to you, you open it, and once
-  you have decided, Claude asks again for the outcome.
+  you have decided, Claude asks again for the outcome, naming the
+  approval.
 - **Clients on a 2025 revision** of MCP get the link too.
 
 A client never types a secret value. `request_secret_value` asks you to

@@ -66,10 +66,8 @@ function ProviderLoginPage({
   const search = Route.useSearch();
   const { next } = search;
   // Shown once: a reload is a clean retry.
-  const once = useOneTime(search, ['error', 'with', 'via']);
-  const label = (id: string) => providers.find((provider) => provider.id === id)?.label;
-  const already = (once.with ?? '').split(',').map(label).filter((name): name is string => name !== undefined);
-  const message = signinErrorMessage(once.error, { providers: already, via: once.via === undefined ? undefined : label(once.via) });
+  const { error } = useOneTime(search, ['error']);
+  const message = signinErrorMessage(error);
   const [leaving, setLeaving] = useState<string | null>(null);
   const query = next === undefined ? '' : `?next=${encodeURIComponent(next)}`;
 

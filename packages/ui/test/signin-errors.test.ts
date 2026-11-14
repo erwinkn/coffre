@@ -3,42 +3,21 @@ import assert from 'node:assert/strict';
 
 import { loginSearch, signinErrorMessage } from '../src/lib/signin-errors.ts';
 
-test('an email that already signs in elsewhere names the provider, and only that', () => {
+test('a sign-in error is a sentence of its own, naming no provider', () => {
   assert.equal(
-    signinErrorMessage('account_mismatch', { providers: ['GitHub'], via: 'Google' }),
-    'Your email already signs in with GitHub. Sign in with GitHub, then link this account from your account page.',
-  );
-  assert.equal(
-    signinErrorMessage('account_mismatch', { providers: ['GitHub', 'Google'], via: 'Okta' }),
-    'Your email already signs in with GitHub and Google. Sign in with one of them, then link this account from your account page.',
-  );
-  // Another account of the same provider: a second GitHub account, say.
-  assert.equal(
-    signinErrorMessage('account_mismatch', { providers: ['GitHub'], via: 'GitHub' }),
-    'Your email already signs in with another GitHub account. Sign in with that one, then link this account from your account page.',
-  );
-  assert.equal(
-    signinErrorMessage('account_mismatch', { providers: ['GitHub', 'Google', 'Okta'], via: 'Google' }),
-    'Your email already signs in with GitHub, another Google account and Okta. Sign in with one of them, then link this account from your account page.',
-  );
-  // Nothing known, as from an older server or a provider no longer configured: the sentence as before.
-  assert.equal(
-    signinErrorMessage('account_mismatch', { providers: [] }),
+    signinErrorMessage('account_mismatch'),
     'Your email already signs in with a different account. Use that one, then link this account from your account page.',
   );
+  assert.equal(signinErrorMessage('no_such_code'), 'The sign-in did not complete. Try again.');
   assert.equal(signinErrorMessage(undefined), null);
 });
 
-test("the sign-in page's search keeps provider ids, and nothing else, for the message", () => {
-  assert.deepEqual(loginSearch({ error: 'account_mismatch', with: 'github,google', via: 'oidc' }), {
+test("the sign-in page's search keeps a same-origin next and an error code, and nothing else", () => {
+  // 0.14's `with` and `via` are dropped: 0.16 never sends them.
+  assert.deepEqual(loginSearch({ next: '/projects', error: 'account_mismatch', with: 'github', via: 'oidc' }), {
+    next: '/projects',
     error: 'account_mismatch',
-    with: 'github,google',
-    via: 'oidc',
-  });
-  // An address or markup slipped into the URL is dropped, not shown.
-  assert.deepEqual(loginSearch({ error: 'account_mismatch', with: 'github,ada@acme.example,<b>x</b>', via: 'Evil Corp' }), {
-    error: 'account_mismatch',
-    with: 'github',
   });
   assert.deepEqual(loginSearch({ next: 'https://evil.example/', error: 'Not A Code' }), {});
+  assert.deepEqual(loginSearch({ next: '//evil.example/' }), {});
 });
