@@ -267,6 +267,19 @@ UPDATE secrets AS secret
 --> statement-breakpoint
 ALTER TABLE secret_versions DROP COLUMN recipe, DROP COLUMN pair_id, DROP COLUMN pair_half;
 --> statement-breakpoint
+-- When each version's value was first written to its key, which a restore copies from its source: the member report
+-- holds each person's last sight of a key to its current value's. 0.14 told equal values apart as it restored them, by
+-- their encryption: a restore copied its source's ciphertext, IV and tag, and wrapped its data key again. So a
+-- version's is the first among its key's versions with its IV and tag; an erasure leaves both. The adoption wraps
+-- each data key again and leaves the three as they are.
+ALTER TABLE secret_versions ADD COLUMN first_written_at timestamp(3) with time zone;
+--> statement-breakpoint
+UPDATE secret_versions AS version SET first_written_at = equal.first
+  FROM (SELECT id, min(created_at) OVER (PARTITION BY secret_id, iv, auth_tag) AS first FROM secret_versions) AS equal
+ WHERE equal.id = version.id;
+--> statement-breakpoint
+ALTER TABLE secret_versions ALTER COLUMN first_written_at SET NOT NULL;
+--> statement-breakpoint
 DROP INDEX secrets_lookup_idx, secret_versions_secret_idx;
 --> statement-breakpoint
 ALTER TABLE secrets

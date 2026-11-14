@@ -184,6 +184,28 @@ export const secretRoutes = {
   }),
 
   /**
+   * Restore a version of a key: its value becomes the key's next version,
+   * opened and sealed again by the vault, which hands it to nobody. It
+   * comes back as it was kept, and sensitive while the key is or its
+   * newest value was; made by a recipe or in a pair, it comes back as
+   * typed. One call to the vault (`secret.write`), which takes
+   * `secret.write` and `secret.read`: the old value serves again. An
+   * archived key is brought back first. Answered with the version it is
+   * now, and its sensitivity.
+   */
+  ...route('POST /secrets/:project/:environment/:key/restore', {
+    input: z.object({ version: z.number().int().min(1).max(2 ** 31 - 1) }).strict(),
+    run: async (ctx, { params, input }) => {
+      const at = `${params.project}/${params.environment}/${params.key}`;
+      const { environment, mine } = environmentOf(params.environment);
+      if (mine) throw new ApiError('not_implemented', `a restore in ${at}, your personal config, is not served yet`);
+      const answer = await changed(ctx, { op: 'secret.write', project: params.project, environment, keys: [{ key: params.key, restore: input.version }] }, at);
+      const { version, nature } = Object.entries(answer.keys).find(([key]) => key === params.key)![1];
+      return { operationId: ctx.shown.request, key: params.key, version, sensitivity: nature };
+    },
+  }),
+
+  /**
    * Rename a folder of an environment's keys: every key filed there,
    * archived ones too, at once, by whoever writes keys there
    * (`secret.refile`). A folder is a label, so renaming onto one that is

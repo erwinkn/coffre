@@ -1,5 +1,5 @@
-import { seal as sealValue, type Envelope } from '@coffre/core/envelope';
-import type { KekRegistry } from '@coffre/core/kek';
+import { open, seal as sealValue, type Envelope } from '@coffre/core/envelope';
+import { KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import type { Database } from '@coffre/db';
 import { gaveUpCode } from '@coffre/db/dialect';
 import { later, laterRows } from '@coffre/db/later';
@@ -29,6 +29,11 @@ import { contextOf, natureOf } from './value.ts';
  * not find has no name to give. So a decision takes nothing from a missing
  * row: with fewer rows it refuses, or allows less.
  *
+ * One table is read that carries no MAC: the versions of values, for a
+ * change that copies one (`Value`). A version's encryption names what it is,
+ * so its row is held to that when it is opened, before anything is written,
+ * and the write reads it again, as any row, by a hash of all of it.
+ *
  * So what an operation says is what it reads and how it decides. Reading
  * again, comparing, writing, sealing each row and logging what it replaced
  * are here, once.
@@ -56,22 +61,27 @@ export type Running = {
   refused: Map<string, { at: number }>;
 };
 
+/** A table a change reads: one whose rows carry the vault's MAC, or the versions of values, which carry none. */
+export type Readable = Sealed | typeof secretVersions;
+
 /**
  * Rows a decision depends on: those of `table` that `where` holds for, a
  * condition on its columns as Drizzle writes one (`eq(principals.id, id)`).
  * Each an index lookup, and few.
  */
-export type Part<T extends Sealed = Sealed> = { table: T; where: SQL };
+export type Part<T extends Readable = Readable> = { table: T; where: SQL };
 
-export function part<T extends Sealed>(table: T, where: SQL | undefined): Part<T> {
+export function part<T extends Readable>(table: T, where: SQL | undefined): Part<T> {
   if (where === undefined) throw new Error('a part reads the rows a condition holds for, never a whole table by default');
   return { table, where };
 }
 
 export type Parts = Readonly<Record<string, Part>>;
 
-/** What a read found, by part: the rows whose MAC is the vault's. */
-export type Seen<P extends Parts> = { [K in keyof P]: Row<P[K]['table']>[] };
+/** What a read found, by part: the rows whose MAC is the vault's, and every version found. */
+export type Seen<P extends Parts> = { [K in keyof P]: RowOf<P[K]['table']>[] };
+/** A row of each table a part may read, one by one. */
+type RowOf<T extends Readable> = T extends PgTable ? Row<T> : never;
 
 /**
  * How many rows each part found whose MAC is not the vault's: written
@@ -105,12 +115,17 @@ export function drop<T extends Sealed>(table: T, was: Row<T>): Write {
 
 /**
  * A value a change writes: its version's row but for the encryption, and
- * its text. It is the current version of a secret the same change writes,
- * in an environment the change read or makes: those two rows say what its
- * encryption names, and nothing the operation says beside them. Its nature
- * is the one the secret's row says.
+ * its text, or the version it is a `copy` of (a restore), which the change
+ * read: the engine opens that one as its row labels it, in the secret and
+ * environment its row names, which the change read too, and the decision
+ * never holds the value. One that does not open, relabelled or erased, or a
+ * plain one whose copy in its row is not its value, refuses the change,
+ * `unreadable`. A value is the current version of a secret the same change
+ * writes, in an environment the change read or makes: those two rows say
+ * what its encryption names, and nothing the operation says beside them. Its
+ * nature is the one the secret's row says.
  */
-export type Value = { version: Omit<Row<typeof secretVersions>, keyof Envelope>; text: Buffer };
+export type Value = { version: Omit<Row<typeof secretVersions>, keyof Envelope> } & ({ text: Buffer; copy?: undefined } | { copy: Row<typeof secretVersions>; text?: undefined });
 
 /** Why a change is not made. Nothing it asked is written. */
 export type Refusal = { refused: string };
@@ -265,24 +280,32 @@ const list = (names: readonly { name: string }[], of?: string) => sql.join(names
  * as it read them, in milliseconds (none when it found no row): a number,
  * which no session's settings read another way.
  */
-export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'keys'>, read: P): Promise<{ seen: Seen<P>; unsealed: Unsealed<P>; named: Map<object, string>; tokens: string[]; readAt: number | undefined }> {
+export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'keys'>, read: P): Promise<{ seen: Seen<P>; unsealed: Unsealed<P>; named: Map<object, string>; versions: Set<object>; tokens: string[]; readAt: number | undefined }> {
   const parts = Object.entries(read);
   if (parts.length === 0) throw new Error('a read names at least one part');
   // With the database's clock, so that no pooler answers the read from a cache (as a use's read, use.ts). Bounded as a
   // change's write is: a lock someone holds on a table it reads makes the call busy, and never holds it, nor the signer's upkeep.
-  const found = await bounded<{ part: string; row: Wire; read_at: number }>(
+  const found = await bounded<{ part: string; row: Wire; token: string; read_at: number }>(
     vault.db,
-    sql`SELECT part, row, (extract(epoch FROM clock_timestamp()) * 1000)::float8 AS read_at FROM (${sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row FROM ${table} WHERE ${where}`), sql` UNION ALL `)}) parts`,
+    sql`SELECT part, row, token, (extract(epoch FROM clock_timestamp()) * 1000)::float8 AS read_at FROM (${sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}'`)} AS part, to_jsonb(${table}) AS row, ${tokenOf(table)} AS token FROM ${table} WHERE ${where}`), sql` UNION ALL `)}) parts`,
   );
   const seen = Object.fromEntries(parts.map(([name]) => [name, [] as object[]]));
   const unsealed = Object.fromEntries(parts.map(([name]) => [name, 0]));
   /** Each row read, with its name. One that several parts found is one object each time. */
   const named = new Map<object, string>();
+  /** Each version read, which carries no MAC. */
+  const versions = new Set<object>();
   const tokens: string[] = [];
-  for (const { part: name, row: wire } of found) {
+  for (const { part: name, row: wire, token } of found) {
     const { table } = read[name]!;
+    tokens.push(`${name}:${token}`);
+    if (!('mac' in table)) {
+      const row = fromWire(table, wire);
+      seen[name]!.push(row);
+      versions.add(row);
+      continue;
+    }
     const row = fromWire(table, wire) as Row<Sealed> & { mac: Buffer };
-    tokens.push(`${name}:${row.mac.toString('hex')}`);
     if (sealedBy(vault.keys, table, row) === undefined) {
       unsealed[name]! += 1;
       continue;
@@ -290,29 +313,33 @@ export async function readParts<P extends Parts>(vault: Pick<Running, 'db' | 'ke
     seen[name]!.push(row);
     named.set(row, nameOf(table, row));
   }
-  return { seen: seen as Seen<P>, unsealed: unsealed as Unsealed<P>, named, tokens, readAt: found[0] && Number(found[0].read_at) };
+  return { seen: seen as Seen<P>, unsealed: unsealed as Unsealed<P>, named, versions, tokens, readAt: found[0] && Number(found[0].read_at) };
 }
+
+/** What a row is read again by: its MAC, or a version's, which has none, a hash of all of it. */
+const tokenOf = (table: Readable) => ('mac' in table ? sql`encode(${table}.mac, 'hex')` : sql`md5(to_jsonb(${table})::text)`);
 
 /** A change's read and its decision. */
 export async function prepare<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>): Promise<Prepared<A> | (Refusal & { said?: Denied | null })> {
   const parts = Object.entries(operation.read);
-  const { seen, unsealed, named: read, tokens, readAt } = await readParts(vault, operation.read);
+  const { seen, unsealed, named: read, versions: copied, tokens, readAt } = await readParts(vault, operation.read);
   const checked = (operation.check === undefined ? undefined : await operation.check(seen, unsealed)) as C;
   // After the read, and the check: the entry's date is the decision's, and the write is sent next.
   const at = vault.now();
   const plan = operation.decide(seen, at, unsealed, checked);
   // Told before anything is sealed: a proof is spent by its hash's own bytes.
   if (!('refused' in plan) && plan.once !== undefined && !(Buffer.isBuffer(plan.once) && plan.once.length === 32)) throw new Error('a change spends a proof by the 32 bytes of its SHA-256');
-  if ('refused' in plan) {
+  const refuse = (refusal: Refusal) => {
     // What the log says of it is the operation's to say, and never costs the refusal: one that cannot be said is not logged.
     let said: Denied | null | undefined;
     try {
-      said = operation.denied?.(seen, at, plan);
+      said = operation.denied?.(seen, at, refusal);
     } catch (error) {
       console.error('coffre: a refused change was not logged', error);
     }
-    return { refused: plan.refused, said };
-  }
+    return { refused: refusal.refused, said };
+  };
+  if ('refused' in plan) return refuse(plan);
 
   const key = vault.keys[0]!;
   const rows: Entry['rows'][number][] = [];
@@ -352,7 +379,8 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
     for (const [row, of] of read) if (of === name) return row as Fresh<T>;
     return undefined;
   };
-  for (const { version, text } of plan.values ?? []) {
+  for (const value of plan.values ?? []) {
+    const { version, copy } = value;
     // Sealed under what its secret's row and its environment's say, as this change leaves them: a use opens it by the same rows.
     const held = plan.writes.find((write) => write.table === secrets && (write.row as { id?: string } | null)?.id === version.secretId)?.row as Fresh<typeof secrets> | undefined;
     const place = held && rowOf(environments, { id: held.environmentId });
@@ -361,15 +389,38 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
     }
     // What the secret's row says of its value, which a change reads, is what the value is sealed as.
     if (held.nature !== natureOf(version)) throw new Error(`a value sealed as ${natureOf(version)} is the current version of a secret whose row says ${held.nature}`);
-    if (version.plaintext !== null && version.plaintext !== text.toString('utf8')) throw new Error("a plain value's copy is the value");
-    versions.push(toWire(secretVersions, { ...version, ...(await sealValue(text, contextOf(held, version, place.owner), vault.keks)) }));
+    let text = value.text;
+    if (copy !== undefined) {
+      // Opened as its own rows say, as a use opens it: its secret's and its environment's, which this change read.
+      const of = copied.has(copy) ? rowOf(secrets, { id: copy.secretId }) : undefined;
+      const where = of && rowOf(environments, { id: of.environmentId });
+      if (of === undefined || where === undefined) throw new Error('a change copies a version it read, of a secret and in an environment it read');
+      try {
+        text = await open(copy, contextOf(of, copy, where.owner), vault.keks);
+      } catch (error) {
+        // A key service that cannot answer is an outage. Anything else is a row that is not what it says: relabelled, moved, erased.
+        if (error instanceof KekUnavailableError) throw error;
+        return refuse({ refused: 'unreadable' });
+      }
+    }
+    try {
+      if (version.plaintext !== null && version.plaintext !== text!.toString('utf8')) {
+        // A version's copy of its plain value is under no MAC: one that is not the value was written behind the vault.
+        if (copy !== undefined) return refuse({ refused: 'unreadable' });
+        throw new Error("a plain value's copy is the value");
+      }
+      versions.push(toWire(secretVersions, { ...version, ...(await sealValue(text!, contextOf(held, version, place.owner), vault.keks)) }));
+    } finally {
+      // A value opened here is the engine's own: nobody else holds it.
+      if (copy !== undefined) text!.fill(0);
+    }
   }
   // Dated now, as the write is sent: sealing a value, through a key service, takes as long as it takes.
   const dated = vault.now();
   const entry = pending(key, plan.entry, dated, rows);
 
   // The same rows, read again by the same conditions: one that changed, went or came since makes the lists differ.
-  const again = sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || encode(${table}.mac, 'hex') FROM ${table} WHERE ${where}`), sql` UNION ALL `);
+  const again = sql.join(parts.map(([name, { table, where }]) => sql`SELECT ${sql.raw(`'${label(name)}:'`)} || ${tokenOf(table)} FROM ${table} WHERE ${where}`), sql` UNION ALL `);
   // And in time, for a decision that holds until one: counted from the read, which came before the decision, so never past it.
   const inTime = until === undefined ? sql`` : sql` AND extract(epoch FROM clock_timestamp()) * 1000 < ${readAt! + (until - at)}::float8`;
   const statements: SQL[] = [sql`same AS (SELECT (SELECT coalesce(array_agg(x ORDER BY x COLLATE "C"), '{}') FROM (${again}) seen (x)) = ${sql.param(tokens.sort())}::text[]${inTime} AS ok)`];

@@ -89,6 +89,7 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   parent_unreadable: ['forbidden', 'that is inherited from an environment you cannot read'],
   unknown_key: ['not_found', 'unknown secret'],
   no_value: ['not_found', 'that secret holds no value'],
+  unknown_version: ['not_found', 'that secret has no such version'],
   unreadable: ['conflict', 'that is a reference whose source cannot be read'],
   archived: ['conflict', 'that secret is archived: bring it back before writing it'],
   broken_chain: ['conflict', 'the environment inherits from one that is gone'],
