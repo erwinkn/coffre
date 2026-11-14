@@ -375,7 +375,7 @@ test("a service's grant taken away while a token is made widens nothing: the tok
   assert.deepEqual([entry.kept, entry.actor, entry.detail.principal], [true, bo, ci]);
 });
 
-test("a protected environment's row taken away while a token is made widens nothing (D241): a service's token on a whole project takes holding it where the project protects, whichever environments those are", async () => {
+test("a service's token on a whole project takes holding it where the project protects, as 0.14.7 did; a personal token made while a protected environment's row is hidden still never reads there", async () => {
   // shop has dev and a protected safe; Dee is a Developer of shop, who only uses and writes safe; wide holds Developer on shop.
   const shop = project('shop');
   const [shopDev, safe] = [environment(shop, 'dev'), environment(shop, 'safe', { protected: true })];
@@ -383,11 +383,7 @@ test("a protected environment's row taken away while a token is made widens noth
   await write(world, ...rows('projects', shop), ...rows('environments', shopDev, safe), ...rows('principals', principal(wide)),
     ...rows('grants', grant(dee, 'developer', { project: shop }), grant(wide, 'developer', { project: shop })));
   assert.deepEqual(await vault.change(serviceToken('dee-cli', wide)), { refused: 'no_access' });
-  // safe's row deleted for the decision, then put back: the service's token is refused as before.
-  let putBack = await hidden('environments', sql`id = ${safe.id}::uuid`);
-  assert.deepEqual(await vault.change(serviceToken('dee-cli', wide)), { refused: 'no_access' });
   assert.deepEqual(await vault.change(serviceToken('dee-cli', wide, { shop: 'developer' })), { refused: 'no_access' });
-  await putBack();
   assert.equal((await minted()).row, undefined);
   // A personal token for a role that reads where shop protects is refused Dee, who only uses there; made while safe's
   // row is hidden, its grant still keeps the protected column Dee holds on all of shop: safe back, it uses and never
@@ -395,7 +391,7 @@ test("a protected environment's row taken away while a token is made widens noth
   const both = ['secret.read', 'secret.use'];
   await write(world, ...rows('roles', role(false, 'looker', both, both)));
   assert.deepEqual(await vault.change(personal('dee-cli', { shop: 'looker' })), { refused: 'no_access' });
-  putBack = await hidden('environments', sql`id = ${safe.id}::uuid`);
+  const putBack = await hidden('environments', sql`id = ${safe.id}::uuid`);
   const issued = await vault.change(personal('dee-cli', { shop: 'looker' }));
   assert.ok(!('refused' in issued), JSON.stringify(issued));
   await putBack();
@@ -408,7 +404,7 @@ test("a protected environment's row taken away while a token is made widens noth
   assert.deepEqual([await at('minted', 'reveal'), await at('minted', 'use'), await at('dee-cli', 'reveal')], ['no_access', 'postgres://safe', 'no_access']);
 });
 
-test("a Developer of a project with nothing protected gives a service no whole-project role, only environment by environment; whoever manages access there does (D241)", async () => {
+test("a Developer of a project with nothing protected gives a service a whole-project role, as in 0.14.7; once an environment there is protected, only environment by environment; whoever manages access there gives anything (D241)", async () => {
   const shop = project('shop');
   const [shopDev, shopStaging] = [environment(shop, 'dev'), environment(shop, 'staging')];
   const [wide, split, ed] = ['token:wide', 'token:split', user('ed')];
@@ -417,9 +413,17 @@ test("a Developer of a project with nothing protected gives a service no whole-p
     ...rows('grants', grant(dee, 'developer', { project: shop }), grant(ed, 'admin', { project: shop }), grant(wide, 'developer', { project: shop }),
       grant(split, 'developer', { environment: shopDev }), grant(split, 'developer', { environment: shopStaging })),
     ...rows('credentials', edCli));
-  // Dee holds all of shop today; protected later, an environment of it would be one she only uses.
+  // Dee holds all of shop, and nothing there is protected: she gives wide its token on all of it, or on dev alone.
+  const all = await vault.change(serviceToken('dee-cli', wide));
+  assert.ok(!('refused' in all), JSON.stringify(all));
+  assert.deepEqual(all.answer.scope, { shop: 'developer' });
+  await dropped('credentials', sql`token_hash = ${tokenOf('minted')}`);
+  const one = await vault.change(serviceToken('dee-cli', wide, { 'shop/dev': 'developer' }));
+  assert.ok(!('refused' in one), JSON.stringify(one));
+  await dropped('credentials', sql`token_hash = ${tokenOf('minted')}`);
+  // A protected environment of shop, which she only uses: wide, which would read it, is no longer hers to mint for.
+  await write(world, ...rows('environments', environment(shop, 'safe', { protected: true })));
   assert.deepEqual(await vault.change(serviceToken('dee-cli', wide)), { refused: 'no_access' });
-  assert.deepEqual(await vault.change(serviceToken('dee-cli', wide, { 'shop/dev': 'developer' })), { refused: 'no_access' });
   const each = await vault.change(serviceToken('dee-cli', split));
   assert.ok(!('refused' in each), JSON.stringify(each));
   assert.deepEqual(each.answer.scope, { 'shop/dev': 'developer', 'shop/staging': 'developer' });

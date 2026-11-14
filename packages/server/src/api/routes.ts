@@ -1,3 +1,5 @@
+import type { z } from 'zod';
+
 import { bindingRoutes } from './routes/bindings.ts';
 import { freezeRoutes } from './routes/freezes.ts';
 import { keyRoutes } from './routes/keys.ts';
@@ -16,3 +18,18 @@ import { unservedRoutes } from './routes/unserved.ts';
  * Those not served yet come first, so that an area serving one replaces it.
  */
 export const routes = { ...unservedRoutes, ...meRoutes, ...placeRoutes, ...secretRoutes, ...keyRoutes, ...memberRoutes, ...bindingRoutes, ...roleRoutes, ...settingsRoutes, ...freezeRoutes, ...signinRoutes, ...tokenRoutes };
+
+export type Routes = typeof routes;
+export type RouteKey = keyof Routes;
+
+type InputSchema<K extends RouteKey> = NonNullable<Routes[K]['input']>;
+
+/** What a caller sends: the body, or the query string for a GET. */
+export type RouteInput<K extends RouteKey> = [InputSchema<K>] extends [never]
+  ? undefined
+  : InputSchema<K> extends z.ZodType
+    ? z.input<InputSchema<K>>
+    : never;
+
+/** What the handler returns, before it is written as JSON. */
+export type RouteOutput<K extends RouteKey> = Awaited<ReturnType<Routes[K]['run']>>;

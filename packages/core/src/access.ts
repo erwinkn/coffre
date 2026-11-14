@@ -878,10 +878,10 @@ export type ServiceSetting = Scope;
  * normal column even in a protected environment, so a person there, who
  * holds its protected column, gives none what they do not hold themselves:
  * a Developer of a protected prod, who only uses it, gives no viewer there.
- * A grant on a whole project reaches every environment it protects, now or
- * later, so it takes holding the role in the protected column: a Developer
- * of `market`, protected or not, gives contributor on `market`, and viewer
- * or developer only environment by environment.
+ * A grant on a whole project reaches the environments it protects, so it
+ * takes holding the role in each of them too, as 0.14.7 did: a Developer
+ * of `market` gives developer on `market` while nothing there is
+ * protected, and only environment by environment once prod is (D241).
  */
 export function givesService(holder: Holdings, setting: ServiceSetting | null, role: Role, place: Place, kept?: RoleDefinition): boolean {
   if (mayManageAccess(holder, place)) return true;
@@ -893,13 +893,11 @@ export function givesService(holder: Holdings, setting: ServiceSetting | null, r
   if (definition === undefined || definition.permissions.length === 0) return false;
   if (setting === null || holder.credentialScope != null || !inScope(setting, place)) return false;
   if (!definition.permissions.every((permission) => allows(holder, permission, place))) return false;
-  if (place.environmentId != null) return true;
-  // A grant on a whole project reaches its protected environments too, today's and those protected later, where the
-  // service holds the role's normal column: the person giving it holds that in their own protected column, or gives
-  // none. Read from what they hold (`heldColumns`), not from which environments are protected, so that no row hidden
-  // from the decision widens it (D241, option A; the alternative seals the list of protected environments instead).
-  const { protected: inProtected } = heldColumns(holder, place);
-  return definition.permissions.every((permission) => PROJECT_ONLY_PERMISSIONS.includes(permission) || inProtected.includes(permission));
+  // A grant on a whole project reaches its protected environments too, where the service holds the role's normal column:
+  // the person giving it holds that there as well, or gives none. Those the decision's rows protect, as 0.14.7 weighed
+  // them: an environment's row a database writer hides from it goes unweighed (D241, docs/design/0.16.md).
+  const inEnvironments = definition.permissions.filter((permission) => !PROJECT_ONLY_PERMISSIONS.includes(permission));
+  return protectedWithin(policy, place).every((there) => inEnvironments.every((permission) => allows(holder, permission, there)));
 }
 
 /** Whether `holder` gives a service account anything anywhere among `places`: whether they set any up. */

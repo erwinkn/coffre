@@ -466,10 +466,11 @@ export function sealedScope(issued: readonly Issued[]): ScopeGrant[] {
  * refuses, `tampered`, wherever it is. One taken away for the decision,
  * and put back after: the caller's grant, a role, a place or a parent,
  * and the token reaches less, or is refused. A protected environment's
- * row: a service's grant on its project takes holding the role in the
- * maker's protected column whatever is protected (`givesService`, D241),
- * so the row decides nothing there; a personal token made without it, which
- * would have been refused, keeps what its person holds in that column on
+ * row: a service's token on its project takes holding the role in each
+ * environment the read finds protected, as 0.14.7 did (`givesService`), so
+ * one made without the row is made as if it were not protected, which
+ * 0.16 accepts (D241, docs/design/0.16.md); a personal token made without
+ * it, which would have been refused, keeps what its person holds in that column on
  * the whole project (`heldColumns`), and so uses, and never reads, where
  * they only use. A service's grant is
  * the one that would let a caller manage the service when they would not
