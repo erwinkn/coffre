@@ -321,7 +321,7 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
   // What it read and left, by the MAC it carried: the same twice.
   const { once, used } = plan;
   if (used !== undefined) {
-    if (!read.has(used)) throw new Error('a change is a use of a binding its decision read');
+    if (read.get(used) !== nameOf(bindings, used)) throw new Error('a change is a use of a binding its decision read');
     // Postgres writes a row once in a statement: which of two writes it kept would be anyone's guess.
     if (rows.some((other) => other.row === nameOf(bindings, used))) throw new Error(`a change that writes ${nameOf(bindings, used)} does not move its last use on too`);
   }
