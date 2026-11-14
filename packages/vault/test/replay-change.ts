@@ -21,7 +21,7 @@ import type { Fresh, Row } from '../src/rows.ts';
 import { answer, memoryOf, read, recall, type Read } from '../src/use.ts';
 import { emptyDatabase, openTestVault } from './database.ts';
 import { statesOf } from './itf.ts';
-import { ask, credential, environment, grant, project, role, rows, secret, value, write } from './world.ts';
+import { amend, ask, credential, environment, grant, project, role, rows, secret, value, write } from './world.ts';
 
 type Role = 'Out' | 'Member' | 'Owner';
 type Op = 'Promote' | 'Demote' | 'Remove';
@@ -101,6 +101,8 @@ try {
         if (!hit && before.role[p!] !== 'Out' && session.get(p!)?.generation !== before.gen[p!]) {
           session.set(p!, { label: `${p}-${before.gen[p!]}`, generation: before.gen[p!]! });
           await write(vault, ...rows('credentials', credential(session.get(p!)!.label, id(p!), { generation: before.gen[p!]! })));
+          // And is granted again: a grant counts only in its member's generation.
+          await amend(vault, 'grants', sql`principal = ${id(p!)}`, { generation: before.gen[p!]! });
         }
         const kept = recall(vault, asking(p!));
         assert.equal(kept !== undefined, hit, `${where}: the vault's memory`);

@@ -265,3 +265,37 @@ test('what a caller holds in a change\'s project is whole, whatever else the ope
   await amend(world, 'environments', eq(environments.id, prod!), { slug: 'prod~1', protected: true });
   assert.deepEqual((await asking('eve-cli')).holds.policy.protectedIn, {});
 });
+
+test('a grant counts in its member\'s generation alone: one a writer hid from a removal and put back reaches nothing once the member is let back in', async () => {
+  const asking = async (label: string) => {
+    let found!: Asking;
+    await prepare(world, { read: callerParts(tokenOf(label), sql`(SELECT p.id FROM projects p WHERE p.slug = 'market')`), decide: (seen, at) => ((found = callerFrom(seen, { proof: null, ip: null }, world.workloads, at)!), { refused: 'only a read' }) });
+    return found;
+  };
+  // A database writer takes Ada's grants away, rows the vault wrote, each with its MAC.
+  const [{ hidden }] = (await rowsOf<{ hidden: string }>(world.owner, sql`WITH gone AS (DELETE FROM grants WHERE principal = ${ada} RETURNING *) SELECT json_agg(gone)::text AS hidden FROM gone`)) as [{ hidden: string }];
+  // Her removal finds none to delete, and moves her generation on.
+  await amend(world, 'principals', sql`id = ${ada}`, { status: 'removed', generation: 1 });
+  // The writer puts them back as they were; she is let back in, and signs in again.
+  await world.owner.execute(sql`INSERT INTO grants SELECT * FROM json_populate_recordset(NULL::grants, ${hidden}::json)`);
+  await amend(world, 'principals', sql`id = ${ada}`, { status: 'active' });
+  await write(world, ...rows('credentials', credential('ada-again', ada, { generation: 1 })));
+  assert.deepEqual(await rowsOf(world.owner, sql`SELECT role, generation FROM grants WHERE principal = ${ada} ORDER BY project_id = ${market.id}`), [{ role: 'developer', generation: 0 }, { role: 'developer', generation: 0 }]);
+
+  assert.deepEqual(await vault.use(reveal('ada-again', ['DATABASE_URL'])), { refused: 'no_access' });
+  assert.deepEqual(await vault.change(writing('ada-again', { DATABASE_URL: 'x' })), { refused: 'no_access' });
+  assert.deepEqual((await asking('ada-again')).holds.grants, []);
+  // Nor does the writer revive them by moving their generation on in place: the MAC covers it.
+  await world.owner.execute(sql`UPDATE grants SET generation = 1 WHERE principal = ${ada}`);
+  world.memory.reads.clear();
+  assert.deepEqual(await vault.use(reveal('ada-again', ['DATABASE_URL'])), { refused: 'no_access' });
+  assert.deepEqual((await asking('ada-again')).holds.grants, []);
+
+  // A grant of her generation, beside the old ones, is all she holds: she views prod, and writes nowhere.
+  const [prod] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM environments WHERE project_id = ${market.id} AND slug = 'prod'`);
+  await write(world, ...rows('grants', grant(ada, 'viewer', { environment: prod! }, { generation: 1 })));
+  world.memory.reads.clear();
+  assert.deepEqual(await given('ada-again', ['DATABASE_URL']), [[1, 'postgres://old']]);
+  assert.deepEqual(await vault.change(writing('ada-again', { DATABASE_URL: 'x' })), { refused: 'no_access' });
+  assert.deepEqual((await asking('ada-again')).holds.grants, [{ projectId: market.id, environmentId: prod!.id, role: 'viewer' }]);
+});

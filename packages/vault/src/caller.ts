@@ -205,7 +205,8 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
       scope,
       // A grant on an environment names only it: its project is the environment's row's. One on a place this request is not about decides nothing here.
       grants: rows.grants
-        .filter((grant) => grant.principal === principal.id && (grant.expiresAt === null || grant.expiresAt.getTime() > at))
+        // A removal moves the generation on: a grant made before it reaches nothing, though a writer hid it from the removal and put it back.
+        .filter((grant) => grant.principal === principal.id && grant.generation === principal.generation && (grant.expiresAt === null || grant.expiresAt.getTime() > at))
         .map((grant) => ({ projectId: grant.projectId ?? projectOf.get(grant.environmentId!) ?? null, environmentId: grant.environmentId, role: grant.role })),
       credentialScope,
       // A role with no row is no role: the roles are the rows read, never the ones that ship.

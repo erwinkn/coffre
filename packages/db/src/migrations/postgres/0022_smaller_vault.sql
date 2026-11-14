@@ -315,11 +315,16 @@ ALTER TABLE grants
     DROP CONSTRAINT vault_grants_role_check,
     DROP COLUMN environment_slug,
     ADD COLUMN id uuid NOT NULL DEFAULT gen_random_uuid(),
+    ADD COLUMN generation integer,
     ALTER COLUMN expires_at TYPE timestamp(3) with time zone USING to_timestamp(expires_at / 1000.0),
     ALTER COLUMN granted_at TYPE timestamp(3) with time zone USING to_timestamp(granted_at / 1000.0);
 --> statement-breakpoint
+-- A grant counts only in its member's generation: one carried over is of the generation its member is in now.
+UPDATE grants SET generation = principals.generation FROM principals WHERE principals.id = grants.principal;
+--> statement-breakpoint
 ALTER TABLE grants
     ALTER COLUMN id DROP DEFAULT,
+    ALTER COLUMN generation SET NOT NULL,
     ADD CONSTRAINT grants_pkey PRIMARY KEY (id),
     ADD CONSTRAINT grants_one_place CHECK ((project_id IS NULL) <> (environment_id IS NULL)),
     ADD CONSTRAINT grants_role_check CHECK (role ~ '^[a-z][a-z0-9-]{1,31}$');
