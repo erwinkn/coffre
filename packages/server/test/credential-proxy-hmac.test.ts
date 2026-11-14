@@ -3,25 +3,32 @@
 // signature is the secret's, `credential(name).verify(body, signature)`;
 // a key of the app's own signs too. Here Yousign's, DFNS's and Lemonway's
 // schemes, each signed as the provider signs it with `node:crypto`, the
-// app's own HS256 token, the log once a minute, and no byte of a secret in
-// anything coffre answers, logs or says on the console. And SumSub's
-// document upload, a message of 12 MiB signed raw, as its bytes come.
-import test from 'node:test';
+// app's own HS256 token, the log, and no byte of a secret in anything
+// coffre answers, logs or says on the console. And SumSub's document
+// upload, a message of 12 MiB signed raw, as its bytes come.
+//
+// 0.14.7's assertions, on 0.16 (docs/design/0.16.md, "The proxy"): each
+// sign or verify is one `use` of the vault, which logs it (`secret.read`,
+// purpose `use`, naming the signer or verifier) once a minute, and the
+// proxy keeps no value; a raw message that comes late is bounded at 60 s
+// from that use, whatever `cacheSeconds` says.
 import assert from 'node:assert/strict';
 import { createHash, createHmac, generateKeyPairSync } from 'node:crypto';
+import { after, beforeEach, test } from 'node:test';
 
 import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 import { credential } from '@coffre/client/credential';
+import { generateToken } from '@coffre/core/identity';
+import { rowsOf } from '@coffre/db/dialect';
+import { credential as credentialRow, emptyDatabase, environment, grant, instance, principal, project, role, rows, secret, value, write } from '@coffre/vault/testing';
+import { sql } from 'drizzle-orm';
 
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { clientFor } from './api-fixture.ts';
-import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
-import { auditLog } from '@coffre/db/schema';
-import { checkPlugins, type PluginContext, type UseAsked } from '../src/plugins.ts';
+import type { PluginContext, UseAsked } from '../src/plugins.ts';
 import { credentialProxy, form, hmac, privateKey, type CredentialProxyOptions, type Encoding } from '../src/plugins/credential-proxy.ts';
 import { keyBytes } from '../src/plugins/hmac.ts';
-
+import { openApp, PUBLIC_URL } from './app-fixture.ts';
 const SECRETS = {
   YOUSIGN_WEBHOOK_SECRET: 'ys_whsec_0123456789abcdefABCDEF',
   DFNS_WEBHOOK_SECRET: 'dfns_whsec_9876543210zyxwvu',
@@ -55,44 +62,63 @@ const options: CredentialProxyOptions = {
   },
 };
 
+const ADA = 'user:ada';
+
+const app = await openApp({ plugins: [credentialProxy(options)] });
+const { world } = app;
+after(() => app.close());
+
+const market = project('market');
+const PLACES = { dev: environment(market, 'dev'), bare: environment(market, 'bare'), empty: environment(market, 'empty'), garbled: environment(market, 'garbled') };
+
+/** Ada's handle for each environment, as `POST /handles` makes one: a viewer where she is a Developer. */
+const handles: Record<string, string> = {};
+
 /** What the console says while a test runs, every line of it. */
 const said: string[] = [];
 
-useMcp(async () => {
-  runtime.plugins = checkPlugins([credentialProxy(options)]);
+beforeEach(async () => {
+  await emptyDatabase(world.owner);
+  for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
   said.length = 0;
-  const root = clientFor(deps, ROOT);
-  await root.members.add(`user:${DEV}`);
-  await root.projects.create('market');
-  await root.environments.create('market/dev');
-  await root.environments.create('market/bare');
-  await root.secrets.set('market/dev', {
-    YOUSIGN_WEBHOOK_SECRET: { value: SECRETS.YOUSIGN_WEBHOOK_SECRET, sensitivity: 'sensitive' },
-    DFNS_WEBHOOK_SECRET: SECRETS.DFNS_WEBHOOK_SECRET,
-    LEMONWAY_WEBHOOK_SECRET: SECRETS.LEMONWAY_WEBHOOK_SECRET,
-    IFRAME_TOKEN_SECRET: SECRETS.IFRAME_TOKEN_SECRET,
-    SUMSUB_SECRET_KEY: SECRETS.SUMSUB_SECRET_KEY,
-    POLICY_SEAL_KEY: SECRETS.POLICY_SEAL_KEY,
-    MONERIUM_WEBHOOK_SECRET: SECRETS.MONERIUM_WEBHOOK_SECRET,
-    BRALE_WEBHOOK_SECRET: SECRETS.BRALE_WEBHOOK_SECRET,
-    DFNS_PRIVATE_KEY: generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+  const made = Object.entries(PLACES).map(([name, place]) => {
+    handles[name] = generateToken('handle');
+    return credentialRow(handles[name], ADA, { kind: 'handle', scope: JSON.stringify([{ projectId: market.id, environmentId: place.id, role: 'viewer' }]), places: JSON.stringify([{ environmentId: place.id, personal: false }]), expiresAt: new Date(Date.now() + 3_600_000) });
   });
-  await root.secrets.set('market/bare', { OTHER: 'x' });
-  await root.environments.create('market/empty');
-  await root.secrets.set('market/empty', { YOUSIGN_WEBHOOK_SECRET: '', IFRAME_TOKEN_SECRET: '' });
-  // Values outside their keyEncoding's alphabet or padding, which a lenient decoder still makes a key of.
-  await root.environments.create('market/garbled');
-  await root.secrets.set('market/garbled', { POLICY_SEAL_KEY: `${SECRETS.POLICY_SEAL_KEY}0`, MONERIUM_WEBHOOK_SECRET: `whsec_${SECRETS.MONERIUM_WEBHOOK_SECRET}`, BRALE_WEBHOOK_SECRET: '====' });
-  await root.access.set(`user:${DEV}`, { market: 'developer' });
+  const held = (place: { id: string; projectId: string }, values: Record<string, string>, sensitive: string[] = []) => Object.entries(values).map(([key, text]) => value(world, secret(place, key), text, { sensitive: sensitive.includes(key) }));
+  await write(
+    world,
+    ...rows('policy', instance()),
+    ...rows('roles', role(true, 'owner', ['secret.read']), role(true, 'member', []), role(false, 'developer', ['secret.read', 'secret.use', 'secret.write']), role(false, 'viewer', ['secret.read', 'secret.use'])),
+    ...rows('projects', market),
+    ...rows('environments', ...Object.values(PLACES)),
+    ...rows('principals', principal(ADA)),
+    ...rows('grants', grant(ADA, 'developer', { project: market })),
+    ...rows(
+      'secrets',
+      ...held(PLACES.dev, { ...SECRETS, DFNS_PRIVATE_KEY: generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }, ['YOUSIGN_WEBHOOK_SECRET']),
+      ...held(PLACES.bare, { OTHER: 'x' }),
+      ...held(PLACES.empty, { YOUSIGN_WEBHOOK_SECRET: '', IFRAME_TOKEN_SECRET: '' }),
+      // Values outside their keyEncoding's alphabet or padding, which a lenient decoder still makes a key of.
+      ...held(PLACES.garbled, { POLICY_SEAL_KEY: `${SECRETS.POLICY_SEAL_KEY}0`, MONERIUM_WEBHOOK_SECRET: `whsec_${SECRETS.MONERIUM_WEBHOOK_SECRET}`, BRALE_WEBHOOK_SECRET: '====' }),
+    ),
+    ...rows('credentials', ...made),
+  );
+  await world.owner.execute(sql`DELETE FROM log_pending`);
+  await app.request('/livez');
+  app.calls.length = 0;
 });
 
-/** What `coffre run market/dev` gives the app: its environment, and `credential(name)` over coffre's own route. */
-async function run(paths = ['market/dev']): Promise<{ env: Record<string, string>; plan: { env: Record<string, string>; credentials: Record<string, string> } }> {
-  const made = await route('/api/handles', { method: 'POST', headers: { authorization: `Bearer ${await sessionFor(DEV)}`, 'content-type': 'application/json' }, body: JSON.stringify({ label: 'run', paths }) });
-  const handle = ((await made.json()) as { token: string }).token;
-  const plan = (await (await route(`/use/${paths[0]}`, { headers: { authorization: `Bearer ${handle}` } })).json()) as { env: Record<string, string>; credentials: Record<string, string> };
+/** What `coffre run market/<place>` gives the app: its environment, and `credential(name)` over coffre's own route. */
+async function run(place: keyof typeof PLACES = 'dev'): Promise<{ env: Record<string, string>; plan: { env: Record<string, string>; credentials: Record<string, string> } }> {
+  const handle = handles[place]!;
+  const answer = await app.request(`/use/market/${place}`, { headers: { authorization: `Bearer ${handle}` } });
+  assert.equal(answer.status, 200, await answer.clone().text());
+  const plan = (await answer.json()) as { env: Record<string, string>; credentials: Record<string, string> };
   return { env: { ...plan.env, COFFRE_CREDENTIALS: JSON.stringify(plan.credentials), COFFRE_HANDLE: handle }, plan };
 }
+
+const route = (path: string, init?: RequestInit) => app.request(path, init);
 
 /** Every answer coffre gave the app, as text, headers and body. */
 const answered: string[] = [];
@@ -100,11 +126,27 @@ const answered: string[] = [];
 /** `credential(name)` as the app holds it, each answer kept for the leak check. */
 function used(env: Record<string, string>, name: string) {
   return credential(name, env, async (input, init) => {
-    const answer = await route(input.replace(ORIGIN, ''), init);
+    const answer = await route(input.replace(PUBLIC_URL, ''), init);
     const text = await answer.text();
     answered.push(`${answer.status} ${JSON.stringify([...answer.headers])} ${text}`);
     return new Response(text, { status: answer.status, headers: answer.headers });
   });
+}
+
+/** The vault's log entries not yet signed in: each one's action, purpose, the name it was used for, and the keys it logs. */
+async function logged(): Promise<{ action: string; purpose?: string; credential?: string; keys: string[] }[]> {
+  const bodies = await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`);
+  return bodies.map(({ body }) => {
+    const { action, detail } = JSON.parse(body) as { action: string; detail: { purpose?: string; credential?: string; keys?: { key: string }[] } };
+    return { action, ...(detail.purpose === undefined ? {} : { purpose: detail.purpose }), ...(detail.credential === undefined ? {} : { credential: detail.credential }), keys: (detail.keys ?? []).map((key) => key.key) };
+  });
+}
+
+/** The vault's calls `run` made. */
+async function callsOf(run: () => Promise<unknown>): Promise<string[]> {
+  const before = app.calls.length;
+  await run();
+  return app.calls.slice(before);
 }
 
 const hmacOf = (secret: string, body: string | Buffer, encoding: 'hex' | 'base64url' = 'hex') => createHmac('sha256', secret).update(body).digest(encoding);
@@ -160,12 +202,12 @@ test('an HMAC signer signs as Node does and checks its own signatures; a verifie
   await assert.rejects(used(env, 'yousign').sign(YOUSIGN_BODY), /yousign is a verifier, which checks signatures and makes none/);
   await assert.rejects(used(env, 'dfns-key').verify('m', 'sig'), /verify names a verifier/);
   // An environment that holds no secret for it says so, and names no value.
-  const bare = await run(['market/bare']);
+  const bare = await run('bare');
   const absent = (await route('/use/market/bare', { method: 'POST', headers: { authorization: `Bearer ${bare.env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ verify: { credential: 'yousign', message: 'aGk', signature: 'sha256=00' } }) }));
   assert.equal(absent.status, 409);
   assert.match(((await absent.json()) as { message: string }).message, /market\/bare holds no YOUSIGN_WEBHOOK_SECRET, which yousign needs/);
   // An empty secret, which WebCrypto takes for no key: said, never a 500.
-  const empty = await run(['market/empty']);
+  const empty = await run('empty');
   for (const asked of [{ verify: { credential: 'yousign', message: 'aGk', signature: 'sha256=00' } }, { sign: { credential: 'iframe-token', message: 'aGk' } }]) {
     const refused = await route('/use/market/empty', { method: 'POST', headers: { authorization: `Bearer ${empty.env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify(asked) });
     assert.equal(refused.status, 409, JSON.stringify(asked));
@@ -206,7 +248,7 @@ test("a key written as text signs and checks as its own code reads it: the polic
   // The same value as its UTF-8 bytes is another key: no match.
   assert.equal(await used(env, 'brale').verify(body, hmacOf(SECRETS.BRALE_WEBHOOK_SECRET, body)), false);
   // A value outside its keyEncoding's alphabet or padding is a 409 naming the key, never a signature, JSON or raw.
-  const garbled = await run(['market/garbled']);
+  const garbled = await run('garbled');
   const asks: [string, RequestInit][] = [
     ['/use/market/garbled', { method: 'POST', body: JSON.stringify({ sign: { credential: 'policy-seal', message: 'aGk' } }), headers: { 'content-type': 'application/json' } }],
     ['/use/market/garbled?sign=policy-seal', { method: 'POST', body: 'hi', headers: { 'content-type': 'application/octet-stream', 'content-length': '2' } }],
@@ -225,14 +267,15 @@ test("a key written as text signs and checks as its own code reads it: the polic
 
 test("a webhook body is 64 KiB at most, or its hmac()'s maxBytes; one past it is refused before anything is opened", async () => {
   const { env } = await run();
-  const before = (await entries('credential.use')).length;
   const sized = (bytes: number) => Buffer.alloc(bytes, 'a');
   const check = (name: string, secret: string, body: Buffer) => used(env, name).verify(body, `sha256=${hmacOf(secret, body)}`);
-  await assert.rejects(check('yousign', SECRETS.YOUSIGN_WEBHOOK_SECRET, sized(64 * 1024 + 1)), /yousign checks a message of 64 KiB at most: its hmac\(\)'s maxBytes takes a longer one/);
-  await assert.rejects(check('dfns', SECRETS.DFNS_WEBHOOK_SECRET, sized(512 * 1024 + 1)), /dfns checks a message of 512 KiB at most/);
-  // Past what the longest takes as JSON, 1 MiB (sumsub-key signs a longer one raw), the request is not read whole.
-  await assert.rejects(check('dfns', SECRETS.DFNS_WEBHOOK_SECRET, sized(2 * 1024 * 1024)), /a message to sign or verify is at most 1 MiB here as JSON/);
-  assert.equal((await entries('credential.use')).length, before, 'nothing opened for a message past its bound');
+  const refusals = await callsOf(async () => {
+    await assert.rejects(check('yousign', SECRETS.YOUSIGN_WEBHOOK_SECRET, sized(64 * 1024 + 1)), /yousign checks a message of 64 KiB at most: its hmac\(\)'s maxBytes takes a longer one/);
+    await assert.rejects(check('dfns', SECRETS.DFNS_WEBHOOK_SECRET, sized(512 * 1024 + 1)), /dfns checks a message of 512 KiB at most/);
+    // Past what the longest takes as JSON, 1 MiB (sumsub-key signs a longer one raw), the request is not read whole.
+    await assert.rejects(check('dfns', SECRETS.DFNS_WEBHOOK_SECRET, sized(2 * 1024 * 1024)), /a message to sign or verify is at most 1 MiB here as JSON/);
+  });
+  assert.deepEqual(refusals, [], 'nothing opened for a message past its bound: the vault is not asked');
   assert.equal(await check('yousign', SECRETS.YOUSIGN_WEBHOOK_SECRET, sized(64 * 1024)), true);
   assert.equal(await check('dfns', SECRETS.DFNS_WEBHOOK_SECRET, sized(512 * 1024)), true);
   // A private key signs up to the same 64 KiB, and past it is 413 too.
@@ -294,7 +337,6 @@ test("SumSub's document upload, 12 MiB (the ceiling), signs raw as Node's create
 test('a raw sign is refused before its body is read: the handle, the signer, its kind, the length, the digest, the secret', async () => {
   const { env } = await run();
   const handle = env.COFFRE_HANDLE!;
-  const before = (await entries('credential.use')).length;
   const asked = async (name: string, headers: Record<string, string | null>, place = 'market/dev', who = handle) => {
     const body = stalled(64 * 1024);
     const answer = await signRaw(who, name, body.body, { 'content-length': String(SUMSUB_BYTES), ...headers }, place);
@@ -302,7 +344,9 @@ test('a raw sign is refused before its body is read: the handle, the signer, its
     assert.equal(body.pulled(), 0, `${name}: its body read`);
     return [answer.status, (JSON.parse(text) as { message?: string }).message ?? text] as const;
   };
-  assert.deepEqual(await asked('sumsub-key', {}, 'market/dev', `coffre_use_${'x'.repeat(43)}`).then(([status]) => status), 401);
+  // A handle the vault knows nothing of: its one use refuses, before the body.
+  assert.deepEqual(await callsOf(async () => assert.deepEqual(await asked('sumsub-key', {}, 'market/dev', `coffre_use_${'x'.repeat(43)}`).then(([status]) => status), 401)), ['use']);
+  const before = app.calls.length;
   assert.deepEqual(await asked('sumsub-key', { authorization: null }).then(([status]) => status), 401);
   assert.match((await asked('nope', {}))[1], /\?sign= names the hmac\(\) signer of a raw message/);
   assert.deepEqual(await asked('yousign', {}), [404, "?sign= names the hmac() signer of a raw message: its deployment's credentialProxy names them, signers: { … }; yousign is a verifier, which checks signatures and makes none"]);
@@ -311,14 +355,15 @@ test('a raw sign is refused before its body is read: the handle, the signer, its
   assert.deepEqual((await asked('iframe-token', { 'content-length': String(64 * 1024 + 1) }))[0], 413);
   assert.deepEqual((await asked('sumsub-key', { 'content-length': null }))[0], 411);
   assert.deepEqual((await asked('sumsub-key', { 'content-digest': 'sha-256=:bm90IGEgZGlnZXN0:' }))[0], 400);
-  assert.equal((await entries('credential.use')).length, before, 'nothing opened for a raw sign refused by its shape');
+  assert.deepEqual(app.calls.slice(before), [], 'nothing opened for a raw sign refused by its shape: the vault is not asked');
+  assert.deepEqual(await logged(), [], 'and nothing logged');
   // An environment that holds no secret for it, and one whose secret is empty: answered as JSON's, with the body unread.
-  const bare = await run(['market/bare']);
+  const bare = await run('bare');
   const json = await route('/use/market/bare', { method: 'POST', headers: { authorization: `Bearer ${bare.env.COFFRE_HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ sign: { credential: 'sumsub-key', message: 'aGk' } }) });
   const asJson = [json.status, ((await json.json()) as { message: string }).message] as const;
-  assert.notEqual(asJson[0], 200);
+  assert.deepEqual(asJson, [409, 'market/bare holds no SUMSUB_SECRET_KEY, which sumsub-key needs']);
   assert.deepEqual(await asked('sumsub-key', {}, 'market/bare', bare.env.COFFRE_HANDLE!), asJson);
-  const empty = await run(['market/empty']);
+  const empty = await run('empty');
   const [status, message] = await asked('iframe-token', { 'content-length': '10' }, 'market/empty', empty.env.COFFRE_HANDLE!);
   assert.equal(status, 409);
   assert.match(message, /market\/empty's IFRAME_TOKEN_SECRET is empty/);
@@ -341,27 +386,41 @@ test("a project named as a form rule's credential: a raw sign at /use/<project>/
   assert.deepEqual(await (await ask('sumsub-key', message, message.length)).json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
 });
 
-test('a raw message whose body comes after its values lapse is signed by nothing: 503 late, sent again it signs', async () => {
+test('a raw message whose body comes 60 s after its use is signed by nothing: 503 late, sent again it signs; cacheSeconds bounds nothing', async () => {
+  // cacheSeconds is read and ignored on 0.16: the bound is the use's, 60 s (`RAW_LATE_MS`).
   const proxy = credentialProxy({ credentials: {}, cacheSeconds: 1, signers: { 'sumsub-key': hmac('SUMSUB_SECRET_KEY', { encoding: 'hex', maxBytes: SUMSUB_BYTES }) } });
   const context = fake('SUMSUB_SECRET_KEY', SECRETS.SUMSUB_SECRET_KEY);
   const message = Buffer.alloc(128 * 1024, 's');
   const ask = (body: BodyInit) => proxy.routes!.fetch(new Request('https://coffre.example/use/market/dev?sign=sumsub-key', {
     method: 'POST', headers: { authorization: `Bearer coffre_use_${'h'.repeat(43)}`, 'content-type': 'application/octet-stream', 'content-length': String(message.length) }, body, duplex: 'half',
   } as RequestInit), context);
-  // Half, then the rest past the second its values serve: a handle revoked meanwhile would still be signing.
-  let sent = 0;
-  const slow = new ReadableStream<Uint8Array>({
-    pull: async (out) => {
-      if (sent === message.length) return out.close();
-      if (sent > 0) await new Promise((resolve) => setTimeout(resolve, 1_200));
-      out.enqueue(message.subarray(sent, sent + message.length / 2));
-      sent += message.length / 2;
-    },
-  }, { highWaterMark: 0 });
-  const late = await ask(slow);
-  const text = await late.text();
-  assert.deepEqual([late.status, (JSON.parse(text) as { reason: string }).reason], [503, 'late'], text);
-  assert.ok(!text.includes('signature'), text);
+  // Half, then the rest after `pause`, as the clock tells it: past 60 s, a handle revoked meanwhile would still be signing.
+  const slow = (pause: () => Promise<void>) => {
+    let sent = 0;
+    return new ReadableStream<Uint8Array>({
+      pull: async (out) => {
+        if (sent === message.length) return out.close();
+        if (sent > 0) await pause();
+        out.enqueue(message.subarray(sent, sent + message.length / 2));
+        sent += message.length / 2;
+      },
+    }, { highWaterMark: 0 });
+  };
+  // Past cacheSeconds, well within the minute: signed.
+  const within = await ask(slow(() => new Promise((resolve) => setTimeout(resolve, 1_200))));
+  assert.deepEqual(await within.json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
+  // A minute and a second later, the clock moved on rather than waited for.
+  const now = Date.now;
+  let ahead = 0;
+  Date.now = () => now() + ahead;
+  try {
+    const late = await ask(slow(async () => void (ahead = 61_000)));
+    const text = await late.text();
+    assert.deepEqual([late.status, (JSON.parse(text) as { reason: string }).reason], [503, 'late'], text);
+    assert.ok(!text.includes('signature'), text);
+  } finally {
+    Date.now = now;
+  }
   assert.deepEqual(await (await ask(message)).json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, message) });
 });
 
@@ -386,26 +445,16 @@ test('a raw message longer or shorter than it declares, or other than its Conten
   assert.deepEqual(await none.json(), { signature: hmacOf(SECRETS.SUMSUB_SECRET_KEY, '') });
 });
 
-test("verifies and HMAC signatures are logged once a minute per handle and name, as a credential's requests are, the vault asked once", async () => {
+test("each verify and HMAC signature is one use of the vault, which logs it once a minute per handle and key, naming the verifier or signer", async () => {
   const { env } = await run();
-  const reads = (await entries('secret.read')).length;
-  const unwrap = deps.vault.unwrap.bind(deps.vault);
-  let unwrapped = 0;
-  deps.vault.unwrap = (async (...args: Parameters<typeof unwrap>) => {
-    unwrapped++;
-    return unwrap(...args);
-  }) as typeof unwrap;
-  try {
-    const header = `sha256=${hmacOf(SECRETS.YOUSIGN_WEBHOOK_SECRET, YOUSIGN_BODY)}`;
-    for (let i = 0; i < 5; i++) assert.equal(await used(env, 'yousign').verify(YOUSIGN_BODY, header), true);
-    for (let i = 0; i < 3; i++) await used(env, 'iframe-token').sign(`m${i}`);
-    assert.equal(unwrapped, 2, 'one opening for each name, then the cache');
-  } finally {
-    deps.vault.unwrap = unwrap;
-  }
-  const uses = (await entries('credential.use')).filter((entry) => entry.metadata.hmac === true);
-  assert.deepEqual(uses.map((entry) => [entry.metadata.credential, entry.metadata.purpose]).sort(), [['iframe-token', 'use'], ['yousign', 'use']]);
-  assert.equal((await entries('secret.read')).length, reads + 2);
+  const header = `sha256=${hmacOf(SECRETS.YOUSIGN_WEBHOOK_SECRET, YOUSIGN_BODY)}`;
+  for (let i = 0; i < 5; i++) assert.deepEqual(await callsOf(async () => assert.equal(await used(env, 'yousign').verify(YOUSIGN_BODY, header), true)), ['use']);
+  for (let i = 0; i < 3; i++) assert.deepEqual(await callsOf(() => used(env, 'iframe-token').sign(`m${i}`)), ['use'], 'no value kept: the vault asked again');
+  const uses = (await logged()).filter((entry) => entry.purpose === 'use');
+  assert.deepEqual(uses, [
+    { action: 'secret.read', purpose: 'use', credential: 'yousign', keys: ['YOUSIGN_WEBHOOK_SECRET'] },
+    { action: 'secret.read', purpose: 'use', credential: 'iframe-token', keys: ['IFRAME_TOKEN_SECRET'] },
+  ]);
 });
 
 test('no byte of a secret leaves coffre: not in an answer, an entry of the log, or the console, whatever is asked', async () => {
@@ -415,7 +464,7 @@ test('no byte of a secret leaves coffre: not in an answer, an entry of the log, 
   answered.length = 0;
   try {
     const { env } = await run();
-    const bare = await run(['market/bare']);
+    const bare = await run('bare');
     // As the app asks, or anyone holding the handle: every name, held or not, every kind of signature, and a wrong one.
     const ask = async (handle: string, path: string, body: unknown) => {
       const answer = await route(path, { method: 'POST', headers: { authorization: `Bearer ${handle}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -434,7 +483,7 @@ test('no byte of a secret leaves coffre: not in an answer, an entry of the log, 
   } finally {
     for (const line of lines) console[line] = original[line]!;
   }
-  const log = (await db.owner.select().from(auditLog)).map((row) => JSON.stringify(row, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : value)));
+  const log = [...(await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending`)), ...(await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log`))].map((row) => row.body);
   const everything = [...answered, ...log, ...said].join('\n');
   assert.ok(answered.length > 60, `${answered.length} answers`);
   for (const [key, secret] of Object.entries(SECRETS)) {
@@ -477,7 +526,7 @@ function fake(key: string, secret: string): PluginContext {
     publicUrl: 'https://coffre.example', api: unused, exchange: unused, signOut: unused, recheck: unused,
     workload: async () => null,
     handle: async () => ({ expiresAt: later, paths: ['market/dev'] }),
-    use: async (_handle: unknown, _asked: UseAsked) => ({ values: { [key]: secret }, plain: [], keys: [key], environment: { path: 'market/dev', personal: false }, expiresAt: later }),
+    use: async (_handle: unknown, _asked: UseAsked) => ({ values: { [key]: secret }, plain: [], environment: { path: 'market/dev', personal: false }, expiresAt: later, workload: null }),
   } as unknown as PluginContext;
 }
 

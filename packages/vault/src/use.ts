@@ -7,7 +7,7 @@ import type { BindingPolicy, Constraints } from '@coffre/core/identity';
 import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { callerOf, ID, live, touch, type Caller, type CallerRead, type Workloads } from './caller.ts';
+import { callerOf, endOf, ID, live, touch, type Caller, type CallerRead, type Workloads } from './caller.ts';
 import { bounded, keep, MOST, type Refusal, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts';
@@ -67,6 +67,8 @@ export type Value = { key: string; secret: string; version: number; nature: Natu
 export type Answer = {
   principal: string;
   credential: string;
+  /** The effective end of the credential, ISO 8601 (`endOf`): not `Called.credential.expiresAt`, its own row's. */
+  expiresAt: string;
   values: Value[];
   /** For a workload's session, what only the app can hold its request to: an unsigned upload its binding must allow, a narrowed session's methods and paths. */
   workload: { binding: string; profile: string; policy: BindingPolicy; constraints: Constraints | null } | null;
@@ -403,7 +405,7 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
   const mark = ({ held, version }: Given) => `${caller.credential.id} ${ask.purpose} ${held.id} ${version.version}`;
   const fresh = read.filter((item) => (memory.logged.get(mark(item))?.at ?? -Infinity) + LOGGED_MS <= at);
   const { workload } = caller;
-  const answered: Answer = { principal: caller.principal, credential: caller.credential.id, values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
+  const answered: Answer = { principal: caller.principal, credential: caller.credential.id, expiresAt: new Date(endOf(caller.credential, found.seen.ancestor)).toISOString(), values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
   if (down) {
     // Nowhere to write it: counted from the first one, for the entry this credential's next proxied use writes.
     const missed = memory.unlogged.get(caller.credential.id);

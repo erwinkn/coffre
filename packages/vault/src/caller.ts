@@ -96,6 +96,15 @@ const ISSUED = 'binding:';
 /** `narrow` goes four deep (docs/design/workload-access.md, section 8.4). */
 const MAX_ANCESTORS = 4;
 
+/**
+ * When a credential stops standing for age, the instant a use starts refusing it: the earliest of its own end, a
+ * workload session's hard end (`notAfter`), and those of the rows it stands under, read with it, the sessions it was
+ * narrowed from or an MCP token's connection. What `Used.expiresAt` says. Not a grant's end, a revoke or a freeze.
+ */
+export function endOf(own: Row<typeof credentials>, above: readonly Row<typeof credentials>[] = []): number {
+  return Math.min(...[own, ...above].map((row) => Math.min(row.expiresAt.getTime(), row.notAfter?.getTime() ?? Infinity)));
+}
+
 function parsed(json: string | null): unknown {
   if (json === null) return null;
   try {
@@ -132,7 +141,7 @@ function capOf(stored: string | null): CredentialScope {
  * Null for one that does not stand.
  */
 function sessionOf(rows: CallerRows, session: Row<typeof credentials>, binding: Row<typeof bindings>, shown: Shown, workloads: NonNullable<Workloads>, at: number): Workload | null {
-  const live = (row: Row<typeof credentials>) => row.kind === 'workload' && row.revokedAt === null && row.expiresAt.getTime() > at && row.notAfter !== null && row.notAfter.getTime() > at;
+  const live = (row: Row<typeof credentials>) => row.kind === 'workload' && row.revokedAt === null && row.notAfter !== null && endOf(row) > at;
   // The key before anything that tells one live session from another: a token without its key learns nothing more.
   if (!live(session) || session.jkt === null || shown.proof !== session.jkt) return null;
   const policy = parsed(binding.policy);
@@ -171,7 +180,7 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
   const [credential] = rows.credential;
   const [principal] = rows.principal;
   if (credential === undefined || principal === undefined) return null;
-  if (credential.revokedAt !== null || credential.expiresAt.getTime() <= at) return null;
+  if (credential.revokedAt !== null || endOf(credential) <= at) return null;
   // Only a workload's session is frozen and thawed, which stops it and keeps it (`Stop`). On any other credential a freeze has no lift, so it ends it.
   if (credential.frozenAt !== null && credential.kind !== 'workload') return null;
   // A removal moves the generation on: everything issued before it is dead, whatever its own row says.
@@ -225,7 +234,7 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
       if (!Array.isArray(above) || above.length !== 1) return null;
       // It stands while its connection does: one ended, expired or of a member removed since ends every token under it, with no write of theirs.
       const connection = rows.ancestors.find((row) => row.id === above[0] && row.kind === 'mcp' && row.ancestors === null && row.challenge === null && row.principal === credential.principal
-        && row.generation === credential.generation && row.revokedAt === null && row.frozenAt === null && row.expiresAt.getTime() > at);
+        && row.generation === credential.generation && row.revokedAt === null && row.frozenAt === null && endOf(row) > at);
       const own = mcpClientOf(credential.client);
       const held = connection && mcpClientOf(connection.client);
       if (own === undefined || held === undefined || own.id !== held.id) return null;

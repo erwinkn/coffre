@@ -28,7 +28,7 @@ import { propertySettings } from '../../../scripts/property-settings.ts';
 import '../src/api/router.ts';
 import { routes } from '../src/api/routes.ts';
 import { unservedRoutes } from '../src/api/routes/unserved.ts';
-import { credentialProxy, header, postgres } from '../src/plugins/credential-proxy.ts';
+import { aesGcm, credentialProxy, header, hmac, postgres, privateKey, sigv4 } from '../src/plugins/credential-proxy.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { openApp, PUBLIC_URL, SESSION } from './app-fixture.ts';
@@ -75,9 +75,17 @@ const mcp = { limits: processLimits({ perSource: 100_000, perConnection: 100_000
 // environment it generates values for, so that the plan reads its person's personal config and names what to make; and
 // a tunnel to the database dev's DATABASE_URL names, `fake`, which its admission checks and never dials here.
 const proxy = credentialProxy({
-  credentials: { cloudflare: { upstream: 'https://api.cloudflare.example/client/v4', inject: header('authorization', 'Bearer {CLOUDFLARE_API_TOKEN}') } },
+  credentials: {
+    cloudflare: { upstream: 'https://api.cloudflare.example/client/v4', inject: header('authorization', 'Bearer {CLOUDFLARE_API_TOKEN}') },
+    r2: { upstream: 'https://r2.cloudflare.example', inject: sigv4({ accessKeyId: '{R2_ACCESS_KEY_ID}', secretAccessKey: '{R2_SECRET_ACCESS_KEY}', region: 'auto', service: 's3' }) },
+  },
   tunnels: { db: postgres('DATABASE_URL', { hosts: ['fake'] }) },
   generate: { 'market/dev': 'all' },
+  // What the app computes with and never holds: a presigned URL of R2's, a signature by a private key or an HMAC
+  // secret, a webhook's checked, AES-256-GCM both ways.
+  signers: { signer: privateKey('SIGNING_KEY'), scaleway: hmac('SCALEWAY_SECRET_KEY', { encoding: 'hex' }) },
+  verifiers: { hook: hmac('SOURCE_REGISTRY_KEY', { encoding: 'hex' }) },
+  ciphers: { box: aesGcm('BOX_KEY', { keyEncoding: 'hex' }) },
 });
 const app = await openApp({ auth: signin({ providers: [acme], workloads, mcp }), transport, workloads: {}, plugins: [proxy] });
 const { world } = app;
@@ -87,6 +95,9 @@ const ci = 'token:ci';
 /** What a CI job reveals: seven keys of the environment it reads. */
 const SEVEN = ['CLOUDFLARE_API_TOKEN', 'SCALEWAY_SECRET_KEY', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'SOURCE_REGISTRY_KEY', 'GITHUB_RELEASE_APP_CLIENT_ID', 'GITHUB_RELEASE_APP_PRIVATE_KEY'];
 const PENDING = '__Host-coffre_signin';
+/** What dev's signer and cipher hold: an Ed25519 key, and 32 bytes as hex. */
+const SIGNING_KEY = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+const BOX_KEY = 'ab'.repeat(32);
 
 /**
  * market: dev (API_KEY, DATABASE_URL and the seven keys), dev-fork, which
@@ -118,6 +129,7 @@ before(async () => {
     ...rows('environments', dev, fork, environment(market, 'prod', { protected: true }), busy, adas),
     ...rows('secrets',
       apiKey, value(world, secret(dev, 'DATABASE_URL'), 'postgres://fake'), ...SEVEN.map((key) => value(world, secret(dev, key), `fake-${key.toLowerCase()}`)),
+      value(world, secret(dev, 'SIGNING_KEY'), SIGNING_KEY), value(world, secret(dev, 'BOX_KEY'), BOX_KEY),
       value(world, secret(fork, 'OWN'), 'fake-own'), value(world, secret(busy, 'KEY'), 'fake-0'), secret(busy, 'MIRROR', { sourceId: apiKey.id }), value(world, secret(adas, 'LOCAL'), 'fake-local')),
     ...rows('roles',
       role(false, 'viewer', ['secret.read', 'secret.use'], []),
@@ -146,6 +158,8 @@ after(async () => {
 
 const api = (label: string, method: string, path: string, body?: unknown) =>
   app.request(`/api${path}`, { method, headers: { authorization: `Bearer ${label}` }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+/** A computation through the proxy, as `credential(name)` asks it: the handle as a bearer token, the ask as JSON. */
+const computed = (body: unknown) => app.request('/use/market/dev', { method: 'POST', headers: { authorization: `Bearer ${handleToken}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
 const reveal = (label: string, path: string, keys?: string[]) => api(label, 'POST', '/reveals', keys === undefined ? { path } : { path, keys });
 /** Cy's browser, on one of coffre's own pages. */
 const asCy = { cookie: `${SESSION}=cy-web`, 'sec-fetch-site': 'same-origin' };
@@ -464,6 +478,20 @@ const requests: Record<string, Entry> = {
     statements: 1,
     fixed: true,
   },
+  // What the app asks coffre to make with dev's values, which it never holds: each one use, naming the signer, verifier,
+  // cipher or credential, and no statement; a workload's adds its gate, as any proxied request (test/proxy-compute.test.ts).
+  'POST /use/:project/:environment, a presigned URL': { request: () => computed({ presign: { credential: 'r2', path: '/bucket/report.pdf', expiresIn: 60 } }), calls: ['use'], statements: 0, fixed: true },
+  'POST /use/:project/:environment, a signature': { request: () => computed({ sign: { credential: 'signer', message: 'aGVsbG8' } }), calls: ['use'], statements: 0, fixed: true },
+  'POST /use/:project/:environment, an HMAC signature': { request: () => computed({ sign: { credential: 'scaleway', message: 'aGVsbG8' } }), calls: ['use'], statements: 0, fixed: true },
+  'POST /use/:project/:environment, a raw message signed': {
+    request: () => app.request('/use/market/dev?sign=scaleway', { method: 'POST', headers: { authorization: `Bearer ${handleToken}`, 'content-type': 'application/octet-stream', 'content-length': '5' }, body: 'hello' }),
+    calls: ['use'],
+    statements: 0,
+    fixed: true,
+  },
+  'POST /use/:project/:environment, a signature checked': { request: () => computed({ verify: { credential: 'hook', message: 'aGVsbG8', signature: '00' } }), calls: ['use'], statements: 0, fixed: true },
+  'POST /use/:project/:environment, encrypted': { request: () => computed({ encrypt: { credential: 'box', plaintext: 'aGVsbG8' } }), calls: ['use'], statements: 0, fixed: true },
+  'POST /use/:project/:environment, decrypted': { request: () => computed({ decrypt: { credential: 'box', iv: 'AAAAAAAAAAAAAAAA', ciphertext: 'aGVsbG8', tag: 'AAAAAAAAAAAAAAAAAAAAAA' } }), calls: ['use'], statements: 0, fixed: true },
   'DELETE /handles/:id': { request: () => api('ada-cli', 'DELETE', `/handles/${handle}`), calls: ['change'], statements: 0 },
   // A service account's trust bindings. Making one is weighed as the change first, `caller` and one statement, before its
   // issuer is asked where its keys are. A CI run's exchange is one statement, which bindings to verify under, and one

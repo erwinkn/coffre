@@ -122,7 +122,7 @@ test('a use is dated as its entry is written, and its write gives up after two s
 test('a reader is handed a key, and the use is logged once: who, with what, where, which version', async () => {
   const result = await use(vault, ask('ada', 'market/prod', ['DATABASE_URL']));
   assert.ok('values' in result);
-  assert.deepEqual(result, { principal: ada, credential: result.credential, workload: null, values: [{ key: 'DATABASE_URL', secret: w.database.id, version: 2, nature: 'secret', value: Buffer.from('postgres://prod') }] });
+  assert.deepEqual(result, { principal: ada, credential: result.credential, expiresAt: '2027-01-01T00:00:00.000Z', workload: null, values: [{ key: 'DATABASE_URL', secret: w.database.id, version: 2, nature: 'secret', value: Buffer.from('postgres://prod') }] });
   const [entry, ...more] = await logged();
   assert.deepEqual(more, []);
   assert.deepEqual(
@@ -1030,4 +1030,36 @@ test('a peek is what a use would give, key by key, and writes nothing: no entry,
   assert.ok('items' in (await peek(vault, brief)) && recall(vault, brief) !== undefined);
   vault.tick(1000);
   assert.deepEqual([await peek(vault, brief), recall(vault, brief)], [{ refused: 'unauthenticated' }, undefined]);
+});
+
+test("a use says when its credential stops standing for age: the earliest of its row's end, a session's hard end and the sessions above it's, from memory and through an outage too", async () => {
+  const start = vault.now();
+  const later = (ms: number) => new Date(start + ms);
+  // A handle's end is its row's; a session's hard end comes before its expiry; a narrowed session's ends with the one above it.
+  await write(vault, ...rows('credentials', credential('brief', ada, { kind: 'handle', scope: scopeOf({ projectId: w.market.id, environmentId: null, role: 'viewer' }), expiresAt: later(10_000) })));
+  const { bound, pod } = await workload({}, { expiresAt: later(30_000), notAfter: later(20_000) });
+  await write(vault, ...rows('credentials', session('agent', bound, { ancestors: JSON.stringify([pod.id]), expiresAt: later(40_000), notAfter: later(50_000) })));
+  Object.assign(vault, { memory: memoryOf(2, 300) });
+  const cases = ([['brief', null, 10_000], ['pod', 'pod', 20_000], ['agent', 'agent', 20_000]] as const).map(([label, proof, ms]) => ({ label, asked: ask(label, 'market/prod', ['FLAG'], { proof, purpose: 'use' }), ms }));
+  const ends = async (asked: Ask) => {
+    const result = await use(vault, asked);
+    return 'refused' in result ? result.refused : result.expiresAt;
+  };
+  const all = () => Promise.all(cases.map(({ asked }) => ends(asked)));
+  const read = await all();
+  assert.deepEqual(read, cases.map(({ ms }) => later(ms).toISOString()));
+  // The same from the vault's memory, and from the rows an outage is answered from.
+  assert.deepEqual(await all(), read);
+  const down = unreachable();
+  vault.tick(2000);
+  assert.deepEqual(await all(), read);
+  assert.ok(down.tried > 0);
+  down.back();
+  // What it says is when the vault refuses: a millisecond before, the use answers; at it, it is refused.
+  for (const { label, asked, ms } of cases) {
+    vault.tick(start + ms - 1 - vault.now());
+    assert.equal(await ends(asked), later(ms).toISOString(), label);
+    vault.tick(1);
+    assert.equal(await ends(asked), 'unauthenticated', label);
+  }
 });
