@@ -10,13 +10,13 @@ import { after, before, beforeEach, test } from 'node:test';
 import { PERMISSIONS } from '@coffre/core/access';
 import { github, GitHubApp, githubApp, pkcs8Of, signin } from '@coffre/core/identity';
 import { DevIdp, fakeInstallations } from '@coffre/conformance/idp';
-import { credential, emptyDatabase, environment, grant, instance, principal, project, role, rows, user, write } from '@coffre/vault/testing';
+import { credential, emptyDatabase, environment, grant, identity, instance, principal, project, role, rows, user, write } from '@coffre/vault/testing';
 
 import { asApp, GITHUB_DEADLINE_MS } from '../src/api/routes/workloads.ts';
 import { ApiError } from '../src/api/errors.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { openApp } from './app-fixture.ts';
+import { openApp, SESSION } from './app-fixture.ts';
 
 const idp = new DevIdp();
 await idp.start();
@@ -51,13 +51,15 @@ const [root, ada, bo, dee, al, ivy] = [user('root'), user('ada'), user('bo'), us
  * `ci` is a service account. Al and Ivy hold no grant, which the vault
  * names no role of: Al is an Admin scoped to market, so manages its
  * access; Ivy a Developer of the instance, so gives developer anywhere. `ada-token` is Ada's personal token, scoped
- * to market. The policy row lets people set service accounts up anywhere.
+ * to market, and `ada-web` her browser's session. The policy row lets people set service accounts up anywhere;
+ * `archived`, market is archived.
  */
-async function seed(setting = '{"projects":"all","environments":"all"}'): Promise<void> {
+async function seed(setting = '{"projects":"all","environments":"all"}', archived = false): Promise<void> {
   await emptyDatabase(world.owner);
   for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
-  const market = project('market');
+  const market = project('market', archived ? { archivedAt: new Date(Date.UTC(2026, 10, 1)) } : {});
   const dev = environment(market, 'dev');
+  const adas = identity(ada);
   await write(
     world,
     ...rows('roles', role(true, 'owner', [...PERMISSIONS]), role(true, 'member', []), role(true, 'admin', ['secret.read', 'secret.write', 'environment.manage', 'project.manage', 'grant.manage']),
@@ -68,7 +70,9 @@ async function seed(setting = '{"projects":"all","environments":"all"}'): Promis
     ...rows('environments', dev),
     ...rows('grants', grant(ada, 'owner', { project: market }), grant(bo, 'developer', { environment: dev }), grant('token:ci', 'developer', { environment: dev })),
     ...rows('policy', instance({ serviceAccounts: setting })),
+    ...rows('identities', adas),
     ...rows('credentials', credential('root-cli', root), credential('ada-cli', ada), credential('bo-cli', bo), credential('dee-cli', dee), credential('ci-cli', 'token:ci'), credential('al-cli', al), credential('ivy-cli', ivy),
+      credential('ada-web', ada, { kind: 'browser', identityId: adas.id }),
       credential('ada-token', ada, { kind: 'personal', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'owner' }]) })),
   );
   // The schema's check, made once: no request below pays it.
@@ -237,6 +241,32 @@ test("the instance's setting decides for whoever does not manage access: outside
     // Ada manages market's access, which the setting does not narrow; Al too, by his instance role.
     assert.equal((await get('ada-cli', '/workloads/repositories')).status, 200);
     assert.equal((await get('al-cli', '/workloads/repositories')).status, 200);
+  } finally {
+    await seed();
+  }
+});
+
+test('asked with the cookie from another site\'s page, both are refused before the vault or GitHub is asked; from coffre\'s own, answered', async () => {
+  documents.set('https://api.github.com/users/acme', { id: 9919, login: 'acme' });
+  for (const path of ['/workloads/lookup?github=acme', '/workloads/repositories']) {
+    for (const site of [{ 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-site', origin: 'https://evil.acme.example' }, {}] as Record<string, string>[]) {
+      const [calls, statements] = [app.calls.length, app.statements];
+      const got = await app.request(`/api${path}`, { headers: { cookie: `${SESSION}=ada-web`, ...site } });
+      assert.deepEqual([got.status, ((await got.json()) as Body).error, app.calls.slice(calls), app.statements - statements], [403, 'cross_origin', [], 0], `${path} ${JSON.stringify(site)}`);
+    }
+    const own = await app.request(`/api${path}`, { headers: { cookie: `${SESSION}=ada-web`, 'sec-fetch-site': 'same-origin' } });
+    assert.equal(own.status, 200, path);
+  }
+  // Only the own page's lookup reached GitHub.
+  assert.deepEqual(fetched, ['https://api.github.com/users/acme']);
+});
+
+test("an archived project's Owner still sets service accounts up there, as the vault admits one: archived places count", async () => {
+  await seed(undefined, true);
+  try {
+    assert.equal((await get('ada-cli', '/workloads/repositories')).status, 200);
+    assert.equal((await get('bo-cli', '/workloads/repositories')).status, 200);
+    assert.equal((await get('dee-cli', '/workloads/repositories')).status, 403);
   } finally {
     await seed();
   }

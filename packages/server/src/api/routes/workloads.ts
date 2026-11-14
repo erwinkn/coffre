@@ -65,17 +65,19 @@ const GITLAB_PROJECT = /^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+){1,20}$/;
  * hour's lookups GitHub allows the deployment's address.
  */
 async function setsUp(ctx: ApiContext): Promise<void> {
+  // Another site's page, riding the visitor's cookie, would spend the deployment's hour of GitHub's lookups for nothing.
+  if (ctx.crossSite) throw new ApiError('cross_origin', "a workload's repository is looked up on coffre's own page");
   const who = await ctx.caller();
   if (runsInstance(who.holds)) return;
   // A service account, or a credential with a scope, sets none up (`givesService`): refused before any statement.
   if (who.principal.startsWith('user:') && who.holds.credentialScope == null) {
     const { setting, roles } = await serviceSetup(ctx.db);
     const reached: Place[] = [];
+    // Archived places too, as the vault weighs them when it admits one (`member.put`).
     for (const project of await places(ctx.db, projectsReached(who))) {
-      if (project.archived) continue;
       reached.push(placeOf(project, null));
       // A personal config is its owner's alone: no service account is given anything there.
-      for (const environment of project.environments) if (!environment.archived && environment.owner === null) reached.push(placeOf(project, environment));
+      for (const environment of project.environments) if (environment.owner === null) reached.push(placeOf(project, environment));
     }
     // The vault names only the roles the caller holds; any role may be one they could give, as the vault weighs it
     // (`member.put`): every one the rows define, under the vault's definitions of their own. The rows are read as they
