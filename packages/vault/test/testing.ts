@@ -41,3 +41,6 @@ export async function signerOf(world: TestVault): Promise<{ sign(): Promise<void
     },
   };
 }
+
+/** A log entry as the vault appends one to `log_pending`: for the load rig (packages/server/test/bench/load), which grows the log through the signer. */
+export { pending } from '../src/entry.ts';
