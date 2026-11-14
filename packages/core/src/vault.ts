@@ -4,11 +4,13 @@ import type { AccessFault } from './access-fault.ts';
 import type { CallerKind, CredentialScope, GrantPlace, Holdings, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
 import type { AccessAnswers, AccessChanges } from './changes/access.ts';
 import type { FreezeAnswers, FreezeChanges } from './changes/freezes.ts';
+import type { McpAnswers, McpChanges, McpUnasked } from './changes/mcp.ts';
 import type { PlacesAnswers, PlacesChanges } from './changes/places.ts';
 import type { SecretsAnswers, SecretsChanges } from './changes/secrets.ts';
 import type { SigninAnswers, SigninChanges, Unasked } from './changes/signin.ts';
 import type { WorkloadAnswers, WorkloadChanges, WorkloadsUnasked } from './changes/workloads.ts';
 import type { BindingPolicy, Constraints } from './identity/index.ts';
+import type { McpScope } from './mcp.ts';
 
 export type { CallerKind } from './access.ts';
 
@@ -64,7 +66,7 @@ export interface Vault {
    * leaves nothing. Only what a caller asks is weighed: a sign-in or an
    * exchange rests on a proof, which this would try without spending.
    */
-  weigh<O extends Exclude<Change['op'], Unasked | WorkloadsUnasked>>(input: Asked<O>): Promise<{ answer: Answers[O] } | Refused>;
+  weigh<O extends Exclude<Change['op'], Unasked | WorkloadsUnasked | McpUnasked>>(input: Asked<O>): Promise<{ answer: Answers[O] } | Refused>;
 }
 
 /** Where a request came from, which every call carries. */
@@ -96,7 +98,7 @@ export type Presented = Trace & {
  * request showed, or for one nobody asks (`Unasked`), where it came from
  * alone.
  */
-export type Asked<O extends Change['op']> = O extends Change['op'] ? (O extends Unasked | WorkloadsUnasked ? Trace : Presented) & Extract<Change, { op: O }> : never;
+export type Asked<O extends Change['op']> = O extends Change['op'] ? (O extends Unasked | WorkloadsUnasked | McpUnasked ? Trace : Presented) & Extract<Change, { op: O }> : never;
 
 export type UseInput = Presented & {
   /** The place, by its slugs. */
@@ -153,8 +155,12 @@ export type Peeked = {
  */
 export type Called = {
   principal: string;
-  /** `expiresAt` is ISO 8601. */
-  credential: { id: string; kind: string; expiresAt: string };
+  /**
+   * `expiresAt` is ISO 8601. An MCP connection's access token (kind `mcp`)
+   * says which connection it is under and the scopes it holds, from its
+   * row; no other credential has either.
+   */
+  credential: { id: string; kind: string; expiresAt: string; connection?: string; scopes?: McpScope[] };
   holds: Holdings & { policy: Policy };
   /**
    * For a call that asked (`head`): the log's head as the vault last signed
@@ -183,11 +189,12 @@ export type Refused = { refused: string };
  * Each area's are in a file of its own (`changes/`), with what each
  * answers once it is made.
  */
-export type Change = SecretsChanges | PlacesChanges | AccessChanges | SigninChanges | WorkloadChanges | FreezeChanges;
-export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers & SigninAnswers & WorkloadAnswers & FreezeAnswers;
+export type Change = SecretsChanges | PlacesChanges | AccessChanges | SigninChanges | WorkloadChanges | FreezeChanges | McpChanges;
+export type Answers = SecretsAnswers & PlacesAnswers & AccessAnswers & SigninAnswers & WorkloadAnswers & FreezeAnswers & McpAnswers;
 
 export type * from './changes/access.ts';
 export type * from './changes/freezes.ts';
+export type * from './changes/mcp.ts';
 export type * from './changes/places.ts';
 export type * from './changes/secrets.ts';
 export type * from './changes/signin.ts';

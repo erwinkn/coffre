@@ -225,8 +225,7 @@ test(`a service token holds no more than its account now and its role when it wa
  * service account holds a role's normal column even in a protected
  * environment, so a person who gives one a role, without managing access
  * there, holds every permission it gives at each place it reaches, in the
- * column they hold there themselves; for a grant on a whole project, in the
- * protected column, whichever of its environments are protected. Those who manage access give anything:
+ * column they hold there themselves. Those who manage access give anything:
  * that is their role.
  */
 test(`a person who does not manage access gives a service account nothing they do not hold, seed ${settings.seed}`, () => hegel.test((tc) => {
@@ -249,16 +248,6 @@ test(`a person who does not manage access gives a service account nothing they d
   for (const place of places) {
     for (const permission of domain.PERMISSIONS) {
       if (allows(account, permission, place)) assert.ok(allows(giver, permission, place), JSON.stringify({ person, given, permission, place, protected: policy.protected }));
-    }
-  }
-  // A grant on a whole project, whatever it protects later, or hid from the decision (D241): every environment protected,
-  // the giver still holds there all the account does.
-  if (at.environmentId != null) return;
-  const everyProtected = { ...policy, protected: projects.flatMap((project) => project.environments.map((environment) => environment.id)) };
-  const guarded = holdings(projects, { ...person, policy: everyProtected });
-  for (const place of places) {
-    for (const permission of domain.PERMISSIONS) {
-      if (allows(account, permission, place)) assert.ok(allows(guarded, permission, place), JSON.stringify({ person, given, permission, place, protected: 'all' }));
     }
   }
 }, settings));

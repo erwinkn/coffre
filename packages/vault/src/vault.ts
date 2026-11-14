@@ -1,4 +1,4 @@
-import { PURPOSES, type Answers, type Asked, type Change, type Unasked, type UseInput, type Vault, type WorkloadsUnasked } from '@coffre/core/vault';
+import { PURPOSES, type Answers, type Asked, type Change, type McpUnasked, type Unasked, type UseInput, type Vault, type WorkloadsUnasked } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
 import type { ResolvedVaultConfig } from './config.ts';
@@ -47,7 +47,7 @@ function asked(input: UseInput): Ask {
 }
 
 /** The changes nobody asks, by name: each rests on a proof, which a weighing would try and not spend. */
-const UNASKED: Record<Unasked | WorkloadsUnasked, true> = { signin: true, 'device.start': true, 'device.redeem': true, 'token.exchange': true, 'workload.signin': true };
+const UNASKED: Record<Unasked | WorkloadsUnasked | McpUnasked, true> = { signin: true, 'device.start': true, 'device.redeem': true, 'token.exchange': true, 'workload.signin': true, 'mcp.token': true, 'oauth.register': true };
 
 /**
  * What every operation is given of the vault's configuration, past its

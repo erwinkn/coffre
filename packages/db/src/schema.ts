@@ -541,8 +541,10 @@ export const bindings = pgTable(
  * authenticates. An MCP connection's token is its authorization code until
  * the client redeems it (`challenge` is then its PKCE challenge, and
  * `expires_at` the code's 60 seconds), and its refresh token since, with
- * the one it replaced in `previous_token_hash`, whose reuse ends the
- * connection. Its access tokens have no row: each names its connection.
+ * the one it replaced in `previous_token_hash`; its code stays in
+ * `code_hash` for as long as it lasts. Either presented again ends the
+ * connection. Each access token is a row of its own, which names its
+ * connection in `ancestors`.
  *
  * A row is deleted a day after it expires.
  */
@@ -554,6 +556,7 @@ export const credentials = pgTable(
     tokenHash: bytea('token_hash').notNull(),
     tokenHint: text('token_hint'),
     previousTokenHash: bytea('previous_token_hash'),
+    codeHash: bytea('code_hash'),
     generation: integer().notNull(),
     // The member it acts as, `user:<email>` or `token:<name>`, under the generation it was issued in.
     principal: text().notNull(),
@@ -600,6 +603,8 @@ export const credentials = pgTable(
     check('credentials_mcp_client_check', sql`(${table.kind} = 'mcp') = (${table.client} IS NOT NULL) AND (${table.challenge} IS NULL OR ${table.kind} = 'mcp')`),
     check('credentials_token_hash_check', sql`octet_length(${table.tokenHash}) = 32`),
     check('credentials_previous_token_hash_check', sql`${table.previousTokenHash} IS NULL OR octet_length(${table.previousTokenHash}) = 32`),
+    unique('credentials_code_hash_key').on(table.codeHash),
+    check('credentials_code_hash_check', sql`${table.codeHash} IS NULL OR (${table.kind} = 'mcp' AND octet_length(${table.codeHash}) = 32)`),
     macCheck('credentials_mac_check', table.mac),
     foreignKey({
       name: 'credentials_principal_fkey',
@@ -628,6 +633,8 @@ export const credentials = pgTable(
       .where(sql`${table.kind} = 'workload' AND ${table.ancestors} IS NULL`),
     // A refresh token presented again after it was replaced.
     index('credentials_previous_token_idx').on(table.previousTokenHash).where(sql`${table.previousTokenHash} IS NOT NULL`),
+    // The MCP credentials of a registered client, by its id at the head of `client`: the upkeep's test of whether one is in use.
+    index('credentials_client_idx').on(sql`(${table.client}::jsonb ->> 'id')`).where(sql`${table.client} IS NOT NULL`),
     // What the minute's upkeep deletes: the rows a day past their expiry.
     index('credentials_expiry_idx').on(table.expiresAt),
   ],

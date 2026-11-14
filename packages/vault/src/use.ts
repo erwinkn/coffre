@@ -80,17 +80,15 @@ export type Serving = Running & {
 /** What a read finds, by table. */
 const READ = { credential: credentials, principal: principals, identity: identities, grant: grants, role: roles, binding: bindings, ancestor: credentials, policy, project: projects, environment: environments, secret: secrets, dismissed: dismissedKeys, version: secretVersions };
 type Seen = { [K in keyof typeof READ]: Row<(typeof READ)[K]>[] };
-const nothingSeen = () => Object.fromEntries(Object.keys(READ).map((part) => [part, []])) as unknown as Seen;
 
 /**
- * Rows as one read found them, when, and the values opened from them since.
- * The memory keeps the newest read of an ask, in place of any older one.
- * `used`: a proxied use was answered from them, and logged, so an outage may
- * be answered from them too; a reveal's or a peek's answers none.
- * `refused`: the ask was refused on them. Only their date is kept, and
- * answers nothing: it keeps a slower use's older rows from being put back.
+ * Rows as one read found them, when it began, and the values opened from
+ * them since. The memory keeps the newest read of an ask, in place of any
+ * older one. `used`: a proxied use was answered from them, and logged, so
+ * an outage may be answered from them too; a reveal's or a peek's answers
+ * none.
  */
-export type Read = { at: number; seen: Seen; opened: Map<string, Buffer>; used?: boolean; refused?: boolean };
+export type Read = { at: number; seen: Seen; opened: Map<string, Buffer>; used?: boolean };
 
 /**
  * What one isolate remembers between calls. Never across a change of what it
@@ -102,7 +100,8 @@ export type Read = { at: number; seen: Seen; opened: Map<string, Buffer>; used?:
  * For an outage of the database (`use`): `outageSeconds`, how long the rows
  * a proxied use was answered from are kept, values and all, to answer it
  * while the database cannot be reached (0 for never); `downAt`, when it last
- * could not be; `unlogged`, by credential, the proxied uses answered then
+ * could not be; `refusals`, by ask, when it was last refused, kept as long
+ * (`refused`); `unlogged`, by credential, the proxied uses answered then
  * that were due a log entry, which its next proxied use's entry says.
  */
 export type Memory = {
@@ -113,13 +112,21 @@ export type Memory = {
   touched: Map<string, { at: number }>;
   outageSeconds: number;
   downAt: number;
+  refusals: Map<string, { at: number }>;
   unlogged: Map<string, { at: number; uses: number }>;
 };
 
-export const memoryOf = (seconds: number, outageSeconds = 0): Memory => ({ seconds, reads: new Map(), callers: new Map(), logged: new Map(), touched: new Map(), outageSeconds, downAt: -Infinity, unlogged: new Map() });
+export const memoryOf = (seconds: number, outageSeconds = 0): Memory => ({ seconds, reads: new Map(), callers: new Map(), logged: new Map(), touched: new Map(), outageSeconds, downAt: -Infinity, refusals: new Map(), unlogged: new Map() });
 
 /** A credential given the same version of a key for the same purpose within the last minute writes no second log entry, wherever it asked. */
 const LOGGED_MS = 60_000;
+/**
+ * How long the database is taken to be out of reach after a use found it
+ * so, before one asks it again (`use`): its own length, not the memory's,
+ * since a lost connection with the database there has proxied uses
+ * answered from their older rows for as long.
+ */
+const DOWN_MS = 2000;
 /** Parents an environment may have above it, as in 0.14. */
 const MAX_PARENTS = 3;
 const shapeOfAsk = (ask: Ask) => JSON.stringify([ask.token.toString('hex'), ask.project, ask.environment, ask.mine, ask.keys]);
@@ -127,18 +134,14 @@ const shapeOfAsk = (ask: Ask) => JSON.stringify([ask.token.toString('hex'), ask.
 /** Whether `now` is within `ms` of a read, from it on: a clock set back makes nothing fresher. */
 const within = (read: Read, now: number, ms: number) => now >= read.at && now < read.at + ms;
 
-/**
- * How long a read is kept, in milliseconds: the memory's length; an
- * outage's, for the rows a proxied use was answered from, which may answer
- * one, and for a refusal's date, which holds older rows off for as long.
- */
-const keptMs = (memory: Memory, read: Read) => Math.max(memory.seconds, read.used === true || read.refused === true ? memory.outageSeconds : 0) * 1000;
+/** How long a read's rows are kept, in milliseconds: the memory's length, or an outage's for those a proxied use was answered from. */
+const keptMs = (memory: Memory, read: Read) => Math.max(memory.seconds, read.used === true ? memory.outageSeconds : 0) * 1000;
 
-/** The rows an outage may answer this ask from, as of `now`: those a proxied use of it was last answered from, while they are kept. */
+/** The rows an outage may answer this ask from, as of `now`: those a proxied use of it was last answered from, for the outage's length from their read. */
 function spareOf(memory: Memory, ask: Ask, now: number): Read | undefined {
-  if (memory.outageSeconds === 0 || ask.purpose !== 'use') return undefined;
+  if (ask.purpose !== 'use') return undefined;
   const kept = memory.reads.get(shapeOfAsk(ask));
-  return kept?.used === true && within(kept, now, keptMs(memory, kept)) ? kept : undefined;
+  return kept?.used === true && within(kept, now, memory.outageSeconds * 1000) ? kept : undefined;
 }
 
 /** The rows this ask read within the vault's memory, if any. */
@@ -147,36 +150,39 @@ export function recall(vault: Serving, ask: Ask): Read | undefined {
   const read = memory.reads.get(shapeOfAsk(ask));
   if (read === undefined) return undefined;
   const now = vault.now();
-  // Past all it is kept for, it goes now, with the values opened from it, not when the next read happens to push it out.
+  // Past all they are kept for, the rows go now, with the values opened from them, not when the next read happens to push them out.
   if (!within(read, now, keptMs(memory, read))) memory.reads.delete(shapeOfAsk(ask));
   // Fresh for the memory's length alone: what is kept longer answers an outage, and nothing while the database does (`use`).
-  return read.refused !== true && within(read, now, memory.seconds * 1000) ? read : undefined;
+  return within(read, now, memory.seconds * 1000) ? read : undefined;
 }
 
 /**
  * The newest rows read for an ask take the place of older ones, and are
  * kept while they may answer (`keptMs`). A slow use does not put its older
- * rows back over newer ones. What has outlasted its own length goes, and
- * past `MOST` reads the ones that came first.
+ * rows back over newer ones, nor rows read before the ask was last refused
+ * (`refused`). What has outlasted its own length goes, and past `MOST`
+ * reads the ones that came first.
  */
 function remember(memory: Memory, ask: Ask, found: Read, at: number): void {
   const shape = shapeOfAsk(ask);
-  if ((memory.reads.get(shape)?.at ?? -Infinity) > found.at) return;
+  if (Math.max(memory.reads.get(shape)?.at ?? -Infinity, memory.refusals.get(shape)?.at ?? -Infinity) > found.at) return;
   memory.reads.delete(shape);
   if (keptMs(memory, found) > 0) memory.reads.set(shape, found);
   for (const [old, read] of memory.reads) if (read.at + keptMs(memory, read) <= at || memory.reads.size > MOST) memory.reads.delete(old);
 }
 
 /**
- * A refusal is not remembered: the next use reads again, and is given what
- * has changed since. The date of the rows it was refused on is, in their
- * place: a use that read before them and answers after would otherwise put
- * its rows back, and an outage be answered from them.
+ * A refusal is not remembered: the ask's rows go, and the next use reads
+ * again, and is given what has changed since. Where an outage may be
+ * answered from memory, when it was refused is kept, for as long: a use
+ * that read before then and answers after would otherwise put its rows
+ * back, and an outage be answered from them.
  */
-function refused(memory: Memory, ask: Ask, found: Read, at: number): void {
-  remember(memory, ask, { at: found.at, seen: nothingSeen(), opened: new Map(), refused: true }, at);
+function refused(memory: Memory, ask: Ask, at: number): void {
+  const shape = shapeOfAsk(ask);
+  memory.reads.delete(shape);
+  if (memory.outageSeconds > 0) keep(memory.refusals, shape, { at }, at - memory.outageSeconds * 1000);
 }
-
 
 /** A use's one read. */
 export async function read(vault: Serving, ask: Ask): Promise<Read> {
@@ -206,14 +212,14 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
     -- Read before its MAC is checked, so only what is shaped like ids is cast: a row someone else wrote is no row, not an error.
     UNION ALL SELECT 'binding', to_jsonb(t) FROM bindings t, c WHERE t.id = CASE WHEN c.created_by ~ '^binding:${ID}$' THEN substr(c.created_by, 9)::uuid END
     -- An array the statement works out once, so each id is one lookup by the key.
-    UNION ALL SELECT 'ancestor', to_jsonb(t) FROM credentials t WHERE t.id = ANY(ARRAY(SELECT above.id::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind = 'workload' AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id)))
+    UNION ALL SELECT 'ancestor', to_jsonb(t) FROM credentials t WHERE t.id = ANY(ARRAY(SELECT above.id::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind IN ('workload', 'mcp') AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id)))
     UNION ALL SELECT 'policy', to_jsonb(t) FROM policy t, c WHERE c.kind = 'workload'
     UNION ALL SELECT 'project', to_jsonb(t) FROM projects t WHERE t.id IN (SELECT project_id FROM held UNION ALL SELECT id FROM p)
     UNION ALL SELECT 'environment', to_jsonb(t) FROM environments t WHERE t.id IN (SELECT environment_id FROM held UNION ALL SELECT id FROM chain)
     UNION ALL SELECT 'secret', to_jsonb(t) FROM held t
     UNION ALL SELECT 'dismissed', to_jsonb(t) FROM dismissed_keys t WHERE t.environment_id IN (SELECT id FROM chain) AND t.restored_at IS NULL AND ${keyed(sql`t.key`)}
     UNION ALL SELECT 'version', to_jsonb(t) FROM secret_versions t JOIN held ON t.secret_id = held.id AND t.version = held.current_version) parts`);
-  const seen = nothingSeen();
+  const seen = Object.fromEntries(Object.keys(READ).map((part) => [part, []])) as unknown as Seen;
   for (const { part, row: wire } of found) {
     const table = READ[part];
     const row = fromWire(table, wire);
@@ -241,6 +247,8 @@ const NO_ACCESS: Refusal = { refused: 'no_access' };
 export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): Decided | Refusal {
   const caller = callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: seen.environment, binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy }, ask, workloads, at);
   if (caller === null) return { refused: 'unauthenticated' };
+  // An MCP client is handed values only if its person let it, at consent: reading names and history is all `read` holds.
+  if (caller.mcp !== null && !caller.mcp.scopes.includes('reveal')) return { refused: 'mcp_no_reveal' };
   const handed = ask.purpose !== 'use';
   const { workload } = caller;
   // A session that stands and is stopped is told why, before anything about the place: lifting it restores service.
@@ -340,7 +348,7 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
   const { memory } = vault;
   const decided = decide(found.seen, ask, vault.workloads, at);
   if ('refused' in decided) {
-    refused(memory, ask, found, at);
+    refused(memory, ask, at);
     return decided;
   }
   const { caller, project, environment } = decided;
@@ -407,7 +415,11 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
         seen AS (INSERT INTO exposures (principal, secret_id, seen_at) SELECT ${caller.principal}, id, ${time} FROM ids, cap WHERE cap.ok ORDER BY id ON CONFLICT (principal, secret_id) DO UPDATE SET seen_at = greatest(exposures.seen_at, excluded.seen_at)),
         entry AS (INSERT INTO log_pending (kept, body, mac) SELECT ${entry.kept}, ${entry.body}, decode(${entry.mac.toString('hex')}, 'hex') FROM cap WHERE cap.ok)
       SELECT ok FROM cap`) as [{ ok: boolean }];
-    if (!ok) return { refused: 'bulk_limit' };
+    if (!ok) {
+      // Kept for the next use, as before, but no longer what an outage may be answered from: it would be refused too.
+      found.used = false;
+      return { refused: 'bulk_limit' };
+    }
     vault.wake(entry.hash);
     // Said, unless more were counted while it was being written, by a use that found no database: the next entry says them all.
     if (unlogged !== undefined && memory.unlogged.get(caller.credential.id) === unlogged) memory.unlogged.delete(caller.credential.id);
@@ -416,7 +428,7 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
     keep(memory.logged, mark(fresh[0]!), { at: written }, at - LOGGED_MS);
   }
 
-  await touch(vault, caller.credential, ask.ip, at);
+  await touch(vault, caller.mcp?.connection ?? caller.credential, ask.ip, at);
   // Answered and logged as a proxied use: what an outage may be answered from.
   if (ask.purpose === 'use') found.used = true;
   remember(memory, ask, found, at);
@@ -437,7 +449,7 @@ export async function peek(vault: Serving, ask: Ask): Promise<Peeked | Refusal> 
   const at = vault.now();
   const decided = decide(found.seen, ask, vault.workloads, at);
   if ('refused' in decided) {
-    refused(vault.memory, ask, found, at);
+    refused(vault.memory, ask, at);
     return decided;
   }
   remember(vault.memory, ask, found, at);
@@ -466,16 +478,16 @@ export async function peek(vault: Serving, ask: Ask): Promise<Peeked | Refusal> 
  * instance that still reaches the database. Any other use fails with the
  * database, as does every change.
  *
- * The failure is remembered for the memory's length (`downAt`), whoever's
- * use met it: the proxied uses in it are answered at once, and the first
- * one after asks the database again.
+ * The failure is remembered for two seconds (`DOWN_MS`), whoever's use met
+ * it: the proxied uses in them are answered at once, and the first one
+ * after asks the database again.
  */
 export async function use(vault: Serving, ask: Ask): Promise<Answer | Refusal> {
   const { memory } = vault;
   const found = recall(vault, ask);
   const now = vault.now();
   const spare = spareOf(memory, ask, now);
-  if (spare !== undefined && now >= memory.downAt && now < memory.downAt + memory.seconds * 1000) return answer(vault, ask, spare, true);
+  if (spare !== undefined && now >= memory.downAt && now < memory.downAt + DOWN_MS) return answer(vault, ask, spare, true);
   try {
     if (found !== undefined) return await answer(vault, ask, found);
     const rows = await read(vault, ask);

@@ -281,11 +281,11 @@ test('GET /roles lists every role in both columns, as it ships or as an Owner ed
   assert.equal((await ada.roles.list()).instanceRoles.find((role) => role.id === 'auditor')!.edited, false);
 });
 
-test("a person gives a service account a role on a whole project only if they hold it in its protected column, whichever environments it protects (D241)", async () => {
-  // Nothing protected yet, a Developer of market sets up a Contributor of all of it, never a Viewer: a protected environment of it, now or later, she only uses and writes.
-  assert.equal(await status(ada.members.add('token:ci-viewer', { access: { market: 'viewer' } })), 403);
-  await ada.members.add('token:ci-before', { access: { market: 'contributor' } });
+test("a person gives a service account a role on a whole project only if they hold it in the project's protected environments too", async () => {
+  // Before anything is protected, a Developer of market sets up a Viewer of all of it.
+  await ada.members.add('token:ci-before', { access: { market: 'viewer' } });
   await maya.environments.protect('market/prod');
+  // Now the service would read prod, which Ada only uses: refused, by the app and by the vault.
   assert.equal(await status(ada.members.add('token:ci-after', { access: { market: 'viewer' } })), 403);
   assert.equal(await status(ada.members.add('token:ci-dev', { access: { 'market/dev': 'viewer' } })), 200, "dev's alone, which she reads");
 });
@@ -372,6 +372,16 @@ test('a fork decided while its source was not protected, which commits once it i
   assert.equal(await status(maya.environments.create('market/prod-copy', { from: 'prod' })), 403);
   assert.equal((await root.environments.create('market/prod-copy', { from: 'prod' })).environment.protected, true);
   assert.equal(await status(maya.secrets.reveal('market/prod-copy')), 403);
+});
+
+test("a service token weighed before prod was protected, issued once it is, is refused: it would read prod for a Developer who only uses it", async () => {
+  await ada.members.add('token:ci-all', { access: { market: 'viewer' } });
+  // Once the vault has answered for Ada, as she issues it, and for the account: what the token is weighed on.
+  meanwhileOn('access', (asked) => asked === 'token:ci-all', () => maya.environments.protect('market/prod'));
+  assert.equal(await status(ada.tokens.issue('token:ci-all', { label: 'deploy', expiresInDays: 30 })), 409);
+  assert.deepEqual((await root.tokens.list('token:ci-all')).tokens, []);
+  // Asked again, it is decided as the policy is now: Ada no longer manages a Viewer of all of market.
+  assert.equal(await status(ada.tokens.issue('token:ci-all', { label: 'deploy', expiresInDays: 30 })), 403);
 });
 
 test("an instance Auditor whose role reads no protected environment's log reads the rest, not the whole log", async () => {

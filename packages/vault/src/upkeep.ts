@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { KekRegistry } from '@coffre/core/kek';
 import { HASH_SIZE, inclusionProof, nodesFrom, leafHash, tileKey, tilesFor, verifyInclusion, WIDTH, type Edge } from '@coffre/core/log';
-import { credentials, deviceLogins, enrollmentCodes } from '@coffre/db/schema';
+import { credentials, deviceLogins, enrollmentCodes, oauthClients } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { change, drop, part, type Running } from './change.ts';
@@ -33,6 +33,8 @@ const RECHECK = 3;
 const DAY_MS = 24 * 60 * 60_000;
 /** The most rows of each kind one minute deletes: a CI run leaves a session and a spent ID token, so 144,000 runs a day. */
 const DELETE_MOST = 100;
+/** A registered client no connection names is deleted a week after it was made, as 0.14.7 revoked it. */
+const UNUSED_CLIENT_MS = 7 * DAY_MS;
 /** An exchange refuses an ID token issued over an hour ago, so one spent two hours ago guards nothing. */
 const SPENT_MS = 2 * 60 * 60_000;
 
@@ -158,7 +160,8 @@ const SEALS_NOTHING = new KekRegistry({ provider: 'none', keyId: 'upkeep', keyVe
  * The rows that lapsed, the oldest first, a batch of each: credentials,
  * device logins and enrollment codes a day past their expiry, in one change
  * whose entry the signer holds to its mirror, as any other; an enrollment
- * code once no credential names it. Then, by a statement with no entry, the
+ * code once no credential names it; a registered OAuth client no MCP
+ * credential names, a week after it was made. Then, by a statement with no entry, the
  * rows that carry no MAC and that nothing reads again: ID tokens spent two
  * hours ago, MCP approvals a day past their expiry. The change's entry, if
  * it made one, is `told` the signer as it commits, before the statement
@@ -170,14 +173,22 @@ export async function expire(vault: Pick<Running, 'db' | 'keys' | 'now'>, ask: A
   // By the expiry a row's MAC covers: one a writer moved back is not the vault's, and stays.
   const oldest = <T extends typeof credentials | typeof deviceLogins | typeof enrollmentCodes>(table: T, more = sql``) =>
     part(table, sql`${table.id} IN (SELECT e.id FROM ${table} e WHERE e.expires_at < ${before}${more} ORDER BY e.expires_at, e.id LIMIT ${DELETE_MOST})`);
-  const read = { credentials: oldest(credentials), logins: oldest(deviceLogins), codes: oldest(enrollmentCodes, sql` AND NOT EXISTS (SELECT 1 FROM credentials c WHERE c.enrollment_id = e.id)`) };
+  const read = {
+    credentials: oldest(credentials),
+    logins: oldest(deviceLogins),
+    codes: oldest(enrollmentCodes, sql` AND NOT EXISTS (SELECT 1 FROM credentials c WHERE c.enrollment_id = e.id)`),
+    // A registration no MCP credential names, a week after it was made: a client registers to connect, within minutes. Each by
+    // `credentials_client_idx`, the client's id each MCP row keeps (ops/mcp.ts); the registrations are `MAX_CLIENTS` at most.
+    clients: part(oauthClients, sql`${oauthClients.id} IN (SELECT o.id FROM oauth_clients o WHERE o.created_at < ${new Date(at - UNUSED_CLIENT_MS).toISOString()}::timestamptz
+      AND NOT EXISTS (SELECT 1 FROM credentials c WHERE c.client IS NOT NULL AND (c.client::jsonb ->> 'id') = o.id::text) ORDER BY o.created_at, o.id LIMIT ${DELETE_MOST})`),
+  };
   let telling: Promise<void> | undefined;
   const committed = change({ ...vault, keks: SEALS_NOTHING, refused: new Map(), wake: (hash) => void (telling = told(hash)) }, {
     read,
-    decide: ({ credentials: sessions, logins, codes }) => {
-      const writes = [...sessions.map((row) => drop(credentials, row)), ...logins.map((row) => drop(deviceLogins, row)), ...codes.map((row) => drop(enrollmentCodes, row))];
+    decide: ({ credentials: sessions, logins, codes, clients }) => {
+      const writes = [...sessions.map((row) => drop(credentials, row)), ...logins.map((row) => drop(deviceLogins, row)), ...codes.map((row) => drop(enrollmentCodes, row)), ...clients.map((row) => drop(oauthClients, row))];
       if (writes.length === 0) return { refused: 'none' };
-      const objects = [...sessions.map(({ id }) => `credential:${id}`), ...logins.map(({ id }) => `device_login:${id}`), ...codes.map(({ id }) => `enrollment_code:${id}`)];
+      const objects = [...sessions.map(({ id }) => `credential:${id}`), ...logins.map(({ id }) => `device_login:${id}`), ...codes.map(({ id }) => `enrollment_code:${id}`), ...clients.map(({ id }) => `oauth_client:${id}`)];
       return { writes, entry: { kept: false, action: 'upkeep.expire', actor: null, credential: null, request: null, ip: null, objects, detail: {} }, answer: null };
     },
   });
