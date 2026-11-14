@@ -200,8 +200,9 @@ over a minute for 2,000 keys, and on the Free plan 25 keys a call at most.
 `key.intent` entry naming every key of the call; afterwards, it logs each
 key's outcome against it. A throttled or failed request is retried twice,
 and the whole call has 5 seconds. If KMS still has not answered, the call
-fails with 503 `unavailable` and `Retry-After`, which the CLI and the Action
-ask again; if KMS refuses coffre's credentials, or the key is disabled or
+fails with 503 `unavailable` and `Retry-After`, which the CLI's reads (`get`,
+`run`, `export`) and the Action ask again by themselves, and a write, a mark
+or a fork leaves to its caller; if KMS refuses coffre's credentials, or the key is disabled or
 gone, which asking again does not mend, with 500. Either way nothing is
 written, and the server log names the KMS error; each key is logged with what
 happened to it: `kms_unavailable`, `kms_uncertain` when a request may have

@@ -34,8 +34,10 @@
   value's newest copy, a mark's included.
 - **A key service that does not answer is 503 `unavailable`.** AWS KMS
   down, throttling past its retries or out of time fails a read, a write, a
-  mark or a fork with 503 and `Retry-After`, which the CLI and the Action
-  ask again, where 0.14.7 answered 500. Nothing is written. KMS refusing
+  mark or a fork with 503 and `Retry-After`, where 0.14.7 answered 500.
+  Nothing is written, so the same request may be sent again: the CLI's
+  `get`, `run` and `export`, and so the Action, do so by themselves; `set`,
+  `mark` and a fork leave it to their caller. KMS refusing
   coffre's credentials, or its key disabled or gone, stays a 500: asked
   again, it says the same. A key service of a deployment's own throws
   `KekRefusedError` (`@coffre/vault`) for what asking again does not mend,

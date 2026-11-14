@@ -126,9 +126,11 @@ export function connectVault(socket: string): Vault {
         },
         (res) => {
           readBody(res).then((text) => {
-            const payload = JSON.parse(text) as { result?: unknown; error?: string; code?: string };
+            const payload = JSON.parse(text) as { result?: unknown; error?: string; code?: string; name?: string };
             if (res.statusCode === 200) return resolve(payload.result);
             const failed = new Error(`vault ${name}: ${payload.error ?? `status ${res.statusCode}`}`);
+            // A key service's failure keeps its name, which says whether to ask again (`failureOf`).
+            if (payload.name !== undefined) failed.name = payload.name;
             reject(payload.code === undefined ? failed : Object.assign(failed, { code: payload.code }));
           }, reject);
         },
