@@ -124,7 +124,10 @@ test("a run's token buys a five-minute token of its service, the issuer's keys f
   assert.deepEqual(fetched, [KEYS]);
   const me = await app.request('/api/me', { headers: { authorization: `Bearer ${answer.body.token}` } });
   assert.equal(me.status, 200);
-  assert.equal(((await me.json()) as { principal: { type: string; id: string } }).principal.id, 'deploy');
+  const seen = (await me.json()) as { principal: { type: string; id: string }; features: { workloads: boolean } };
+  assert.equal(seen.principal.id, 'deploy');
+  // This deployment's sign-in trusts workloads, and says so.
+  assert.equal(seen.features.workloads, true);
   // The keys are kept: the next run fetches nothing.
   assert.equal((await exchange(idToken())).status, 200);
   assert.deepEqual(fetched, [KEYS]);

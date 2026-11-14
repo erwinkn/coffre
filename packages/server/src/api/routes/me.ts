@@ -20,10 +20,9 @@ export const meRoutes = {
    * what every page's shell reads first. One call to the vault, shared by
    * all the calls of one render, and one statement.
    *
-   * Three of its fields are other areas' to answer, and say "none" until
+   * Two of its fields are other areas' to answer, and say "none" until
    * they are served: `setsUpServices` past whoever runs the instance and
-   * `serviceSetup` (the policy's row), `personalToken` (the token's label),
-   * `features.workloads` (whether sign-in trusts workloads).
+   * `serviceSetup` (the policy's row), `personalToken` (the token's label).
    */
   ...route('GET /me', {
     run: async (ctx): Promise<Me> => {
@@ -57,7 +56,7 @@ export const meRoutes = {
         canReadAudit: canAnywhere(who, 'audit.read'),
         setsUpServices: runs,
         serviceSetup: null,
-        features: { mcp: mcp === null ? null : resourceOf(mcp.publicUrl), workloads: false },
+        features: { mcp: mcp === null ? null : resourceOf(mcp.publicUrl), workloads: ctx.auth.mode === 'signin' && ctx.auth.signin.workloads !== null },
         personalToken: null,
         credentialExpiresAt: who.credential.expiresAt,
         environments,
