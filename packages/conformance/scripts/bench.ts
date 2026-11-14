@@ -196,7 +196,7 @@ function paths(deployment: Deployment, people: { admin: Who; reader: Who; servic
       name: `PATCH /api/secrets, ${marked.length} keys marked`,
       request: async () => {
         sensitive = !sensitive;
-        ok(await people.admin.browser.send('PATCH', `/api/secrets/${MARKS}`, Object.fromEntries(marked.map((key) => [key, { sensitivity: sensitive ? 'sensitive' : 'secret' }]))));
+        await ok(await people.admin.browser.send('PATCH', `/api/secrets/${MARKS}`, Object.fromEntries(marked.map((key) => [key, { sensitivity: sensitive ? 'sensitive' : 'secret' }]))));
       },
     }]),
   ];
@@ -232,7 +232,7 @@ async function populate(deployment: Deployment) {
   }
   // The log grown to size by writes, each an entry of the app's and one of the vault's, eight at a time.
   const sql = await deployment.database();
-  const entries = async () => Number((await sql.query<{ n: string }>('SELECT count(*) AS n FROM audit_log'))[0].n);
+  const entries = async () => Number((await sql.query<{ n: string }>('SELECT count(*) AS n FROM log'))[0].n);
   let written = await entries();
   while (written < count('entries')) {
     let next = 0;
