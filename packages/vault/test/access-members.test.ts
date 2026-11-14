@@ -183,9 +183,16 @@ test('an Admin sets any role but an Owner\'s, Admin included, never their own', 
     assert.deepEqual(await setRole('fay-cli', dee, 'admin'), { refused: 'no_access' }, 'nor of one project');
     assert.deepEqual(await setRole('fay-cli', fay, 'owner'), { refused: 'no_access' }, 'their own, up');
     assert.deepEqual(await setRole('fay-cli', fay, 'developer'), { refused: 'no_access' }, 'their own, down');
-    assert.deepEqual(await setRole('fay-cli', fay, 'admin'), { refused: 'no_access' }, 'their own, as it is');
     assert.deepEqual(await setRole('dee-cli', dee, 'owner'), { refused: 'no_access' }, 'an Owner of one project runs no instance');
   });
+});
+
+test('a role asked as it is changes nothing, and whoever runs the instance may ask it, their own or an Owner\'s', async () => {
+  const before = JSON.stringify(await members());
+  assert.deepEqual(await setRole('fay-cli', fay, 'admin'), { answer: { role: 'admin', scope: null } }, 'an Admin, their own');
+  assert.deepEqual(await setRole('fay-cli', ada, 'owner'), { answer: { role: 'owner', scope: null } }, 'an Owner\'s, by an Admin');
+  assert.equal(JSON.stringify(await members()), before, 'no member\'s row moved');
+  assert.deepEqual(await setRole('fay-cli', ada, 'owner', { projects: { only: ['market'] }, environments: 'all' }), { refused: 'no_access' }, 'but not narrowed');
 });
 
 test('an Owner\'s role is set by an Owner of the whole instance alone, never the last one\'s away, and never a named Owner\'s, and a refusal writes nothing', async () => {

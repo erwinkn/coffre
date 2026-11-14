@@ -225,9 +225,11 @@ function memberRole(input: Presented & MemberRole, vault: Deciding): Operation<P
       if (!runsInstance(caller.holds)) return { refused: 'no_access' };
       const [was] = seen.member;
       if (was === undefined || was.status !== 'active') return { refused: was === undefined ? 'not_a_member' : 'removed' };
-      if ((was.role === 'owner' || role === 'owner' || principal === caller.principal) && !ownsAllAsking(caller)) return { refused: 'no_access' };
       const written = scopeWritten(scope, seen.scoped);
       if (written === undefined) return { refused: 'no_access' };
+      // A role asked as it is changes nothing, so whoever runs the instance may ask it, of anyone, themselves included, as 0.14 did.
+      if (was.role === role && was.scope === written) return { writes: [], entry: said('member.role', caller, shown, [`principal:${principal}`, ...seen.scoped.map((project) => `project:${project.id}`)], { member: principal, role, scope: standing(role, written).scope }), answer: standing(role, written) };
+      if ((was.role === 'owner' || role === 'owner' || principal === caller.principal) && !ownsAllAsking(caller)) return { refused: 'no_access' };
       const ownsAfter = role === 'owner' && written === null;
       if (named(vault, principal) && !ownsAfter) return { refused: 'configured_owner' };
       if (ownsAll(was) && !ownsAfter && !anotherOwner(seen.owners, principal)) return { refused: 'last_owner' };
