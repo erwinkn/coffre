@@ -23,7 +23,7 @@ import { memoryOf, peek, use, type Ask, type Serving } from './use.ts';
 export type PreparedVault = Pick<Serving, 'keys' | 'keks' | 'cap' | 'workloads' | 'memory' | 'refused'> & Pick<Deciding, 'owners'>;
 
 export function prepareVault(config: ResolvedVaultConfig): PreparedVault {
-  return { keys: config.signingKeys.map(keyOf), keks: config.keks, cap: config.bulkLimit, workloads: config.workloads, memory: memoryOf(config.memorySeconds), refused: new Map(), owners: config.owners };
+  return { keys: config.signingKeys.map(keyOf), keks: config.keks, cap: config.bulkLimit, workloads: config.workloads, memory: memoryOf(config.memorySeconds, config.outageSeconds), refused: new Map(), owners: config.owners };
 }
 
 /** What one call runs on: its database, and the signer's wake-up, which never holds the reply nor fails the call. */

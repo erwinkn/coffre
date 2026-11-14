@@ -559,7 +559,7 @@ export async function written<A>(vault: Running, prepared: Prepared<A>): Promise
 /** A refusal is logged once a minute for whoever asked and what they asked: a loop of them does not fill the log. */
 const REFUSED_MS = 60_000;
 /** The most a memory's map holds, whatever the rate: past it, the oldest go. */
-const MOST = 1000;
+export const MOST = 1000;
 
 /** Remember `value`, and forget what is older than `since`, and past `MOST` entries the ones that came first. */
 export function keep<V extends { at: number }>(map: Map<string, V>, key: string, value: V, since: number): void {

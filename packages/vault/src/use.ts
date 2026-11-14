@@ -2,13 +2,13 @@ import type { Peeked } from '@coffre/core/vault';
 import { allows, readsSensitive, useOnly, withinCredential, type Place } from '@coffre/core/access';
 import { open } from '@coffre/core/envelope';
 import { KekUnavailableError } from '@coffre/core/kek';
-import { rowsOf } from '@coffre/db/dialect';
+import { isUnavailable, rowsOf } from '@coffre/db/dialect';
 import type { BindingPolicy, Constraints } from '@coffre/core/identity';
 import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { callerOf, ID, live, touch, type Caller, type CallerRead, type Workloads } from './caller.ts';
-import { bounded, keep, type Refusal, type Running } from './change.ts';
+import { bounded, keep, MOST, type Refusal, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts';
 import { contextOf, natureOf } from './value.ts';
@@ -31,6 +31,10 @@ import { contextOf, natureOf } from './value.ts';
  * no other table. Within the vault's short memory a repeat is no database
  * call at all: the rows are remembered from when they were read, and
  * decided on again as of now.
+ *
+ * While the database cannot be reached, a proxied use, and no other, is
+ * answered from the rows it was last answered from, for as long as the
+ * deployment says (`outageSeconds`, never unless set): `use`, below.
  */
 
 export type Ask = {
@@ -77,8 +81,12 @@ export type Serving = Running & {
 const READ = { credential: credentials, principal: principals, identity: identities, grant: grants, role: roles, binding: bindings, ancestor: credentials, policy, project: projects, environment: environments, secret: secrets, dismissed: dismissedKeys, version: secretVersions };
 type Seen = { [K in keyof typeof READ]: Row<(typeof READ)[K]>[] };
 
-/** Rows as one read found them, when, and the values opened from them since. */
-export type Read = { at: number; seen: Seen; opened: Map<string, Buffer> };
+/**
+ * Rows as one read found them, when, and the values opened from them since.
+ * `used`: a proxied use was answered from them, and logged, so an outage may
+ * be answered from them too.
+ */
+export type Read = { at: number; seen: Seen; opened: Map<string, Buffer>; used?: boolean };
 
 /**
  * What one isolate remembers between calls. Never across a change of what it
@@ -86,10 +94,25 @@ export type Read = { at: number; seen: Seen; opened: Map<string, Buffer> };
  * for `seconds` (2 by default, 0 for never), counted from the read, not the
  * answer; `logged`, what it wrote a log entry for in the last minute;
  * `touched`, the credentials whose last use it moved on.
+ *
+ * For an outage of the database (`use`): `outageSeconds`, how long the rows
+ * a proxied use was answered from are kept past `seconds`, to answer it
+ * while the database cannot be reached (0 for never); `downAt`, when it last
+ * could not be; `unlogged`, by ask, the uses answered since then that were
+ * due a log entry, which the next entry written for that ask says.
  */
-export type Memory = { seconds: number; reads: Map<string, Read>; callers: Map<string, CallerRead>; logged: Map<string, { at: number }>; touched: Map<string, { at: number }> };
+export type Memory = {
+  seconds: number;
+  reads: Map<string, Read>;
+  callers: Map<string, CallerRead>;
+  logged: Map<string, { at: number }>;
+  touched: Map<string, { at: number }>;
+  outageSeconds: number;
+  downAt: number;
+  unlogged: Map<string, { at: number; uses: number }>;
+};
 
-export const memoryOf = (seconds: number): Memory => ({ seconds, reads: new Map(), callers: new Map(), logged: new Map(), touched: new Map() });
+export const memoryOf = (seconds: number, outageSeconds = 0): Memory => ({ seconds, reads: new Map(), callers: new Map(), logged: new Map(), touched: new Map(), outageSeconds, downAt: -Infinity, unlogged: new Map() });
 
 /** A credential given the same version of a key for the same purpose within the last minute writes no second log entry, wherever it asked. */
 const LOGGED_MS = 60_000;
@@ -97,14 +120,19 @@ const LOGGED_MS = 60_000;
 const MAX_PARENTS = 3;
 const shapeOfAsk = (ask: Ask) => JSON.stringify([ask.token.toString('hex'), ask.project, ask.environment, ask.mine, ask.keys]);
 
+/** How long a read's rows are kept, in milliseconds: the memory's length, or an outage's for those a proxied use was answered from. */
+const keptMs = (memory: Memory, read: Read) => Math.max(memory.seconds, read.used === true ? memory.outageSeconds : 0) * 1000;
+
 /** The rows this ask read within the vault's memory, if any. */
 export function recall(vault: Serving, ask: Ask): Read | undefined {
-  const read = vault.memory.reads.get(shapeOfAsk(ask));
+  const { memory } = vault;
+  const read = memory.reads.get(shapeOfAsk(ask));
   const now = vault.now();
   // Fresh only between its read and the memory's length after it: a clock set back makes nothing fresher.
-  if (read === undefined || (now >= read.at && now < read.at + vault.memory.seconds * 1000)) return read;
-  // Stale: its rows and the values opened from them go now, not when the next read happens to push them out.
-  vault.memory.reads.delete(shapeOfAsk(ask));
+  if (read === undefined || (now >= read.at && now < read.at + memory.seconds * 1000)) return read;
+  // Stale: its rows and the values opened from them go now, not when the next read happens to push them out. But for
+  // those kept for an outage, which answer nothing while the database does (`use`).
+  if (!(now >= read.at && now < read.at + keptMs(memory, read))) memory.reads.delete(shapeOfAsk(ask));
   return undefined;
 }
 
@@ -261,15 +289,18 @@ export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): 
 
 /**
  * A use's answer from rows read: the decision as of now, the values, and
- * the one write. A refusal writes nothing, the log included.
+ * the one write. A refusal writes nothing, the log included. `down`, the
+ * database cannot be reached (`use`): the same decision and values, and no
+ * write; a use that was due a log entry is counted instead (`unlogged`).
  */
-export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Answer | Refusal> {
+export async function answer(vault: Serving, ask: Ask, found: Read, down = false): Promise<Answer | Refusal> {
   const at = vault.now();
   const { memory } = vault;
+  const shape = shapeOfAsk(ask);
   const decided = decide(found.seen, ask, vault.workloads, at);
   if ('refused' in decided) {
     // Not remembered: the next use reads again, and is given what has changed since.
-    memory.reads.delete(shapeOfAsk(ask));
+    memory.reads.delete(shape);
     return decided;
   }
   const { caller, project, environment } = decided;
@@ -301,10 +332,19 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
   // What this credential has not been logged reading in the last minute.
   const mark = ({ held, version }: Given) => `${caller.credential.id} ${ask.purpose} ${held.id} ${version.version}`;
   const fresh = read.filter((item) => (memory.logged.get(mark(item))?.at ?? -Infinity) + LOGGED_MS <= at);
+  const { workload } = caller;
+  const answered: Answer = { principal: caller.principal, credential: caller.credential.id, values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
+  if (down) {
+    // Nowhere to write it: counted from the first one, for the entry the next use writes once the database answers.
+    const missed = memory.unlogged.get(shape);
+    if (fresh.length > 0) keep(memory.unlogged, shape, { at: missed?.at ?? at, uses: (missed?.uses ?? 0) + 1 }, -Infinity);
+    return answered;
+  }
   if (fresh.length > 0) {
     const ids = [...new Set(fresh.map((item) => item.held.id))];
     // Dated now, as its write is sent, not when the use was decided: opening its values, through a key service, takes as long as it takes.
     const written = vault.now();
+    const unlogged = memory.unlogged.get(shape);
     const entry = pending(vault.keys[0]!, {
       kept: false,
       action: 'secret.read',
@@ -313,7 +353,8 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
       request: ask.request,
       ip: ask.ip,
       objects: [...new Set([`project:${project.id}`, `environment:${environment.id}`, `principal:${caller.principal}`, `credential:${caller.credential.id}`, ...fresh.flatMap((item) => [`secret:${item.held.id}`, `secret:${item.asked.id}`])])],
-      detail: { purpose: ask.purpose, ...(ask.upstream === null ? {} : { credential: ask.upstream }), keys: fresh.map(({ key, held, asked, version }) => ({ key, secret: held.id, version: version.version, ...(asked === held ? {} : { through: asked.id }) })) },
+      // After an outage, the uses of this ask that no entry says: since when, and how many (`use`).
+      detail: { purpose: ask.purpose, ...(ask.upstream === null ? {} : { credential: ask.upstream }), ...(unlogged === undefined ? {} : { unlogged: { since: new Date(unlogged.at).toISOString(), uses: unlogged.uses } }), keys: fresh.map(({ key, held, asked, version }) => ({ key, secret: held.id, version: version.version, ...(asked === held ? {} : { through: asked.id }) })) },
     }, written, []);
     const time = sql`${new Date(written).toISOString()}::timestamptz`;
     const since = sql`${new Date(written - vault.cap.windowMs).toISOString()}::timestamptz`;
@@ -328,20 +369,31 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
       SELECT ok FROM cap`) as [{ ok: boolean }];
     if (!ok) return { refused: 'bulk_limit' };
     vault.wake(entry.hash);
+    if (unlogged !== undefined) memory.unlogged.delete(shape);
     // Remembered by the entry's own date: the minute a use is logged once in starts there.
     for (const item of fresh) memory.logged.set(mark(item), { at: written });
     keep(memory.logged, mark(fresh[0]!), { at: written }, at - LOGGED_MS);
   }
 
   await touch(vault, caller.credential, ask.ip, at);
+  // Answered and logged as a proxied use: what an outage may be answered from.
+  if (ask.purpose === 'use') found.used = true;
   remember(memory, ask, found, at);
-  const { workload } = caller;
-  return { principal: caller.principal, credential: caller.credential.id, values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
+  return answered;
 }
 
-/** A read's rows kept for the memory's length, unless a newer read of the same is there already: a slow use does not put its older rows back over it. */
+/**
+ * A read's rows kept for as long as they may answer (`keptMs`), unless a
+ * newer read of the same is there already: a slow use does not put its
+ * older rows back over it. What has outlasted its own length goes, and past
+ * `MOST` reads the ones that came first.
+ */
 function remember(memory: Memory, ask: Ask, found: Read, at: number): void {
-  if (memory.seconds > 0 && !((memory.reads.get(shapeOfAsk(ask))?.at ?? -Infinity) > found.at)) keep(memory.reads, shapeOfAsk(ask), found, at - memory.seconds * 1000);
+  const shape = shapeOfAsk(ask);
+  if (keptMs(memory, found) === 0 || (memory.reads.get(shape)?.at ?? -Infinity) > found.at) return;
+  memory.reads.delete(shape);
+  memory.reads.set(shape, found);
+  for (const [old, read] of memory.reads) if (read.at + keptMs(memory, read) <= at || memory.reads.size > MOST) memory.reads.delete(old);
 }
 
 /**
@@ -366,7 +418,42 @@ export async function peek(vault: Serving, ask: Ask): Promise<Peeked | Refusal> 
   return { principal: decided.caller.principal, credential: decided.caller.credential.id, items };
 }
 
-/** A use: from memory while it is fresh, else one read. */
+/**
+ * A use: from memory while it is fresh, else one read.
+ *
+ * While the database cannot be reached (`isUnavailable`: no connection, or
+ * a statement that gave up waiting), a proxied use is answered all the
+ * same, where the deployment set `outageSeconds`: from the rows this ask
+ * was last answered from as a proxied use, for that long after they were
+ * read. So it is given what it was given before, and nothing else: the same
+ * credential, keys and versions, never handed back. The decision is made
+ * again as of now, so a credential that expires in the outage stops. What
+ * it cannot see is a change the rows do not hold: one made after they were
+ * read, in the memory's length before the outage, or made through another
+ * instance that still reaches the database. Any other use fails with the
+ * database, as does every change.
+ *
+ * The failure is remembered for the memory's length (`downAt`): the uses in
+ * it are answered at once, and the first one after asks the database again.
+ */
 export async function use(vault: Serving, ask: Ask): Promise<Answer | Refusal> {
-  return answer(vault, ask, recall(vault, ask) ?? (await read(vault, ask)));
+  const { memory } = vault;
+  let found = recall(vault, ask);
+  // After `recall`, what is kept is fresh, or kept for an outage alone.
+  const kept = memory.reads.get(shapeOfAsk(ask));
+  const spare = memory.outageSeconds > 0 && ask.purpose === 'use' && kept?.used === true ? kept : undefined;
+  const now = vault.now();
+  if (spare !== undefined && now >= memory.downAt && now < memory.downAt + memory.seconds * 1000) return answer(vault, ask, spare, true);
+  try {
+    if (found === undefined) {
+      found = await read(vault, ask);
+      memory.downAt = -Infinity;
+    }
+    return await answer(vault, ask, found);
+  } catch (error) {
+    if (spare === undefined || !isUnavailable(error)) throw error;
+    memory.downAt = vault.now();
+    // The rows just read, when it is the write that failed: the newest there are.
+    return answer(vault, ask, found ?? spare, true);
+  }
 }

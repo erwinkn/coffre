@@ -113,10 +113,11 @@ test('who a request is crosses as JSON: what it holds, as the app decides on it,
 test('the vault runs as its configuration says: its memory, and what it takes of workloads', () => {
   const config = { kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') }, owners: ['root@acme.example'] };
   const plain = prepareVault(resolveVaultConfig(config));
-  assert.deepEqual([plain.memory.seconds, plain.workloads, plain.cap], [2, null, { count: 1000, windowMs: 15 * 60_000 }]);
-  const told = prepareVault(resolveVaultConfig({ ...config, memorySeconds: 0, workloads: { useOnly: true }, bulkLimit: { count: 5, windowMinutes: 1 } }));
-  assert.deepEqual([told.memory.seconds, told.workloads, told.cap], [0, { noReads: false, useOnly: true }, { count: 5, windowMs: 60_000 }]);
+  assert.deepEqual([plain.memory.seconds, plain.memory.outageSeconds, plain.workloads, plain.cap], [2, 0, null, { count: 1000, windowMs: 15 * 60_000 }]);
+  const told = prepareVault(resolveVaultConfig({ ...config, memorySeconds: 0, outageSeconds: 330, workloads: { useOnly: true }, bulkLimit: { count: 5, windowMinutes: 1 } }));
+  assert.deepEqual([told.memory.seconds, told.memory.outageSeconds, told.workloads, told.cap], [0, 330, { noReads: false, useOnly: true }, { count: 5, windowMs: 60_000 }]);
   for (const memorySeconds of [-1, 601, Number.NaN]) assert.throws(() => resolveVaultConfig({ ...config, memorySeconds }), /memorySeconds/);
+  for (const outageSeconds of [-1, 3601, Number.NaN]) assert.throws(() => resolveVaultConfig({ ...config, outageSeconds }), /outageSeconds/);
 });
 
 test('a wake-up that fails costs the caller nothing: the entry is written, and the value given', async (t) => {

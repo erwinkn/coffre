@@ -333,6 +333,156 @@ test('a memory decides again as of now: a credential that expires within it stop
   assert.equal(await got(ask('brief', 'market/prod', ['FLAG'])), 'unauthenticated');
 });
 
+/**
+ * The vault's database out of reach until `back()`: its statements fail as
+ * `failure` says, a refused connection unless told, and `tried` counts
+ * them. With `writes`, only its transactions do: a use's read still answers,
+ * and its one write does not.
+ */
+function unreachable({ writes = false, failure = { code: 'ECONNREFUSED' } }: { writes?: boolean; failure?: object } = {}) {
+  const real = vault.db;
+  const state = { tried: 0, back: () => void Object.assign(vault, { db: real }) };
+  const refuse = () => {
+    state.tried += 1;
+    return Promise.reject(Object.assign(new Error('the database is not there'), failure));
+  };
+  const db = new Proxy(real, {
+    get(target, name) {
+      if (name === 'transaction' || (name === 'execute' && !writes)) return refuse;
+      const value: unknown = Reflect.get(target, name, target);
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  Object.assign(vault, { db });
+  return state;
+}
+const REFUSED = { code: 'ECONNREFUSED' };
+/** The entries written for a proxied use, each one's `unlogged`. */
+const unlogged = async () => (await logged()).filter((entry) => entry.detail.purpose === 'use').map((entry) => entry.detail.unlogged);
+
+test('while the database cannot be reached, a proxied use is answered from the rows it was last answered from, for as long as the deployment says; nothing else is', async () => {
+  Object.assign(vault, { memory: memoryOf(2, 300) });
+  const start = vault.now();
+  await write(vault, ...rows('credentials', credential('brief', ada, { expiresAt: new Date(start + 100_000) })));
+  const proxied = ask('ada', 'market/prod', ['FLAG', 'DATABASE_URL'], { purpose: 'use' });
+  const values = { FLAG: 'on', DATABASE_URL: 'postgres://prod' };
+  const brief = ask('brief', 'market/prod', ['FLAG'], { purpose: 'use' });
+  const revealed = ask('bo', 'market/staging', ['DATABASE_URL']);
+  assert.deepEqual([await got(proxied), await got(brief), await got(revealed)], [values, { FLAG: 'on' }, { DATABASE_URL: 'postgres://staging' }]);
+  assert.deepEqual(await unlogged(), [undefined, undefined]);
+
+  // Within the memory nothing is asked of the database, there or not.
+  const down = unreachable();
+  vault.tick(1999);
+  assert.deepEqual([await got(proxied), down.tried], [values, 0]);
+  // Rows a reveal read answer no proxied use, fresh as they are: it was never logged, nor counted, as one.
+  await assert.rejects(use(vault, { ...revealed, purpose: 'use' }), REFUSED);
+  assert.equal(down.tried, 1);
+  // Past it, the read fails, and the use is answered all the same. The failure is remembered for the memory's length:
+  // the next use asks nothing.
+  vault.tick(1);
+  assert.deepEqual([await got(proxied), down.tried], [values, 2]);
+  assert.deepEqual([await got(proxied), down.tried], [values, 2]);
+  // Nothing else is answered: a reveal, though the same person's and of the same keys; a use handed back to someone
+  // else; a proxied use that was never answered before.
+  await assert.rejects(use(vault, { ...proxied, purpose: 'reveal' }), REFUSED);
+  await assert.rejects(use(vault, revealed), REFUSED);
+  await assert.rejects(use(vault, ask('cy', 'market/prod', ['FLAG'], { purpose: 'use' })), REFUSED);
+  assert.equal(down.tried, 5);
+  // The memory's length after the failure, the database is asked again.
+  vault.tick(2000);
+  assert.deepEqual([await got(proxied), down.tried], [values, 6]);
+
+  // Decided again as of now: a credential that expires in the outage stops.
+  vault.tick(95_999);
+  assert.deepEqual(await got(brief), { FLAG: 'on' });
+  vault.tick(1);
+  assert.equal(await got(brief), 'unauthenticated');
+  // For as long as the deployment says, from when the rows were read, and no longer: then they are gone.
+  assert.deepEqual(await got(proxied), values);
+  vault.tick(199_999);
+  assert.deepEqual(await got(proxied), values);
+  vault.tick(1);
+  await assert.rejects(use(vault, proxied), REFUSED);
+  assert.equal(recall(vault, proxied), undefined);
+  assert.equal(vault.memory.reads.size, 0);
+
+  // The database back, the next use reads and is logged: its entry says the two that were due one and had none, and
+  // since when. The one after says nothing of them.
+  down.back();
+  assert.deepEqual(await got(proxied), values);
+  assert.deepEqual(await unlogged(), [undefined, undefined, { since: new Date(start + 100_000).toISOString(), uses: 2 }]);
+  vault.tick(60_000);
+  assert.deepEqual(await got(proxied), values);
+  assert.deepEqual((await unlogged()).slice(3), [undefined]);
+});
+
+test('an outage hides a revocation only while it lasts, and a write that fails alone is an outage too', async () => {
+  Object.assign(vault, { memory: memoryOf(2, 300) });
+  const proxied = ask('ada', 'market/prod', ['FLAG'], { purpose: 'use' });
+  assert.deepEqual(await got(proxied), { FLAG: 'on' });
+  // Revoked through somewhere that still reaches the database, while this vault does not: it answers on.
+  const down = unreachable();
+  await vault.owner.execute(sql`DELETE FROM credentials WHERE label = 'ada'`);
+  vault.tick(2000);
+  assert.deepEqual(await got(proxied), { FLAG: 'on' });
+  // The database back, and not known to be: no use has asked it since the failure. The first read that answers,
+  // anyone's, ends the outage, and the revocation stands.
+  down.back();
+  assert.deepEqual([await got(proxied), down.tried], [{ FLAG: 'on' }, 1]);
+  const other = ask('cy', 'market/prod', ['DATABASE_URL'], { purpose: 'use' });
+  assert.deepEqual(await got(other), { DATABASE_URL: 'postgres://prod' });
+  assert.equal(await got(proxied), 'unauthenticated');
+  assert.equal(vault.memory.reads.size, 1);
+
+  // The read answers and the write does not: answered from the rows just read, the newest there are, and counted.
+  await rewrite(vault, w.database, 'postgres://newer');
+  vault.tick(60_000);
+  const writes = unreachable({ writes: true });
+  assert.deepEqual([await got(other), writes.tried], [{ DATABASE_URL: 'postgres://newer' }, 1]);
+  assert.deepEqual(vault.memory.unlogged.get(JSON.stringify([other.token.toString('hex'), 'market', 'prod', false, ['DATABASE_URL']])), { at: vault.now(), uses: 1 });
+  // And so does a write due within the memory, where nothing is read: a longer memory, a minute into it.
+  writes.back();
+  Object.assign(vault, { memory: memoryOf(120, 300) });
+  assert.deepEqual(await got(other), { DATABASE_URL: 'postgres://newer' });
+  vault.tick(60_000);
+  const again = unreachable({ writes: true });
+  assert.deepEqual([await got(other), again.tried], [{ DATABASE_URL: 'postgres://newer' }, 1]);
+  again.back();
+  vault.tick(120_000);
+  assert.deepEqual(await got(other), { DATABASE_URL: 'postgres://newer' });
+  assert.deepEqual((await unlogged()).at(-1), { since: new Date(vault.now() - 120_000).toISOString(), uses: 1 });
+});
+
+test('with no outage length set, and for a failure that is no outage, a use fails with the database', async () => {
+  // The default: the memory's two seconds, then the failure.
+  const proxied = ask('ada', 'market/prod', ['FLAG'], { purpose: 'use' });
+  assert.deepEqual(await got(proxied), { FLAG: 'on' });
+  let down = unreachable();
+  vault.tick(1999);
+  assert.deepEqual(await got(proxied), { FLAG: 'on' });
+  vault.tick(1);
+  await assert.rejects(use(vault, proxied), REFUSED);
+  assert.equal(vault.memory.reads.size, 0);
+  down.back();
+  // A write due within a longer memory fails too.
+  Object.assign(vault, { memory: memoryOf(120) });
+  assert.deepEqual(await got(proxied), { FLAG: 'on' });
+  vault.tick(60_000);
+  down = unreachable({ writes: true });
+  await assert.rejects(use(vault, proxied), REFUSED);
+  down.back();
+
+  // An outage length set: a statement Postgres refuses as written is a bug, not an outage, and answers nothing.
+  Object.assign(vault, { memory: memoryOf(2, 300) });
+  assert.deepEqual(await got(proxied), { FLAG: 'on' });
+  vault.tick(2000);
+  down = unreachable({ failure: { code: '42601' } });
+  await assert.rejects(use(vault, proxied), { code: '42601' });
+  assert.equal(vault.memory.downAt, -Infinity);
+  down.back();
+});
+
 test('the bulk cap refuses the read that would pass it, writes nothing for it, and lets the window slide', async () => {
   Object.assign(vault, { cap: { count: 3, windowMs: 60_000 } });
   assert.deepEqual(Object.keys(await got(ask('ci', 'market/prod', ['DATABASE_URL', 'FLAG'])) as object), ['DATABASE_URL', 'FLAG']);
