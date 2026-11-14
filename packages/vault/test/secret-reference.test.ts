@@ -233,7 +233,13 @@ test('who pointed a reference, and when, is its row\'s: set as it is made, moved
   world.memory.reads.clear();
   assert.deepEqual(await given('bo-cli', ['LINK']), ['unknown_key']);
   assert.deepEqual(await vault.change(breaking('ada-cli', 'LINK')), { refused: 'unreadable' });
-  await world.owner.execute(sql`UPDATE secrets SET source_set_by = ${ada}, source_set_at = now() WHERE id = ${link.id}`);
+  // Put back as sealed, the row is the vault's again; then the date alone, moved a second, is not.
+  await world.owner.execute(sql`UPDATE secrets SET source_set_by = ${link.sourceSetBy} WHERE id = ${link.id}`);
+  world.memory.reads.clear();
+  assert.deepEqual(await given('bo-cli', ['LINK']), [[1, 'sk_live']]);
+  await world.owner.execute(sql`UPDATE secrets SET source_set_at = source_set_at + interval '1 second' WHERE id = ${link.id}`);
+  world.memory.reads.clear();
+  assert.deepEqual(await given('bo-cli', ['LINK']), ['unknown_key'], 'nor the date');
   assert.deepEqual(await vault.change(breaking('ada-cli', 'LINK')), { refused: 'unreadable' }, 'nor the date');
 });
 

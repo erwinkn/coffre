@@ -330,17 +330,18 @@ export function PrincipalAccess({ principalType, principalId }: { principalType:
       {found !== null && <PrincipalReportCards report={found} />}
       {/* A report from an instance before 0.7, mid-deploy or rolled back, lists none, nor does 0.16's yet (null). */}
       {found !== null && !removed && (found.personalTokens ?? []).length > 0 && (
-        <MemberPersonalTokens member={memberRef(principalType, principalId)} tokens={found.personalTokens ?? []} />
+        <MemberPersonalTokens member={memberRef(principalType, principalId)} tokens={found.personalTokens ?? []} total={found.totals.personalTokens} />
       )}
     </>
   );
 }
 
 /** A person's personal tokens, for whoever runs the instance, who reads their report and may revoke any of them. */
-function MemberPersonalTokens({ member, tokens }: { member: string; tokens: TokenRow[] }) {
+function MemberPersonalTokens({ member, tokens, total }: { member: string; tokens: TokenRow[]; total: number | null }) {
   return (
     <PersonalTokensCard
       tokens={tokens}
+      total={total}
       change={revokeMemberToken(useCoffre(), member)}
       description="Tokens they made, each acting as them within what it reaches. Removing them from coffre revokes every one."
     />

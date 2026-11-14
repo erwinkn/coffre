@@ -462,6 +462,11 @@ function relative(iso: string, now: number, style: 'long' | 'narrow' = 'long'): 
   return RELATIVE[style].format(Math.round(delta / divisor), unit);
 }
 
+/** "200 of 1,240" in a list's title, when it stops short of all of them; nothing otherwise. */
+export function ofAll(listed: number, total: number | null): string {
+  return total === null || total <= listed ? '' : ` (${listed.toLocaleString('en-US')} of ${total.toLocaleString('en-US')})`;
+}
+
 /** A UTC time as the log writes it: `2026-10-17 08:45:13`, to the millisecond when `precise`. */
 export function absolute(iso: string, precise: boolean): string {
   return iso.replace('T', ' ').replace('Z', '').slice(0, precise ? 23 : 19);

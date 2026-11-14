@@ -2,7 +2,7 @@ import { Link } from '@tanstack/react-router';
 import { credentialScopeInWords } from '@coffre/core/access';
 import type { PrincipalReport, RemovedPrincipal } from '../shared/models';
 import { Card } from './page';
-import { EmptyState, Notice, Timestamp } from './ui';
+import { EmptyState, Notice, Timestamp, ofAll } from './ui';
 import { PrincipalLink } from './principal';
 import { referenceProblem } from './references';
 import { ChevronRight, Key, User } from './icons';
@@ -179,11 +179,6 @@ function ConsiderRotating({ report, person }: { report: PrincipalReport; person:
  * environment that holds it, like a value, not to them (D46), so their
  * leaving ends none. Listed to review.
  */
-/** "200 of 1,240" in a list's title, when it stops short of all of them; nothing otherwise. */
-function ofAll(listed: number, total: number | null): string {
-  return total === null || total <= listed ? '' : ` (${listed.toLocaleString('en-US')} of ${total.toLocaleString('en-US')})`;
-}
-
 function MadeReferences({ references, total }: { references: NonNullable<PrincipalReport['references']>; total: number | null }) {
   return (
     <Card
