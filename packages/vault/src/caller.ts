@@ -339,14 +339,15 @@ export async function touch(vault: Pick<Running, 'db'> & { memory: Memory }, cre
 /** The log's head as its row holds it, in the words its MAC covers (`headText`): what rides beside a caller's rows when a page asks. */
 const HEAD = sql`
   SELECT jsonb_build_object('size', size, 'keptSize', kept_size, 'keptRoot', encode(kept_root, 'hex'), 'agingSize', aging_size, 'agingRoot', encode(aging_root, 'hex'),
-    'agingFrom', aging_from, 'signedAt', round(extract(epoch FROM signed_at) * 1000)::bigint, 'mac', encode(mac, 'hex')) AS row
+    'agingFrom', aging_from, 'signedAt', CASE WHEN isfinite(signed_at) THEN round(extract(epoch FROM signed_at) * 1000)::bigint END, 'mac', encode(mac, 'hex')) AS row
   FROM log_head`;
 
 /**
  * The head the vault signed, or null: no head yet, or a row whose MAC is
  * not the vault's, which vouches for nothing. A number too large to read
- * back whole fails the MAC like any other edit. The table's own columns
- * give the row its shape: none is null, and each is of its type.
+ * back whole fails the MAC like any other edit, and so does a date with no
+ * number, `infinity`, read as null. The table's own columns give the row
+ * its shape otherwise: none is null, and each is of its type.
  */
 function headOf(keys: readonly Key[], wire: Wire | undefined): SignedHead | null {
   if (wire === undefined) return null;
