@@ -96,9 +96,11 @@ export async function deletion(deployment: Deployment, cli: Cli, admin: Person):
   // An environment alone, the same way.
   await admin.api.environments.update(`${PROJECT}/prod`, { archived: true });
   await run(['environments', 'delete', `${PROJECT}/prod`, '--apply']);
-  await admin.api.environments.create(`${PROJECT}/prod`, { name: 'prod, again' });
+  await admin.api.environments.create(`${PROJECT}/prod`, {});
+  // 0.16 names a place by its slug alone (0.14.7 kept a display name): the new prod is told from the deleted one by holding no key.
   const environments = (await admin.api.projects.list()).projects.find((project) => project.slug === PROJECT)?.environments ?? [];
-  expect(environments.length === 1 && environments[0]!.name === 'prod, again', 'a deleted environment is still listed, or its slug is not free', environments);
+  expect(environments.length === 1 && environments[0]!.slug === 'prod' && environments[0]!.details?.secretCount === 0,
+    'a deleted environment is still listed, or its slug is not free', environments);
   expect((await sealed(deployment, (await projectId(deployment, PROJECT))!)).sealed === 0, 'a deleted environment still holds a value');
   return `${PROJECT} and ${PROJECT}/prod deleted by the CLI: 5 versions erased, a grant revoked, both unlisted and their slugs reused`;
 }

@@ -474,7 +474,10 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   const changed = () => {
     const connections = new Set(entries.filter((entry) => entry.action === 'mcp.connect' && entry.metadata.client === clientId).map((entry) => entry.metadata.connection));
     const viaApproval = (action: string) => entries.filter((entry) => entry.action === action && entry.decision === 'allow' && connections.has(entry.metadata.via) && typeof entry.metadata.approval === 'string');
-    once = { archive: viaApproval('secret.archive').length, rename: viaApproval('secret.rename').length, write: viaApproval('secret.write').length };
+    // 0.16 logs an archiving as a write whose key's line says `archived` (0.14.7 logged it as `secret.archive`).
+    const archives = (entry: AuditEntryView) => Array.isArray(entry.metadata.keys) && entry.metadata.keys.some((line: { archived?: unknown }) => line.archived === true);
+    const writes = viaApproval('secret.write');
+    once = { archive: writes.filter(archives).length, rename: viaApproval('secret.rename').length, write: writes.filter((entry) => !archives(entry)).length };
     return JSON.stringify(once) === JSON.stringify({ archive: 1, rename: 1, write: 2 });
   };
   await until('the changes on the log', async () => {
