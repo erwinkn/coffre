@@ -1077,8 +1077,6 @@ the AAD's `plain` or `version` left out on one side (667 and 1,581 of its
   `givesService` throw. Roles are checked and ids are UUIDs before they get
   there, so nothing reached it; each lookup now takes only the record's own
   keys, as `definitionOf` did.
-- **References share by design** (`reference_shares_by_design`): a stronger
-  claim than the code makes would be false, so the model says so.
 
 ## What it does not cover
 
