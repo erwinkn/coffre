@@ -631,6 +631,7 @@ export async function admit(connect: () => CoffreClient, args: string[], io: Io 
   const [projects, environments] = [filterOf(values, 'projects'), filterOf(values, 'environments')];
   const scoped = projects !== undefined || environments !== undefined;
   if (scoped && role === undefined) throw new UsageError('a scope goes with a role: add --role');
+  if (scoped && service) throw new UsageError('a service account holds project grants only: drop the scope flags, then coffre grant');
   if (service && role !== undefined && role !== 'member') throw new UsageError('a service account holds project grants only: drop --role, then coffre grant');
   // A service account's one role, `member`, is sent as none: whoever sets one up and does not run the instance names no role.
   const asked = service ? undefined : role;
