@@ -134,6 +134,11 @@ const standing = (role: InstanceRole, scope: string | null): Standing => ({ role
  * to and with no grant. Whoever runs the instance admits a member; only an
  * Owner of the whole instance gives an instance role. A person the
  * deployment names an Owner comes in as one, or not at all.
+ *
+ * A removed member whose row is deleted around the vault looks new, and comes
+ * back in generation 0: no row the vault reads says otherwise. Its entry says
+ * the row it made replaced none, which the signer's mirror finds false
+ * history (`rewritten`), as it does any write over a deleted row.
  */
 const admit = (action: 'member.add' | 'member.restore') =>
   function admitting(input: Presented & (MemberAdd | MemberRestore), vault: Deciding): Operation<Parts, AccessAnswers[typeof action]> {

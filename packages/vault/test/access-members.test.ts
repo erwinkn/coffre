@@ -14,7 +14,8 @@ import { commit, prepare } from '../src/change.ts';
 import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
-import { emptyDatabase, openTestVault } from './database.ts';
+import { Signer } from '../src/signer.ts';
+import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
 import { amend, binding, credential, environment, grant, instance, principal, project, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
 
 const world = await openTestVault();
@@ -199,6 +200,24 @@ test('a removal deletes the member\'s grants and moves their generation on, whic
   // An Owner of the whole instance removes another, and anyone who runs it removes themselves.
   assert.deepEqual(await remove('ada-cli', cy), { answer: { revoked: 0 } });
   assert.deepEqual(await remove('fay-cli', fay), { answer: { revoked: 0 } });
+});
+
+test('a removed member whose rows are deleted around the vault is admitted anew in generation 0, and the signer finds the entry false history', async () => {
+  // The design's adversary deletes rows (docs/design/0.16.md, "What it promises"): the decision cannot tell
+  // such a member from a newcomer, but its entry says the row it made replaced none, and the signer's
+  // mirror holds Bo's removed row. Its credential would have to be put back too, a row put back.
+  const signer = await Signer.open({ db: world.db, keys: world.keys, now: world.now, store: memoryStore() });
+  assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 2 } });
+  for (const hash of world.woken.splice(0)) await signer.wake(hash);
+  await signer.run(true);
+  assert.deepEqual(await signer.take(), []);
+  await world.owner.execute(sql`DELETE FROM credentials WHERE principal = ${bo}`);
+  await world.owner.execute(sql`DELETE FROM principals WHERE id = ${bo}`);
+  assert.deepEqual(await add('fay-cli', bo), { answer: { role: 'member', scope: null } });
+  assert.equal((await row(bo))!.generation, 0);
+  for (const hash of world.woken.splice(0)) await signer.wake(hash);
+  await signer.run(false);
+  assert.deepEqual(await signer.take(), [{ found: 'rewritten', of: JSON.stringify(['principals', bo]) }]);
 });
 
 test('a removal is refused to whoever may not make it, of an Owner but by an Owner of the whole instance, and of the last one, and writes nothing', async () => {
