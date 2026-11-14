@@ -10,7 +10,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { secrets } from '@coffre/db/schema';
 import { eq, sql } from 'drizzle-orm';
 
-import { change, commit, prepare, type Operation, type Parts } from '../src/change.ts';
+import { change, commit, MOST_COPIED, prepare, type Operation, type Parts } from '../src/change.ts';
 import { entryOf } from '../src/entry.ts';
 import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
@@ -312,4 +312,17 @@ test(`a fork copies ${MOST_KEYS} values at most in its one change: past that it 
   // As references, it seals no value, and is made.
   const referred = answered(await vault.change(forking('ada-cli', 'over', 'big', true))).forked!;
   assert.deepEqual([referred.keys, referred.references, referred.copied], [MOST_KEYS + 1, MOST_KEYS + 1, []]);
+});
+
+test(`a fork copies ${MOST_COPIED / 2 ** 20} MiB of values at most, weighed before any is read: past that it is refused, and nothing is made; by reference, it is made`, async () => {
+  // As many 64 KiB values as the bound holds: with their wrapped keys, they weigh more.
+  const size = 64 * 1024;
+  const heavy = environment(market, 'heavy');
+  const keys = Array.from({ length: Math.floor(MOST_COPIED / size) }, (_, n) => value(world, secret(heavy, `KEY_${String(n).padStart(4, '0')}`), String(n % 10).repeat(size)));
+  await write(world, ...rows('environments', heavy), ...rows('secrets', ...keys));
+  const before = await counts();
+  assert.deepEqual(await vault.change(forking('ada-cli', 'over', 'heavy')), { refused: 'too_much_to_copy' });
+  assert.deepEqual(await counts(), before);
+  const referred = answered(await vault.change(forking('ada-cli', 'over', 'heavy', true))).forked!;
+  assert.deepEqual([referred.keys, referred.references, referred.copied], [keys.length, keys.length, []]);
 });

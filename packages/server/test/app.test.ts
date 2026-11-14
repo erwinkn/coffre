@@ -186,7 +186,7 @@ test('what only the app sees of a request, it holds before the vault is asked: n
   assert.deepEqual(await tried(as(PERSONAL, body)), [200, undefined, undefined, ['use']]);
 });
 
-test("a write answers each key's version; what it refuses, and what is not served yet", async () => {
+test("a write answers each key's version, and what it refuses", async () => {
   const patch = (label: string, path: string, values: unknown) => answered(app.request(`/api/secrets/${path}`, as(label, { method: 'PATCH', body: JSON.stringify(values) })));
   const [status, body] = await patch('bo-cli', 'market/prod', { API_KEY: 'k1', FLAG: { value: 'off', sensitivity: 'plain' }, STRIPE_KEY: { value: 'sk_2', sensitivity: 'sensitive' } });
   assert.equal(status, 200, JSON.stringify(body));
@@ -209,12 +209,12 @@ test("a write answers each key's version; what it refuses, and what is not serve
   // A key that is archived is brought back before it is written: 0.14's answer.
   const [archived, why] = await patch('bo-cli', 'market/prod', { OLD: 'x' });
   assert.deepEqual([archived, why.error, why.reason], [409, 'conflict', 'archived']);
-  // What the vault would call a fault, the app refuses first, and what is not served yet it says: the vault is not asked.
+  // What the vault would call a fault, the app refuses first, by its shape: the vault is not asked.
   app.calls.length = 0;
   const shapes: [string, unknown, number][] = [
     ['market/prod', { API_KEY: 'a\0b' }, 400], ['market/prod', { API_KEY: '\ud800' }, 400], ['market/prod', { API_KEY: 'x'.repeat(64 * 1024 + 1) }, 400], ['market/prod', { 'not a key': 'x' }, 400], ['market/prod', {}, 400],
     ['market/prod', { API_KEY: { ref: 'market/prod' } }, 400],
-    ['market/prod', { API_KEY: { ref: 'market/prod@me/FLAG' } }, 400], ['market/prod', { API_KEY: { ref: 'market/prod/FLAG', value: 'x' } }, 400], ['market/prod', { API_KEY: { sensitivity: 'sensitive' } }, 400],
+    ['market/prod', { API_KEY: { ref: 'market/prod@me/FLAG' } }, 400], ['market/prod', { API_KEY: { ref: 'market/prod/FLAG', value: 'x' } }, 400], ['market/prod', { API_KEY: { sensitivity: 'loud' } }, 400], ['market/prod', { API_KEY: { sensitivity: 'secret', replaces: '00000000-0000-4000-8000-000000000000' } }, 400],
     ['market/prod?dryRun=yes', { API_KEY: 'x' }, 400], ['market/prod?dry=1', { API_KEY: 'x' }, 400], ['market/prod@me', { API_KEY: { ref: 'market/prod/FLAG' } }, 400], ['Market/prod', { API_KEY: 'x' }, 400],
   ];
   for (const [path, values, expected] of shapes) assert.equal((await patch('bo-cli', path, values))[0], expected, `${path} ${JSON.stringify(values).slice(0, 40)}`);

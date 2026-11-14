@@ -141,6 +141,45 @@ export function drop<T extends Sealed>(table: T, was: Row<T>): Write {
  */
 export type Value = { version: Omit<Row<typeof secretVersions>, keyof Envelope> } & ({ text: Buffer; copy?: undefined } | { copy: Row<typeof secretVersions>; text?: undefined });
 
+/**
+ * The most one change copies (`Value`'s `copy`, a mark's, a fork's or a
+ * restore's), in bytes as stored: each version's ciphertext, wrapped key
+ * and plain copy. Workers give an isolate 128 MiB, for the vault's code
+ * and everything it holds, and a value copied is held several times over
+ * on its way through. Read, Postgres sends each version as JSON, its bytes
+ * in hex (2x), which the driver holds as bytes and as a string (4x), and
+ * parsing it makes another string (2x) before it is a Buffer (1x): about
+ * 7x at the read's peak, 1x after. Written, each copy sealed again is hex
+ * in the statement's JSON (2x), that JSON is a string (2x) the driver
+ * encodes for the wire (2x): with the rows read, about 7x again. So 8 MiB
+ * copied peaks near 56 MiB, under half the isolate, which leaves the rest
+ * to the vault's code, the other rows of the change and the runtime. 2,000
+ * values of 4 KiB, certificates, fit in one change; values of the usual
+ * few hundred bytes, many times over.
+ */
+export const MOST_COPIED = 8 * 1024 * 1024;
+
+/** What a version weighs as stored, to `MOST_COPIED`: its ciphertext, its wrapped key and a plain one's copy. */
+const weight = (row: Pick<Row<typeof secretVersions>, 'ciphertext' | 'wrappedDek' | 'plaintext'>) => row.ciphertext.length + row.wrappedDek.length + (row.plaintext === null ? 0 : Buffer.byteLength(row.plaintext));
+
+/**
+ * The versions a change reads to copy, those `where` holds for, read only
+ * if together they weigh `MOST_COPIED` at most; and to ride beside the read
+ * (`Operation.beside`), what they weigh, which `overweight` tells. So a
+ * copy past it is refused from the lengths Postgres stores, before any of
+ * its ciphertext reaches the vault. A decision refuses one,
+ * `too_much_to_copy`, before it misses its versions, which a read past it
+ * finds none of.
+ */
+export function copying(where: SQL): { part: Part<typeof secretVersions>; weighed: SQL } {
+  // In a subquery of its own, which `where`'s columns, named by their table's name, name the rows of.
+  const total = sql`(SELECT coalesce(sum(octet_length(ciphertext) + octet_length(wrapped_dek) + coalesce(octet_length(plaintext), 0)), 0)::float8 FROM ${secretVersions} WHERE ${where})`;
+  return { part: part(secretVersions, sql`${where} AND ${total} <= ${MOST_COPIED}`), weighed: sql`SELECT jsonb_build_object('bytes', ${total}) AS row` };
+}
+
+/** Whether the versions `copying` read the weight of weigh more than a change copies. */
+export const overweight = (weighed: readonly Wire[] | undefined): boolean => Number((weighed?.[0] as { bytes?: unknown } | undefined)?.bytes ?? 0) > MOST_COPIED;
+
 /** Why a change is not made. Nothing it asked is written. */
 export type Refusal = { refused: string };
 
@@ -484,6 +523,8 @@ export async function prepare<P extends Parts, A, C = undefined>(vault: Running,
       return undefined;
     }
   };
+  // Weighed before anything is opened: what a change copies is held several times over, which only so much fits.
+  if ((plan.values ?? []).reduce((sum, value) => sum + (value.copy === undefined ? 0 : weight(value.copy)), 0) > MOST_COPIED) return refuse({ refused: 'too_much_to_copy' });
   for (const row of plan.vouched ?? []) {
     const text = await opened(row);
     if (text === undefined) return refuse({ refused: 'unreadable' });

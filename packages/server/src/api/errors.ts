@@ -120,6 +120,12 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   held_here: ['conflict', 'it holds that key of its own, a value or a reference, which removing would not stop it serving: reset it to what it inherits first (`coffre reset`), or archive it (`coffre archive`)'],
   no_config: ['not_found', 'you have no personal config of that environment: a value written there makes one'],
   too_many_dismissals: ['bad_request', 'one request dismisses or restores 2,000 keys at most: send the rest in another'],
+  // A key's nature marked in place (routes/secrets.ts), as 0.14.7 answered.
+  is_reference: ['conflict', 'that key is a reference: mark its source, which it reads'],
+  inherited_key: ['conflict', "that key is inherited: mark it where it is held, or write a value of this environment's own"],
+  looser: ['conflict', 'making a value plain takes it written again, never a flip of the one stored'],
+  not_owner: ['conflict', 'that value is sensitive: making it a secret takes it written again, unless an Owner of the project makes it one in place'],
+  too_much_to_copy: ['conflict', 'one change opens and seals again 8 MiB of values at most: mark fewer keys at once, or fork by references (`references`) or inherit (`inherit`) instead'],
   too_many_keys: ['conflict', 'a fork copies 2,000 values at most: make it hold references to them (`references`), or inherit them (`inherit`), instead'],
   too_large: ['conflict', 'it holds more versions than one deletion erases: delete its environments one at a time first'],
   parent_archived: ['conflict', 'it inherits from an environment that is archived or deleted: restore that first'],

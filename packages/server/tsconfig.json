@@ -13,7 +13,6 @@
   "exclude": [
     // Secrets' generated values, forks, dismissals (W418).
     "src/api/references.ts",
-    "test/owner-powers.test.ts",
 
     // The member report's lists (W419); the client generator still reads its named types from api/access.ts,
     // api/members.ts and api/settings.ts.

@@ -9,9 +9,9 @@ import { dismissedKeys, environments, grants, principals, projects, secrets, sec
 import { sql, type SQL } from 'drizzle-orm';
 
 import { callerParts, live, refusedTo, type Asking } from '../caller.ts';
-import { amended, drop, part, put, type Operation, type Part, type Parts, type Plan, type Refusal, type Seen, type Unsealed, type Value, type Write } from '../change.ts';
+import { amended, copying, drop, overweight, part, put, type Operation, type Part, type Parts, type Plan, type Refusal, type Seen, type Unsealed, type Value, type Write } from '../change.ts';
 import type { Said } from '../entry.ts';
-import type { Fresh, Row, Sealed } from '../rows.ts';
+import type { Fresh, Row, Sealed, Wire } from '../rows.ts';
 import { natureOf } from '../value.ts';
 import type { Deciding } from '../vault.ts';
 import { asking, NOWHERE } from './asking.ts';
@@ -125,6 +125,11 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
   // A copy's: the environments whose keys it copies, and the sources of the references among them, live, which may be in other projects.
   const layers = copy === undefined ? NONE : chainIds(project, copy.from, MAX_PARENTS);
   const referred = sql`(SELECT s.source_id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id IN ${layers} AND s.archived_at IS NULL AND s.source_id IS NOT NULL)`;
+  const values = sql`(${secretVersions.secretId}, ${secretVersions.version}) IN (SELECT s.id, s.current_version FROM secrets s
+      WHERE ((s.project_id = ${project} AND s.environment_id IN ${layers} AND s.archived_at IS NULL) OR s.id IN ${referred}) AND s.current_version IS NOT NULL)`;
+  // A fork by references copies only what its forker cannot refer to, which the engine weighs as it copies (`MOST_COPIED`).
+  const copyAll = copy !== undefined && !copy.references;
+  const weighing = copying(values);
   const read = {
     // A reference's source may be in another project, whose grants and protections the caller is weighed by too.
     ...callerParts(shown.token, copy === undefined ? project : sql`(SELECT p.id FROM projects p WHERE p.slug = ${projectSlug} UNION SELECT s.project_id FROM secrets s WHERE s.id IN ${referred})`),
@@ -137,9 +142,8 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
     source: part(secrets, sql`${secrets.id} IN ${referred}`),
     sourcePlace: part(environments, sql`${environments.id} IN (SELECT s.environment_id FROM secrets s WHERE s.id IN ${referred})`),
     sourceProject: part(projects, sql`${projects.id} IN (SELECT s.project_id FROM secrets s WHERE s.id IN ${referred})`),
-    // The value each live key holds now, or its source does.
-    version: part(secretVersions, sql`(${secretVersions.secretId}, ${secretVersions.version}) IN (SELECT s.id, s.current_version FROM secrets s
-      WHERE ((s.project_id = ${project} AND s.environment_id IN ${layers} AND s.archived_at IS NULL) OR s.id IN ${referred}) AND s.current_version IS NOT NULL)`),
+    // The value each live key holds now, or its source does: a fork that copies them all reads them only if it copies no more than a change does.
+    version: copyAll ? weighing.part : part(secretVersions, values),
     // What would hold its place: the slug in the project, and for a personal config, the caller's of that environment.
     taken: part(environments, sql`(${environments.projectId} = ${project} AND ${environments.slug} = ${slug})${mine
       ? sql` OR (${environments.parentId} = (SELECT e.id FROM environments e WHERE e.project_id = ${project} AND e.slug = ${named}) AND ${environments.owner} = ${principal} AND strpos(${environments.slug}, '~') = 0)`
@@ -156,6 +160,7 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
   };
   return {
     read,
+    ...(copyAll ? { beside: { weighed: weighing.weighed } } : {}),
     // A personal config is named by the environment it is of, the page its maker was on; anything else by its own slug, and its parent's if it has one.
     denied: refusedTo('environment.create', shown, vault.workloads, {
       where: { project: projectSlug, environment: named, ...(mine || parentSlug === null ? {} : { parent: parentSlug }), ...(copy === undefined ? {} : { from: copy.from }) },
@@ -164,7 +169,7 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
         return [...(place === undefined ? [] : [`project:${place.id}`]), ...(there === undefined ? [] : [`environment:${there.id}`]), ...(parent == null ? [] : [`environment:${parent.id}`])];
       },
     }),
-    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
+    decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>, _checked: undefined, beside?: Readonly<Record<string, readonly Wire[]>>) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
       const { place, parent } = placed(seen);
@@ -186,6 +191,8 @@ function environmentCreate(input: Presented & EnvironmentCreate, vault: Deciding
       // A fork of a protected environment is protected, a copy as one that inherits.
       const guarded = !mine && (input.protected || parent?.protected === true);
       const row = { id, projectId: place.id, slug, name: slug, createdAt: new Date(at), archivedAt: null, parentId: copy === undefined ? (parent?.id ?? null) : null, owner: mine ? caller.principal : null, protected: guarded, frozenCredentials: [] };
+      // Past what a change copies, its versions were not read: too much, not gone.
+      if (copyAll && overweight(beside?.weighed)) return { refused: 'too_much_to_copy' };
       const forked = copy === undefined ? undefined : copied(seen, unsealed, { caller, place, from: parent!, made: row, copy, seed, at });
       if (forked !== undefined && 'refused' in forked) return forked;
       return {
@@ -373,7 +380,7 @@ function projectEdit(place: Row<typeof projects>, changes: Partial<Fresh<typeof 
  * and a person. A role with no row is no role: neither counts without the
  * Owner role's row read.
  */
-function owns(caller: Asking, projectId: string): boolean {
+export function owns(caller: Asking, projectId: string): boolean {
   const { holds } = caller;
   const { roles, instanceRoles } = holds.policy;
   return ownsProject({ ...holds, role: Object.hasOwn(instanceRoles, holds.role) ? holds.role : 'member', grants: holds.grants.filter((grant) => Object.hasOwn(roles, grant.role)) }, projectId);

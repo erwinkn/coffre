@@ -192,7 +192,9 @@ written one Encrypt. AWS charges about $1 a month per key and $0.03 per
 of 50 secrets is 50 Decrypts in about seven round trips. On Workers, each is
 a subrequest: the Free plan allows 50 per invocation, so an environment
 larger than that cannot be read in one call there. The Paid plan allows
-10,000.
+10,000. A mark (`coffre mark`) or a fork that copies, of N keys, opens and
+seals each value again, 2N calls, one after another: about N × 30 ms, so
+over a minute for 2,000 keys, and on the Free plan 25 keys a call at most.
 
 **When KMS fails.** Before it asks KMS anything, the vault commits a
 `key.intent` entry naming every key of the call; afterwards, it logs each

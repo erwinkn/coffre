@@ -8,7 +8,7 @@
 // floor: what any request costs the runtime itself.
 //
 //   pnpm build, then
-//   pnpm bench:workers [--entries 10000] [--members 200]
+//   pnpm bench:workers [--entries 10000] [--members 200] [--marks 2000]
 //   pnpm bench:node [--entries 10000]
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -21,7 +21,7 @@ import { bearer, Browser } from '../src/browser.ts';
 import { deviceLogin, personaOn, signIn, signInAdmin } from '../src/checks/people.ts';
 import { boot, type Deployment, type Kind } from '../src/harness.ts';
 
-const USAGE = `usage: bench.ts workers|node <dir> [--entries <n>] [--members <n>] [--keys <n>] [--warm <n>] [--cold <n>] [--port <n>]
+const USAGE = `usage: bench.ts workers|node <dir> [--entries <n>] [--members <n>] [--keys <n>] [--marks <n>] [--warm <n>] [--cold <n>] [--port <n>]
   --postgres <url> --runtime <url> --vault-runtime <url>   as coffre-conformance takes them`;
 
 const { values, positionals } = parseArgs({
@@ -30,6 +30,8 @@ const { values, positionals } = parseArgs({
     entries: { type: 'string', default: '0' },
     members: { type: 'string', default: '0' },
     keys: { type: 'string', default: '30' },
+    // An environment of that many keys, every one marked in each sample: none by default.
+    marks: { type: 'string', default: '0' },
     warm: { type: 'string', default: '8' },
     cold: { type: 'string', default: '3' },
     only: { type: 'string' },
@@ -49,7 +51,7 @@ if (!readdirSync('/proc').includes('self')) {
   process.exit(2);
 }
 const count = (name: keyof typeof values) => Number(values[name]);
-for (const name of ['entries', 'members', 'keys', 'warm', 'cold', 'port'] as const) {
+for (const name of ['entries', 'members', 'keys', 'marks', 'warm', 'cold', 'port'] as const) {
   if (!Number.isInteger(count(name)) || count(name) < (name === 'keys' || name === 'port' ? 1 : 0)) {
     console.error(`--${name} takes a whole number${name === 'keys' || name === 'port' ? ' above zero' : ''}\n${USAGE}`);
     process.exit(2);
@@ -150,6 +152,10 @@ async function measure(deployment: Deployment, request: () => Promise<unknown>):
 const PROJECT = 'bench';
 const APP = `${PROJECT}/app`;
 const GROW = `${PROJECT}/grow`;
+const MARKS = `${PROJECT}/marks`;
+/** The keys `--marks` makes, each marked by every sample, sensitive and a secret by turns: by an Owner, who makes one a secret again. */
+const marked = Array.from({ length: Number(values.marks) }, (_, i) => `MARK_${i}`);
+let sensitive = false;
 
 type Who = { browser: Browser; api: CoffreClient };
 type Path = { name: string; request: () => Promise<unknown>; workersOnly?: boolean };
@@ -186,6 +192,13 @@ function paths(deployment: Deployment, people: { admin: Who; reader: Who; servic
       },
     },
     { name: 'cron: heartbeat + checkpoint', workersOnly: true, request: () => deployment.scheduled() },
+    ...(marked.length === 0 ? [] : [{
+      name: `PATCH /api/secrets, ${marked.length} keys marked`,
+      request: async () => {
+        sensitive = !sensitive;
+        ok(await people.admin.browser.send('PATCH', `/api/secrets/${MARKS}`, Object.fromEntries(marked.map((key) => [key, { sensitivity: sensitive ? 'sensitive' : 'secret' }]))));
+      },
+    }]),
   ];
 }
 
@@ -196,6 +209,11 @@ async function populate(deployment: Deployment) {
   await admin.api.projects.create(PROJECT, { name: 'Bench' });
   for (const path of [APP, GROW]) await admin.api.environments.create(path, { name: path });
   await admin.api.secrets.set(APP, Object.fromEntries(Array.from({ length: count('keys') }, (_, i) => [`KEY_${i}`, `fake-value-${i}`])));
+  // Values of a typical API key's length.
+  if (marked.length > 0) {
+    await admin.api.environments.create(MARKS, { name: MARKS });
+    await admin.api.secrets.set(MARKS, Object.fromEntries(marked.map((key, i) => [key, `fake-sk_live_${String(i).padStart(8, '0')}_0123456789abcdef`])));
+  }
   const reader = await personaOn(deployment, admin, 'reader', { [APP]: 'viewer' });
   // An instance in use: its policy changed now and then, and the reader's access too, which each check reads the newest of.
   for (let i = 0; i < 20; i++) {

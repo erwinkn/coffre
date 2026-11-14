@@ -159,11 +159,25 @@ test('the plan names what a recipe made and the app would go without; a run writ
   assert.deepEqual(writes.flatMap((entry) => entry.detail.keys!.map((line) => [line.key, line.recipe])).sort(), [['SEAL_KEY', 'bytes:32:hex'], ['WEBHOOK_SECRET', 'bytes:24:base62']]);
 });
 
-// R18's second step, making one's own value sensitive in place with no new value (`{ SEAL_KEY: { sensitivity:
-// 'sensitive' } }`), needs the nature change W418 builds next: 0.14.7's test of it ("a person's own generated value
-// they made sensitive is theirs: never made again, and the app goes without it (R18)") is ported with it. The plan's
-// side of R18, a person's own sensitive value never generated again, is the test after this one.
-test.todo("a person's own generated value they made sensitive is theirs: never made again, and the app goes without it (R18)");
+// R18's second step, 0.14.7's: one's own generated value made sensitive in place, with no new value (`coffre mark`).
+test("a person's own generated value they made sensitive is theirs: never made again, and the app goes without it (R18)", async () => {
+  const handle = await handleFor(tokens.dev, 'market/local');
+  const ids = await versionIds('market/local');
+  const [written, body] = await api(tokens.dev, 'PATCH', '/secrets/market/local@me', { SEAL_KEY: { value: 'c'.repeat(64), generated: { recipe: 'bytes:32:hex' }, replaces: ids.SEAL_KEY!, sensitivity: 'secret' } });
+  assert.equal(written, 200, JSON.stringify(body));
+  const [marked, answer] = await api(tokens.dev, 'PATCH', '/secrets/market/local@me', { SEAL_KEY: { sensitivity: 'sensitive' } });
+  assert.deepEqual([marked, (answer as { keys: unknown }).keys], [200, { SEAL_KEY: { version: 2, sensitivity: 'sensitive' } }]);
+  const plan = await planFor('market/local', handle);
+  assert.equal(plan.environment, 'market/local@me');
+  assert.equal(plan.generate?.SEAL_KEY, undefined);
+  assert.ok(plan.left.includes('SEAL_KEY'));
+  // WEBHOOK_SECRET, local's sensitive value it inherits, is still made the person's own.
+  assert.ok(plan.generate?.WEBHOOK_SECRET !== undefined);
+  // Written saying nothing, as a CLI before 0.10 writes it, it is as sensitive as local's: the person's own, left out the same.
+  await api(tokens.dev, 'PATCH', '/secrets/market/local@me', { WEBHOOK_SECRET: { value: 'devs-own-webhook-0123', generated: { recipe: 'bytes:24:base62' }, replaces: ids.WEBHOOK_SECRET! } });
+  const after = await planFor('market/local', handle);
+  assert.deepEqual([after.generate?.WEBHOOK_SECRET, after.left.includes('WEBHOOK_SECRET')], [undefined, true]);
+});
 
 test("a person's own value written sensitive is theirs: never made again, and the app goes without it; what they inherit sensitive still is (R18)", async () => {
   const handle = await handleFor(tokens.dev, 'market/local');

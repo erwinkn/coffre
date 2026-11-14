@@ -233,11 +233,17 @@ export const secretRoutes = {
    * gives a key a value where they have none, as 0.14's: its owner's alone,
    * while they read or use dev, and it holds no reference (a 400).
    *
+   * `{ "KEY": { "sensitivity": "sensitive" } }`, alone, marks the key's
+   * value (`coffre mark`): kept, as its next version, which the vault opens
+   * and seals again. Stricter by whoever writes there; a sensitive value
+   * made a secret by an Owner of the project alone (`not_owner`), and plain
+   * never (`looser`); the nature it has already writes nothing. A reference
+   * or an inherited key is marked where it is held (`is_reference`,
+   * `inherited_key`). 8 MiB of values marked in one call at most
+   * (`too_much_to_copy`).
+   *
    * With `?dryRun=1`, what the write would do to each key, and nothing
    * written (`dryRun`): `added`, `changed`, `unchanged` or `archived`.
-   *
-   * Not served yet, refused as a 400 by the input's shape: a nature
-   * changed in place, `{ "sensitivity" }` alone.
    */
   ...route('PATCH /secrets/:project/:environment', {
     input: z.record(secretKey, z.union([
@@ -245,6 +251,7 @@ export const secretRoutes = {
       z.object({ value: secretValue, generated: generation, replaces: rowId.optional(), sensitivity: z.enum(['secret', 'sensitive']).optional() }).strict(),
       z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']), replaces: rowId.optional() }).strict(),
       z.object({ ref: sourcePath }).strict(),
+      z.object({ sensitivity: z.enum(['plain', 'secret', 'sensitive']) }).strict(),
     ]).nullable())
       .refine((patch) => Object.keys(patch).length > 0, 'name at least one key'),
     // `?dryRun=1` weighs the write and makes none. Any other query is refused, not ignored: a mistyped flag must not write.
@@ -258,6 +265,7 @@ export const secretRoutes = {
       if (problem !== null) throw badRequest(problem);
       const keys = Object.entries(input).map(([key, written]): KeyWrite => (written === null ? { key, archived: true } : typeof written === 'string' ? { key, value: written }
         : 'ref' in written ? { key, ref: { project: written.ref.project, environment: written.ref.environment, key: written.ref.key! } }
+          : !('value' in written) ? { key, nature: written.sensitivity }
           : { key, value: written.value, nature: written.sensitivity, replaces: written.replaces, ...('generated' in written ? { generated: canonical(written.generated) } : {}) }));
       const change = { op: 'secret.write', project: params.project, environment, mine, keys } as const;
       const at = `${params.project}/${params.environment}`;

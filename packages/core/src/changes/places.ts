@@ -82,6 +82,13 @@ export type EnvironmentCreate = { op: 'environment.create'; project: string; env
  * to its source, which its forker must be able to make, or the fork is
  * refused, `no_access`. A workload copies or refers to no value it only
  * uses where it is held (`use_only`).
+ *
+ * One change opens and seals again 2,000 values at most (`too_many_keys`),
+ * and 8 MiB of them as stored (`too_much_to_copy`, the vault's
+ * `MOST_COPIED`, which a mark shares): past either, nothing is made, and
+ * the fork is made by references or inherits instead. A fork that copies
+ * by default is weighed before any value is read; one by references, by
+ * what it copies.
  */
 export type EnvironmentCopy = { from: string; references: boolean };
 
