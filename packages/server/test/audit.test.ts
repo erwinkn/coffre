@@ -293,6 +293,54 @@ test('a path reads that place, an environment or a key of it; one the caller may
   for (const path of ['market/de%00v', 'Market', 'market/dev/a-b', 'market/dev/%ED%A0%80']) assert.equal((await call('aud-cli', 'GET', `/audit?path=${path}`))[0], 400, path);
 });
 
+test("a key's path finds each read that gave that key, an environment's whole read too, and none that did not", async () => {
+  // Ed reads market/dev whole while API_KEY is its one key; OTHER comes after, and Ed reads it alone.
+  assert.equal((await call('ed-cli', 'POST', '/reveals', { path: 'market/dev' }))[0], 200);
+  assert.equal((await call('cy-cli', 'PATCH', '/secrets/market/dev', { OTHER: 'o1' }))[0], 200);
+  assert.equal((await call('ed-cli', 'POST', '/reveals', { path: 'market/dev/OTHER' }))[0], 200);
+  await sign();
+  const reads = async (key: string) => (await page('aud-cli', `?path=market/dev/${key}`))[0].entries.filter((entry) => entry.action === 'secret.read' && entry.actorId === ed.slice('user:'.length)).length;
+  assert.deepEqual([await reads('API_KEY'), await reads('OTHER')], [1, 1]);
+  // The whole read is API_KEY's, and only API_KEY's: OTHER's page shows Ed's read of it alone.
+  const other = (await page('aud-cli', '?path=market/dev/OTHER'))[0];
+  assert.deepEqual(brief(other), ['secret.read market/dev/OTHER proven', 'secret.write market/dev/OTHER proven']);
+});
+
+test('the longest path there is, 256 characters, reads its key; one character more names no key', async () => {
+  const [project, environment, key] = ['p'.repeat(63), 'e'.repeat(63), `K${'_'.repeat(127)}`];
+  for (const [method, path, body] of [['PUT', `/projects/${project}`, { name: 'Long' }], ['PUT', `/projects/${project}/${environment}`, {}], ['PATCH', `/secrets/${project}/${environment}`, { [key]: 'v' }]] as const) {
+    const [status, answer] = await call('cy-cli', method, path, body);
+    assert.equal(status, 200, `${method} ${path}: ${JSON.stringify(answer)}`);
+  }
+  await sign();
+  const path = `${project}/${environment}/${key}`;
+  assert.equal(path.length, 256);
+  assert.deepEqual(brief((await page('aud-cli', `?path=${path}`))[0]), [`secret.write ${path} proven`]);
+  assert.equal((await call('aud-cli', 'GET', `/audit?path=${path}_`))[0], 400);
+});
+
+test('an audit.read grant on an archived environment still reads its log, and /me still says it reads one', async () => {
+  assert.equal((await call('cy-cli', 'PATCH', '/projects/market/dev', { archived: true }))[0], 200);
+  await sign();
+  const before = ['secret.read market/dev/API_KEY proven', 'secret.write market/dev/API_KEY proven'];
+  for (const query of ['', '?path=market/dev', '?path=market/dev/API_KEY']) {
+    const shown = brief((await page('ed-cli', query))[0]);
+    assert.deepEqual(shown.slice(-2), before, query);
+  }
+  const [status, me] = await call('ed-cli', 'GET', '/me');
+  assert.deepEqual([status, me.canReadAudit], [200, true]);
+});
+
+test("an entry a personal token wrote names the token, by its id and label; its person's own session names none", async () => {
+  const [made, issued] = await call('bo-cli', 'POST', `/members/${encodeURIComponent(bo)}/tokens`, { label: 'laptop', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  assert.equal(made, 200, JSON.stringify(issued));
+  const { id, token } = issued as unknown as { id: string; token: string };
+  assert.equal((await call(token, 'POST', '/reveals', { path: 'market/dev/API_KEY' }))[0], 200);
+  await sign();
+  const reads = (await page('aud-cli', '?path=market/dev/API_KEY'))[0].entries.filter((entry) => entry.action === 'secret.read');
+  assert.deepEqual(reads.map((entry) => [entry.actorId, entry.token]), [[bo.slice('user:'.length), { id, label: 'laptop' }], [bo.slice('user:'.length), null]]);
+});
+
 test("a path's entry that names another project too is the caller's if they read that one's log as well, and no one else's", async () => {
   const [billing] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id::text AS id FROM projects WHERE slug = 'billing'`);
   await write(world, ...rows('grants', grant(bo, 'lead', { project: billing! })));
