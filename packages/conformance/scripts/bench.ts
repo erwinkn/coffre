@@ -191,7 +191,7 @@ function paths(deployment: Deployment, people: { admin: Who; reader: Who; servic
         if (!signed.ok) throw new Error(`sign-in refused: ${signed.error}`);
       },
     },
-    { name: 'cron: heartbeat + checkpoint', workersOnly: true, request: () => deployment.scheduled() },
+    { name: 'cron: the scheduled handler', workersOnly: true, request: () => deployment.scheduled() },
     ...(marked.length === 0 ? [] : [{
       name: `PATCH /api/secrets, ${marked.length} keys marked`,
       request: async () => {
@@ -243,7 +243,7 @@ async function populate(deployment: Deployment) {
     written = await entries();
   }
   await sql.close();
-  // A checkpoint over all of it, as the cron would have signed by now.
+  // The scheduled handler, as the Cron trigger would have run it by now.
   await deployment.scheduled();
   return { admin, reader, service: token, cli, entries: written };
 }

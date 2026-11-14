@@ -3,11 +3,11 @@
 // (docs/design/environments.md).
 import { randomUUID } from 'node:crypto';
 
-import { CoffreError } from '@coffre/client';
+import { CoffreError, type AuditEntryView } from '@coffre/client';
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
-import { expect, refused } from '../report.ts';
+import { expect, refused, until } from '../report.ts';
 import { canary, DEV, PROD, PROJECT, valuesIn, type Canaries, type People, type Person } from './people.ts';
 import { query } from './storage.ts';
 
@@ -164,16 +164,25 @@ export async function references(deployment: Deployment, { admin, reader, leaver
   expect(sourceKey !== undefined, 'prod holds no secret to refer to');
   const source = `${PROD}/${sourceKey}`;
   await refused('a viewer on dev read prod directly', reader.api.secrets.reveal(source));
-  expect(await outcome(leaver.api.secrets.set(DEV, { [HELD]: { ref: source } })) === '403 missing_secret_read',
-    "a developer on dev who cannot read prod made a reference to prod's secret");
+  // 0.14 refused it `missing_secret_read`; 0.16's vault, `no_access`, as any place the maker does not read.
+  const made = await outcome(leaver.api.secrets.set(DEV, { [HELD]: { ref: source } }));
+  expect(made === '403 no_access', "a developer on dev who cannot read prod made a reference to prod's secret", made);
 
   await admin.api.secrets.set(DEV, { [HELD]: { ref: source } });
   try {
     const read = await reader.api.secrets.reveal(`${DEV}/${HELD}`);
     expect(read.values[HELD] === canaries[source], "a viewer on dev did not read prod's value through dev's reference");
-    const logged = async (path: string) => (await admin.api.audit.list({ path, limit: 200 })).entries
-      .filter((entry) => entry.action === 'secret.read' && entry.actorId === reader.email && entry.metadata.via !== undefined).length;
-    expect(await logged(PROD) >= 1 && await logged(DEV) >= 1, "the read through the reference is not in both the source's log and the holder's");
+    // 0.16's entry names the read by its request, and each key read through a reference by its holder, `through`;
+    // the page lists it once the signer has published it, within its minute. The source key's own log is looked at
+    // too, to tell a read missing from prod's log from one missing from the log altogether.
+    const through = (entry: AuditEntryView) => entry.requestId === read.operationId && entry.action === 'secret.read'
+      && Array.isArray(entry.metadata.keys) && entry.metadata.keys.some((key: unknown) => typeof key === 'object' && key !== null && 'through' in key);
+    const seen: Record<string, boolean> = { [PROD]: false, [DEV]: false, [source]: false };
+    await until('the read through the reference on the logs', async () => {
+      for (const path of Object.keys(seen)) seen[path] ||= (await admin.api.audit.list({ path, limit: 200 })).entries.some(through);
+      return Object.values(seen).every(Boolean);
+    }, 90).catch(() => undefined);
+    expect(seen[PROD] && seen[DEV], "the read through the reference is not in both the source's log and the holder's", seen);
 
     // What it reads cannot be archived while it reads it (D41): not the key, nor its environment. Its
     // project could be, since the reference is held there too, and archiving it stops no one else's read.
@@ -201,29 +210,24 @@ export async function references(deployment: Deployment, { admin, reader, leaver
     const back = await reader.api.secrets.reveal(`${DEV}/${HELD}`);
     expect(back.values[HELD] === canaries[source], 'a reference did not read its source again once both were restored');
 
-    // A row the vault never sealed: a reference to prod, held in dev, pointing at a vault entry about something else.
+    // A row the vault never sealed: a key in dev whose row says it reads prod's secret, its MAC none of the vault's.
     const forged = await using(deployment.database(), async (sql) => {
-      const [holder] = await query<{ id: string; project_id: string; environment_id: string }>(sql,
-        'SELECT id, project_id, environment_id FROM secrets WHERE key = $1', [HELD]);
-      const [target] = await query<{ id: string; project_id: string; environment_id: string }>(sql,
-        'SELECT s.id, s.project_id, s.environment_id FROM secrets s JOIN environments e ON e.id = s.environment_id WHERE s.key = $1 AND e.slug = $2', [sourceKey, PROD.split('/')[1]]);
-      const [entry] = await query<{ seq: number | string | bigint }>(sql,
-        "SELECT seq FROM audit_log WHERE author = 'vault' AND action = 'access.grant' AND decision = 'allow' ORDER BY seq DESC LIMIT 1");
+      const [holder] = await query<{ project_id: string; environment_id: string }>(sql,
+        'SELECT project_id, environment_id FROM secrets WHERE key = $1', [HELD]);
+      const [target] = await query<{ id: string }>(sql,
+        'SELECT s.id FROM secrets s JOIN environments e ON e.id = s.environment_id WHERE s.key = $1 AND e.slug = $2', [sourceKey, PROD.split('/')[1]]);
       const id = randomUUID();
-      await query(sql, 'INSERT INTO secrets (id, project_id, environment_id, key, current_version) VALUES ($1, $2, $3, $4, 0)', [id, holder!.project_id, holder!.environment_id, FORGED]);
-      await query(sql, `INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [randomUUID(), holder!.project_id, holder!.environment_id, id, target!.project_id, target!.environment_id, target!.id, String(entry!.seq), admin.member]);
+      const now = new Date();
+      await query(sql, `INSERT INTO secrets (id, project_id, environment_id, key, created_at, updated_at, versions, source_id, source_set_at, source_set_by)
+        VALUES ($1, $2, $3, $4, $5, $5, 0, $6, $5, $7)`, [id, holder!.project_id, holder!.environment_id, FORGED, now, target!.id, admin.member]);
       return id;
     });
     try {
       const forgedRead = await outcome(reader.api.secrets.reveal(`${DEV}/${FORGED}`));
-      // Read from its seal, the row is no reference at all, and its key holds no value; the vault would refuse it anyway.
-      expect(['404 no_value', '404 not_found', '403 bad_claim'].includes(forgedRead), `a reference row the vault never made was read: ${forgedRead}`);
+      // A row the vault did not write is no row to it: the key is not there, and nothing is read through it.
+      expect(['404 no_value', '404 not_found'].includes(forgedRead), `a reference row the vault never made was read: ${forgedRead}`);
     } finally {
-      await using(deployment.database(), async (sql) => {
-        await query(sql, 'DELETE FROM secret_references WHERE secret_id = $1', [forged]);
-        await query(sql, 'DELETE FROM secrets WHERE id = $1', [forged]);
-      });
+      await using(deployment.database(), (sql) => query(sql, 'DELETE FROM secrets WHERE id = $1', [forged]));
     }
 
     await admin.api.references.break(`${DEV}/${HELD}`);
@@ -268,8 +272,15 @@ export async function loosening({ admin, reader, leaver }: People): Promise<stri
     expect(read.values[LOOSE] === value, "the reader did not read the loosened value as dev's secret");
     const versions = (await admin.api.secrets.history(path)).versions.map((version) => version.sensitivity);
     expect(versions.join() === 'secret,sensitive', 'the loosening changed the old version too, or made none', versions);
-    const logged = (await admin.api.audit.list({ path, limit: 50 })).entries.filter((entry) => entry.action === 'secret.loosen');
-    expect(logged.length === 1 && logged[0]!.metadata.from === 'sensitive' && logged[0]!.metadata.to === 'secret', 'the loosening is not its own entry, saying both levels', logged);
+    // The page lists what the signer has published, within its minute. The entry's line for the key says the nature it
+    // `was` and the one it is now (docs/design/0.16.md, "A change that makes any key looser is logged `secret.loosen`").
+    let logged: AuditEntryView[] = [];
+    await until('the loosening on the audit page', async () => {
+      logged = (await admin.api.audit.list({ path, limit: 50 })).entries.filter((entry) => entry.action === 'secret.loosen');
+      return logged.length > 0;
+    }, 90).catch(() => undefined);
+    const lines = (logged.length === 1 ? logged[0]!.metadata.keys : undefined) as { key?: unknown; was?: unknown; nature?: unknown }[] | undefined;
+    expect(lines?.some((line) => line.key === LOOSE && line.was === 'sensitive' && line.nature === 'secret') === true, 'the loosening is not its own entry, saying both levels', logged);
   } finally {
     await admin.api.secrets.set(DEV, { [LOOSE]: null });
   }

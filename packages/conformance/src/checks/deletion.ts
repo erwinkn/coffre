@@ -72,7 +72,8 @@ export async function deletion(deployment: Deployment, cli: Cli, admin: Person):
   expect((await admin.api.projects.list()).projects.every((project) => !project.slug.startsWith(PROJECT)), 'a deleted project is still listed');
   expect((await admin.api.members.get(SERVICE)).live.grants === 0, 'a grant on the deleted project is still live');
   const revealed = await admin.api.secrets.reveal(`${tombstone!.slug}/prod`).then(() => null, (error: unknown) => error);
-  expect(revealed instanceof CoffreError && revealed.status === 404, 'a deleted project is still revealed by its tombstone', revealed);
+  // 0.16 refuses the tombstone's slug as no path at all (400), where 0.14 found nothing there (404).
+  expect(revealed instanceof CoffreError && (revealed.status === 404 || revealed.status === 400), 'a deleted project is still revealed by its tombstone', revealed);
 
   // Its slug is another project's now; the log tells the two apart.
   const fresh = value();
@@ -81,7 +82,9 @@ export async function deletion(deployment: Deployment, cli: Cli, admin: Person):
   await admin.api.secrets.set(`${PROJECT}/prod`, { API_KEY: fresh });
   expect((await projectId(deployment, PROJECT)) !== id, 'the new project took the deleted one\'s row');
   expect((await admin.api.secrets.reveal(`${PROJECT}/prod/API_KEY`)).values.API_KEY === fresh, 'the new project does not read its own value');
-  const { entries } = await admin.api.audit.list({ path: tombstone!.slug, limit: 500 });
+  const page = await admin.api.audit.list({ path: tombstone!.slug, limit: 500 }).catch((error: unknown) => error);
+  expect(!(page instanceof Error), 'the log cannot be read under the tombstone\'s slug', page instanceof Error ? page.message : page);
+  const { entries } = page as Awaited<ReturnType<typeof admin.api.audit.list>>;
   expect(entries.some((entry) => entry.action === 'project.delete' && entry.decision === 'allow'), 'the deletion is not in the log under its tombstone', entries.slice(0, 5));
 
   // An environment alone, the same way.

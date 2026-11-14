@@ -31,7 +31,7 @@ for (const [error, reason, passes] of [
 
 async function auditFixture(t: test.TestContext, status: number, error: string, down = false) {
   const database = await scratch(t);
-  await using(database(), (sql) => sql.exec('CREATE TABLE audit_log (action TEXT)'));
+  await using(database(), (sql) => sql.exec('CREATE TABLE log_pending (body TEXT)'));
   let output = '';
   const deployment = { database, output: () => output } as Deployment;
   const admin = {
@@ -39,7 +39,7 @@ async function auditFixture(t: test.TestContext, status: number, error: string, 
       if (!down) {
         await using(database(), async (sql) => {
           try {
-            await sql.exec("INSERT INTO audit_log VALUES ('secret.read')");
+            await sql.exec(`INSERT INTO log_pending VALUES ('{"action":"secret.read"}')`);
           } catch (cause) {
             output += String(cause);
           }
@@ -47,7 +47,7 @@ async function auditFixture(t: test.TestContext, status: number, error: string, 
       }
       return Response.json({ error, message: 'something went wrong; see the server log' }, { status });
     } },
-    api: { secrets: { reveal: async () => ({ values: { API_KEY: 'canary' } }) } },
+    api: { secrets: { set: async () => ({}), reveal: async () => ({ values: { API_KEY: 'canary', NO_AUDIT_NO_VALUE: 'unlogged' } }) } },
   };
   return { deployment, people: { admin } as unknown as People, canaries: { [`${DEV}/API_KEY`]: 'canary' } };
 }

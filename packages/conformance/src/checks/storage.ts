@@ -1,7 +1,8 @@
 // SQL around coffre, as the database's owner: what the checks read, change
 // and put back behind its back.
 import type { Sql } from '../database.ts';
-import { expect } from '../report.ts';
+import type { Deployment } from '../harness.ts';
+import { expect, until } from '../report.ts';
 
 export const TABLES = [
   'projects', 'environments', 'secrets', 'secret_versions', 'principals', 'grants',
@@ -68,43 +69,44 @@ export async function transaction<T>(sql: Sql, work: () => Promise<T>): Promise<
 export const LOG_REFUSAL = 'coffre-conformance: the log refuses writes';
 
 /**
- * `work` with the audit log refusing appends, of one action or all, as a
- * full disk or a lost connection would, without changing the deployment's
- * code: a trigger, dropped after.
+ * `work` with the log refusing appends, of one action or all, as a full
+ * disk or a lost connection would, without changing the deployment's code:
+ * a trigger on `log_pending`, where the vault appends each entry, dropped
+ * after.
  */
 export async function logRefuses<T>(sql: Sql, work: () => Promise<T>, action?: string): Promise<T> {
-  const when = action === undefined ? '' : ` WHEN (NEW.action = '${action}')`;
+  const when = action === undefined ? '' : ` WHEN ((NEW.body::jsonb)->>'action' = '${action}')`;
   await sql.exec(`CREATE FUNCTION conformance_refuse() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN RAISE EXCEPTION '${LOG_REFUSAL}'; END $$;
-    CREATE TRIGGER conformance_refuse BEFORE INSERT ON audit_log FOR EACH ROW${when} EXECUTE FUNCTION conformance_refuse();`);
+    CREATE TRIGGER conformance_refuse BEFORE INSERT ON log_pending FOR EACH ROW${when} EXECUTE FUNCTION conformance_refuse();`);
   try {
     return await work();
   } finally {
-    await sql.exec('DROP TRIGGER conformance_refuse ON audit_log; DROP FUNCTION conformance_refuse();');
+    await sql.exec('DROP TRIGGER conformance_refuse ON log_pending; DROP FUNCTION conformance_refuse();');
   }
 }
 
-/** The log's fields in the order its format (`coffre.audit.v2`) encodes them. */
-const ENTRY_FIELDS = [
-  'seq', 'author', 'key_id', 'occurred_at', 'actor', 'action', 'decision', 'code', 'subject_principal', 'project_id',
-  'environment_id', 'secret_id', 'secret_version_id', 'operation_id', 'request_id', 'source_ip', 'related_seq', 'metadata',
-] as const;
+/** A log entry's body as the vault writes it (`Entry` in @coffre/vault): the fields the checks read. */
+export type Body = {
+  action: string;
+  actor: string | null;
+  request: string | null;
+  objects: string[];
+  detail: Record<string, unknown>;
+};
+
+/** Every entry, signed (`log`) or waiting to be (`log_pending`), oldest first, read in one statement. */
+export async function logBodies(sql: Sql): Promise<Body[]> {
+  const rows = await sql.query<{ body: string }>('SELECT body FROM (SELECT seq, 0 AS waiting, body FROM log UNION ALL SELECT id, 1, body FROM log_pending) entries ORDER BY waiting, seq');
+  return rows.map((row) => JSON.parse(row.body) as Body);
+}
 
 /**
- * An entry's fields as its MAC and hash cover them, written here from the
- * format rather than taken from coffre, so a check does not trust the code
- * it checks: each field length-prefixed in order, null as length -1.
+ * Wait for the signer's alert naming a row (`nameOf` in @coffre/vault:
+ * its table and key), in the processes' output, where a deployment with no
+ * `alert` of its own sends it. Its check runs each minute.
  */
-export function entryFields(row: Record<string, unknown>): Buffer {
-  return Buffer.concat(ENTRY_FIELDS.flatMap((field) => {
-    const header = Buffer.alloc(4);
-    const value = row[field];
-    if (value === null || value === undefined) {
-      header.writeInt32BE(-1);
-      return [header];
-    }
-    const bytes = Buffer.from(String(value));
-    header.writeInt32BE(bytes.length);
-    return [header, bytes];
-  }));
+export async function alerted(deployment: Deployment, table: string, ...key: unknown[]): Promise<void> {
+  const named = `- row ${JSON.stringify([table, ...key])}:`;
+  await until(`the signer's alert naming ${named}`, async () => deployment.output().includes(named), 150);
 }
