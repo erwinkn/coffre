@@ -5,7 +5,7 @@ import type { Answers, Called, TokenCreate } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { memberTokens, type MemberTokens, type TokenRow } from '../../db/queries/tokens.ts';
-import { changed } from '../change.ts';
+import { changed, weighed } from '../change.ts';
 import type { ApiContext } from '../context.ts';
 import { ApiError, badRequest, forbidden, notFound } from '../errors.ts';
 import { route } from '../route.ts';
@@ -37,6 +37,13 @@ export type TokenView = {
 
 /** A token made: its value, here and nowhere after. */
 export type IssuedToken = { id: string; token: string; expiresAt: string; scope: Record<string, string> };
+
+/** What a token would reach, each place by path and its role, as the vault would make it now: `?dryRun=1`'s answer. */
+export type TokenPlan = {
+  scope: Record<string, string>;
+  /** 0.14.7's places whose sensitive values it would not read (R32): never answered yet, as the weighing does not say them. */
+  withheld?: string[];
+};
 
 /** The most days a service's token lasts, as the vault takes it. */
 const SERVICE_TOKEN_DAYS = 366;
@@ -83,24 +90,42 @@ function drawn(kind: 'personal' | 'handle' | 'service', minutes: number, named: 
 }
 
 /**
- * A token made, by one change of the vault's, worded as 0.14.7 worded what
- * it refused with words of its own: who makes no personal token or handle,
- * and an instance whose services sign in by key alone.
+ * A refusal of `token.create`'s in the words 0.14.7 had of its own: who
+ * makes no personal token or handle, and an instance whose services sign
+ * in by key alone.
  */
+function worded(error: unknown): unknown {
+  if (error instanceof ApiError && error.reason === 'not_a_person') {
+    return new ApiError('forbidden', 'only a person makes a personal token or a handle: a service account reads its values', 'not_a_person');
+  }
+  if (error instanceof ApiError && error.reason === 'use_only') {
+    return new ApiError('forbidden', 'this instance issues no service token (useOnly): trust the workload with a binding, and it signs in with its key', 'use_only');
+  }
+  return error;
+}
+
+/** A token made, by one change of the vault's. */
 async function made(ctx: ApiContext, change: TokenCreate, token: string, what: string): Promise<IssuedToken> {
   let answer: Answers['token.create'];
   try {
     answer = await changed(ctx, change, what);
   } catch (error) {
-    if (error instanceof ApiError && error.reason === 'not_a_person') {
-      throw new ApiError('forbidden', 'only a person makes a personal token or a handle: a service account reads its values', 'not_a_person');
-    }
-    if (error instanceof ApiError && error.reason === 'use_only') {
-      throw new ApiError('forbidden', 'this instance issues no service token (useOnly): trust the workload with a binding, and it signs in with its key', 'use_only');
-    }
-    throw error;
+    throw worded(error);
   }
   return { id: answer.credential, token, expiresAt: answer.expiresAt, scope: answer.scope };
+}
+
+/**
+ * What a token would reach, weighed (`vault.weigh`) and not made: 0.14.7's
+ * `?dryRun=1`. One weigh, no statement, nothing written; a refusal is
+ * logged as the change's would be.
+ */
+async function planned(ctx: ApiContext, change: TokenCreate, what: string): Promise<TokenPlan> {
+  try {
+    return { scope: (await weighed(ctx, change, what)).scope };
+  } catch (error) {
+    throw worded(error);
+  }
 }
 
 /** A token's scope, by path, from its row: each place by id, those still there; none for a row whose scope does not read as one. */
@@ -202,26 +227,27 @@ export const tokenRoutes = {
    * its scope (`expiresInMinutes`, a label and a scope all said), or a
    * service account's (`expiresInDays`; its scope, or every grant it holds).
    * The value is in the answer, and only there. One change, no statement.
-   * `?dryRun=1`, 0.14.7's preview of what it would reach, is not served yet.
+   * `?dryRun=1` answers what it would reach, weighed and not made: one
+   * weigh, no statement.
    */
   ...route('POST /members/:member/tokens', {
     input: tokenInput,
     query: z.object({ dryRun: z.string().optional() }),
-    run: async (ctx, { params, input, query }): Promise<IssuedToken> => {
+    run: async (ctx, { params, input, query }): Promise<IssuedToken | TokenPlan> => {
       signsIn(ctx);
       const member = memberOf(params.member);
-      // Never a token made where only a preview was asked.
-      if (query.dryRun !== undefined) throw new ApiError('not_implemented', "previewing what a token would reach is not served yet");
+      // Weighed only, where only a preview was asked: never a token made.
+      const make = (change: TokenCreate, token: string) => (query.dryRun !== undefined ? planned(ctx, change, member) : made(ctx, change, token, member));
       if (member.startsWith('user:')) {
         if (input.label === null) throw badRequest('a personal token needs a label, which every entry it makes names');
         if (input.expiresInMinutes === undefined || input.expiresInDays !== undefined) throw badRequest('a personal token lasts expiresInMinutes, not days');
         if (input.scope === undefined) throw badRequest('a personal token needs a scope: what it reaches, by path');
         const { token, credential, hint } = drawn('personal', input.expiresInMinutes, input.label);
-        return made(ctx, { op: 'token.create', kind: 'personal', member, credential, hint, scope: input.scope }, token, member);
+        return make({ op: 'token.create', kind: 'personal', member, credential, hint, scope: input.scope }, token);
       }
       if (input.expiresInDays === undefined || input.expiresInMinutes !== undefined) throw badRequest('a service token lasts expiresInDays');
       const { token, credential, hint } = drawn('service', input.expiresInDays * 24 * 60, input.label);
-      return made(ctx, { op: 'token.create', kind: 'service', member, credential, hint, scope: input.scope ?? null }, token, member);
+      return make({ op: 'token.create', kind: 'service', member, credential, hint, scope: input.scope ?? null }, token);
     },
   }),
 

@@ -98,12 +98,15 @@ export type MemberRemove = { op: 'member.remove'; principal: string };
  * whoever runs the instance brings back. A row these weigh that the vault
  * did not write refuses, `tampered`. 1 to 1,000 places; past the shapes
  * above, or `admit` of a person, the call is a fault, not a refusal: the
- * app checks them first.
+ * app checks them first. `was`, given, is the grant the member holds at
+ * the place as an approval page showed it, or null for none: a live grant
+ * of their generation, as the member list has it. One that differs when
+ * the vault writes refuses `stale`, and nothing is changed.
  */
 export type AccessGrant = {
   op: 'access.grant';
   principal: string;
-  changes: { project: string; environment: string | null; role: Role | null; expiresAt: string | null }[];
+  changes: { project: string; environment: string | null; role: Role | null; expiresAt: string | null; was?: { role: Role; expiresAt: string | null } | null }[];
   admit?: boolean;
 };
 

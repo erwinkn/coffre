@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
-import type { KeyWrite, Presented, SecretWrite } from '@coffre/core/vault';
+import type { KeyWrite, Presented, Replaces, SecretRename, SecretWrite } from '@coffre/core/vault';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
@@ -217,13 +217,46 @@ test('a generated value that is not what the contract says is a fault, before an
     // A pair written in half, of two recipes, naming another pair, naming no key of its own, or one key twice.
     [item({ generated: made('ecdsa:p-256', PAIR) })], [item({ generated: made('ecdsa:p-384', PAIR) }), half], [item({ generated: made('ecdsa:p-256', { ...PAIR, public: 'OTHER' }) }), half],
     [{ key: 'OTHER', value: 'x', generated: made('ecdsa:p-256', PAIR) } as KeyWrite, half], [item({ generated: made('ecdsa:p-256', { private: PAIR.private, public: PAIR.private }) })],
-    // A version replaced that is no UUID, or by anything but a value.
-    [item({ replaces: 'v1' })], [item({ replaces: '0A000000-0000-4000-8000-000000000000' })], [{ key: 'TOKEN', restore: 1, replaces: '00000000-0000-4000-8000-000000000000' } as unknown as KeyWrite],
+    // What a key replaces said as no UUID, or not as a version, a source or null; or of a reset.
+    [item({ replaces: 'v1' })], [item({ replaces: '0A000000-0000-4000-8000-000000000000' })], [{ key: 'TOKEN', restore: 1, replaces: { source: 'v1' } } as unknown as KeyWrite],
+    [{ key: 'TOKEN', archived: true, replaces: { source: '00000000-0000-4000-8000-000000000000', more: 1 } } as unknown as KeyWrite], [{ key: 'TOKEN', archived: true, replaces: 1 } as unknown as KeyWrite],
     [{ key: 'TOKEN', restore: 1, generated: made('bytes:32:hex') } as unknown as KeyWrite], [{ key: 'TOKEN', archived: true, generated: made('bytes:32:hex') } as unknown as KeyWrite],
     [{ key: 'TOKEN', inherit: true, replaces: '00000000-0000-4000-8000-000000000000' } as unknown as KeyWrite],
   ];
   for (const keys of bad) await assert.rejects(vault.change(writing(keys)), TypeError, JSON.stringify(keys).slice(0, 120));
+  await assert.rejects(vault.change(renaming('DATABASE_URL', 'v1' as Replaces)), TypeError);
   assert.equal(world.woken.length, 0);
+});
+
+const renaming = (key: string, replaces?: Replaces, to = 'DB_URL'): Presented & SecretRename =>
+  ({ ...shown('ada-cli'), op: 'secret.rename', project: 'market', environment: 'prod', key, to, ...(replaces === undefined ? {} : { replaces }) });
+
+test('any change of a key but a reset may say what it replaces, a rename too: made over what the key reads now, `stale` over anything else', async () => {
+  const was = await listed('prod', 'DATABASE_URL');
+  await written(vault.change(writing([{ key: 'DATABASE_URL', value: 'postgres://new' }])));
+  // A version written since: an archiving, a restore, a reference, a mark and a rename over the one before are each refused, and write nothing.
+  const before = await versions();
+  for (const change of [writing([{ key: 'DATABASE_URL', archived: true, replaces: was }]), writing([{ key: 'DATABASE_URL', restore: 1, replaces: was }]),
+    writing([{ key: 'DATABASE_URL', ref: { project: 'billing', environment: 'prod', key: 'STRIPE_KEY' }, replaces: was }]),
+    writing([{ key: 'DATABASE_URL', nature: 'sensitive', replaces: was }]), renaming('DATABASE_URL', was)]) {
+    assert.deepEqual(await vault.change(change), { refused: 'stale' }, JSON.stringify(change).slice(0, 160));
+  }
+  assert.deepEqual([await versions(), (await said('prod', 'DATABASE_URL'))!.version], [before, 2]);
+  // Over what it reads now, each is made: a restore, a mark, then a rename, an archiving, and its return over nothing, which an archived key reads here.
+  await written(vault.change(writing([{ key: 'DATABASE_URL', restore: 1, replaces: await listed('prod', 'DATABASE_URL') }])));
+  await written(vault.change(writing([{ key: 'DATABASE_URL', nature: 'sensitive', replaces: await listed('prod', 'DATABASE_URL') }])));
+  assert.ok('answer' in (await vault.change(renaming('DATABASE_URL', await listed('prod', 'DATABASE_URL')))));
+  const kept = await listed('prod', 'DB_URL');
+  await written(vault.change(writing([{ key: 'DB_URL', archived: true, replaces: kept }])));
+  assert.deepEqual(await vault.change(writing([{ key: 'DB_URL', archived: false, replaces: kept }])), { refused: 'stale' }, 'archived, it reads no version');
+  await written(vault.change(writing([{ key: 'DB_URL', archived: false, replaces: null }])));
+  // A reference, by its source's id: archived over it, and not over another.
+  const [{ id: source }] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM secrets WHERE key = 'STRIPE_KEY'`);
+  assert.deepEqual(await vault.change(writing([{ key: 'REF', archived: true, replaces: { source: kept } }])), { refused: 'stale' });
+  assert.deepEqual(await vault.change(renaming('REF', null, 'REFERENCE')), { refused: 'stale' }, 'a reference reads its source');
+  await written(vault.change(writing([{ key: 'REF', archived: true, replaces: { source: source! } }])));
+  // With nothing said, as before: a rename of whatever holds the name.
+  assert.ok('answer' in (await vault.change(renaming('TOKEN', undefined, 'TOKEN_2'))));
 });
 
 test("`coffre run`'s own value: the first write into a personal config replaces the environment's version it was planned from, and of two runs at once exactly one writes", async () => {

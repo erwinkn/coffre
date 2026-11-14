@@ -154,13 +154,13 @@ async function runChecked(def: AnyRoute, params: Record<string, string>, raw: un
  * as a request's are: what an MCP tool calls (`mcp/tools.ts`), as its
  * connection, rather than a second request with a forged identity.
  */
-export async function runRoute<K extends RouteKey>(key: K, params: Params<K>, input: RouteInput<K>, ctx: ApiContext): Promise<RouteOutput<K>> {
+export async function runRoute<K extends RouteKey>(key: K, params: Params<K>, input: RouteInput<K>, ctx: ApiContext, query: Record<string, string> = {}): Promise<RouteOutput<K>> {
   try {
     const checked: Record<string, string> = { ...params };
     checkParams(checked);
     const def = routes[key] as AnyRoute;
-    // No query string: what a route reads from one is its default (a write, not its dry run).
-    return (await runChecked(def, checked, input ?? {}, def.query?.parse({}), ctx)) as RouteOutput<K>;
+    // No query string unless asked (`{ dryRun: '1' }`): what a route reads from one is its default (a write, not its dry run).
+    return (await runChecked(def, checked, input ?? {}, def.query?.parse(query), ctx)) as RouteOutput<K>;
   } catch (error) {
     noteTampered(error, key, ctx.shown.request);
     throw error;

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { ACCESS_TOKEN_MINUTES, APPROVAL_SECONDS, CODE_SECONDS, isMcpScope, MAX_CLIENTS, MAX_CONNECTIONS, MAX_PENDING, MCP_SCOPES, MCP_SHOWS, redirectKind, redirectMatches, scopeString, supersedes, type McpScope } from '@coffre/core/mcp';
+import { ACCESS_TOKEN_MINUTES, APPROVAL_SECONDS, CODE_SECONDS, isMcpScope, MAX_ASK_ARGUMENTS, MAX_CLIENTS, MAX_CONNECTIONS, MAX_PENDING, MCP_SCOPES, MCP_SHOWS, redirectKind, redirectMatches, scopeString, supersedes, type McpScope } from '@coffre/core/mcp';
 import type { Answers, Asked, McpAsk, McpChanges, McpClient, McpDecide, Presented } from '@coffre/core/vault';
 import { credentials, mcpApprovals, oauthClients, principals } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
@@ -408,12 +408,9 @@ function oauthRegister(input: Asked<'oauth.register'>): Operation<Parts, Answers
 const TOOL = /^[a-z][a-z_]{0,63}$/;
 /** A place, as `project/environment/KEY` or less: what the entry names, so plain slugs and a key's name. */
 const PLACE = /^[a-z0-9][a-z0-9-]{0,62}(\/[a-z0-9][a-z0-9-]{0,62}(\/[A-Za-z_][A-Za-z0-9_]{0,127})?)?$/;
-/** A tool's arguments, as JSON: a few names and a note. */
-const MOST_ARGUMENTS = 4096;
-
 /** Arguments as the app sends them: a JSON object, as its text. */
 function argumentsAsked(value: unknown): boolean {
-  if (!long(value, MOST_ARGUMENTS)) return false;
+  if (!long(value, MAX_ASK_ARGUMENTS)) return false;
   try {
     const parsed: unknown = JSON.parse(value);
     return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);

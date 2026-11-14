@@ -5,6 +5,5 @@
 // `api/routes/unserved.ts`. Only a route that comes back belongs here; a
 // check of one 0.16 drops goes with the route.
 export const UNSERVED: Readonly<Record<string, string>> = {
-  'verify keys': '`coffre verify keys` reads GET /audit/keys, which answers 501 until 0.16 serves it',
-  'ready once adopted': "/readyz says only that the database is migrated: whether the vault has adopted it and the signer signed comes with the vault's `about` call (T311; docs/design/0.16.md, \"Readiness\")",
+  'ready once adopted': "/readyz says only that the database is migrated: whether the vault has adopted it and the signer signed is still to design: both are stored, and the vault's `about` reads nothing (docs/design/0.16.md, \"Readiness\")",
 };

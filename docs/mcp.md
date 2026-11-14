@@ -92,6 +92,13 @@ what you name and lasts an hour unless told
 Each tool is coffre's API called as you, so a tool can do no more than you
 could with the CLI.
 
+**Not yet in 0.16.** `admit_member` adds a service account only for an
+admin or owner of the whole instance: a person who holds access, whom the
+instance's setting lets add one, is refused until 0.16 serves that setting
+again. Managing an account that is there (its access, tokens and trusted
+workloads) is as before. A token's or a binding's preview no longer names
+the places whose sensitive values it will not read.
+
 **Your client lists only the tools your roles reach.** A viewer's client
 sees the reads and the two that show values, not `set_access` or the
 audit log; an access manager's sees `list_access` and `set_access`, not
@@ -113,6 +120,13 @@ it replaces, read as the page opens. **Approve** makes the change there and
 then, as you, and the app only hears what became of it; **Deny** changes
 nothing. Nobody else can decide your approvals, and each expires after five
 minutes.
+
+Approve changes only what the page showed. If, after you opened it, a
+key it writes changed, someone was given another grant where it sets one,
+or a trust binding it would end appeared, nothing is changed: the page
+says so, and you open the approval again to see it as it is now. Nothing
+retries by itself. What only describes the change, such as how many
+sessions an offboarding ends, is checked when you press Approve.
 
 - **Claude Code**, and any client on MCP 2026-07-28 that can open a URL,
   asks you to open the page, and picks up the outcome by itself.

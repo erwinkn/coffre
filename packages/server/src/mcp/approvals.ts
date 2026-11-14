@@ -9,7 +9,7 @@
 // returns (D36), and it hears how it ended by the approval's id, a read.
 import { createHash } from 'node:crypto';
 
-import { APPROVAL_SECONDS, MAX_PENDING } from '@coffre/core/mcp';
+import { APPROVAL_SECONDS, MAX_ASK_ARGUMENTS, MAX_PENDING } from '@coffre/core/mcp';
 
 import { changed } from '../api/change.ts';
 import type { ApiContext } from '../api/context.ts';
@@ -113,13 +113,25 @@ export const approvalUrl = (publicUrl: string, id: string) => `${publicUrl}/appr
 const UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 
 /**
+ * A call's arguments as its approval keeps them, canonical JSON, or the 400
+ * that says they are too long for one, which the vault would take as a
+ * fault: checked before anything is read or asked.
+ */
+export function askable(args: Record<string, unknown>): string {
+  const text = canonical(args);
+  if (text.length > MAX_ASK_ARGUMENTS) throw badRequest(`this call's arguments are too long to ask for an approval: ${MAX_ASK_ARGUMENTS} characters as JSON at most, so name fewer places or claims at once`);
+  return text;
+}
+
+/**
  * The approval for a call that names none, the vault's (`mcp.ask`): a new
  * one, or the one the same call waits on (`joined`); none (`full`) past
  * `MAX_PENDING` waiting.
  */
 export async function ask(ctx: ApiContext, connection: string, tool: Tool, args: Record<string, unknown>): Promise<{ id: string; expiresAt: Date; joined: boolean } | { full: true }> {
+  const asked = askable(args);
   for (let attempt = 0; ; attempt += 1) {
-    const answer = await ctx.vault.change<'mcp.ask'>({ ...ctx.shown, op: 'mcp.ask', tool: tool.name, arguments: canonical(args), place: tool.change!.place(args as never) });
+    const answer = await ctx.vault.change<'mcp.ask'>({ ...ctx.shown, op: 'mcp.ask', tool: tool.name, arguments: asked, place: tool.change!.place(args as never) });
     if (!('refused' in answer)) return { id: answer.answer.approval, expiresAt: new Date(answer.answer.expiresAt), joined: false };
     if (answer.refused === 'full') return { full: true };
     if (answer.refused !== 'pending') throw refusal(answer.refused, tool.name);
@@ -228,8 +240,10 @@ function unread(error: unknown): Detail[] {
  * - Approve of a change: the change, on the person's session with the
  *   connection and the approval named (`via`): the vault writes the
  *   approval approved in the change's own write. Refused (another version
- *   set since, `stale`; expired; disconnected), nothing is written, and the
- *   approval still waits: the page shows why, and the person reloads it.
+ *   set since, a binding or a grant it would end or overwrite that the
+ *   page did not show, `stale`, worded as changed since they were asked;
+ *   expired; disconnected), nothing is written, and the approval still
+ *   waits: the page shows why, and the person reloads it. Nothing retries.
  * - Approve of a value shown: the value first, read as the person's own
  *   reveal, then `mcp.decide`. Should the second be refused (expired, or
  *   decided in another tab meanwhile), the person still sees the value,
@@ -276,9 +290,18 @@ export async function decide(ctx: ApiContext, id: string, input: Decide): Promis
     }
     if (basisOf(replaced) !== input.basis) throw conflict('this changed since you opened it: open the approval again');
   }
-  const { shown = [] } = await change.apply({ ...ctx, via: { connection: row.connectionId, approval: id, digest: input.digest } }, args, { value: input.value, replaced });
-  return { status: 'approved', outcome: change.done(args, new Date()), shown };
+  try {
+    const { shown = [] } = await change.apply({ ...ctx, via: { connection: row.connectionId, approval: id, digest: input.digest } }, args, { value: input.value, replaced });
+    return { status: 'approved', outcome: change.done(args, new Date()), shown };
+  } catch (error) {
+    // Between Approve's read and the vault's write, what it changes moved: nothing is, and the person decides on it as it is now.
+    if (error instanceof ApiError && error.reason === 'stale') throw conflict(STALE);
+    throw error;
+  }
 }
+
+/** What the person reads when the key changed between Approve's read and the vault's write. */
+export const STALE = 'this changed since you were asked, so nothing was changed: open the approval again to see it as it is now';
 
 /**
  * An approval, its tool and its client, if the caller is its person on a

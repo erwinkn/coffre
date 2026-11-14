@@ -3,5 +3,5 @@ export { DEK_BYTES, KekUnavailableError, KekCancelledError, KekRefusedError, Kek
 export { LocalKekProvider, equalBytes } from './local.ts';
 export { KekRegistry } from './registry.ts';
 export { AwsKmsKekProvider, awsKms, type AwsKmsOptions } from './aws-kms.ts';
-export { appLogKeyId, derivedSigningKey, KEY_CHECK, KEY_CHECK_CONTEXT, KEY_CHECK_VALUE, opensKeyCheck } from './check.ts';
+export { derivedSigningKey, keyCheckOf } from './check.ts';
 export type { AwsCredentials } from './sigv4.ts';

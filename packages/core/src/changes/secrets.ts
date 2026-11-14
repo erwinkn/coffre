@@ -53,17 +53,6 @@ export type Nature = 'secret' | 'sensitive' | 'plain';
  *   Never plain. A key pair's recipe writes its two keys together, each
  *   naming both, `{ private, public }`, with the same recipe: the two
  *   halves of one pair. A value typed, restored or referred to makes none.
- *   `replaces`: the version the key's value is now, by its id, as a
- *   listing gave it (`versionId`): its own live one, or in a fork that
- *   holds none, the one it inherits. Anything else, a key renamed,
- *   archived, made a reference or written since, refuses the write,
- *   `stale`: a regenerate addresses keys by name, and would otherwise
- *   write a name that no longer holds what it listed. `null`: the key
- *   reads no value now and is no reference, here or inherited (it is new,
- *   archived with none passed down, or a reference broken); `{ source }`:
- *   it reads, here or inherited, a reference to that secret, by its id (a
- *   listing's `reference.sourceId`). Anything else refuses either the same:
- *   an MCP approval's value, set over what its person read.
  * - `restore`: the key's next version, the value of that version of its
  *   own, opened and sealed again by the vault, which never hands it out.
  *   The value comes back as it was kept, plain, a secret or sensitive, and
@@ -106,17 +95,32 @@ export type Nature = 'secret' | 'sensitive' | 'plain';
  *   writing over a parent's does, and false `secret.read` too: the value
  *   serves again. A key no parent passes down is `not_inherited`.
  *
+ * Any of these but `inherit` may say what the key read when its author
+ * looked (`replaces`): the version the key's value is now, by its id, as a
+ * listing gave it (`versionId`), its own live one or, in a fork that holds
+ * none live, the one it inherits; `{ source }`, a reference, here or
+ * inherited, to that secret, by its id (a listing's `reference.sourceId`);
+ * or `null`, a key that reads no value now and is no reference, here or
+ * inherited (new, archived with none passed down, or a reference broken).
+ * Anything else, a key renamed, archived, made a reference or written
+ * since, refuses the write, `stale`: a regenerate, or an MCP approval's
+ * change, addresses keys by name, and would otherwise change a key that no
+ * longer holds what its person read.
+ *
  * A key that gets neither a value nor a reference is one the environment
  * holds. In a fork, a key reset to what it inherits is written over as if
  * it were live: it overrides its parent's again, as 0.14's did.
  */
-export type KeyWrite = { key: string; archived?: boolean; folder?: string | null; inherit?: undefined } & (
-  | { value: string; nature?: Nature; generated?: Generation; replaces?: string | null | { source: string }; ref?: undefined; restore?: undefined }
-  | { restore: number; value?: undefined; nature?: undefined; generated?: undefined; replaces?: undefined; ref?: undefined }
-  | { ref: SecretPath; value?: undefined; nature?: undefined; generated?: undefined; replaces?: undefined; restore?: undefined }
-  | { value?: undefined; nature?: undefined; generated?: undefined; replaces?: undefined; ref?: undefined; restore?: undefined }
-) | { key: string; nature: Nature; archived?: undefined; folder?: undefined; inherit?: undefined; value?: undefined; generated?: undefined; replaces?: undefined; ref?: undefined; restore?: undefined }
+export type KeyWrite = { key: string; archived?: boolean; folder?: string | null; replaces?: Replaces; inherit?: undefined } & (
+  | { value: string; nature?: Nature; generated?: Generation; ref?: undefined; restore?: undefined }
+  | { restore: number; value?: undefined; nature?: undefined; generated?: undefined; ref?: undefined }
+  | { ref: SecretPath; value?: undefined; nature?: undefined; generated?: undefined; restore?: undefined }
+  | { value?: undefined; nature?: undefined; generated?: undefined; ref?: undefined; restore?: undefined }
+) | { key: string; nature: Nature; replaces?: Replaces; archived?: undefined; folder?: undefined; inherit?: undefined; value?: undefined; generated?: undefined; ref?: undefined; restore?: undefined }
   | { key: string; inherit: boolean; archived?: undefined; folder?: undefined; value?: undefined; nature?: undefined; generated?: undefined; replaces?: undefined; ref?: undefined; restore?: undefined };
+
+/** What a key read when its author looked (`KeyWrite`'s): a version by its id, a reference to a secret by its id, or nothing. */
+export type Replaces = string | null | { source: string };
 
 /**
  * Write keys in one environment, all of them or none. 1 to 2,000 keys,
@@ -170,6 +174,8 @@ export type SecretRename = {
   mine?: boolean;
   key: string;
   to: string;
+  /** What the key read when its author looked, as a write's (`KeyWrite`): anything else now, `stale`. */
+  replaces?: Replaces;
 };
 
 /**

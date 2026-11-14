@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 
-import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
+import { KekRegistry, keyCheckOf, LocalKekProvider } from '@coffre/core/kek';
 import { openDatabase } from '@coffre/db/connect';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
@@ -39,6 +39,7 @@ async function vaultOn(database: string): Promise<TestVault> {
   let now = Date.now();
   const vault: TestVault = {
     db: own.db, owner: owner.db, keys: [keyOf(SEED)], keks, cap: { count: 1000, windowMs: 15 * 60_000 }, workloads: { noReads: false, useOnly: false }, memory: memoryOf(2), refused: new Map(), owners: [],
+    about: { kek: { provider: 'local', id: 'k' }, previous: [], checks: [keyCheckOf(SEED)] },
     now: () => now, tick: (ms) => void (now += ms), wake: (hash) => void woken.push(hash), woken,
     close: async () => void (await Promise.all([owner.close(), own.close()])),
   };

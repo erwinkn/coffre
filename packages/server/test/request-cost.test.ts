@@ -404,6 +404,8 @@ const requests: Record<string, Entry> = {
   // The audit page: the caller with the log's head, then the stretch and its tiles; by a path, its place first.
   'GET /audit': { request: () => api('cy-cli', 'GET', '/audit'), calls: ['caller'], statements: 2 },
   'GET /audit?path=': { request: () => api('cy-cli', 'GET', '/audit?path=market/dev'), calls: ['caller'], statements: 3 },
+  // What the keys an operator keeps are checked against: the vault's configuration, which reads nothing.
+  'GET /audit/keys': { request: () => api('cy-cli', 'GET', '/audit/keys'), calls: ['caller', 'about'], statements: 0, fixed: true },
 
   // Every change: one call to the vault, `change`, and no statement.
   'PATCH /secrets/:project/:environment': { request: () => api('bo-cli', 'PATCH', '/secrets/market/busy', { KEY: `fake-${round}` }), calls: ['change'], statements: 0 },
@@ -460,6 +462,8 @@ const requests: Record<string, Entry> = {
     request: () => take<{ id: string }>(api('bo-cli', 'POST', `/members/${ci}/tokens`, { label: null, expiresInDays: 1 }), (body) => (serviceToken = body.id)),
     calls: ['change'], statements: 0,
   },
+  // What a token would reach, weighed and not made: one `weigh`, no statement, nothing written, nothing sealed.
+  'POST /members/:member/tokens?dryRun=1': { request: () => api('bo-cli', 'POST', `/members/${ci}/tokens?dryRun=1`, { label: null, expiresInDays: 1, scope: { 'market/dev': 'viewer' } }), calls: ['weigh'], statements: 0 },
   'DELETE /members/:member/tokens/:id': { request: () => api('bo-cli', 'DELETE', `/members/${ci}/tokens/${serviceToken}`), calls: ['change'], statements: 0 },
   'DELETE /sessions/:id': { request: () => api('bo-cli', 'DELETE', `/sessions/${personal}`), calls: ['change'], statements: 0 },
   'POST /handles': { request: () => take<{ id: string; token: string }>(api('ada-cli', 'POST', '/handles', { label: 'run', paths: ['market/dev'] }), (body) => ([handle, handleToken] = [body.id, body.token])), calls: ['change'], statements: 0 },
@@ -502,6 +506,12 @@ const requests: Record<string, Entry> = {
   'POST /members/:member/bindings': {
     request: () => take<{ binding: { id: string } }>(api('bo-cli', 'POST', `/members/${ci}/bindings`, { profile: 'custom', issuer: KUBE, claims: POD, scope: { 'market/dev': 'viewer' } }), (body) => (bound = body.binding.id)),
     calls: ['caller', 'change'], statements: 1,
+  },
+  // A binding weighed and not made, as it would be made: `caller` and one statement before its issuer is asked where
+  // its keys are, then one `weigh` under the keys it found.
+  'POST /members/:member/bindings?dryRun=1': {
+    request: () => api('bo-cli', 'POST', `/members/${ci}/bindings?dryRun=1`, { profile: 'custom', issuer: KUBE, claims: POD, scope: { 'market/dev': 'viewer' } }),
+    calls: ['caller', 'weigh'], statements: 1,
   },
   'GET /members/:member/bindings': { request: () => api('bo-cli', 'GET', `/members/${ci}/bindings`), calls: ['caller'], statements: 1 },
   'GET /members/:member/bindings, by the service itself': { request: () => api('ci-token', 'GET', `/members/${ci}/bindings`), calls: ['caller'], statements: 1 },

@@ -125,7 +125,7 @@ In order, since each builds on the ones before:
 | verify as the admin, verify again | With the admin's session, twice: every check of the [owner tier](#signed-in-as-an-owner) passes, and none is skipped. The first makes `token:conformance-probe` and its grants; the second finds everything. No line shows a credential, the session or the canary, and the session still works after |
 | verify interrupted | The same, stopped with Ctrl-C mid-run: it exits 130, its credential revoked and the session still signed in, and nothing it printed shows a credential or a canary |
 | verify leftovers | After the runs: the service holds no credential, the CLI's session is the one `coffre login` made, `conformance/live/CANARY` is as the live setup wrote it, no other member, grant, project or environment changed, and the runs' entries are in the audit log |
-| verify keys | Skipped until 0.16 serves `GET /audit/keys`. `coffre verify keys` with the admin's session: the deployment's own keys pass, piped in, vault ID included; a wrong vault key and a malformed app key are each named. No key shows in what it prints |
+| verify keys | `coffre verify keys` with the admin's session: the deployment's own vault key passes, piped in, vault ID included; a wrong key and a malformed one are each named. No key shows in what it prints |
 | manage by CLI | With the admin's `coffre login` session: a project and its environment made, a secret set and renamed; `grant` to a service not yet admitted refused, naming `coffre admit … --service`; the service admitted and granted; `tokens issue --output-file` writes a 0600 file and prints no token; the token, piped to `coffre login --token` in a CLI of its own, reads the renamed secret; `tokens revoke` previews, then with `--apply` the token is refused, plainly; the grant revoked, the secret and the project archived, as `list --json` and `projects --json` show; `sessions --json` marks the CLI's own session |
 | delete by CLI | With the same session: `coffre projects delete` refuses a live project; archived, it shows what it would erase (five versions), revoke (the one grant of a service) and leave holding nothing, warns that earlier backups still hold the values, and changes nothing. With `--apply`, every version under it has an empty ciphertext and wrapped key in the database, the project is renamed `conformance-gone~deleted-<date>`, leaves every list and revealing it by its tombstone is 404; a new `conformance-gone` is another project, reading its own value, and the log names the deletion under the tombstone. `coffre environments delete` does the same for an environment, whose slug is then free in its project |
 | offboarding | Removing the leaver names the values they read, to rotate; their browser session, their CLI session and a new sign-in all stop at once. A removed service's token stops too |
@@ -201,7 +201,7 @@ log yet.
 - **A live instance's keys and settings.** The run uses its own keys and a
   local database. `coffre verify instance` sees what anyone on the network
   can, and what one token of its own can; `coffre verify keys` holds the
-  keys you keep to the instance ([keys.md](keys.md#check-your-escrow)).
+  key you keep to the instance ([keys.md](keys.md#check-your-escrow)).
 
 ## Against a running instance
 

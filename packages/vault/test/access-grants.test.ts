@@ -251,6 +251,9 @@ test('a change of grants shaped otherwise than the contract says is a fault, bef
     [{ project: 'market', role: 'Viewer' }],
     [{ project: 'market', role: 'viewer', expiresAt: 'tomorrow' }],
     [{ project: 'market', role: 'viewer', expiresAt: '2026-02-30T00:00:00Z' }],
+    [{ project: 'market', role: 'viewer', was: 'viewer' }],
+    [{ project: 'market', role: 'viewer', was: { role: 'Viewer', expiresAt: null } }],
+    [{ project: 'market', role: 'viewer', was: { role: 'viewer', expiresAt: 'soon' } }],
     Array.from({ length: 1001 }, (_, i) => ({ project: `p${i}`, role: 'viewer' })),
   ];
   for (const places of bad) {

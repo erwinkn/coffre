@@ -436,7 +436,7 @@ export const SECTIONS = [
       {
         command: 'verify keys',
         usage: ['verify keys [--vault-id <id>]'],
-        about: ['the vault key and app key you keep, checked on this machine'],
+        about: ['the vault key or signing key you keep, checked on this machine'],
       },
       { command: 'verify log', usage: ['verify log'], about: ['the whole audit log, as an auditor, admin or owner of all of it'] },
       {
