@@ -1,5 +1,6 @@
-// `coffre verify`: the keys held to check material made as the vault makes
-// it; what the CLI sends while it checks them, which is never a key; the
+// `coffre verify`: a key held to the checks the vault answers in `about`,
+// made as it makes them; what the CLI sends while it checks one, which is
+// never a key; the
 // session `coffre login` made, used and left signed in; and the choice of
 // check, on a terminal and off one. The real instance's side is the server's
 // tests, and conformance, which runs this CLI against a deployment.
@@ -14,32 +15,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { appLogKeyId, KEY_CHECK_CONTEXT, KEY_CHECK_VALUE, LocalKekProvider } from '@coffre/core/kek';
+import { derivedSigningKey, keyCheckOf } from '@coffre/core/kek';
 
 import { signInError } from '../src/instance.ts';
 import { Failure, Skip } from '../src/verify/checks.ts';
-import { appKeyVerdict, vaultKeyVerdict, type KeyMaterial } from '../src/verify/keys.ts';
+import { keyVerdict, type KeyMaterial } from '../src/verify/keys.ts';
 import { inTerminal, ptySkip, visible } from './pty.ts';
 
 const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
 
 const CURRENT = 'vault-2026-10-03-bbbbbb';
 const PREVIOUS = 'vault-2025-01-10-aaaaaa';
-const keys = { current: randomBytes(32), previous: randomBytes(32), app: randomBytes(32) };
+const keys = { current: randomBytes(32), previous: randomBytes(32), signing: randomBytes(32) };
 
-/** A key's check, as the vault writes it in a `key.check` entry and the instance gives it. */
-async function checkOf(key: Buffer, vaultId: string, seq: number): Promise<KeyMaterial['vault']['checks'][number]> {
-  const wrapped = await new LocalKekProvider(key, vaultId).wrap(Buffer.from(KEY_CHECK_VALUE), KEY_CHECK_CONTEXT);
-  return { seq, vaultId, provider: 'local', version: wrapped.kekVersion, wrapped: wrapped.bytes.toString('base64') };
-}
-
-/** What an instance rotated once gives: the app key's id, the current vault key, and both keys' checks, newest first. */
+/** What an instance rotated once answers, as `about` makes it: both local vault keys, and the checks of the signing keys they stand for, the current first. */
 const material: KeyMaterial = {
-  app: { keyId: appLogKeyId(keys.app) },
-  vault: {
-    current: { vaultId: CURRENT, provider: 'local' },
-    checks: [await checkOf(keys.current, CURRENT, 41), await checkOf(keys.previous, PREVIOUS, 2)],
-  },
+  kek: { provider: 'local', id: CURRENT },
+  previous: [{ provider: 'local', id: PREVIOUS }],
+  checks: [keyCheckOf(derivedSigningKey(keys.current)), keyCheckOf(derivedSigningKey(keys.previous))],
 };
 
 const b64 = (key: Buffer) => key.toString('base64');
@@ -56,51 +49,42 @@ async function refusal(verdict: () => unknown): Promise<string> {
   assert.fail('the key passed');
 }
 
-test('the vault key: the current one passes, with its vault ID; a previous one is named as such; another fails', async () => {
-  assert.equal(await vaultKeyVerdict(b64(keys.current), material.vault), `the current one, vault ID ${CURRENT}`);
-  assert.equal(await vaultKeyVerdict(b64(keys.current), material.vault, CURRENT), `the current one, vault ID ${CURRENT}, as given`);
+test('a local vault key: the current one passes, its vault ID shown, or compared when given; a previous one is named as such; another fails', async () => {
+  assert.equal(keyVerdict(b64(keys.current), material), `the vault key the vault signs with now; it wraps under vault ID ${CURRENT}`);
+  assert.equal(keyVerdict(b64(keys.current), material, CURRENT), `the vault key the vault signs with now; it wraps under vault ID ${CURRENT}, as given`);
   assert.equal(
-    await refusal(() => vaultKeyVerdict(b64(keys.current), material.vault, PREVIOUS)),
-    `✗ the key is right, but its vault ID is ${CURRENT}, not ${PREVIOUS}: keep the right one with it`,
+    await refusal(() => keyVerdict(b64(keys.current), material, PREVIOUS)),
+    `✗ the vault key is right, but the vault wraps under ${CURRENT}, not ${PREVIOUS}: keep the right ID with it`,
   );
-  assert.equal(
-    await refusal(() => vaultKeyVerdict(b64(keys.previous), material.vault)),
-    `✗ this is a previous vault key (vault ID ${PREVIOUS}), not the current one: the vault wraps under vault ID ${CURRENT}`,
-  );
-  assert.equal(
-    await refusal(() => vaultKeyVerdict(b64(randomBytes(32)), material.vault)),
-    `✗ not this instance's vault key: it opens none of the checks of its 2 vault keys, current or replaced. The vault wraps under vault ID ${CURRENT}`,
-  );
-  // The app key is no vault key, though of the same shape.
-  assert.match(await refusal(() => vaultKeyVerdict(b64(keys.app), material.vault)), /^✗ not this instance's vault key/);
+  assert.match(await refusal(() => keyVerdict(b64(keys.previous), material)), new RegExp(`^✗ a vault key the vault only verifies with, not the one it signs with now: a previous one, .* The vault wraps under vault ID ${CURRENT}$`));
+  for (const other of [randomBytes(32), derivedSigningKey(randomBytes(32))]) {
+    assert.equal(
+      await refusal(() => keyVerdict(b64(other), material)),
+      `✗ not this instance's: no key the vault signs or verifies with, taken as a vault key or as a signing key. The vault wraps under vault ID ${CURRENT}`,
+    );
+  }
 });
 
-test('a vault that moved to a key service: the local key it replaced is named as previous', async () => {
-  const moved: KeyMaterial['vault'] = {
-    current: { vaultId: 'arn:aws:kms:eu-west-1:111122223333:key/coffre', provider: 'aws-kms' },
-    checks: [{ seq: 50, vaultId: 'arn:aws:kms:eu-west-1:111122223333:key/coffre', provider: 'aws-kms', version: '1', wrapped: b64(randomBytes(184)) }, material.vault.checks[0]!],
+test("a key service and its signingKey: the signingKey passes as the signing key; the local key it replaced is a previous one; the service's ID is shown, not proven", async () => {
+  const moved: KeyMaterial = {
+    kek: { provider: 'aws-kms', id: 'arn:aws:kms:eu-west-1:111122223333:key/coffre' },
+    previous: [{ provider: 'local', id: CURRENT }],
+    checks: [keyCheckOf(keys.signing), material.checks[0]!],
   };
-  assert.match(await refusal(() => vaultKeyVerdict(b64(keys.current), moved)), /^✗ this is a previous vault key \(vault ID vault-2026-10-03-bbbbbb\), not the current one: the vault wraps under arn:\S+, in aws-kms$/);
-});
-
-test('the app key: the one the app signs with passes; another fails; neither key is in what is said', async () => {
-  assert.equal(appKeyVerdict(b64(keys.app), material.app), 'the one the app signs with now');
-  assert.equal(await refusal(() => appKeyVerdict(b64(keys.current), material.app)), "✗ not this instance's app key: the app signs with another");
-  // One the app replaced, kept to verify the log: said, and still not the one to escrow as current.
-  const replaced = { ...material.app, previous: [appLogKeyId(keys.current)] };
-  assert.equal(await refusal(() => appKeyVerdict(b64(keys.current), replaced)), `✗ this is a previous app key (${appLogKeyId(keys.current)}), not the current one: the app signs with ${material.app.keyId}`);
+  assert.equal(keyVerdict(b64(keys.signing), moved), 'the signing key the vault signs with now; it wraps under arn:aws:kms:eu-west-1:111122223333:key/coffre, in aws-kms');
+  assert.match(await refusal(() => keyVerdict(b64(keys.current), moved)), /^✗ a vault key the vault only verifies with, not the one it signs with now: .* The vault wraps under arn:\S+, in aws-kms$/);
+  // The local key's own signing key, pasted as such, is the same key: named a signing key.
+  assert.match(await refusal(() => keyVerdict(b64(derivedSigningKey(keys.current)), moved)), /^✗ a signing key the vault only verifies with/);
 });
 
 test('a malformed key is said to be one, without being shown; an empty answer skips the key', async () => {
   const text = b64(keys.current);
   for (const malformed of [text.slice(1), keys.current.toString('hex'), 'hunter2', `${text}${text}`]) {
-    for (const said of [await refusal(() => vaultKeyVerdict(malformed, material.vault)), await refusal(() => appKeyVerdict(malformed, material.app))]) {
-      assert.match(said, /^✗ not an? (vault|app) key: one is 32 bytes in base64, 44 characters, and these \d+ characters are not$/);
-      assert.ok(!said.includes(malformed));
-    }
+    const said = await refusal(() => keyVerdict(malformed, material));
+    assert.match(said, /^✗ not a key: one is 32 bytes in base64, 44 characters, and these \d+ characters are not$/);
+    assert.ok(!said.includes(malformed));
   }
-  assert.equal(await refusal(() => vaultKeyVerdict('', material.vault)), '– not given: not checked');
-  assert.equal(await refusal(() => appKeyVerdict('', material.app)), '– not given: not checked');
+  assert.equal(await refusal(() => keyVerdict('', material)), '– not given: not checked');
 });
 
 // --- the command, against an instance that records what it is sent ---------------
@@ -158,36 +142,32 @@ async function coffre(args: string[], home: string, input = '', env: NodeJS.Proc
 /** Every form a key could be sent in. */
 const forms = (key: Buffer) => [key.toString('base64'), key.toString('base64url'), key.toString('hex'), encodeURIComponent(key.toString('base64'))];
 
-test('coffre verify keys reads what the keys are checked against, and sends nothing else: no key, in any form', async (t) => {
+test('coffre verify keys reads what the key is checked against, and sends nothing else: no key, in any form', async (t) => {
   const instance = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/audit/keys' ? material : undefined));
   const { home } = signedInHome(t, instance.origin);
 
-  // On stdin, as a script pipes them: the vault key's line, then the app key's.
-  const right = await coffre(['verify', 'keys'], home, `${b64(keys.current)}\n${b64(keys.app)}\n`);
+  // On stdin, as a script pipes it: the key's line.
+  const right = await coffre(['verify', 'keys'], home, `${b64(keys.current)}\n`);
   assert.equal(right.code, 0, right.stderr);
-  assert.match(right.stdout, /✓ vault key +the current one, vault ID vault-2026-10-03-bbbbbb \(from stdin\)/);
-  assert.match(right.stdout, /✓ app key +the one the app signs with now \(from stdin\)/);
-  assert.match(right.stdout, new RegExp(`Both keys are ${instance.origin}'s\\.`));
+  assert.match(right.stdout, /✓ key +the vault key the vault signs with now; it wraps under vault ID vault-2026-10-03-bbbbbb \(from stdin\)/);
+  assert.match(right.stdout, new RegExp(`The key is ${instance.origin}'s\\.`));
 
-  const previous = await coffre(['verify', 'keys'], home, `${b64(keys.previous)}\n${b64(randomBytes(32))}\n`);
+  // 0.14's two lines, the app key's second: the vault key checked, and the app key's line said to be unread.
+  const previous = await coffre(['verify', 'keys'], home, `${b64(keys.previous)}\n${b64(keys.signing)}\n`);
   assert.equal(previous.code, 1);
-  assert.match(previous.stdout, /✗ vault key +this is a previous vault key \(vault ID vault-2025-01-10-aaaaaa\), not the current one: .* \(from stdin\)/);
-  assert.match(previous.stdout, /✗ app key +not this instance's app key: the app signs with another \(from stdin\)/);
-  assert.match(previous.stdout, /Neither key is /);
+  assert.match(previous.stdout, /✗ key +a vault key the vault only verifies with, not the one it signs with now: .* \(from stdin\)/);
+  assert.match(previous.stdout, /stdin's other lines are not read: the app key has nothing to be checked against/);
+  assert.match(previous.stdout, /The key is not the one /);
 
-  // One key alone, a blank line for the other: that one skipped, not failed.
-  const one = await coffre(['verify', 'keys'], home, `\n${b64(keys.app)}\n`);
-  assert.equal(one.code, 0);
-  assert.match(one.stdout, /– vault key +not given: not checked/);
-  assert.match(one.stdout, /The app key is /);
-  const none = await coffre(['verify', 'keys'], home, '\n\n');
+  const none = await coffre(['verify', 'keys'], home, '\n');
   assert.equal(none.code, 1);
+  assert.match(none.stdout, /– key +not given: not checked/);
   assert.match(none.stdout, /No key given: nothing checked/);
 
   assert.deepEqual(new Set(instance.seen.map(({ method, url }) => `${method} ${url}`)), new Set(['GET /api/audit/keys']));
   const sent = JSON.stringify(instance.seen);
   for (const key of Object.values(keys)) for (const form of forms(key)) assert.ok(!sent.includes(form), 'a key was sent');
-  for (const run of [right, previous, one]) for (const key of Object.values(keys)) assert.ok(!(run.stdout + run.stderr).includes(b64(key)), 'a key was printed');
+  for (const run of [right, previous]) for (const key of Object.values(keys)) assert.ok(!(run.stdout + run.stderr).includes(b64(key)), 'a key was printed');
 });
 
 test('coffre verify keys is refused before any key is asked for, for someone who may not read the checks', async (t) => {
@@ -276,21 +256,18 @@ test('coffre verify alone, on a terminal, asks which check, and runs the one cho
   assert.match(shown, /audit log OK: verified from the first entry through entry 11, 12 entries/);
 });
 
-test('coffre verify keys, on a terminal, asks for each key without showing it', { skip: ptySkip }, async (t) => {
+test('coffre verify keys, on a terminal, asks for the key without showing it', { skip: ptySkip }, async (t) => {
   const instance = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/audit/keys' ? material : undefined));
   const { home } = signedInHome(t, instance.origin);
   const { output, code } = await inTerminal(['verify', 'keys'], { ...cleanEnv(), HOME: home }, async (terminal) => {
-    await terminal.waitFor('Vault key?');
+    await terminal.waitFor('Vault key, or signing key?');
     terminal.send(`${b64(keys.previous)}\r`);
-    await terminal.waitFor('App key?');
-    terminal.send(`${b64(keys.app)}\r`);
     await terminal.waitFor('is not');
   });
   assert.equal(code, 1);
   const shown = visible(output);
   assert.match(shown, /•{44} {2}44 characters/);
-  assert.match(shown, /✗ vault key +this is a previous vault key \(vault ID vault-2025-01-10-aaaaaa\), not the current one/);
-  assert.match(shown, /✓ app key +the one the app signs with now\r?\n/);
+  assert.match(shown, /✗ key +a vault key the vault only verifies with, not the one it signs with now/);
   for (const key of Object.values(keys)) for (const form of forms(key)) assert.ok(!output.includes(form), 'a key was shown');
 });
 

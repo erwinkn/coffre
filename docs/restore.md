@@ -26,9 +26,9 @@ Keep the keys apart from the backups. A backup alone opens nothing, and the
 keys alone hold nothing; whoever has both has every value.
 
 Check your escrow before you need it: `coffre verify keys`, as an Admin or
-Owner of the whole instance, asks for the vault key and the app key you keep, and checks
-each against the running instance on your machine, sending neither. A vault
-key it replaced is named as such ([keys.md](keys.md#check-your-escrow)). Do
+Owner of the whole instance, asks for the vault key you keep, or with a key
+service the `signingKey`, and checks it against the running instance on your
+machine, sending nothing of it. A vault key it replaced is named as such ([keys.md](keys.md#check-your-escrow)). Do
 it once the keys are saved, and after every rotation.
 
 ## Before you restore
