@@ -5,12 +5,13 @@ import { after, beforeEach, test } from 'node:test';
 import { INSTANCE_ROLES, ROLES } from '@coffre/core/access';
 import { deriveLogKey, sealEntry, type LogFields } from '@coffre/core/audit';
 import { encrypt, ownerKey, type SecretContext } from '@coffre/core/envelope';
+import type { Transaction } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { auditArchive, credentials, environments, grants, principals, projects, secrets, secretVersions } from '@coffre/db/schema';
 import { sql } from 'drizzle-orm';
 
 import { adopt, adopted } from '../src/adopt.ts';
-import { keyOf, shapeOf, type Fresh } from '../src/rows.ts';
+import { keyOf, sealedBy, shapeOf, type Fresh } from '../src/rows.ts';
 import { MIRRORED, Signer, type Finding } from '../src/signer.ts';
 import { use, type Value } from '../src/use.ts';
 import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
@@ -178,6 +179,66 @@ test("a secret's row says what its current value opened as, whatever the rows sa
   assert.equal(await adopting(), true);
   assert.deepEqual(await natures(), { 'prod DATABASE_URL': 'secret', 'prod FLAG': 'plain', 'prod STRIPE_KEY': 'sensitive', 'prod ERASED': 'sensitive', 'prod-ada DATABASE_URL': 'sensitive' });
   assert.equal(await unsealed(), 0);
+});
+
+/**
+ * The adoption run with a writer's transaction open beside it: `hold` before
+ * it starts, then `then` once it waits on a row that writer holds, then the
+ * writer's commit. What the adoption answers.
+ */
+async function racing(hold: (tx: Transaction) => Promise<unknown>, then: (tx: Transaction) => Promise<unknown>): Promise<boolean> {
+  const [running] = await vault.owner.transaction(async (tx) => {
+    await hold(tx);
+    const adoption = adopting();
+    let settled = false;
+    adoption.then(() => (settled = true), () => (settled = true));
+    for (;;) {
+      const [{ waiting }] = await rowsOf<{ waiting: number }>(tx, sql`SELECT count(*)::int AS waiting FROM pg_locks WHERE NOT granted AND pg_backend_pid() = ANY(pg_blocking_pids(pid))`);
+      if (waiting > 0 || settled) break;
+    }
+    await then(tx);
+    // In an array, so that the transaction commits without waiting for the adoption, which waits for it.
+    return [adoption];
+  });
+  return running!;
+}
+
+const sealedRow = async (id: string) => {
+  const [row] = await vault.owner.select().from(secrets).where(sql`${secrets.id} = ${id}`);
+  return sealedBy(vault.keys, secrets, row!) !== undefined;
+};
+
+test("a row a writer changes while the adoption runs is sealed with its current value's nature, or not at all", async () => {
+  const w = await upgraded();
+  // STRIPE_KEY shows no current value as the adoption begins, and its sensitive version once the adoption has passed
+  // it by, marked plain: the row it seals says sensitive.
+  await vault.owner.execute(sql`UPDATE secrets SET current_version = NULL, nature = NULL WHERE id = ${w.stripe.id}`);
+  assert.equal(
+    await racing(
+      (tx) => tx.execute(sql`UPDATE projects SET name = name WHERE id = ${w.market.id}`),
+      (tx) => tx.execute(sql`UPDATE secrets SET current_version = 1, nature = 'plain' WHERE id = ${w.stripe.id}`),
+    ),
+    true,
+  );
+  assert.equal((await natures())['prod STRIPE_KEY'], 'sensitive');
+  assert.equal(await sealedRow(w.stripe.id), true);
+
+  // DATABASE_URL shows its older version, plain, and a writer brings back its newer one, keeping that nature, between
+  // the adoption's read of the row and its write: the row is left with a MAC over what it no longer holds.
+  await emptyDatabase(vault.owner);
+  store = memoryStore();
+  const again = await upgraded();
+  await vault.owner.execute(sql`UPDATE secret_versions SET plaintext = 'postgres://old' WHERE secret_id = ${again.database.id} AND version = 1`);
+  await vault.owner.execute(sql`UPDATE secrets SET versions = 1, current_version = 1, nature = 'plain' WHERE id = ${again.database.id}`);
+  assert.equal(
+    await racing(
+      (tx) => tx.execute(sql`UPDATE secrets SET versions = 2, current_version = 2 WHERE id = ${again.database.id}`),
+      async () => {},
+    ),
+    true,
+  );
+  assert.deepEqual(await rowsOf(vault.owner, sql`SELECT current_version, nature FROM secrets WHERE id = ${again.database.id}`), [{ current_version: 2, nature: 'plain' }]);
+  assert.equal(await sealedRow(again.database.id), false);
 });
 
 test('a fresh database is adopted with the roles as they ship and the Owners the configuration names, then served', async () => {
