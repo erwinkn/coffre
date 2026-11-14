@@ -19,7 +19,7 @@ import { unknownKeyAlert } from './alerts.ts';
 import { ApiError, noteTampered, notFound, refusal, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import { issuerBindings, type IssuerBinding } from './db/queries/bindings.ts';
 import { errorResponse, jsonResponse, readLimitedJson } from './http.ts';
-import { logged } from './logged.ts';
+import { logged } from '@coffre/db/dialect';
 import type { CoffreRuntime } from './runtime.ts';
 import { IssuerUnavailable, verifyWithKeys } from './workloads/keys.ts';
 

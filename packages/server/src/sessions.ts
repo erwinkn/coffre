@@ -23,7 +23,7 @@ import { limitAlert, sendAlert } from './alerts.ts';
 import { ApiError } from './api/errors.ts';
 import { routedSession, type RoutedSession } from './db/queries/sessions.ts';
 import { errorResponse, jsonResponse } from './http.ts';
-import { logged } from './logged.ts';
+import { logged } from '@coffre/db/dialect';
 import type { CoffreRuntime } from './runtime.ts';
 
 /** `Authorization: DPoP <token>`: a workload's session; null for any other scheme. */

@@ -1,8 +1,6 @@
 import { z } from 'zod';
 
-import { gaveUp, isUnavailable } from '@coffre/db/dialect';
-
-import { logged } from '../logged.ts';
+import { gaveUp, isUnavailable, logged } from '@coffre/db/dialect';
 
 /**
  * Every API error has one shape, `{ "error": code, "message": sentence }`,

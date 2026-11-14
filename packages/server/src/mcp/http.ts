@@ -8,7 +8,7 @@ import type { Asked } from '@coffre/core/vault';
 
 import { ApiError, noteTampered, refusal, toErrorBody, UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { errorResponse, jsonResponse, readLimitedJson, readLimitedText } from '../http.ts';
-import { logged } from '../logged.ts';
+import { logged } from '@coffre/db/dialect';
 import type { CoffreRuntime } from '../runtime.ts';
 import { admit, isResource, mcpOf, OAuthError, resourceOf } from './oauth.ts';
 

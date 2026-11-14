@@ -6,7 +6,7 @@ import { ApiError, notFound, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import { ExchangeRefused, UnknownKey, type WorkloadService } from './api/workloads.ts';
 import { dpopToken, SessionRefused, signedUrl, standingSession } from './workload-sessions.ts';
 import { errorResponse, jsonResponse, readLimitedJson } from './http.ts';
-import { logged } from './logged.ts';
+import { logged } from '@coffre/db/dialect';
 import type { CoffreRuntime } from './runtime.ts';
 
 // 0.14's workload sessions under `/api/auth`, the source to port from when

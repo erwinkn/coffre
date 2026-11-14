@@ -41,7 +41,7 @@ import { update, type BindingRow } from './db/queries.ts';
 import { workloadSession, type SessionRow } from './db/workloads.ts';
 import { credentials } from '@coffre/db/schema';
 import { errorResponse, jsonResponse } from './http.ts';
-import { logged } from './logged.ts';
+import { logged } from '@coffre/db/dialect';
 import type { CoffreRuntime } from './runtime.ts';
 
 /** A narrowed session's ancestors are at most this many: `narrow` goes four deep (section 8.4). */

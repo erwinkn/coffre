@@ -13,9 +13,9 @@
 //   lack, once an hour per service, since anyone who knows the service and
 //   its issuer can send one.
 import type { GateCount, WorkloadAlert, WorkloadsConfig } from '@coffre/core/identity';
+import { logged } from '@coffre/db/dialect';
 
 import type { Gates } from './gate.ts';
-import { logged } from './logged.ts';
 
 /** How long a refusal waits on the deployment's alert: past it, it answers, and the alert goes on without it. */
 const ALERT_WAIT_MS = 2_000;
