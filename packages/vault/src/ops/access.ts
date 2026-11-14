@@ -36,6 +36,9 @@ const isMember = (value: unknown): value is string => text(value) && PRINCIPAL.t
 /** The most slugs a scope's list names: as many as a credential's scope names places. */
 const MOST_SLUGS = 1000;
 
+/** A place's slug as one is made (`SLUG` in places.ts): a scope names its projects and environments by theirs, so no other text reaches the row or the log. */
+const SLUG = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
 /** A filter as the app names it, copied: an array from another isolate may have holes, which no check of its items sees. */
 function filterOf(value: unknown): Filter | undefined {
   if (value === 'all') return 'all';
@@ -44,7 +47,7 @@ function filterOf(value: unknown): Filter | undefined {
   const list: unknown = (value as Record<string, unknown>)[kind!];
   if (more.length > 0 || (kind !== 'only' && kind !== 'except') || !Array.isArray(list) || list.length > MOST_SLUGS) return undefined;
   const items = [...list];
-  if (!items.every((item) => text(item) && item.length > 0)) return undefined;
+  if (!items.every((item) => typeof item === 'string' && SLUG.test(item))) return undefined;
   return kind === 'only' ? { only: items as string[] } : { except: items as string[] };
 }
 
@@ -61,11 +64,14 @@ function scopeOf(row: Row<typeof principals>): Scope | null {
   }
 }
 
-/** Whether an active member's row makes them an Owner of the whole instance: Owner, scoped nowhere. */
+/** Whether an active member's row makes them an Owner of the whole instance: a person, Owner, scoped nowhere. A service account owns nothing, as `callerOf` takes it. */
 function ownsAll(row: Row<typeof principals>): boolean {
   const scope = scopeOf(row);
-  return scope !== null && ownsInstance({ role: row.role as InstanceRole, scope });
+  return row.id.startsWith('user:') && scope !== null && ownsInstance({ role: row.role as InstanceRole, scope });
 }
+
+/** Whether the caller runs the instance by a role whose row was read: a role with no row is no role, as `project.create` takes it. */
+const runs = (caller: Asking) => runsInstance(caller.holds) && Object.hasOwn(caller.holds.policy.instanceRoles, caller.holds.role);
 
 /** Whether the caller is an Owner of the whole instance, on a credential no scope narrows. */
 const ownsAllAsking = (caller: Asking) => caller.holds.credentialScope == null && ownsInstance(caller.holds);
@@ -129,11 +135,11 @@ function membership(input: MemberAdd | MemberRestore | MemberRole): { principal:
 /**
  * The scope as the row keeps it, its projects by id, from the projects the
  * read found by their slugs: null, everywhere. Undefined when a slug names
- * no project there is, or one deleted.
+ * no project there is (a deleted one's slug holds a `~`, which none asked does).
  */
 function scopeWritten(asked: ScopeInput | null, found: readonly Row<typeof projects>[]): string | null | undefined {
   if (asked === null) return null;
-  const ids = listOf(asked.projects).map((slug) => found.find((row) => row.slug === slug && !row.slug.includes('~'))?.id);
+  const ids = listOf(asked.projects).map((slug) => found.find((row) => row.slug === slug)?.id);
   if (ids.includes(undefined)) return undefined;
   const scope = normalScope({ projects: asked.projects === 'all' ? 'all' : 'only' in asked.projects ? { only: ids as string[] } : { except: ids as string[] }, environments: asked.environments });
   return unscoped(scope) ? null : JSON.stringify(scope);
@@ -171,7 +177,7 @@ const admit = (action: 'member.add' | 'member.restore') =>
       decide(seen: Seen<typeof read>, at: number) {
         const caller = asking(seen, shown, vault, at);
         if ('refused' in caller) return caller;
-        if (!runsInstance(caller.holds) || (role === 'owner' && !ownsAllAsking(caller))) return { refused: 'no_access' };
+        if (!runs(caller) || (role === 'owner' && !ownsAllAsking(caller))) return { refused: 'no_access' };
         const [was] = seen.member;
         if (action === 'member.add' ? was !== undefined : was?.status !== 'removed') {
           return { refused: was === undefined ? 'not_a_member' : was.status === 'removed' ? 'removed' : 'exists' };
@@ -222,13 +228,13 @@ function memberRole(input: Presented & MemberRole, vault: Deciding): Operation<P
     decide(seen: Seen<typeof read>, at: number) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
-      if (!runsInstance(caller.holds)) return { refused: 'no_access' };
+      if (!runs(caller)) return { refused: 'no_access' };
       const [was] = seen.member;
       if (was === undefined || was.status !== 'active') return { refused: was === undefined ? 'not_a_member' : 'removed' };
       const written = scopeWritten(scope, seen.scoped);
       if (written === undefined) return { refused: 'no_access' };
-      // A role asked as it is changes nothing, so whoever runs the instance may ask it, of anyone, themselves included, as 0.14 did.
-      if (was.role === role && was.scope === written) return { writes: [], entry: said('member.role', caller, shown, [`principal:${principal}`, ...seen.scoped.map((project) => `project:${project.id}`)], { member: principal, role, scope: standing(role, written).scope }), answer: standing(role, written) };
+      // A role asked as it is changes nothing, so whoever runs the instance may ask it, of anyone, themselves included, as 0.14 did. Its entry says so, as `secret.write`'s with no key does.
+      if (was.role === role && was.scope === written) return { writes: [], entry: said('member.role', caller, shown, [`principal:${principal}`, ...seen.scoped.map((project) => `project:${project.id}`)], { member: principal, role, scope: standing(role, written).scope, unchanged: true }), answer: standing(role, written) };
       if ((was.role === 'owner' || role === 'owner' || principal === caller.principal) && !ownsAllAsking(caller)) return { refused: 'no_access' };
       const ownsAfter = role === 'owner' && written === null;
       if (named(vault, principal) && !ownsAfter) return { refused: 'configured_owner' };
@@ -265,7 +271,7 @@ function memberRemove(input: Presented & MemberRemove, vault: Deciding): Operati
     decide(seen: Seen<typeof read>, at: number) {
       const caller = asking(seen, shown, vault, at);
       if ('refused' in caller) return caller;
-      if (!runsInstance(caller.holds)) return { refused: 'no_access' };
+      if (!runs(caller)) return { refused: 'no_access' };
       const [was] = seen.member;
       if (was === undefined || was.status !== 'active') return { refused: was === undefined ? 'not_a_member' : 'removed' };
       if (was.role === 'owner' && !ownsAllAsking(caller)) return { refused: 'no_access' };

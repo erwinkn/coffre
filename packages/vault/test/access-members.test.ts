@@ -123,7 +123,7 @@ test('an admission is refused to whoever may not make it, and of someone the ins
     assert.deepEqual(await add('fay-cli', bo), { refused: 'exists' });
     assert.deepEqual(await add('fay-cli', ex), { refused: 'removed' });
     assert.deepEqual(await add('ada-cli', user('new'), 'developer', { projects: { only: ['nowhere'] }, environments: 'all' }), { refused: 'no_access' }, 'a scope naming no project there is');
-    assert.deepEqual(await add('ada-cli', user('new'), 'developer', { projects: { except: ['gone~deleted-2026-11-01'] }, environments: 'all' }), { refused: 'no_access' }, 'nor one deleted');
+    await assert.rejects(add('ada-cli', user('new'), 'developer', { projects: { except: ['gone~deleted-2026-11-01'] }, environments: 'all' }), TypeError, 'nor one deleted, by its tombstone');
     assert.deepEqual(await restore('fay-cli', bo), { refused: 'exists' });
     assert.deepEqual(await restore('fay-cli', user('new')), { refused: 'not_a_member' });
     assert.deepEqual(await restore('fay-cli', ex, 'owner'), { refused: 'no_access' }, 'an Admin brings back no Owner');
@@ -192,6 +192,9 @@ test('a role asked as it is changes nothing, and whoever runs the instance may a
   assert.deepEqual(await setRole('fay-cli', fay, 'admin'), { answer: { role: 'admin', scope: null } }, 'an Admin, their own');
   assert.deepEqual(await setRole('fay-cli', ada, 'owner'), { answer: { role: 'owner', scope: null } }, 'an Owner\'s, by an Admin');
   assert.equal(JSON.stringify(await members()), before, 'no member\'s row moved');
+  const entry = await written();
+  assert.deepEqual([entry.action, entry.detail], ['member.role', { member: ada, role: 'owner', scope: null, unchanged: true }], 'its entry says nothing changed, and reads as no promotion');
+  assert.ok(named(entry).every((name) => name.endsWith(' read')), 'and wrote no row');
   assert.deepEqual(await setRole('fay-cli', ada, 'owner', { projects: { only: ['market'] }, environments: 'all' }), { refused: 'no_access' }, 'but not narrowed');
 });
 
@@ -353,6 +356,26 @@ test('two Owners demoting each other side by side: the second starts over, finds
   assert.deepEqual((await members()).filter((member) => member.role === 'owner' && member.scope === null).map((member) => member.id), [ada]);
 });
 
+test('a caller whose instance role has no row runs no instance, as `project.create` takes it', async () => {
+  await world.owner.execute(sql`DELETE FROM roles WHERE instance AND id = 'admin'`);
+  await nothingWritten(async () => {
+    assert.deepEqual(await add('fay-cli', user('new')), { refused: 'no_access' });
+    assert.deepEqual(await restore('fay-cli', ex), { refused: 'no_access' });
+    assert.deepEqual(await setRole('fay-cli', eve, 'developer'), { refused: 'no_access' });
+    assert.deepEqual(await remove('fay-cli', eve), { refused: 'no_access' });
+  });
+  assert.deepEqual(await setRole('ada-cli', eve, 'developer'), { answer: { role: 'developer', scope: null } }, 'an Owner, whose row is there, still does');
+});
+
+test('a service account\'s row that reads Owner keeps no Owner of the whole instance: the last person who owns it stays', async () => {
+  await write(world, ...rows('principals', principal('token:x', { role: 'owner' })));
+  assert.ok('answer' in (await remove('ada-cli', cy)));
+  await nothingWritten(async () => {
+    assert.deepEqual(await setRole('ada-cli', ada, 'admin'), { refused: 'last_owner' }, 'token:x is counted for no one');
+    assert.deepEqual(await remove('ada-cli', ada), { refused: 'last_owner' });
+  });
+});
+
 test('a removal and a demotion side by side, each counting on the other Owner: the second starts over and keeps the last one', async () => {
   const deciding = { workloads: world.workloads, owners: world.owners };
   const removing = OPERATIONS['member.remove']({ ...shown('ada-cli'), op: 'member.remove', principal: cy }, deciding);
@@ -428,6 +451,8 @@ test('a member change that is not what the contract says is a fault, before any 
     { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: 'all', environments: 'all', more: 1 } },
     { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: { only: 'market' }, environments: 'all' } },
     { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: { only: [''] }, environments: 'all' } },
+    { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: 'all', environments: { except: ['Prod'] } } },
+    { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: 'all', environments: { only: ['URGENT rotate at https://evil.example'] } } },
     { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: { only: ['a'], except: ['b'] }, environments: 'all' } },
     { op: 'member.add', principal: user('new'), role: 'developer', scope: { projects: { only: Array.from({ length: 1001 }, (_, i) => `p${i}`) }, environments: 'all' } },
     { op: 'member.add', principal: 'token:ci', role: 'developer', scope: null },
