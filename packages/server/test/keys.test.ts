@@ -268,19 +268,24 @@ test('references into and out of a place, to whoever lists or manages either end
 });
 
 test("who reads through a reference: the members who read its holder's environment, to whoever manages either project's access, at one statement more", async () => {
-  const [hal, ivy, jo, kim, max, rex] = [user('hal'), user('ivy'), user('jo'), user('kim'), user('max'), user('rex')];
+  const [hal, ivy, jo, kim, max, nia, rex] = [user('hal'), user('ivy'), user('jo'), user('kim'), user('max'), user('nia'), user('rex')];
   const [market, billing] = [{ id: ids.market }, { id: ids.billing }];
   const [staging, adas] = [{ id: ids.staging, projectId: ids.market }, { id: ids.adas, projectId: ids.market }];
+  // Nia views billing's dev alone, an environment no other reference names; her personal config of it holds one: the vault makes none,
+  // but a stored one is read through its parent, and shown alike from either end.
+  const billed = environment({ id: ids.billing }, 'dev');
+  const nias = environment({ id: ids.billing }, 'dev-nia', { parentId: billed.id, owner: nia });
   await write(
     world,
-    ...rows('secrets', secret(staging, 'SREF', { sourceId: ids.a }), secret(adas, 'MINE', { sourceId: ids.a })),
+    ...rows('environments', billed, nias),
+    ...rows('secrets', secret(staging, 'SREF', { sourceId: ids.a }), secret(adas, 'MINE', { sourceId: ids.a }), secret(nias, 'NREF', { sourceId: ids.a })),
     ...rows('roles', role(false, 'admin', ['secret.read', 'grant.manage']), role(false, 'manager', ['grant.manage'])),
     // Hal administers billing, Ivy manages market's access and reads nothing, Max owns market alone; Jo's grant has ended,
     // Kim's is from before a removal, Rex is removed. cv is a service account viewing market.
-    ...rows('principals', principal(hal), principal(ivy), principal(jo), principal(kim, { generation: 1 }), principal(max, { role: 'owner', scope: JSON.stringify({ projects: { only: [ids.market] }, environments: 'all' }) }), principal(rex, { status: 'removed' }), principal('token:cv')),
+    ...rows('principals', principal(hal), principal(ivy), principal(jo), principal(kim, { generation: 1 }), principal(max, { role: 'owner', scope: JSON.stringify({ projects: { only: [ids.market] }, environments: 'all' }) }), principal(nia), principal(rex, { status: 'removed' }), principal('token:cv')),
     ...rows('grants',
       grant(hal, 'admin', { project: billing }), grant(ivy, 'manager', { project: market }),
-      grant(jo, 'viewer', { project: market }, { expiresAt: new Date(Date.UTC(2020, 0, 1)) }), grant(kim, 'viewer', { project: market }), grant(rex, 'viewer', { project: market }), grant('token:cv', 'viewer', { project: market })),
+      grant(jo, 'viewer', { project: market }, { expiresAt: new Date(Date.UTC(2020, 0, 1)) }), grant(kim, 'viewer', { project: market }), grant(nia, 'viewer', { environment: billed }), grant(rex, 'viewer', { project: market }), grant('token:cv', 'viewer', { project: market })),
     ...rows('credentials', ...[hal, ivy].map((who) => credential(`${who.slice(5, who.indexOf('@'))}-cli`, who))),
   );
   const readers = async (label: string, path: string) => {
@@ -293,15 +298,15 @@ test("who reads through a reference: the members who read its holder's environme
   // a person who views market holds nothing there, a service account holds its role's other column, a maintainer's role holds its
   // protected column. Ada's config is read by Ada alone.
   const inMarket = { 'market/prod/R': [ci, cj, 'token:cv', ada, bo, cy, max], 'market/staging/SREF': [ci, cj, 'token:cv', bo, cy, max], 'market/prod-ada/MINE': [ada] };
-  const inBilling = { 'billing/prod/LINK': [cy, hal], 'billing/stale/DEAD': [cy, hal] };
+  const inBilling = { 'billing/dev-nia/NREF': [nia], 'billing/prod/LINK': [cy, hal], 'billing/stale/DEAD': [cy, hal] };
   // Ivy manages market's access: every reference with an end there, LINK's readers in billing too, as 0.14.7 showed them.
   assert.deepEqual(await readers('ivy-cli', 'market'), { ...inBilling, ...inMarket });
   // Hal manages billing's: its own references, whose sources are in market.
   assert.deepEqual(await readers('hal-cli', 'billing'), inBilling);
-  assert.deepEqual(await readers('cy-cli', 'market/prod/A'), { 'billing/prod/LINK': inBilling['billing/prod/LINK'], 'market/prod-ada/MINE': inMarket['market/prod-ada/MINE'], 'market/prod/R': inMarket['market/prod/R'], 'market/staging/SREF': inMarket['market/staging/SREF'] });
+  assert.deepEqual(await readers('cy-cli', 'market/prod/A'), { 'billing/dev-nia/NREF': inBilling['billing/dev-nia/NREF'], 'billing/prod/LINK': inBilling['billing/prod/LINK'], 'market/prod-ada/MINE': inMarket['market/prod-ada/MINE'], 'market/prod/R': inMarket['market/prod/R'], 'market/staging/SREF': inMarket['market/staging/SREF'] });
   // Anyone else is shown none, at one statement; so is a manager shown no reference.
   assert.deepEqual(await readers('bo-cli', 'market/staging'), { 'market/staging/SREF': null });
-  assert.deepEqual(await readers('ada-cli', 'market/prod/A'), { 'billing/prod/LINK': null, 'market/prod-ada/MINE': null, 'market/prod/R': null, 'market/staging/SREF': null });
+  assert.deepEqual(await readers('ada-cli', 'market/prod/A'), { 'billing/dev-nia/NREF': null, 'billing/prod/LINK': null, 'market/prod-ada/MINE': null, 'market/prod/R': null, 'market/staging/SREF': null });
   assert.deepEqual(await readers('ivy-cli', 'market/dev'), {});
 });
 
