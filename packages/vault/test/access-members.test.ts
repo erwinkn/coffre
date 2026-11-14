@@ -16,7 +16,7 @@ import { openLocalVault } from '../src/local.ts';
 import { OPERATIONS } from '../src/ops/index.ts';
 import { Signer } from '../src/signer.ts';
 import { emptyDatabase, memoryStore, openTestVault } from './database.ts';
-import { amend, binding, credential, environment, grant, instance, principal, project, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
+import { amend, binding, credential, environment, grant, identity, instance, principal, project, role, rows, secret, session, tokenOf, user, value, write } from './world.ts';
 
 const world = await openTestVault();
 const vault = openLocalVault(world.db, world, { wake: world.wake, now: world.now });
@@ -265,6 +265,42 @@ test('a removal deletes the member\'s grants and moves their generation on, whic
   assert.deepEqual(await remove('fay-cli', fay), { answer: { revoked: 0 } });
 });
 
+test('a removal revokes the member\'s sign-in accounts, so that back in, they bind them anew: one revoked before is left as it is', async () => {
+  const account = identity(bo, { email: 'bo@acme.example' });
+  const before = identity(bo, { revokedAt: new Date(world.now() - 60_000), revokedBy: bo });
+  const others = identity(eve);
+  await write(world, ...rows('identities', account, before, others));
+  const accounts = async () => rowsOf<{ id: string; generation: number; revoked_by: string | null; revoked: boolean }>(world.owner, sql`SELECT id, generation, revoked_by, revoked_at IS NOT NULL AS revoked FROM identities ORDER BY id`);
+  const untouched = (await accounts()).find((found) => found.id === before.id);
+
+  assert.ok('answer' in (await remove('fay-cli', bo)));
+  const entry = await written();
+  assert.ok(entry.objects.includes(`identity:${account.id}`) && !entry.objects.includes(`identity:${before.id}`), entry.objects.join());
+  assert.deepEqual(named(entry).filter((name) => name.startsWith('identities')), ['identities read', 'identities replaced'], 'the one revoked before is read, by the member alone, and left');
+  assert.ok('answer' in (await restore('fay-cli', bo)));
+  const now = await accounts();
+  assert.deepEqual(now.find((found) => found.id === account.id), { id: account.id, generation: 0, revoked_by: fay, revoked: true }, 'revoked, of the generation before');
+  assert.deepEqual(now.find((found) => found.id === before.id), untouched);
+  assert.deepEqual(now.find((found) => found.id === others.id), { id: others.id, generation: 0, revoked_by: null, revoked: false }, 'another member\'s, untouched');
+  assert.equal((await row(bo))!.generation, 1);
+});
+
+test('a removal that finds an account of the member\'s it cannot read refuses, and removes nothing', async () => {
+  await write(world, ...rows('identities', identity(bo, { email: 'bo@acme.example' })));
+  const before = [await members(), await count('grants'), await kept()];
+  // Marked revoked behind the vault, as one that would hide it from a read of live accounts; then edited: neither is taken as it says.
+  for (const edit of [sql`UPDATE identities SET revoked_at = now() WHERE principal = ${bo}`, sql`UPDATE identities SET revoked_at = NULL, email = 'eve@acme.example' WHERE principal = ${bo}`]) {
+    await world.owner.execute(edit);
+    assert.deepEqual(await remove('fay-cli', bo), { refused: 'tampered' });
+    assert.deepEqual([await members(), await count('grants'), await kept()], before);
+  }
+  // Another member's account, edited, is not this removal's to refuse.
+  await world.owner.execute(sql`DELETE FROM identities WHERE principal = ${bo}`);
+  await write(world, ...rows('identities', identity(eve)));
+  await world.owner.execute(sql`UPDATE identities SET email = 'x@acme.example' WHERE principal = ${eve}`);
+  assert.ok('answer' in (await remove('fay-cli', bo)));
+});
+
 test('a grant hidden from a removal and put back once the member is brought back reaches nothing: it is of the generation the removal ended', async () => {
   // The writer the design assumes deletes Bo's grants before the removal, which finds none to drop, and puts them back, MACs and all, after.
   const [{ hidden }] = (await rowsOf<{ hidden: string }>(world.owner, sql`WITH gone AS (DELETE FROM grants WHERE principal = ${bo} RETURNING *) SELECT json_agg(gone)::text AS hidden FROM gone`)) as [{ hidden: string }];
@@ -404,6 +440,17 @@ test('a removal beside a new grant of the member\'s starts over, and takes that 
   assert.equal(await commit(world, prepared), false, 'a grant came since its read');
   assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 3 } });
   assert.equal(await count('grants'), 0);
+});
+
+test('a removal beside a sign-in that binds an account of the member\'s starts over, and revokes that account too', async () => {
+  const deciding = { workloads: world.workloads, owners: world.owners };
+  const prepared = await prepare(world, OPERATIONS['member.remove']({ ...shown('fay-cli'), op: 'member.remove', principal: bo }, deciding));
+  assert.ok(!('refused' in prepared));
+  const bound = identity(bo, { email: 'bo@acme.example' });
+  await write(world, ...rows('identities', bound));
+  assert.equal(await commit(world, prepared), false, 'an account came since its read');
+  assert.ok('answer' in (await remove('fay-cli', bo)));
+  assert.deepEqual(await rowsOf(world.owner, sql`SELECT revoked_by FROM identities WHERE id = ${bound.id}`), [{ revoked_by: fay }]);
 });
 
 test('a row written around the vault is no row: an Owner edited in place or forged counts for nothing, and a scope\'s project edited names none', async () => {

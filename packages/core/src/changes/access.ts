@@ -42,7 +42,8 @@ export type MemberRestore = Membership & { op: 'member.restore' };
 export type MemberRole = Membership & { op: 'member.role' };
 
 /**
- * Remove a member: their grants go, and their generation moves on, which
- * ends every session, token and binding issued before.
+ * Remove a member: their grants go, their sign-in accounts are revoked, and
+ * their generation moves on, which ends every session, token and binding
+ * issued before.
  */
 export type MemberRemove = { op: 'member.remove'; principal: string };
