@@ -223,13 +223,15 @@ test("a personal token is its person's own, made on a session, with a label, min
   assert.deepEqual(app.calls, []);
 });
 
-test("0.14.7's preview of a token (`?dryRun=1`) is not served yet, and makes nothing", async () => {
+test("a token's preview (`?dryRun=1`) is what it would reach, weighed and not made: one weigh each, nothing written; a refusal is the change's", async () => {
   const before = (await listed('root-cli', ci))[0].length;
   app.calls.length = 0;
-  assert.deepEqual(refused(await call('bo-cli', 'POST', `/members/${ci}/tokens?dryRun=1`, { label: null, expiresInDays: 1 })), [501, 'not_implemented', undefined]);
-  assert.deepEqual(refused(await call('bo-cli', 'POST', `/members/${bo}/tokens?dryRun=1`, { label: 'x', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } })), [501, 'not_implemented', undefined]);
-  assert.deepEqual(app.calls, []);
+  assert.deepEqual(await call('bo-cli', 'POST', `/members/${ci}/tokens?dryRun=1`, { label: null, expiresInDays: 1 }), [200, { scope: { 'market/dev': 'developer' } }]);
+  assert.deepEqual(await call('bo-cli', 'POST', `/members/${bo}/tokens?dryRun=1`, { label: 'x', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } }), [200, { scope: { 'market/dev': 'viewer' } }]);
+  assert.deepEqual(app.calls, ['weigh', 'weigh']);
   assert.equal((await listed('root-cli', ci))[0].length, before);
+  // A scope past what the service holds is refused as issuing it would be.
+  assert.deepEqual(refused(await call('bo-cli', 'POST', `/members/${ci}/tokens?dryRun=1`, { label: null, expiresInDays: 1, scope: { 'market/prod': 'viewer' } })), [403, 'vault_refused', 'no_access']);
 });
 
 test("a service's token, made by whoever manages it: its scope, or every grant it holds", async () => {

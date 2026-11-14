@@ -341,7 +341,7 @@ const MOST_PLACES = 1000;
 type Wanted = { path: string; project: string; environment: string | null; role: string | null; expiresAt: string | null };
 
 /** The grants a body asks for, each place by its path, checked before any call: a place named once, by slug, an end to come. */
-function grantsAsked(input: z.output<typeof accessPatch>): Wanted[] {
+export function grantsAsked(input: z.output<typeof accessPatch>): Wanted[] {
   const now = Date.now();
   const wanted = Object.entries(input).map(([raw, value]) => {
     const path = parsePath(raw, [1, 2]);

@@ -432,7 +432,7 @@ test('malformed asks throw before anything is read', () => {
     { member: 'user:ada@acme.example' }, { member: 'token:' }, { keys: { issuer: KUBE, jwks: {} } },
     { binding: asked({ profile: 'nope' }) }, { binding: asked({ claims: { aud: 'x' } }) }, { binding: asked({ keys: { uri: 7 } as never }) },
     { binding: asked({ issuer: 'http://kubernetes.acme.example' }) }, { binding: asked({ scope: { 'market/dev/x': 'viewer' } }) }, { binding: asked({ scope: {} }) },
-    { binding: asked({ label: ' padded ' }) }, { binding: asked({ replaces: ['nope'] }) }, { binding: asked({ replaces: Array.from({ length: MAX_BINDINGS + 1 }, () => '00000000-0000-4000-8000-000000000000') }) },
+    { binding: asked({ label: ' padded ' }) }, { binding: asked({ replaces: ['nope'] }) }, { binding: asked({ only: 'yes' as never }) }, { binding: asked({ replaces: Array.from({ length: MAX_BINDINGS + 1 }, () => '00000000-0000-4000-8000-000000000000') }) },
     { binding: asked({ policy: { reads: { 'market/dev': ['A'], market: ['B'] } } }) }, { binding: asked({ policy: { nope: true } }) }, { binding: asked({ policy: [] as never }) },
     { binding: asked({ profile: 'aws', issuer: null, claims: { account: '123456789012' }, keys: { uri: 'https://x.example/jwks' } }) },
   ];

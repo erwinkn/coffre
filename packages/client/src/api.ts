@@ -317,6 +317,42 @@ export type Api = {
         };
       };
       replaced: string[];
+    } | {
+      profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
+      issuer: string;
+      jwksUri: string;
+      keys: null | {
+        kid: string | null;
+        alg: "ES256" | "RS256";
+        thumbprint: string;
+      }[];
+      claims: {
+        [key: string]: string | string[];
+      };
+      scope: {
+        [key: string]: string;
+      };
+      policy: null | {
+        sources?: string[];
+        audience?: string;
+        keyAudience?: true;
+        sessionHours?: number;
+        replicas?: number;
+        sessionDays?: number;
+        overlapMinutes?: number;
+        mintedBy?: string;
+        approve?: true;
+        onContention?: "alert";
+        unsignedUploads?: true;
+        reads?: {
+          [key: string]: "*" | string[];
+        };
+      };
+      withheld?: string[];
+      replaces: {
+        id: string;
+        why: "asked" | "keys_moved";
+      }[];
     };
   };
   "POST /members/:member/bindings/keys": {
@@ -382,6 +418,11 @@ export type Api = {
       scope: {
         [key: string]: string;
       };
+    } | {
+      scope: {
+        [key: string]: string;
+      };
+      withheld?: string[];
     };
   };
   "DELETE /members/:member/tokens/:id": {
@@ -1696,6 +1737,44 @@ export type AuthorizationView = {
   days: number;
 };
 
+export type BindingPlan = {
+  profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
+  issuer: string;
+  jwksUri: string;
+  keys: null | {
+    kid: string | null;
+    alg: "ES256" | "RS256";
+    thumbprint: string;
+  }[];
+  claims: {
+    [key: string]: string | string[];
+  };
+  scope: {
+    [key: string]: string;
+  };
+  policy: null | {
+    sources?: string[];
+    audience?: string;
+    keyAudience?: true;
+    sessionHours?: number;
+    replicas?: number;
+    sessionDays?: number;
+    overlapMinutes?: number;
+    mintedBy?: string;
+    approve?: true;
+    onContention?: "alert";
+    unsignedUploads?: true;
+    reads?: {
+      [key: string]: "*" | string[];
+    };
+  };
+  withheld?: string[];
+  replaces: {
+    id: string;
+    why: "asked" | "keys_moved";
+  }[];
+};
+
 export type BindingView = {
   id: string;
   profile: "aws" | "azure" | "cloudflare" | "custom" | "enrollment" | "fly" | "gcp" | "github" | "github-reusable" | "github-reusable-organization" | "gitlab" | "kubernetes" | "vercel";
@@ -2303,6 +2382,13 @@ export type SettingsView = {
       except: string[];
     };
   };
+};
+
+export type TokenPlan = {
+  scope: {
+    [key: string]: string;
+  };
+  withheld?: string[];
 };
 
 export type TokenRow = {
