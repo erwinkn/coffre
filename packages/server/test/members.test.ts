@@ -316,14 +316,22 @@ test("`GET /me` says who sets up service accounts, as the instance's setting let
 
 test("the Owner the deployment names stays one: removing or demoting them is 409 `configured_owner` (0.14.7's admin-api and instance-roles)", async () => {
   const root = 'user:root@acme.example';
-  await write(world, ...rows('principals', principal(root, { role: 'owner' })));
+  const boss = user('boss');
+  await write(world, ...rows('principals', principal(root, { role: 'owner' }), principal(boss, { role: 'admin' })), ...rows('credentials', credential('root-cli', root), credential('boss-cli', boss)));
   assert.deepEqual(refused(await call('cy-cli', 'DELETE', `/members/${root}`)), [409, 'conflict', 'configured_owner']);
   for (const body of [{ role: 'admin' }, { role: 'member' }, { role: 'owner', scope: { projects: { only: ['market'] } } }]) {
     assert.deepEqual(refused(await call('cy-cli', 'PUT', `/members/${root}`, body)), [409, 'conflict', 'configured_owner'], JSON.stringify(body));
   }
+  // Nor do they step down themselves; and Boss, an Admin of the whole instance, may not touch an Owner at all, named or not.
+  assert.deepEqual(refused(await call('root-cli', 'PUT', `/members/${root}`, { role: 'admin' })), [409, 'conflict', 'configured_owner']);
+  assert.deepEqual(refused(await call('root-cli', 'DELETE', `/members/${root}`)), [409, 'conflict', 'configured_owner']);
+  assert.deepEqual(refused(await call('boss-cli', 'PUT', `/members/${root}`, { role: 'admin' })), NO_ACCESS);
+  assert.deepEqual(refused(await call('boss-cli', 'DELETE', `/members/${root}`)), NO_ACCESS);
   // Still the Owner of everything; asked to stay one, nothing moves.
   const everywhere = { projects: 'all', environments: 'all' };
   assert.deepEqual(await call('cy-cli', 'PUT', `/members/${root}`, { role: 'owner' }), [200, { member: root, instanceRole: 'owner', scope: everywhere, created: false }]);
+  // Cy, whom the deployment does not name, steps down as any Owner may: root is the Owner of all that is left.
+  assert.deepEqual(await call('cy-cli', 'PUT', `/members/${cy}`, { role: 'admin' }), [200, { member: cy, instanceRole: 'admin', scope: everywhere, created: false }]);
 });
 
 test('an email is one member however it is cased, accents included, and is otherwise kept as written: no Unicode normalization (0.14.7)', async () => {
