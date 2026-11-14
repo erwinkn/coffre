@@ -276,11 +276,38 @@ test('a grant hidden from a removal and put back once the member is brought back
   assert.equal(await uses('bo-cli'), 'unauthenticated', 'nor does the session of the one before stand');
 });
 
+test('grants of two memberships before, kept and put back after the second return, reach nothing; one of this membership does', async () => {
+  const saved = async () => (await rowsOf<{ kept: string }>(world.owner, sql`SELECT json_agg(g)::text AS kept FROM grants g WHERE principal = ${bo}`))[0]!.kept;
+  const [prod] = await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM environments`) as [{ id: string }];
+  const putBack = (kept: string) => world.owner.execute(sql`INSERT INTO grants SELECT * FROM json_populate_recordset(NULL::grants, ${kept}::json)`);
+  // Generation 0's grants on market and on prod; the writer keeps the one on market.
+  const [{ first }] = (await rowsOf<{ first: string }>(world.owner, sql`SELECT json_agg(g)::text AS first FROM grants g WHERE principal = ${bo} AND project_id IS NOT NULL`)) as [{ first: string }];
+  assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 2 } });
+  assert.deepEqual(await restore('fay-cli', bo), { answer: { role: 'member', scope: null } });
+  // Generation 1 is given prod, genuinely, and the writer keeps that too.
+  await write(world, ...rows('grants', grant(bo, 'developer', { environment: prod }, { generation: 1 })));
+  const second = await saved();
+  assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 1 } });
+  assert.deepEqual(await restore('fay-cli', bo), { answer: { role: 'member', scope: null } });
+  assert.equal((await row(bo))!.generation, 2);
+  await putBack(first);
+  await putBack(second);
+  assert.deepEqual((await rowsOf<{ generation: number }>(world.owner, sql`SELECT generation FROM grants WHERE principal = ${bo} ORDER BY generation`)).map((found) => found.generation), [0, 1]);
+  await write(world, ...rows('credentials', credential('bo-third', bo, { generation: 2 })));
+  world.tick(2000);
+  assert.equal(await uses('bo-third'), 'no_access', 'neither membership before reaches this one');
+  // The same place given to generation 2 reaches it: the test sees a grant that counts.
+  await world.owner.execute(sql`DELETE FROM grants WHERE principal = ${bo} AND generation = 1`);
+  await write(world, ...rows('grants', grant(bo, 'developer', { environment: prod }, { generation: 2 })));
+  world.tick(2000);
+  assert.equal(await uses('bo-third'), 'postgres://market');
+});
+
 test('a removed member whose rows are deleted around the vault is admitted anew in generation 0, their old session put back stands for it, and the signer finds the entry false history', async () => {
   // The design's adversary deletes rows (docs/design/0.16.md, "What it promises"): the decision cannot tell
   // such a member from a newcomer, but its entry says the row it made replaced none, and the signer's
   // mirror holds Bo's removed row. Its credential would have to be put back too, a row put back.
-  const signer = await Signer.open({ db: world.db, keys: world.keys, now: world.now, store: memoryStore() });
+  const signer = await Signer.open({ db: world.db, keys: world.keys, now: world.now, store: memoryStore(), keepUsesDays: 90 });
   assert.deepEqual(await remove('fay-cli', bo), { answer: { revoked: 2 } });
   for (const hash of world.woken.splice(0)) await signer.wake(hash);
   await signer.run(true);
