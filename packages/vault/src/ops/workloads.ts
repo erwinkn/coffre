@@ -355,4 +355,4 @@ function workloadRenew(input: Presented & WorkloadRenew, vault: Deciding): Opera
 }
 
 /** The changes of workloads signing in (docs/design/0.16.md, "A workload signing in"). */
-export const workloadOperations: Operations<WorkloadChanges> = { 'token.exchange': tokenExchange, 'workload.signin': workloadSignin, 'workload.renew': workloadRenew };
+export const workloadOperations: Operations<Exclude<WorkloadChanges, { op: 'token.bind' | 'token.unbind' }>> = { 'token.exchange': tokenExchange, 'workload.signin': workloadSignin, 'workload.renew': workloadRenew };

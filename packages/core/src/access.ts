@@ -511,6 +511,26 @@ export function issuedGrant(grant: GrantPlace & { role: Role }, policy: Policy =
 }
 
 /**
+ * Of a grant issued anew and the one it takes the place of, what both
+ * hold, column by column, and the sensitive values only if both read them:
+ * a binding that replaces others keeps no more than they did, whatever its
+ * role holds now (0.14.7's `narrowest`).
+ *
+ *   was     viewer on market/dev: read, use / use
+ *   now     viewer, edited since: read / read, use
+ *   kept    read / use
+ */
+export function narrowest(now: ScopeGrant, before: ScopeGrant): ScopeGrant {
+  const both = (a: readonly Permission[], b: readonly Permission[]) => a.filter((permission) => b.includes(permission));
+  const [a, b] = [scopeDefinition(now), scopeDefinition(before)];
+  return {
+    ...now,
+    permissions: { normal: both(a.permissions, b.permissions), protected: both(a.protected, b.protected) },
+    ...(now.sensitive === undefined ? {} : { sensitive: now.sensitive && before.sensitive === true }),
+  };
+}
+
+/**
  * What `holder` holds at `place` in each column a credential's grant there
  * keeps (`issuedGrant`): `normal`, as if nothing were protected; `protected`,
  * as a person in a protected environment. At an environment, as if it were
