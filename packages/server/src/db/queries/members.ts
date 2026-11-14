@@ -88,7 +88,8 @@ export async function members(
   const now = sql`${query.now.toISOString()}::timestamptz`;
   const reaching = query.reaching === undefined ? sql`true` : query.reaching.instance ? sql`m.role = ${query.reaching.role}`
     : sql`EXISTS (SELECT 1 FROM grants rg WHERE rg.principal = m.id AND rg.generation = m.generation AND rg.role = ${query.reaching.role} AND (rg.expires_at IS NULL OR rg.expires_at > ${now}))`;
-  const most = query.most === undefined ? sql`` : sql` ORDER BY gp.slug, e.slug NULLS LAST LIMIT ${query.most + 1}`;
+  // Unordered, so the database stops at the limit rather than sorting every grant first; `json_agg` orders what it took.
+  const most = query.most === undefined ? sql`` : sql` LIMIT ${query.most + 1}`;
   const members = query.most === undefined ? sql`` : sql` LIMIT ${query.most + 1}`;
   const within = query.within === null ? sql`true` : sql`gp.id = ANY(${sql.param([...query.within])}::uuid[])`;
   const onProject = query.project === undefined ? sql`true` : sql`gp.id = ${query.project}::uuid`;
