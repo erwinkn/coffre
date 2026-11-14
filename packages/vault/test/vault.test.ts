@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
+import { allows } from '@coffre/core/access';
 import type { UseInput } from '@coffre/core/vault';
 import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
@@ -24,6 +25,7 @@ const ada = user('ada');
 beforeEach(async () => {
   await emptyDatabase(world.owner);
   prepared.memory.reads.clear();
+  prepared.memory.callers.clear();
   prepared.memory.logged.clear();
   world.woken.length = 0;
   const market = project('market');
@@ -80,6 +82,24 @@ test('a use that is not what the contract says is a fault, before any read', asy
   assert.ok(!('refused' in every) && every.values.map(({ key }) => key).join() === 'DATABASE_URL,EMPTY', JSON.stringify(every));
   const thousand = await vault.use(reveal('ada-cli', Array.from({ length: 1000 }, (_, i) => `K${i}`)));
   assert.ok(!('refused' in thousand) && thousand.values.length === 1000);
+});
+
+test('who a request is crosses as JSON: what it holds, as the app decides on it, and a refusal as an answer', async () => {
+  const answer = await vault.caller({ token: tokenOf('ada-cli').toString('hex'), proof: null, request: 'req-1', ip: '192.0.2.7' });
+  assert.ok(!('refused' in answer), JSON.stringify(answer));
+  assert.deepEqual(JSON.parse(JSON.stringify(answer)), answer, 'nothing in it that JSON does not carry');
+  assert.equal(answer.principal, ada);
+  assert.equal(answer.credential.expiresAt, '2027-01-01T00:00:00.000Z');
+  const [held] = answer.holds.grants;
+  assert.ok(held !== undefined && held.role === 'viewer' && held.environmentId === null);
+  assert.equal(allows(answer.holds, 'secret.read', { projectId: held.projectId! }), true);
+  assert.equal(allows(answer.holds, 'secret.write', { projectId: held.projectId! }), false);
+  assert.deepEqual(await vault.caller({ token: tokenOf('nobody').toString('hex'), proof: null, request: null, ip: null }), { refused: 'unauthenticated' });
+  // It wrote no entry, and woke nobody.
+  assert.equal(world.woken.length, 0);
+  for (const bad of [{ token: 'ada-cli' }, { proof: 7 }, { ip: {} }]) {
+    await assert.rejects(vault.caller({ token: tokenOf('ada-cli').toString('hex'), proof: null, request: null, ip: null, ...(bad as object) }), TypeError, JSON.stringify(bad));
+  }
 });
 
 test('the vault runs as its configuration says: its memory, and what it takes of workloads', () => {

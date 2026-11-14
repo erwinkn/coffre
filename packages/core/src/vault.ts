@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { AccessFault } from './access-fault.ts';
-import type { CallerKind, CredentialScope, GrantPlace, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
+import type { CallerKind, CredentialScope, GrantPlace, Holdings, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
 import type { AccessAnswers, AccessChanges } from './changes/access.ts';
 import type { PlacesAnswers, PlacesChanges } from './changes/places.ts';
 import type { SecretsAnswers, SecretsChanges } from './changes/secrets.ts';
@@ -35,6 +35,12 @@ export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames
 export interface Vault {
   /** Open values for whoever presented a token: a reveal, `coffre run`, an export, a proxied request, a signature. */
   use(input: UseInput): Promise<Used | Refused>;
+  /**
+   * Who a request's credential is and all it holds, for the app to scope a
+   * page's queries with. Nothing is opened or changed on the answer: a use
+   * and a change read their caller themselves.
+   */
+  caller(input: Presented): Promise<Called | Refused>;
   /**
    * Make a change: one operation, named as its log entry's action is, with
    * its input. All of it, or none.
@@ -95,6 +101,20 @@ export type Used = {
   values: UsedValue[];
   /** For a workload's session, what only the app can hold its request to: an unsigned upload its binding must allow, a narrowed session's methods and paths. */
   workload: { binding: string; profile: string; policy: BindingPolicy; constraints: Constraints | null } | null;
+};
+
+/**
+ * Who a request is: its principal, `user:<email>` or `token:<name>`, the
+ * credential it came in on, and what it holds, as `allows` in
+ * `@coffre/core/access` decides on it: its role in the instance and that
+ * role's scope, its live grants, a token's own scope, each role's
+ * definition, and every environment the instance protects.
+ */
+export type Called = {
+  principal: string;
+  /** `expiresAt` is ISO 8601. */
+  credential: { id: string; kind: string; expiresAt: string };
+  holds: Holdings & { policy: Policy };
 };
 
 /** Why a call is not answered. Nothing it asked was written. */

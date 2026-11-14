@@ -6,7 +6,7 @@ import type { BindingPolicy, Constraints } from '@coffre/core/identity';
 import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { callerOf, ID, live, type Caller, type Workloads } from './caller.ts';
+import { callerOf, ID, live, touch, type Caller, type CallerRead, type Workloads } from './caller.ts';
 import { bounded, keep, type Refusal, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts';
@@ -80,19 +80,18 @@ type Seen = { [K in keyof typeof READ]: Row<(typeof READ)[K]>[] };
 export type Read = { at: number; seen: Seen; opened: Map<string, Buffer> };
 
 /**
- * What one isolate remembers between uses. Never across a change of what it
- * read: `reads` for `seconds` (2 by default, 0 for never), counted from the
- * read, not the answer; `logged`, what it wrote a log entry for in the last
- * minute; `touched`, the credentials whose last use it moved on.
+ * What one isolate remembers between calls. Never across a change of what it
+ * read: `reads`, a use's rows, and `callers`, the rows of who a request is,
+ * for `seconds` (2 by default, 0 for never), counted from the read, not the
+ * answer; `logged`, what it wrote a log entry for in the last minute;
+ * `touched`, the credentials whose last use it moved on.
  */
-export type Memory = { seconds: number; reads: Map<string, Read>; logged: Map<string, { at: number }>; touched: Map<string, { at: number }> };
+export type Memory = { seconds: number; reads: Map<string, Read>; callers: Map<string, CallerRead>; logged: Map<string, { at: number }>; touched: Map<string, { at: number }> };
 
-export const memoryOf = (seconds: number): Memory => ({ seconds, reads: new Map(), logged: new Map(), touched: new Map() });
+export const memoryOf = (seconds: number): Memory => ({ seconds, reads: new Map(), callers: new Map(), logged: new Map(), touched: new Map() });
 
 /** A credential given the same version of a key for the same purpose within the last minute writes no second log entry, wherever it asked. */
 const LOGGED_MS = 60_000;
-/** A credential's last use is moved on at most this often. */
-const TOUCHED_MS = 5 * 60_000;
 /** Parents an environment may have above it, as in 0.14. */
 const MAX_PARENTS = 3;
 const shapeOfAsk = (ask: Ask) => JSON.stringify([ask.token.toString('hex'), ask.project, ask.environment, ask.mine, ask.keys]);
@@ -332,19 +331,11 @@ export async function answer(vault: Serving, ask: Ask, found: Read): Promise<Ans
     keep(memory.logged, mark(fresh[0]!), { at: written }, at - LOGGED_MS);
   }
 
-  // When the credential was last used: its row's own statement, since it shares one with nothing a change may lock.
-  const { id, lastUsedAt } = caller.credential;
-  if (Math.max(lastUsedAt?.getTime() ?? -Infinity, memory.touched.get(id)?.at ?? -Infinity) + TOUCHED_MS <= at) {
-    // It only says when, so it never costs the use: a row a change holds is skipped, not waited for, a failure is
-    // dropped, and a later time is never put back.
-    const when = sql`${new Date(at).toISOString()}::timestamptz`;
-    const free = sql`SELECT id FROM credentials WHERE id = ${id} AND (last_used_at IS NULL OR last_used_at < ${when}) FOR NO KEY UPDATE SKIP LOCKED`;
-    await vault.db.execute(sql`UPDATE credentials SET last_used_at = ${when}, last_used_ip = ${ask.ip} WHERE id IN (${free})`).then(() => keep(memory.touched, id, { at }, at - TOUCHED_MS), () => {});
-  }
+  await touch(vault, caller.credential, ask.ip, at);
   // Unless a newer read of the same is there already: a slow use does not put its older rows back over it.
   if (memory.seconds > 0 && !((memory.reads.get(shapeOfAsk(ask))?.at ?? -Infinity) > found.at)) keep(memory.reads, shapeOfAsk(ask), found, at - memory.seconds * 1000);
   const { workload } = caller;
-  return { principal: caller.principal, credential: id, values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
+  return { principal: caller.principal, credential: caller.credential.id, values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
 }
 
 /** A use: from memory while it is fresh, else one read. */
