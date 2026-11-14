@@ -86,9 +86,13 @@ export type EnvironmentCreate = { op: 'environment.create'; project: string; env
  * One change opens and seals again 2,000 values at most (`too_many_keys`),
  * and 8 MiB of them as stored (`too_much_to_copy`, the vault's
  * `MOST_COPIED`, which a mark shares): past either, nothing is made, and
- * the fork is made by references or inherits instead. A fork that copies
- * by default is weighed before any value is read; one by references, by
- * what it copies.
+ * the fork is made by references or inherits instead. Either is weighed
+ * before any value is read: one that copies by default, by every value it
+ * copies; one by references, by every value it may copy (each sensitive
+ * value its chain holds, and each a reference reads that is not), so past
+ * the bound it is refused even where the forker uses most of them, and is
+ * made inheriting instead (docs/design/0.16.md, the paragraph on
+ * `MOST_COPIED`).
  */
 export type EnvironmentCopy = { from: string; references: boolean };
 

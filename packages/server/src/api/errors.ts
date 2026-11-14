@@ -125,7 +125,7 @@ const REFUSALS: Record<string, [ErrorCode, string]> = {
   inherited_key: ['conflict', "that key is inherited: mark it where it is held, or write a value of this environment's own"],
   looser: ['conflict', 'making a value plain takes it written again, never a flip of the one stored'],
   not_owner: ['conflict', 'that value is sensitive: making it a secret takes it written again, unless an Owner of the project makes it one in place'],
-  too_much_to_copy: ['conflict', 'one change opens and seals again 8 MiB of values at most: mark fewer keys at once, or fork by references (`references`) or inherit (`inherit`) instead'],
+  too_much_to_copy: ['conflict', 'one change opens and seals again 8 MiB of values at most: mark fewer keys at once; for a fork, make it inherit (`inherit`), which copies none: by references (`references`) it still counts each sensitive value it may copy'],
   too_many_keys: ['conflict', 'a fork copies 2,000 values at most: make it hold references to them (`references`), or inherit them (`inherit`), instead'],
   too_large: ['conflict', 'it holds more versions than one deletion erases: delete its environments one at a time first'],
   parent_archived: ['conflict', 'it inherits from an environment that is archived or deleted: restore that first'],
