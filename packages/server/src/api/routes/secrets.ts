@@ -62,6 +62,9 @@ const readPath = z.string().max(400).transform((text, issue) => {
   return { project: path.project, environment: path.environment!, key: path.key };
 });
 
+/** A reference's source, `market/prod/KEY`: a key of an environment, never of a personal config. */
+const sourcePath = readPath.refine((path) => path.key !== undefined && personalOf(path.environment) === null, 'a reference names its source as <project>/<environment>/<KEY>, never in a personal config');
+
 export const secretRoutes = {
   /**
    * The only way to open a value, and a POST so nothing can trigger it by
@@ -113,24 +116,49 @@ export const secretRoutes = {
   /**
    * Write values in one environment: `{ "KEY": "value" }`, or
    * `{ "KEY": { "value", "sensitivity": "sensitive" } }` to say who sees
-   * it. One call to the vault, which decides and writes all of them or
-   * none, and says each one's sensitivity as written: a bare value is
-   * sensitive over a sensitive one, and a secret otherwise (`secret.write`).
+   * it; `{ "KEY": { "ref": "billing/prod/STRIPE_KEY" } }` makes the key a
+   * reference to that one, which whoever reads here reads through it. One
+   * call to the vault, which decides and writes all of them or none, and
+   * says each value's sensitivity as written: a bare value is sensitive over
+   * a sensitive one, and a secret otherwise (`secret.write`). A reference
+   * is answered with its source, as asked.
    *
    * Not served yet, each refused as a 400 by the input's shape or below:
-   * archiving a key (`null`), a generated value, a reference, a nature
-   * changed in place, a dry run, and `dev@me`.
+   * archiving a key (`null`), a generated value, a nature changed in place,
+   * a dry run, and `dev@me`.
    */
   ...route('PATCH /secrets/:project/:environment', {
-    input: z.record(secretKey, z.union([secretValue, z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']) }).strict()])).refine((patch) => Object.keys(patch).length > 0, 'name at least one key'),
+    input: z.record(secretKey, z.union([secretValue, z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']) }).strict(), z.object({ ref: sourcePath }).strict()]))
+      .refine((patch) => Object.keys(patch).length > 0, 'name at least one key'),
     query: z.object({}).strict(),
     run: async (ctx, { params, input }) => {
       const { environment, mine } = environmentOf(params.environment);
       if (mine) throw new ApiError('not_implemented', `a write to ${params.project}/${params.environment}, your personal config, is not served yet`);
-      const values = Object.entries(input).map(([key, written]) => (typeof written === 'string' ? { key, value: written } : { key, value: written.value, nature: written.sensitivity }));
-      const answer = await changed(ctx, { op: 'secret.write', project: params.project, environment, keys: values }, `${params.project}/${params.environment}`);
+      const keys = Object.entries(input).map(([key, written]) => (typeof written === 'string' ? { key, value: written }
+        : 'ref' in written ? { key, ref: { project: written.ref.project, environment: written.ref.environment, key: written.ref.key! } }
+          : { key, value: written.value, nature: written.sensitivity }));
+      const answer = await changed(ctx, { op: 'secret.write', project: params.project, environment, keys }, `${params.project}/${params.environment}`);
+      const references = keys.flatMap((item) => (item.ref === undefined ? [] : [[item.key, { reference: `${item.ref.project}/${item.ref.environment}/${item.ref.key}` }] as const]));
       // As entries: a key named __proto__ is a key like any other.
-      return { operationId: ctx.shown.request, keys: Object.fromEntries(Object.entries(answer.keys).map(([key, { version, nature }]) => [key, { version, sensitivity: nature }])) };
+      return { operationId: ctx.shown.request, keys: Object.fromEntries([...Object.entries(answer.keys).map(([key, { version, nature }]) => [key, { version, sensitivity: nature }] as const), ...references]) };
+    },
+  }),
+
+  /**
+   * Break the reference a key is: whoever read through it reads nothing
+   * there until the key is given a value. Whoever writes the key may, and
+   * whoever manages access in its source's project; one call to the vault,
+   * which decides (`reference.break`). Answered with what it read, by the
+   * source's rows: `(gone)` where the vault does not see them. Who made the
+   * reference, and when, is the log's, read with the references' list.
+   */
+  ...route('DELETE /secrets/:project/:environment/:key/reference', {
+    run: async (ctx, { params }) => {
+      const holder = `${params.project}/${params.environment}/${params.key}`;
+      // A personal config holds values only.
+      if (environmentOf(params.environment).mine) throw refusal('no_reference', holder);
+      const { source } = await changed(ctx, { op: 'reference.break', project: params.project, environment: params.environment, key: params.key }, holder);
+      return { operationId: ctx.shown.request, reference: { holder, source: source === null ? '(gone)' : `${source.project}/${source.environment}/${source.key}`, state: 'broken' as const } };
     },
   }),
 };

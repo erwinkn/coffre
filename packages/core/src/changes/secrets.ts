@@ -1,10 +1,15 @@
 /** The changes of keys and their values (`packages/vault/src/ops/secrets.ts`). */
-export type SecretsChanges = SecretWrite;
+export type SecretsChanges = SecretWrite | ReferenceBreak;
 
 export type SecretsAnswers = {
-  /** Each key given a value: the version it is at now, and the nature it was written as. */
+  /** Each key given a value: the version it is at now, and the nature it was written as. A key made a reference is given none. */
   'secret.write': { keys: Record<string, { version: number; nature: Nature }> };
+  /** Where the reference read, as its source's rows say: null when the vault does not see them. */
+  'reference.break': { source: SecretPath | null };
 };
+
+/** A key by where it is held: `market/prod/STRIPE_KEY`. */
+export type SecretPath = { project: string; environment: string; key: string };
 
 /** How a value is kept: a secret, a sensitive one that no person is handed back, or a plain one that whoever lists its environment sees. */
 export type Nature = 'secret' | 'sensitive' | 'plain';
@@ -18,22 +23,32 @@ export type Nature = 'secret' | 'sensitive' | 'plain';
  *   and both for an archived key brought back: sensitive stays sensitive, and anything else is written a secret, a
  *   plain one's and one inherited from nowhere included. A reference's is
  *   its source's.
+ * - `ref`: the key made a reference to that key, which whoever reads this
+ *   environment then reads through it, value and nature, as it changes. Its
+ *   own value, if any, is history. The source is a key of a live project and
+ *   environment, no personal config's, that the writer reads there (and
+ *   uses, a sensitive one), and that is no reference itself; nor is a key
+ *   other references read made one: one hop only. A workload refers only to
+ *   a value it is handed back where it is held, a plain one or one its
+ *   binding lists.
  * - `archived`: true archives the key, false brings it back. A key is
  *   archived with no value written.
  * - `folder`: the folder it is listed in, null for none.
  *
- * A key that gets no value is one the environment holds.
+ * A key that gets neither a value nor a reference is one the environment
+ * holds.
  */
 export type KeyWrite = { key: string; archived?: boolean; folder?: string | null } & (
-  | { value: string; nature?: Nature }
-  | { value?: undefined; nature?: undefined }
+  | { value: string; nature?: Nature; ref?: undefined }
+  | { ref: SecretPath; value?: undefined; nature?: undefined }
+  | { value?: undefined; nature?: undefined; ref?: undefined }
 );
 
 /**
  * Write keys in one environment, all of them or none. 1 to 2,000 keys,
  * each once and named as a key is (`[A-Za-z_][A-Za-z0-9_]{0,127}`); a value
  * is well-formed text with no NUL, 64 Ki characters at most, and the values
- * of one write 1 MiB of UTF-8 in all; a folder 1 to 64 UTF-16 units, with no slash or control character
+ * of one write 1 MiB of UTF-8 in all; a reference's source named by slugs and its key's name; a folder 1 to 64 UTF-16 units, with no slash or control character
  * and nothing `trim` removes at either end (`folderName`). Past any of these
  * the call is a fault, not a refusal: the app checks them first.
  */
@@ -42,4 +57,17 @@ export type SecretWrite = {
   project: string;
   environment: string;
   keys: KeyWrite[];
+};
+
+/**
+ * End the reference a key is: whoever read through it reads nothing there,
+ * until the key is given a value or made a reference again. Whoever writes
+ * the key may, and whoever manages access in its source's project, who
+ * need not see the key's environment at all.
+ */
+export type ReferenceBreak = {
+  op: 'reference.break';
+  project: string;
+  environment: string;
+  key: string;
 };
