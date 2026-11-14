@@ -509,9 +509,10 @@ export class Signer {
 
   /**
    * After a check (upkeep.ts): the oldest uses pruned, as a move, so that
-   * what is kept from is in its storage before anything goes; a slice of the
-   * log held to what it signed; the rows that lapsed deleted. Its answer:
-   * whether an entry of its own waits.
+   * what is kept from is in its storage before anything goes; the rows that
+   * lapsed deleted; a slice of the log held to what it signed, last, so that
+   * what it finds is kept with nothing between to fail. Its answer: whether
+   * an entry of its own waits.
    */
   async #upkeep(at: number): Promise<boolean> {
     const ask = <Row>(statement: SQL) => this.#ask<Row>(statement);
@@ -525,9 +526,8 @@ export class Signer {
       });
       await this.move();
     }
+    const waits = await expire(this.#on, ask, (hash) => this.wake(hash));
     const { found, walk } = await recheck(ask, this.#on.now(), this.#trees, to, this.#walk);
-    const expired = await expire(this.#on, ask);
-    if (expired !== null) await this.wake(expired);
     await this.#step((changes) => {
       for (const { of } of found) this.#find(changes, 'lost', of);
       this.#walk = walk;
@@ -536,7 +536,7 @@ export class Signer {
       this.#checked = at;
       changes.set('checked', at);
     });
-    return expired !== null;
+    return waits;
   }
 
   /**

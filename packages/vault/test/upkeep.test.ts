@@ -394,3 +394,37 @@ test('the upkeep\'s entry is expected: a writer who deletes it before it is sign
   assert.deepEqual((await signer.take()).map(({ found }) => found), ['missing']);
   assert.deepEqual(await minute(), [{ found: 'row', of: nameOf(credentials, old) }], 'and the credential it deleted is not what the log says');
 });
+
+test('a cleanup a writer holds up fails its minute after the deletion it committed is expected, and before the re-check reads: both are said', async () => {
+  await write(3);
+  assert.deepEqual(await minute(), []);
+  const old = world.credential('old', ada, { expiresAt: since(-2 * DAY) });
+  await world.write(vault, ...world.rows('principals', world.principal(ada)), ...world.rows('credentials', old));
+  await plain([since(-3 * HOUR)], []);
+  const [{ row }] = (await rowsOf<{ row: unknown }>(vault.owner, sql`SELECT to_jsonb(c) AS row FROM credentials c WHERE id = ${old.id}`)) as [{ row: unknown }];
+  const [{ body }] = (await rowsOf<{ body: string }>(vault.owner, sql`DELETE FROM log WHERE NOT kept AND leaf = 1 RETURNING body`)) as [{ body: string }];
+  vault.tick(DAY);
+  const checked = signer.checked;
+  let release!: () => void;
+  const locked = vault.owner.transaction(async (tx) => {
+    await tx.execute(sql`SELECT 1 FROM spent_id_tokens FOR UPDATE`);
+    await new Promise<void>((resolve) => (release = resolve));
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    vault.tick(60_000);
+    await assert.rejects(signer.run(true));
+    assert.equal(signer.checked, checked);
+    // The deletion committed: the writer drops its entry and puts the credential back, as it was.
+    assert.deepEqual((await remaining()).credentials, null);
+    await vault.owner.execute(sql`DELETE FROM log_pending`);
+    await vault.owner.execute(sql`INSERT INTO credentials SELECT * FROM jsonb_populate_record(NULL::credentials, ${JSON.stringify(row)}::jsonb)`);
+  } finally {
+    release();
+    await locked;
+  }
+  const found = await minute();
+  assert.deepEqual(found.map(({ found }) => found).sort(), ['lost', 'missing']);
+  assert.deepEqual(found.find(({ found }) => found === 'lost'), { found: 'lost', of: leafHash(Buffer.from(body)).toString('hex') });
+  assert.equal(signer.checked, vault.now());
+});

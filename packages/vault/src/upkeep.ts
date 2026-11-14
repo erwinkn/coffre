@@ -156,17 +156,18 @@ export async function recheck(ask: Ask, now: number, trees: Record<Tree, Edge>, 
  * code once no credential names it. Then, by a statement with no entry, the
  * rows that carry no MAC and that nothing reads again: ID tokens spent two
  * hours ago, MCP approvals a day past their expiry. The change's entry, if
- * it made one, waits to be signed: its hash.
+ * it made one, is `told` the signer as it commits, before the statement
+ * that follows can fail: its answer, whether one waits to be signed.
  */
-export async function expire(vault: Omit<Running, 'wake'>, ask: Ask): Promise<Buffer | null> {
+export async function expire(vault: Omit<Running, 'wake'>, ask: Ask, told: (hash: Buffer) => Promise<void>): Promise<boolean> {
   const at = vault.now();
   const before = sql`${new Date(at - DAY_MS).toISOString()}::timestamptz`;
   // By the expiry a row's MAC covers: one a writer moved back is not the vault's, and stays.
   const oldest = <T extends typeof credentials | typeof deviceLogins | typeof enrollmentCodes>(table: T, more = sql``) =>
     part(table, sql`${table.id} IN (SELECT e.id FROM ${table} e WHERE e.expires_at < ${before}${more} ORDER BY e.expires_at, e.id LIMIT ${DELETE_MOST})`);
   const read = { credentials: oldest(credentials), logins: oldest(deviceLogins), codes: oldest(enrollmentCodes, sql` AND NOT EXISTS (SELECT 1 FROM credentials c WHERE c.enrollment_id = e.id)`) };
-  let hash: Buffer | null = null;
-  await change({ ...vault, wake: (committed) => (hash = committed) }, {
+  let telling: Promise<void> | undefined;
+  const committed = change({ ...vault, wake: (hash) => void (telling = told(hash)) }, {
     read,
     decide: ({ credentials: sessions, logins, codes }) => {
       const writes = [...sessions.map((row) => drop(credentials, row)), ...logins.map((row) => drop(deviceLogins, row)), ...codes.map((row) => drop(enrollmentCodes, row))];
@@ -175,8 +176,10 @@ export async function expire(vault: Omit<Running, 'wake'>, ask: Ask): Promise<Bu
       return { writes, entry: { kept: false, action: 'upkeep.expire', actor: null, credential: null, request: null, ip: null, objects, detail: {} }, answer: null };
     },
   });
+  // Expected once committed, whatever fails after: a deletion the signer is not told of, a writer could undo unseen.
+  await committed.finally(() => telling);
   await ask(sql`WITH spent AS (DELETE FROM spent_id_tokens WHERE hash IN (SELECT hash FROM spent_id_tokens WHERE spent_at < ${new Date(at - SPENT_MS).toISOString()}::timestamptz LIMIT ${DELETE_MOST})),
     approvals AS (DELETE FROM mcp_approvals WHERE id IN (SELECT id FROM mcp_approvals WHERE expires_at < ${before} LIMIT ${DELETE_MOST}))
     SELECT 1`);
-  return hash;
+  return telling !== undefined;
 }

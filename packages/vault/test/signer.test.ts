@@ -423,7 +423,7 @@ test('a run is two round trips, its read and its move, and a minute\'s five, wit
     // The rows and the entries that wait are of one moment: one statement reads both. Each goes with the bound on its waits.
     assert.deepEqual(await run(), []);
     const bounded = (statement: string) => ['begin isolat', 'SELECT set_c', statement, 'commit'];
-    assert.deepEqual(sent.map((group) => group.map((text) => text.slice(0, 12))), [bounded('SELECT parts'), bounded('WITH taken A'), bounded('SELECT l.kep'), bounded('SELECT part,'), bounded('WITH spent A')]);
+    assert.deepEqual(sent.map((group) => group.map((text) => text.slice(0, 12))), [bounded('SELECT parts'), bounded('WITH taken A'), bounded('SELECT part,'), bounded('WITH spent A'), bounded('SELECT l.kep')]);
     // With the database's clock, so that no pooler answers the read from a cache.
     assert.match(sent[0]![2]!, /^SELECT parts\.\*, clock_timestamp\(\)/);
     const first = signer.run(true);
