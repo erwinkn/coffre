@@ -124,6 +124,73 @@ export async function auditPageProofs({ admin }: People): Promise<string> {
   return `the audit page sent with its proofs, rendered by the server: ${proven} of ${proofs.length} rows proven`;
 }
 
+/** A row of `log` as the database holds it: its bigints as text, put back as they were. */
+type LogRow = { seq: string; kept: boolean; leaf: string; body: string };
+
+/**
+ * The newest signed entry of a tree cut out of the log, by the database's
+ * owner (docs/design/0.16.md, "What the minute's run checks of the log"):
+ * the signer's next check, within its minute, says `cut` of that tree in
+ * its alert, in the processes' output, and the audit page proves the
+ * entry nowhere, the gap a hole in its stretch. Put back, the page proves
+ * it again, and the signer lets the finding go: the same cut is news to a
+ * later check. The change cut first, then the use, whose finding says the
+ * check after the change was put back has run; then the change again. An
+ * entry cut further back, or the newest once another is signed after it,
+ * is the re-check's, which reads the log a day after its last walk (D222):
+ * not within a run (docs/conformance.md).
+ */
+export async function logCut(deployment: Deployment, { admin }: People): Promise<string> {
+  const said = (tree: string) => deployment.output().split(`- cut ${tree}:`).length - 1;
+  const out: LogRow[] = [];
+  const seqs = new Set<number>();
+  await using(deployment.database(), async (sql) => {
+    const cut = async (kept: boolean): Promise<LogRow> => {
+      // Nothing waits: an entry signed after the cut would end its tree again, and leave the cut to the walk.
+      await until('nothing waiting to be signed', async () => (await query(sql, 'SELECT 1 FROM log_pending LIMIT 1')).length === 0, PUBLISHED_SECONDS);
+      const tree = kept ? 'kept' : 'aging';
+      const before = said(tree);
+      const [row] = await query<LogRow>(sql, 'DELETE FROM log WHERE kept = $1 AND leaf = (SELECT max(leaf) FROM log WHERE kept = $1) RETURNING seq::text, kept, leaf::text, body', [kept]);
+      expect(row !== undefined, `the log has no ${tree} entry to cut`);
+      out.push(row);
+      await until(`the signer's alert naming - cut ${tree}:`, async () => said(tree) > before, PUBLISHED_SECONDS);
+      // The page's stretch lacks it, by its tree's count, and lists it nowhere as proven.
+      const page = await admin.api.audit.list({ detail: '1', limit: 200 });
+      const seq = Number(row.seq);
+      seqs.add(seq);
+      const hole = page.holes?.some((gap) => (gap.above === null || gap.above > seq) && (gap.below === null || gap.below < seq) && gap[tree] > 0);
+      expect(page.entries.every((entry) => entry.seq !== seq || entry.proof !== 'proven'), 'the audit page proves an entry cut out of the log', { seq });
+      expect(hole === true, "the audit page's stretch does not lack the entry cut out of the log", { seq, holes: page.holes });
+      return row;
+    };
+    const putBack = async (row: LogRow) => {
+      await query(sql, 'INSERT INTO log (seq, kept, leaf, body) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING', [row.seq, row.kept, row.leaf, row.body]);
+      out.splice(out.indexOf(row), 1);
+    };
+    try {
+      await putBack(await cut(true));
+      await putBack(await cut(false));
+      await putBack(await cut(true));
+    } finally {
+      for (const row of [...out]) await putBack(row);
+    }
+  });
+  // Every entry back, and proven against the head again.
+  let judged: ProofJudgment | undefined;
+  let listed: AuditEntryView[] = [];
+  await until('a page past the race between its head and its log', async () => {
+    const page = await admin.api.audit.list({ detail: '1', limit: 200 });
+    [judged, listed] = [judgeProofs(page), page.entries];
+    return !judged.racing;
+  }, PUBLISHED_SECONDS).catch((error: unknown) => {
+    if (judged === undefined) throw error;
+  });
+  const { failed, misplaced, missing } = judged!;
+  const unproven = [...seqs].filter((seq) => !listed.some((entry) => entry.seq === seq && entry.proof === 'proven'));
+  expect(unproven.length === 0 && failed.length === 0 && misplaced.length === 0 && missing !== null && missing.length === 0, 'the entries put back are not proven again', { unproven, failed: failed.slice(0, 5), misplaced: misplaced.slice(0, 5), missing });
+  return "the newest change and use cut out of the log, each named in the signer's alert and proven nowhere on the audit page; put back, proven again, and a change cut again named again";
+}
+
 /**
  * Every version stored is the vault's write: one entry of the log names
  * it, its secret and its number, among the keys the change wrote: a
