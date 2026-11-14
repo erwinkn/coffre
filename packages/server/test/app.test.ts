@@ -270,6 +270,18 @@ test('a dry run tells nobody their guess is right unless they read the value, as
   world.memory.reads.clear();
   assert.deepEqual((await dry('bo-cli', 'market/prod', { DATABASE_URL: 'postgres://märkt' }))[0], [200, { dryRun: true, keys: { DATABASE_URL: 'unchanged' } }], 'asked again');
 
+  // A key made a reference between the weigh and the use: its source has the same version and value, but it is another secret, and the write would end the reference.
+  assert.equal((await answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ SOURCE: 'same', HOLDER: 'same' }) }))))[0], 200);
+  app.vault.use = async (input) => {
+    assert.equal((await answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ HOLDER: { ref: 'market/prod/SOURCE' } }) }))))[0], 200);
+    return use.call(app.vault, input);
+  };
+  try {
+    assert.deepEqual((await dry('bo-cli', 'market/prod', { HOLDER: 'same' }))[0], [200, { dryRun: true, keys: { HOLDER: 'changed' } }]);
+  } finally {
+    app.vault.use = use;
+  }
+
   // A key it inherits and a reference, live or not, are no value of its own to compare: only its own key is asked of the use.
   assert.equal((await answered(app.request('/api/secrets/market/prod', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ LINK: { ref: 'market/prod/DATABASE_URL' } }) }))))[0], 200);
   const used: (string[] | null)[] = [];
