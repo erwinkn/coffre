@@ -89,8 +89,11 @@ const TREES = ['kept', 'aging'] as const;
 type Tree = (typeof TREES)[number];
 const treeOf = (kept: boolean): Tree => (kept ? 'kept' : 'aging');
 
-/** Every table whose rows carry the vault's MAC: the mirror holds each one's. */
-const MIRRORED = (Object.values(schema) as unknown[]).filter((table): table is Sealed => is(table, PgTable) && 'mac' in table && table !== schema.logPending && table !== schema.logHead && table !== schema.auditArchive);
+/** The action of the log's first entry, the adoption's (adopt.ts): the mirror starts from the rows it sealed. */
+export const ADOPTION = 'vault.adopt';
+
+/** Every table whose rows carry the vault's MAC: the mirror holds each one's, and the adoption seals each one. */
+export const MIRRORED = (Object.values(schema) as unknown[]).filter((table): table is Sealed => is(table, PgTable) && 'mac' in table && table !== schema.logPending && table !== schema.logHead && table !== schema.auditArchive);
 
 /** An entry's hash as the database works it out: RFC 9162's leaf hash of its body. */
 const leafOf = (body: string) => sql.raw(`sha256('\\x00'::bytea || convert_to(${body}, 'UTF8'))`);
@@ -150,6 +153,8 @@ export class Signer {
   readonly #mirror = new Map<string, string>();
   /** The entries the vault told of, not yet signed, by hash. */
   readonly #expected = new Set<string>();
+  /** Whether the vault ever told it of one: kept once an entry it was told of is signed, or goes missing. */
+  #told = false;
   /** The entries signed that it would still take, by hash, with their dates. */
   readonly #signed = new Map<string, number>();
   /** When it last read everything that waited. */
@@ -196,6 +201,7 @@ export class Signer {
       const [kind, name] = space < 0 ? [key, ''] : [key.slice(0, space), key.slice(space + 1)];
       if (kind === 'row') signer.#mirror.set(name, value as string);
       else if (kind === 'expected') signer.#expected.add(name);
+      else if (kind === 'told') signer.#told = true;
       else if (kind === 'signed') signer.#signed.set(name, value as number);
       else if (kind === 'moving') signer.#moving = value as Move;
       else if (kind === 'found') signer.#found = value as Finding[];
@@ -231,6 +237,16 @@ export class Signer {
     }
   }
 
+  /**
+   * Whether it has signed nothing and is told of nothing: the one signer
+   * that may adopt its database (adopt.ts). A database that shows no log
+   * to one that has was emptied behind it, and is not adopted again.
+   */
+  get blank(): boolean {
+    this.#alive();
+    return this.#trees.kept.size + this.#trees.aging.size === 0 && this.#moving === null && !this.#told;
+  }
+
   /** The rows and the trees the last check found wrong. */
   get standing(): Finding[] {
     return [...this.#stands];
@@ -261,6 +277,9 @@ export class Signer {
       if (this.#signed.has(hex) || this.#expected.has(hex)) return;
       this.#expected.add(hex);
       changes.set(`expected ${hex}`, true);
+      if (this.#told) return;
+      this.#told = true;
+      changes.set('told', true);
     });
   }
 
@@ -338,6 +357,14 @@ export class Signer {
           this.#find(changes, found!, entry === undefined ? `pending:${row.id}` : hex);
           refused.push(row.id);
           continue;
+        }
+        // The first entry kept, the adoption's: it names no row, and the mirror is the rows read with it, as it sealed them.
+        if (entry.action === ADOPTION && this.#trees.kept.size + hashes.kept.length === 0) {
+          if (snapshot.rows === null) throw new Error("the adoption's entry is signed by a run that reads the rows it sealed");
+          for (const [name, mac] of snapshot.rows) {
+            this.#mirror.set(name, mac);
+            changes.set(`row ${name}`, mac);
+          }
         }
         // In the order written: each change moves the mirror on from the MAC it replaced.
         for (const { row: name, was, now } of entry.rows) {
@@ -465,13 +492,19 @@ export class Signer {
       this.#owed ||= full;
       await this.move();
       const checking = this.#owed && !this.#behind;
-      const [snapshot, failed] = await this.read(checking).then(
+      let [snapshot, failed] = await this.read(checking).then(
         (read) => [read, null] as const,
         async (error: unknown) => {
           if (!checking) throw error;
           return [await this.read(false), error] as const;
         },
       );
+      // The adoption's entry is signed with the rows it sealed (`sign`): a quick read that finds it waiting reads them too,
+      // and fails as the full read did if it does again.
+      if (snapshot.rows === null && this.#trees.kept.size === 0 && snapshot.pending.some((row) => entryOf(this.#on.keys, row)?.action === ADOPTION)) {
+        snapshot = await this.read(true);
+        failed = null;
+      }
       await this.sign(snapshot);
       await this.move();
       this.#behind = !snapshot.drained;

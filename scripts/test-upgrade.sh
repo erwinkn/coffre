@@ -5,7 +5,8 @@
 # (packages/db/test/upgrade/from-0.14.ts); then three databases must have one
 # schema, line for line: that one, one migrated from nothing, and one made
 # from schema.ts alone, as drizzle-kit writes it. The first two must also
-# agree on every privilege and storage setting, which schema.ts does not say.
+# agree on every privilege and storage setting, which schema.ts does not say,
+# and the vault adopts each (packages/vault/test/adopt-upgraded.ts).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-coffre}"
@@ -55,4 +56,6 @@ for database in coffre_upgraded coffre_fresh; do
 done
 [[ -s "$scratch/coffre_fresh.settings.txt" ]]
 diff "$scratch/coffre_fresh.settings.txt" "$scratch/coffre_upgraded.settings.txt" || { echo "a database upgraded from 0.14 has other privileges or storage settings than one migrated from nothing (migrated < > upgraded)"; exit 1; }
-echo "upgrade from 0.14: every row converted, and $(wc -l < "$scratch/coffre_declared.txt") lines of schema agree across the three databases"
+# Then the vault adopts both, and serves them through the new engine.
+DATABASE_URL="$(url postgres)" node --conditions=coffre:source --test packages/vault/test/adopt-upgraded.ts
+echo "upgrade from 0.14: every row converted and adopted, and $(wc -l < "$scratch/coffre_declared.txt") lines of schema agree across the three databases"
