@@ -74,7 +74,6 @@ BEGIN
         'UPDATE secret_versions SET ciphertext = ''''::bytea, wrapped_dek = ''\x01''::bytea WHERE id = $1',
         'UPDATE secret_versions SET iv = iv WHERE id = $1',
         'UPDATE secret_versions SET version = 2 WHERE id = $1',
-        'UPDATE secret_versions SET recipe = ''bytes:1:hex'' WHERE id = $1',
         'UPDATE secret_versions SET plaintext = ''other'' WHERE id = $1',
         'UPDATE secret_versions SET sensitive = true WHERE id = $1',
         'UPDATE secret_versions SET ciphertext = ''''::bytea, wrapped_dek = ''''::bytea WHERE id = $1'

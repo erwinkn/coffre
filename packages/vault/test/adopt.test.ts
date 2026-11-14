@@ -76,10 +76,11 @@ async function value14(of: Fresh<typeof secrets>, text: string, more: { sensitiv
   const version = of.versions + 1;
   const row = {
     id: crypto.randomUUID(), secretId: of.id, version, envelopeVersion: 1, ...encrypt(Buffer.from(text), ids, dek), wrappedDek: wrapped.bytes, kekProvider: wrapped.kekProvider, kekId: wrapped.kekId, kekVersion: wrapped.kekVersion,
-    createdAt: new Date(0), createdBy: ada, recipe: null, pairId: null, pairHalf: null, plaintext: more.plain ? text : null, sensitive: more.sensitive === true,
+    createdAt: new Date(0), createdBy: ada, plaintext: more.plain ? text : null, sensitive: more.sensitive === true,
   };
   versions.push(row);
-  return { ...of, versions: version, currentVersion: version };
+  // Its nature as the migration leaves it, from the version's labels.
+  return { ...of, versions: version, currentVersion: version, nature: more.sensitive ? 'sensitive' : more.plain ? 'plain' : 'secret' };
 }
 const versions: (typeof secretVersions.$inferInsert)[] = [];
 
@@ -98,7 +99,7 @@ async function upgraded() {
   const flag = await value14(secret(prod, 'FLAG'), 'on', { plain: true });
   const stripe = await value14(secret(prod, 'STRIPE_KEY'), 'sk_live', { sensitive: true });
   const own = await value14(secret(mine, 'DATABASE_URL'), 'postgres://ada', { owner: ada });
-  const erased = { ...secret(prod, 'ERASED'), versions: 1, currentVersion: 1 };
+  const erased = { ...secret(prod, 'ERASED'), versions: 1, currentVersion: 1, nature: 'secret' as const };
   versions.push({ ...versions.at(-1)!, id: crypto.randomUUID(), secretId: erased.id, version: 1, ciphertext: Buffer.alloc(0), wrappedDek: Buffer.alloc(0), plaintext: null, sensitive: false });
   await vault.owner.insert(projects).values([market, dropped]);
   await vault.owner.insert(environments).values([prod, vaulted, mine, gone, within]);
@@ -133,6 +134,8 @@ test('a database as the upgrade leaves it is adopted: policy from the archive, e
   // A deleted place the policy names, or one in a deleted project, protects nothing, as in 0.14.
   // Every key wrapped again, but the erased version's, which keeps its label and has nothing to open.
   assert.deepEqual(await rowsOf(vault.owner, sql`SELECT envelope_version AS format, count(*)::int AS n FROM secret_versions GROUP BY 1 ORDER BY 1`), [{ format: 1, n: 1 }, { format: 2, n: 5 }]);
+  // Each secret's row says what its value opened as: the erased one's nothing, so the strictest.
+  assert.deepEqual(await natures(), { 'prod DATABASE_URL': 'secret', 'prod FLAG': 'plain', 'prod STRIPE_KEY': 'sensitive', 'prod ERASED': 'sensitive', 'prod-ada DATABASE_URL': 'secret' });
   assert.equal(await unsealed(), 0);
   const [first] = await rowsOf<{ body: { action: string; detail: { archive: { seq: number }; rows: Record<string, number> } } }>(vault.owner, sql`SELECT body::jsonb AS body FROM log_pending`);
   assert.equal(first!.body.action, 'vault.adopt');
@@ -156,6 +159,25 @@ test('a database as the upgrade leaves it is adopted: policy from the archive, e
   assert.deepEqual(await signed(running), []);
   // The first minute's check.
   assert.deepEqual(await signed(running, true), []);
+});
+
+/** What each secret's row says of its current value, by environment and key. */
+async function natures(): Promise<Record<string, string | null>> {
+  const found = await rowsOf<{ name: string; nature: string | null }>(vault.owner, sql`SELECT e.slug || ' ' || s.key AS name, s.nature FROM secrets s JOIN environments e ON e.id = s.environment_id`);
+  return Object.fromEntries(found.map(({ name, nature }) => [name, nature]));
+}
+
+test("a secret's row says what its current value opened as, whatever the rows said before the adoption", async () => {
+  const w = await upgraded();
+  // Loosened behind 0.14 or after the migration, rows the adoption would seal as it finds them: a sensitive key, a
+  // secret and an erased one marked plain, and a version marked as one 0.16 wrote, which the adoption does not open.
+  await vault.owner.execute(sql`UPDATE secrets SET nature = 'plain' WHERE id IN (${w.stripe.id}, ${w.database.id}, ${w.erased.id})`);
+  await vault.owner.execute(sql`UPDATE secret_versions SET envelope_version = 2 WHERE secret_id = ${w.own.id}`);
+  // And an older version of another nature than the current one, which is the one the row takes: plain, as its column is its value.
+  await vault.owner.execute(sql`UPDATE secret_versions SET plaintext = 'postgres://old' WHERE secret_id = ${w.database.id} AND version = 1`);
+  assert.equal(await adopting(), true);
+  assert.deepEqual(await natures(), { 'prod DATABASE_URL': 'secret', 'prod FLAG': 'plain', 'prod STRIPE_KEY': 'sensitive', 'prod ERASED': 'sensitive', 'prod-ada DATABASE_URL': 'sensitive' });
+  assert.equal(await unsealed(), 0);
 });
 
 test('a fresh database is adopted with the roles as they ship and the Owners the configuration names, then served', async () => {

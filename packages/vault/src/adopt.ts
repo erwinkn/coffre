@@ -12,6 +12,7 @@ import { CHANGE_LOCK, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, seal, shapeOf, toWire, type Wire } from './rows.ts';
 import { ADOPTION, MIRRORED, type Signer } from './signer.ts';
+import { natureOf } from './value.ts';
 
 /**
  * The vault's adoption of a database (docs/design/0.16.md, "Upgrade from
@@ -25,7 +26,8 @@ import { ADOPTION, MIRRORED, type Signer } from './signer.ts';
  *    `settings.change`, each held to 0.14's vault MAC, and makes the Owners
  *    the configuration names;
  * 2. wraps each version's data key again, as envelope format 2, which names
- *    its number and whether it is plain;
+ *    its number and whether it is plain, and writes on each secret's row the
+ *    nature its current value opened as;
  * 3. MACs every starred row;
  * 4. writes the log's first entry, which pins 0.14's chain and counts what
  *    it adopted.
@@ -93,6 +95,11 @@ export async function adopt(signer: Signer, vault: Pick<Running, 'db' | 'keys' |
       await tx.execute(sql`UPDATE secret_versions v SET envelope_version = 2, wrapped_dek = decode(j.dek, 'hex'), kek_provider = j.provider, kek_id = j.kek, kek_version = j.version
         FROM jsonb_to_recordset(${JSON.stringify(wrapped)}::jsonb) AS j(id uuid, dek text, provider text, kek text, version text) WHERE v.id = j.id`);
     }
+    // A secret's row says what its current value is as the value opened, whatever the migration left there. One it did
+    // not open, erased or never 0.14's, is taken as sensitive, the nature that hands it to the fewest.
+    await tx.execute(sql`UPDATE secrets s SET nature = coalesce(j.nature, 'sensitive')
+      FROM secrets c LEFT JOIN jsonb_to_recordset(${JSON.stringify(wrapped)}::jsonb) AS j(secret uuid, number integer, nature text) ON j.secret = c.id AND j.number = c.current_version
+      WHERE s.id = c.id AND c.current_version IS NOT NULL`);
 
     const counts: Record<string, number> = { secret_versions: wrapped.length };
     for (const table of MIRRORED) counts[shapeOf(table).name] = await sealAll(tx, vault.keys[0]!, table);
@@ -138,7 +145,9 @@ async function sealAll(tx: Transaction, key: Running['keys'][number], table: (ty
  * number and, for one 0.14 marked plain, as plain. 0.14 knew a plain value
  * only by its `plaintext` column, which nothing protects, so one is taken as
  * plain only if its value is that column's. A version 0.14 erased, with no
- * ciphertext and no key, has nothing to wrap, and keeps its label.
+ * ciphertext and no key, has nothing to wrap, and keeps its label. With
+ * each, its nature as it opened, which its secret's row takes when it is
+ * the current one.
  */
 async function wrapAgain(tx: Transaction, keks: Config['keks']) {
   const versions = await tx
@@ -167,7 +176,7 @@ async function wrapAgain(tx: Transaction, keks: Config['keks']) {
         value.fill(0);
         if (!same) throw new Error(`${what} is marked plain, and its value is not its plaintext column: someone wrote the row behind 0.14`);
         const again = await keks.wrap(dek, { ...named, version: version.version, ...(plain ? { plain: true as const } : {}) });
-        return { id: version.id, dek: again.bytes.toString('hex'), provider: again.kekProvider, kek: again.kekId, version: again.kekVersion };
+        return { id: version.id, dek: again.bytes.toString('hex'), provider: again.kekProvider, kek: again.kekId, version: again.kekVersion, secret: version.secretId, number: version.version, nature: natureOf(version) };
       } finally {
         dek.fill(0);
       }

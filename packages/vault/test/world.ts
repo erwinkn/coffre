@@ -28,7 +28,7 @@ export function environment(of: { id: string }, slug: string, more: Partial<Fres
 }
 
 export function secret(of: { id: string; projectId: string }, key: string, more: Partial<Fresh<typeof secrets>> = {}): Fresh<typeof secrets> {
-  return { id: randomUUID(), projectId: of.projectId, environmentId: of.id, key, createdAt: at, updatedAt: at, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: null, ...more };
+  return { id: randomUUID(), projectId: of.projectId, environmentId: of.id, key, createdAt: at, updatedAt: at, versions: 0, currentVersion: null, archivedAt: null, folder: null, sourceId: null, nature: null, recipe: null, pairId: null, pairHalf: null, ...more };
 }
 
 export function principal(id: string, more: Partial<Fresh<typeof principals>> = {}): Fresh<typeof principals> {
@@ -113,10 +113,10 @@ export async function amend<K extends keyof typeof TABLES>(vault: TestVault, tab
 export function value(_vault: TestVault, of: Fresh<typeof secrets>, text: string, more: { sensitive?: boolean; plain?: boolean } = {}): Fresh<typeof secrets> {
   const version = of.versions + 1;
   values.push({
-    value: { version: { id: randomUUID(), secretId: of.id, version, createdAt: at, createdBy: root, recipe: null, pairId: null, pairHalf: null, plaintext: more.plain === true ? text : null, sensitive: more.sensitive === true }, text: Buffer.from(text) },
+    value: { version: { id: randomUUID(), secretId: of.id, version, createdAt: at, createdBy: root, plaintext: more.plain === true ? text : null, sensitive: more.sensitive === true }, text: Buffer.from(text) },
     environment: of.environmentId,
   });
-  return { ...of, versions: version, currentVersion: version };
+  return { ...of, versions: version, currentVersion: version, nature: more.sensitive === true ? 'sensitive' : more.plain === true ? 'plain' : 'secret', recipe: null, pairId: null, pairHalf: null };
 }
 
 /** A secret's next value, in a change of its own, over the row that is there: one change writes one version of a secret. */
@@ -128,8 +128,8 @@ export async function rewrite(vault: TestVault, of: { id: string }, text: string
     decide: ({ found: [was] }) => {
       const { mac: _, ...kept } = was!;
       const version = kept.versions + 1;
-      written = { ...kept, versions: version, currentVersion: version };
-      const row = { id: randomUUID(), secretId: kept.id, version, createdAt: at, createdBy: root, recipe: null, pairId: null, pairHalf: null, plaintext: null, sensitive: false };
+      written = { ...kept, versions: version, currentVersion: version, nature: 'secret', recipe: null, pairId: null, pairHalf: null };
+      const row = { id: randomUUID(), secretId: kept.id, version, createdAt: at, createdBy: root, plaintext: null, sensitive: false };
       return { writes: [put(secrets, written, was!)], values: [{ version: row, text: Buffer.from(text) }], entry: { kept: true, action: 'test.write', actor: null, credential: null, request: null, ip: null, objects: [], detail: {} }, answer: null };
     },
   });
