@@ -122,11 +122,11 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
       return forwardSocket(request, config.sockets);
     },
     // The object's coffre lasts as long as it does: its database client, which only routes, opens with a query and closes once idle.
-    Sockets: socketsObject<Env>((env) => {
+    Sockets: socketsObject<Env>((env, state) => {
       const { config, resolved, gates } = configured(env);
       const pool = new HyperdrivePool(config.database.hyperdrive.connectionString, { closeIdleMs: IDLE_DATABASE_MS });
       const runtime = createRuntime(resolved, createDatabase(pool), config.vault, { transport: fetchTransport(), gates });
-      return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, hold);
+      return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, { hold, track: (work) => state.waitUntil(work) });
     }),
     Anchor: CoffreAnchor,
     Gates: CoffreGates,

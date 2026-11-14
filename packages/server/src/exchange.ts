@@ -9,13 +9,13 @@ import {
   type BindingClaims,
   type DecodedToken,
   type VerifiedUnder,
-  type WorkloadAlert,
   type WorkloadProfile,
   type WorkloadsConfig,
 } from '@coffre/core/identity';
 import { isServiceMember, shownMember } from '@coffre/core/schemas';
 import { z } from 'zod';
 
+import { unknownKeyAlert } from './alerts.ts';
 import { ApiError, noteTampered, notFound, refusal, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import { issuerBindings, type IssuerBinding } from './db/queries/bindings.ts';
 import { errorResponse, jsonResponse, readLimitedJson } from './http.ts';
@@ -45,13 +45,12 @@ import { IssuerUnavailable, verifyWithKeys } from './workloads/keys.ts';
  * Every refusal is 401 with its reason, as 0.14 answered, but too many at
  * once (429) and the issuer's keys out of reach (503), which are the app's.
  * A token signed by a key the binding's own keys lack is the deployment's
- * alert, once an hour per service in this isolate at most: 0.14.7 kept that
- * count in the database, once per deployment, and the service's gate will
- * keep it in 0.16; until then each new isolate may say it again. Each
- * refusal is one line of the log, once a minute per reason and service.
+ * alert, once an hour per service at most, counted in the service's gate
+ * (`unknownKeyAlert`). Each refusal is one line of the log, once a minute
+ * per reason and service, in this isolate.
  *
- * Not yet: 0.14.7's count of what one binding issued a minute (60), which
- * the service's gate keeps in 0.16, with the workload's sessions.
+ * 0.14.7's 60 credentials a minute per binding is not kept (D177): the
+ * limit per source address bounds a flood.
  */
 export async function exchangeToken(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): Promise<Response> {
   const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
@@ -172,7 +171,7 @@ async function exchanged(request: Request, runtime: CoffreRuntime, workloads: Wo
   if (!('refused' in answer)) return jsonResponse({ token, expiresAt: answer.answer.expiresAt });
   const reason = answer.refused;
   logRefusal(reason, service, sourceIp, reason === 'unknown_signer' ? { issuer, kid: shownKid(decoded.header) } : {});
-  if (reason === 'unknown_signer') await unknownKey(workloads, service, newest, issuer, decoded, sourceIp, track);
+  if (reason === 'unknown_signer') await unknownKeyAlert(workloads, runtime.gates, { service, binding: newest, issuer, kid: shownKid(decoded.header) }, sourceIp, track);
   if (reason === 'no_match') {
     // Which claims differ from the closest binding, by name, never the values it expects: told only of a token whose signature the app verified.
     const differ = claims === null ? null : closest(taking.filter((binding) => binding.jwksUri === newest.jwksUri), claims);
@@ -204,6 +203,7 @@ function closest(bindings: readonly IssuerBinding[], claims: Record<string, unkn
 /** When each reason and service last logged a refusal, in this isolate: settled values only. */
 const refusalsLogged = new Map<string, number>();
 const REFUSAL_LOG_MS = 60 * 1000;
+const MAX_LOGGED = 1_000;
 
 /** One line per reason and service a minute, in this isolate, as 0.14.7 logged them: enough to see a refusal, not a flood. */
 function logRefusal(reason: string, service: string, sourceIp: string | null, named: { issuer?: string; kid?: string | null }): void {
@@ -212,57 +212,12 @@ function logRefusal(reason: string, service: string, sourceIp: string | null, na
   if (now - (refusalsLogged.get(key) ?? -Infinity) < REFUSAL_LOG_MS) return;
   refusalsLogged.delete(key);
   refusalsLogged.set(key, now);
-  while (refusalsLogged.size > MAX_ALERTED) refusalsLogged.delete(refusalsLogged.keys().next().value!);
+  while (refusalsLogged.size > MAX_LOGGED) refusalsLogged.delete(refusalsLogged.keys().next().value!);
   console.error({ event: 'workload_exchange_refused', reason, service, sourceIp, ...named }, `a CI run's exchange for ${shownMember(service)} was refused: ${reason}`);
 }
-
-/** When each service's unknown key last alerted, in this isolate: settled values only. */
-const alerted = new Map<string, number>();
-const UNKNOWN_KEY_ALERT_MS = 60 * 60 * 1000;
-/** How long the refusal waits on the deployment's alert: past it, it answers, and the alert goes on without it. */
-const ALERT_WAIT_MS = 2_000;
-const MAX_ALERTED = 1_000;
 
 /** The kid a token names, as an alert shows it: at most 64 characters a kid uses. */
 function shownKid(header: Record<string, unknown>): string | null {
   const kid = header.kid;
   return typeof kid === 'string' && /^[A-Za-z0-9._~+/=:-]{1,64}$/.test(kid) ? kid : null;
-}
-
-/**
- * A token signed by a key its binding's own keys lack: its issuer most
- * likely rotated them, and none of the service's runs signs in until a
- * manager uploads them again. The deployment's alert, once an hour per
- * service in this isolate at most, waited on for 2 s at most and finished
- * after the response (`track`); never throws.
- */
-async function unknownKey(workloads: WorkloadsConfig, service: string, binding: IssuerBinding, issuer: string, decoded: DecodedToken, sourceIp: string | null, track: (work: Promise<unknown>) => void): Promise<void> {
-  const now = Date.now();
-  if (workloads.alert === null || now - (alerted.get(service) ?? -Infinity) < UNKNOWN_KEY_ALERT_MS) return;
-  alerted.delete(service);
-  alerted.set(service, now);
-  while (alerted.size > MAX_ALERTED) alerted.delete(alerted.keys().next().value!);
-  const name = service.slice('token:'.length);
-  const kid = shownKid(decoded.header);
-  const fetch = binding.profile === 'kubernetes' ? 'kubectl get --raw /openid/v1/jwks > keys.json' : 'save its JWKS as keys.json';
-  const alert: WorkloadAlert = {
-    kind: 'unknown_key',
-    service,
-    binding: binding.id,
-    session: null,
-    ip: sourceIp,
-    text: `${name}'s sign-in${sourceIp === null ? '' : ` from ${sourceIp}`} was refused: its token ${kid === null ? 'names no key' : `names key "${kid}"`}, not one uploaded for ${issuer}. `
-      + `If that issuer rotated its keys, upload them again: ${fetch}, then coffre trust ${shellWord(shownMember(service))} --issuer ${shellWord(issuer)} --replace-keys --jwks-file keys.json --apply. Said once an hour at most.`,
-  };
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const sent = (async () => workloads.alert!(alert))().catch((error: unknown) => console.error("the deployment's workload alert failed", logged(error)));
-  // Said once an hour: a hook slower than the wait still finishes, the platform keeping the request alive for it.
-  track(sent);
-  await Promise.race([sent, new Promise<void>((resolve) => (timer = setTimeout(resolve, ALERT_WAIT_MS)))]);
-  clearTimeout(timer);
-}
-
-/** `word` as one shell word: as it is when it needs no quoting, as an issuer URL does not. */
-function shellWord(word: string): string {
-  return /^[A-Za-z0-9._~:/@%+=,-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
 }

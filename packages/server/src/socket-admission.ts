@@ -19,13 +19,20 @@ const ADMISSION_MS = 45_000;
 /**
  * The plugin's refusal or its session; a path no plugin takes for a socket
  * is a 404, and a plugin that has not decided in time has refused (`inTime`).
+ * `hold`: as `inTime` says. `track`: work the platform must keep alive past
+ * the answer, a limit's alert (`gated`), the Durable Object's `waitUntil`.
  */
-export async function admitSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null, hold?: (deciding: Promise<unknown>) => void): Promise<Response | SocketSession> {
+export async function admitSocket(
+  request: Request,
+  runtime: CoffreRuntime,
+  sourceIp: string | null,
+  { hold, track }: { hold?: (deciding: Promise<unknown>) => void; track?: (work: Promise<unknown>) => void } = {},
+): Promise<Response | SocketSession> {
   return inTime(
     (async () =>
       !(await schemaReady(runtime))
         ? new Response("coffre's database lacks this version's migrations", { status: 503 })
-        : ((await pluginSocket(request, runtime, sourceIp)) ?? new Response('no WebSocket here', { status: 404 })))(),
+        : ((await pluginSocket(request, runtime, sourceIp, track)) ?? new Response('no WebSocket here', { status: 404 })))(),
     hold,
   );
 }

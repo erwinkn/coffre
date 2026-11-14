@@ -12,6 +12,14 @@
   setting again (`GET /api/me` says `setsUpServices: false`). A token's or a
   binding's preview (`?dryRun=1`) answers what it would reach, but not the
   places whose sensitive values it will not read (`withheld`).
+- **A workload's alerts, as 0.14.7 said them.** The first request a
+  credential's limit refuses in its window is the deployment's `limit`
+  alert, once per workload, credential and window, on a WebSocket too. A
+  token signed by a key no binding holds is alerted once an hour per
+  service for the whole deployment, counted in the service's gate, where
+  0.16 had capped it per isolate. 0.14.7's 60 credentials a minute per
+  binding is not kept (D177): a CI sign-in has one limit, per source
+  address.
 - **Postgres only.** coffre no longer runs on SQLite. `@coffre/db` drops its
   SQLite schema, migrations and driver (`@libsql/client`), and a `file:`
   URL is refused wherever a database URL is taken (`createCoffre`,
