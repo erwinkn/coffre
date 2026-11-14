@@ -49,7 +49,7 @@ export interface Vault {
    * page's queries with. Nothing is opened or changed on the answer: a use
    * and a change read their caller themselves.
    */
-  caller(input: Presented): Promise<Called | Refused>;
+  caller(input: Presented & { head?: boolean }): Promise<Called | Refused>;
   /**
    * Make a change: one operation, named as its log entry's action is, with
    * its input. All of it, or none.
@@ -146,7 +146,24 @@ export type Called = {
   /** `expiresAt` is ISO 8601. */
   credential: { id: string; kind: string; expiresAt: string };
   holds: Holdings & { policy: Policy };
+  /**
+   * For a call that asked (`head`): the log's head as the vault last signed
+   * it, read with the caller's rows and held to the vault's MAC; null when
+   * no head stands under it. The audit page proves each entry it shows
+   * against these roots; one past these sizes is proven by nothing here.
+   */
+  head?: SignedHead | null;
 };
+
+/**
+ * The log's signed head: how many entries are numbered (`size`), and each
+ * tree's size and root, hex (the changes kept for good, and the uses that
+ * age out, of which `agingFrom` is the first still there). `signedAt` is
+ * ISO 8601. It says the vault signed this log, not that none is newer: the
+ * signer holds the log's end to its own copy every minute, and walks the
+ * rest within a day.
+ */
+export type SignedHead = { size: number; keptSize: number; keptRoot: string; agingSize: number; agingRoot: string; agingFrom: number; signedAt: string };
 
 /** Why a call is not answered. Nothing it asked was written. */
 export type Refused = { refused: string };

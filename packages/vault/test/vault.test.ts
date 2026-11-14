@@ -98,6 +98,11 @@ test('who a request is crosses as JSON: what it holds, as the app decides on it,
   assert.equal(allows(answer.holds, 'secret.read', { projectId: held.projectId! }), true);
   assert.equal(allows(answer.holds, 'secret.write', { projectId: held.projectId! }), false);
   assert.deepEqual(await vault.caller({ token: tokenOf('nobody').toString('hex'), proof: null, request: null, ip: null }), { refused: 'unauthenticated' });
+  // Asked for the log's head, the answer says so: null here, where nothing is signed yet; anything but `true` asks for none.
+  const headed = await vault.caller({ token: tokenOf('ada-cli').toString('hex'), proof: null, request: null, ip: null, head: true });
+  assert.ok(!('refused' in headed) && headed.head === null, JSON.stringify(headed));
+  const plain = await vault.caller({ token: tokenOf('ada-cli').toString('hex'), proof: null, request: null, ip: null, head: 'yes' as unknown as boolean });
+  assert.ok(!('refused' in plain) && !('head' in plain), JSON.stringify(plain));
   // It wrote no entry, and woke nobody.
   assert.equal(world.woken.length, 0);
   for (const bad of [{ token: 'ada-cli' }, { proof: 7 }, { ip: {} }]) {

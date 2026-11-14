@@ -511,6 +511,26 @@ export function issuedGrant(grant: GrantPlace & { role: Role }, policy: Policy =
 }
 
 /**
+ * Of a grant issued anew and the one it takes the place of, what both
+ * hold, column by column, and the sensitive values only if both read them:
+ * a binding that replaces others keeps no more than they did, whatever its
+ * role holds now (0.14.7's `narrowest`).
+ *
+ *   was     viewer on market/dev: read, use / use
+ *   now     viewer, edited since: read / read, use
+ *   kept    read / use
+ */
+export function narrowest(now: ScopeGrant, before: ScopeGrant): ScopeGrant {
+  const both = (a: readonly Permission[], b: readonly Permission[]) => a.filter((permission) => b.includes(permission));
+  const [a, b] = [scopeDefinition(now), scopeDefinition(before)];
+  return {
+    ...now,
+    permissions: { normal: both(a.permissions, b.permissions), protected: both(a.protected, b.protected) },
+    ...(now.sensitive === undefined ? {} : { sensitive: now.sensitive && before.sensitive === true }),
+  };
+}
+
+/**
  * What `holder` holds at `place` in each column a credential's grant there
  * keeps (`issuedGrant`): `normal`, as if nothing were protected; `protected`,
  * as a person in a protected environment. At an environment, as if it were
@@ -581,6 +601,13 @@ export const MAX_PERSONAL_TOKEN_MINUTES = 7 * 24 * 60;
  * then, and the CLI's sign-in hint says so before it has asked for one.
  */
 export const DEVICE_TTL_SECONDS = 10 * 60;
+
+/**
+ * A device login's user code, as the app draws it and the vault takes it:
+ * eight letters in two fours, `BCDF-GHJK`, of an alphabet with no vowel, so
+ * that a code never spells a word, and no letter that reads as a digit.
+ */
+export const USER_CODE = /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/;
 
 /**
  * A credential's scope, by path as the API names it, in words, each role

@@ -191,8 +191,9 @@ export async function historyOf(
 /**
  * The references of `project`: every secret of it that reads another, and
  * every secret elsewhere that reads one of it, each with its source; with
- * the project's environments and every place either end is in. One
- * statement; the rows it reads are the project's keys and the references.
+ * the project's environments and every place either end is in, a personal
+ * config's parent too, which its access is read through. One statement; the
+ * rows it reads are the project's keys and the references.
  */
 export async function referencesOf(db: Queryable, project: string): Promise<{ project: ProjectRow | null; projects: Map<string, ProjectRow>; environments: Map<string, EnvironmentRow>; secrets: Map<string, SecretRow>; holders: string[] }> {
   const rows = await rowsOf<{ part: 'project' | 'environment' | 'secret' | 'holder'; row: Wire }>(
@@ -208,7 +209,8 @@ export async function referencesOf(db: Queryable, project: string): Promise<{ pr
       SELECT 'holder' AS part, jsonb_build_object('id', t.id) AS row FROM holders t
       UNION ALL SELECT 'secret', ${SECRET} FROM ends t
       UNION ALL SELECT 'project', ${PROJECT} FROM projects t WHERE t.id IN (SELECT id FROM p UNION SELECT project_id FROM ends)
-      UNION ALL SELECT 'environment', ${ENVIRONMENT} FROM environments t WHERE t.project_id = (SELECT id FROM p) OR t.id IN (SELECT environment_id FROM ends)`,
+      UNION ALL SELECT 'environment', ${ENVIRONMENT} FROM environments t WHERE t.project_id = (SELECT id FROM p) OR t.id IN (SELECT environment_id FROM ends)
+        OR t.id IN (SELECT e.parent_id FROM environments e WHERE e.owner IS NOT NULL AND e.id IN (SELECT environment_id FROM ends))`,
   );
   const found = { project: null as ProjectRow | null, projects: new Map<string, ProjectRow>(), environments: new Map<string, EnvironmentRow>(), secrets: new Map<string, SecretRow>(), holders: [] as string[] };
   for (const { part, row } of rows) {

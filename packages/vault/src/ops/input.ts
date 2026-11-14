@@ -10,12 +10,15 @@ import type { Presented, Trace } from '@coffre/core/vault';
 export const HASH = /^[0-9a-f]{64}$/;
 
 /**
- * A name as the vault takes one: text of a bounded length, which Postgres
+ * Text as the vault takes it: of a bounded length, which Postgres
  * stores and gives back as given: no NUL, and no half of a surrogate pair,
  * which JSON carries and Postgres refuses. What it names is the decision's
  * to find, or not.
  */
-export const text = (value: unknown): value is string => typeof value === 'string' && value.length <= 256 && !value.includes('\0') && Buffer.from(value).toString() === value;
+export const long = (value: unknown, most: number): value is string => typeof value === 'string' && value.length <= most && !value.includes('\0') && Buffer.from(value).toString() === value;
+
+/** A name: such text, 256 characters at most. */
+export const text = (value: unknown): value is string => long(value, 256);
 
 /** Where a request came from, for the log: all a change nobody asks comes with. */
 export function traced({ request, ip }: Trace): Trace {

@@ -9,6 +9,7 @@ import { can, permissionsAt, placeOf, type Place } from '../caller.ts';
 import { badRequest, refusal } from '../errors.ts';
 import { parsePath } from '../paths.ts';
 import { route } from '../route.ts';
+import { readersAt } from './members.ts';
 import { environmentOf, stopOf, versionOf } from './secrets.ts';
 
 /**
@@ -445,8 +446,10 @@ export const keyRoutes = {
    * `market/prod/KEY`: those it lends and those it holds. Each is listed to
    * whoever lists, or manages the access of, either end. A place the caller
    * holds nothing in, and shown none of, answers as one that is not there.
-   * Who reads through one, `readers`, is the members area's to say, and
-   * null until then.
+   * Who reads through one, `readers`, is shown to whoever manages either
+   * project's access, as 0.14.7 showed it: the members who read its
+   * holder's environment (`readersAt`), at one more statement for the page,
+   * and null to anyone else.
    */
   ...route('GET /references', {
     input: z.object({ path: z.string().max(400) }).strict(),
@@ -475,9 +478,11 @@ export const keyRoutes = {
         if (!(reaches(holder) || (source !== undefined && reaches(source)))) return [];
         const where = environments.get(holder.environmentId);
         const whose = found.projects.get(holder.projectId);
+        const manages = [holder, ...(source === undefined ? [] : [source])].some((end) => can(who, 'grant.manage', { projectId: end.projectId }));
         return [{
           ...referenceView(found, holder, source),
-          readers: null,
+          // Where its readers read, for a manager's.
+          readAt: manages && where !== undefined ? placeOfEnd(holder) : null,
           canBreak: (where !== undefined && can(who, 'secret.write', placeOfEnd(holder))) || (source !== undefined && can(who, 'grant.manage', { projectId: source.projectId })),
           holderArchived: holder.archived || where === undefined || where.archived || whose === undefined || whose.archived,
         }];
@@ -485,7 +490,10 @@ export const keyRoutes = {
       // A place the caller holds nothing in answers as one not there, unless a reference they reach by its other end names it: that end shows it already.
       if (!holds && references.length === 0) throw refusal('no_access', input.path);
       references.sort((a, b) => (a.holder < b.holder ? -1 : a.holder > b.holder ? 1 : 0));
-      return { references };
+      // Their readers, for a manager's: one statement for them all, none when there are none.
+      const readers = await readersAt(ctx.db, who, references.flatMap(({ readAt }) => (readAt === null ? [] : [readAt])), new Date());
+      let next = 0;
+      return { references: references.map(({ readAt, ...reference }) => ({ ...reference, readers: readAt === null ? null : readers[next++]! })) };
     },
   }),
 
