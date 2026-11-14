@@ -211,12 +211,13 @@ test('an Owner the configuration names is a member whatever the rows say: made o
 
 test('nobody signs in to a database the vault has not adopted: not an Owner its configuration names, whom it would make from nothing', async () => {
   const before = (await entries()).length;
-  // The instance's row as the upgrade leaves it, under no MAC; then none at all, as a new database has.
+  // The instance's row written behind the vault is not one it adopted, and says so; then none at all, as a database new or just upgraded has.
   await world.owner.execute(sql`UPDATE policy SET mac = '\\x'`);
-  assert.deepEqual(await owned.change(signin(github('gh-root', 'root@acme.example'), 'root-web')), { refused: 'adopting' });
-  assert.deepEqual(await vault.change(signin(github('gh-bo'), 'bo-web-2')), { refused: 'adopting' });
+  assert.deepEqual(await owned.change(signin(github('gh-root', 'root@acme.example'), 'root-web')), { refused: 'tampered' });
+  assert.deepEqual(await vault.change(signin(github('gh-bo'), 'bo-web-2')), { refused: 'tampered' });
   await world.owner.execute(sql`DELETE FROM policy`);
   assert.deepEqual(await owned.change(signin(github('gh-root', 'root@acme.example'), 'root-web')), { refused: 'adopting' });
+  assert.deepEqual(await vault.change(signin(github('gh-bo'), 'bo-web-2')), { refused: 'adopting' });
   assert.deepEqual([(await entries()).length, (await rowsOf(world.owner, sql`SELECT 1 FROM principals WHERE id = 'user:root@acme.example'`)).length, world.woken.length], [before, 0, 0]);
 });
 

@@ -47,6 +47,9 @@ export type Issued = { principal: string; credential: string; expiresAt: string 
  * - An email the vault's configuration names an Owner is a member whatever
  *   the rows say: made one, or made an active Owner of the whole instance
  *   again, in the same change.
+ * - Before the vault has adopted the database nobody signs in
+ *   (`adopting`, for the app to answer 503). A row the decision would read
+ *   that is there and not the vault's refuses it (`tampered`).
  *
  * `replaces` is the SHA-256 of the session token the browser showed, if it
  * showed one: that session ends in the same change, whoever's it was.

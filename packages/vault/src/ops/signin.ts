@@ -62,7 +62,8 @@ function signin(input: Asked<'signin'>, vault: Deciding): Operation<Parts, Answe
     decide(seen: Seen<typeof read>, at: number, unsealed: Unsealed<typeof read>) {
       // Every other change is asked by a caller, whose rows the adoption sealed. This one is asked by nobody, and makes an
       // Owner from nothing: on a database not adopted yet it would begin the log, and the adoption would never run.
-      if (seen.instance.length === 0) return { refused: 'adopting' };
+      // Before its adoption a database has no such row; one that is there and not the vault's was written behind it.
+      if (seen.instance.length === 0) return { refused: unsealed.instance > 0 ? 'tampered' : 'adopting' };
       // A row written behind the vault is not a row that is absent: an account that is not the vault's is not a new
       // one, nor its member nobody.
       if (unsealed.account + unsealed.holder > 0) return { refused: 'tampered' };
