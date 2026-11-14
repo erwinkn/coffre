@@ -1,9 +1,10 @@
 import { type AuditEntryView } from '@coffre/client';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
-import { chainResult, chainUnknown, queries, shownChain, type AuditSearch, type ChainResult } from '../lib/queries';
+import { queries, type AuditSearch } from '../lib/queries';
+import { proofOf, remember, shownProofs, type Head, type Proof, type Proved } from '../lib/audit-proofs';
 import {
   decidedBy,
   describe,
@@ -13,7 +14,7 @@ import {
   who,
   type Part,
 } from '../lib/audit-sentences';
-import { absolute, EmptyState, Notice, Spinner, Timestamp, Toggletip } from '../components/ui';
+import { absolute, EmptyState, Notice, Timestamp, Toggletip } from '../components/ui';
 import { memberName, Sentence } from '../components/audit-sentence';
 import { ClosedDoor, PageHeader } from '../components/page';
 import {
@@ -21,7 +22,6 @@ import {
   AlertTriangle,
   ChevronRight,
   Clock,
-  Info,
   Ledger,
   ShieldCheck,
   SlashCircle,
@@ -36,34 +36,15 @@ const Route = pageRoute<typeof audit>();
 export function AuditPage() {
   const search = Route.useSearch();
   const client = useCoffre();
-  const { data: result } = useSuspenseQuery(queries.auditEntries(client, search));
-  // Loaded with the entries: the page arrives with its badge.
-  const verification = useSuspenseQuery(queries.auditChain(client));
-  // The walk from the first entry, once someone ran it, beside the check from the newest checkpoint, which
-  // the page reuses for `FRESH_MS` and asks again after that, after a change made here, or on Retry:
-  // `shownChain` says which the page shows, until the page is left.
-  const [whole, setWhole] = useState<ChainResult | null>(null);
-  const chain = shownChain(verification.data, whole);
-  // The walk from the first entry, when someone asks for it: how far it has got. Its verdict takes the badge's place.
-  const [walked, setWalked] = useState<{ through: number | null } | null>(null);
-  const [walkFailed, setWalkFailed] = useState<string | null>(null);
-  const walkWhole = async () => {
-    setWalked({ through: null });
-    setWalkFailed(null);
-    setWhole(null);
-    let verdict: ChainResult;
-    try {
-      verdict = chainResult(await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through })), true);
-    } catch (error) {
-      verdict = chainUnknown(error);
-    }
-    // A walk that could not run says nothing of the log: the verdict from the newest checkpoint stands.
-    if (verdict.integrity === 'unknown') setWalkFailed(verdict.problem);
-    else if (verdict.integrity !== 'owners-only') setWhole(verdict);
-    setWalked(null);
-  };
+  const entries = useSuspenseQuery(queries.auditEntries(client, search));
+  const result = entries.data;
+  // What this page has seen proven, by head, while it is open: see `shownProofs`.
+  const proved = useRef<Proved>(new Map());
+  const proofs = result.ok ? shownProofs(proved.current, result.head, result.entries) : new Map<number, Proof>();
+  useEffect(() => {
+    if (result.ok) remember(proved.current, result.head, result.entries);
+  }, [result]);
   const { decision, actorId } = search;
-  const detail = search.detail === '1';
   const deniedOnly = decision === 'deny';
 
   if (!result.ok) {
@@ -74,8 +55,25 @@ export function AuditPage() {
     );
   }
 
-  const broken = chain?.integrity === 'broken' ? chain : null;
-  const breakAt = broken?.failedAtSeq ?? null;
+  const proof = (entry: Entry) => proofs.get(entry.seq) ?? entry.proof;
+  const failed = result.entries.filter((entry) => proof(entry) === 'failed');
+  const counts = {
+    failed: failed.length,
+    unproven: result.entries.filter((entry) => proof(entry) === 'unproven').length,
+    proven: result.entries.filter((entry) => proof(entry) === 'proven').length,
+  };
+  const signed = result.head === null ? null : `${absolute(result.head.signedAt, false)} UTC`;
+  const holes = result.holes ?? [];
+  // Kept entries are never pruned, so a kept one missing is removed; an aging
+  // one may have been pruned while the page read the log.
+  const gone = (kind: 'kept' | 'aging') => {
+    const found = holes.filter((hole) => hole[kind] > 0);
+    const count = found.reduce((sum, hole) => sum + hole[kind], 0);
+    const places = found.length === 1 ? where(found[0]!) : `, in ${found.length} places`;
+    return { count, places, entries: `${count.toLocaleString('en')} ${count === 1 ? 'entry' : 'entries'}` };
+  };
+  const removed = gone('kept');
+  const pruned = gone('aging');
   const shown = lines(result.entries);
   const filters = { decision, actorId };
 
@@ -86,41 +84,44 @@ export function AuditPage() {
         actions={
           // One region for every state, so each change of it is announced.
           <div className="chain-live" aria-live="polite" aria-atomic="true">
-            <ChainStatus
-              chain={chain}
-              walked={walked}
-              walkFailed={walkFailed}
-              retrying={verification.isFetching}
-              onRetry={() => void verification.refetch()}
-              onWalk={() => void walkWhole()}
+            <ProofStatus
+              head={result.head}
+              counts={counts}
+              pruned={pruned.count > 0}
+              checking={entries.isFetching}
+              onCheck={() => void entries.refetch()}
             />
           </div>
         }
       />
 
-      {broken !== null && (
+      {failed.length > 0 && (
         <div style={{ marginBottom: '1.25rem' }}>
           <Notice tone="bad">
             <strong>Treat this as an incident.</strong>{' '}
-            {broken.failedAtSeq === null
-              ? `The log does not verify, found by the ${broken.author}'s check: ${broken.reason}.`
-              : `The log breaks at entry ${broken.failedAtSeq}, found by the ${broken.author}'s check: ${broken.reason}.`}{' '}
-            {broken.through !== null && `Every entry through ${broken.through} holds. `}
-            Something with direct access to the database has changed what it records
-            {broken.failedAtSeq === null ? '' : `, and nothing from entry ${broken.failedAtSeq} on can be relied on`} until
-            that is explained.
-            {breakAt !== null && !result.entries.some((entry) => entry.seq === breakAt) && (
-              <>
-                {' '}Entry {breakAt} is not among the entries below
-                {detail ? (
-                  <>
-                    ; <code>coffre audit</code> lists them all.
-                  </>
-                ) : (
-                  ': it may be detail, which Everything lists.'
-                )}
-              </>
-            )}
+            {failed.length === 1 ? `Entry ${failed[0]!.seq} is` : `${failed.length} entries below are`} not what the vault
+            signed{signed === null ? '' : ` in the head it signed at ${signed}`}. Something with direct access to the
+            database has changed what the log records, and {failed.length === 1 ? 'that entry' : 'those entries'} can’t be
+            relied on until that is explained.
+          </Notice>
+        </div>
+      )}
+
+      {removed.count > 0 && (
+        <div style={{ marginBottom: '1.25rem' }}>
+          <Notice tone="bad">
+            <strong>Treat this as an incident.</strong> The log lacks {removed.entries} the vault’s head numbers
+            {removed.places}. Nothing prunes these entries: something with direct access to the database removed them.
+          </Notice>
+        </div>
+      )}
+
+      {pruned.count > 0 && (
+        <div style={{ marginBottom: '1.25rem' }}>
+          <Notice tone="warn">
+            The log lacks {pruned.entries} the vault’s head numbers{pruned.places}, all of the kind it prunes with
+            age. A prune while the page read the log does this, and checking again settles it; entries that stay missing
+            were removed by something with direct access to the database.
           </Notice>
         </div>
       )}
@@ -197,7 +198,7 @@ export function AuditPage() {
               </thead>
               <tbody>
                 {shown.map((batch) => (
-                  <Line key={batch[0]!.seq} batch={batch} filters={filters} detail={search.detail} breakAt={breakAt} />
+                  <Line key={batch[0]!.seq} batch={batch} filters={filters} detail={search.detail} proof={proof} />
                 ))}
               </tbody>
             </table>
@@ -221,23 +222,23 @@ function Line({
   batch,
   filters,
   detail,
-  breakAt,
+  proof,
 }: {
   batch: Entry[];
   filters: Filters;
   detail: '1' | undefined;
-  breakAt: number | null;
+  proof: (entry: Entry) => Proof;
 }) {
-  const breaksInside = breakAt !== null && batch.some((entry) => entry.seq === breakAt);
-  const [open, setOpen] = useState(breaksInside);
+  const proofs = batch.map(proof);
+  const shown = proofOf(proofs);
+  // A batch with an entry that fails opens on it.
+  const [open, setOpen] = useState(shown === 'failed');
   const lead = batch[0]!;
   const sentence = describe(batch);
   const seqs = batch.map((entry) => entry.seq);
   const each = batch.flatMap(perSecret);
   const grouped = each.length > 1;
   const [unit, units] = each.length === batch.length ? ['entry', 'entries'] : ['secret', 'secrets'];
-  // A read of several breaks at its first secret's row.
-  const breakRow = each.findIndex((entry) => entry.seq === breakAt);
   const [first, last] = [Math.min(...seqs), Math.max(...seqs)];
 
   return (
@@ -250,8 +251,7 @@ function Line({
         decided={decidedBy(batch)}
         filters={filters}
         detail={detail}
-        breaks={breaksInside && !grouped}
-        marked={breaksInside}
+        proof={shown}
         toggle={
           grouped ? (
             <button
@@ -280,8 +280,7 @@ function Line({
               decided={decidedBy([entry])}
               filters={filters}
               detail={detail}
-              breaks={i === breakRow}
-              marked={false}
+              proof={proof(entry)}
               child
             />
           );
@@ -298,8 +297,7 @@ function Row({
   decided,
   filters,
   detail,
-  breaks,
-  marked,
+  proof,
   toggle,
   child = false,
 }: {
@@ -310,23 +308,21 @@ function Row({
   decided: string;
   filters: Filters;
   detail: '1' | undefined;
-  /** The entry where verification stopped. */
-  breaks: boolean;
-  /** A batch holding it, closed or open. */
-  marked: boolean;
+  /** Its own, or a batch's: its worst entry's. */
+  proof: Proof;
   toggle?: ReactNode;
   child?: boolean;
 }) {
   const actor = who(entry);
   const classes = [
     refused && 'is-denied',
-    (breaks || marked) && 'is-break',
+    proof === 'failed' && 'is-break',
     child && 'is-child',
     entry.detail && 'is-detail',
     entry.action === 'vault.tampered' && 'is-tampered',
   ].filter(Boolean);
   return (
-    <tr className={classes.length === 0 ? undefined : classes.join(' ')}>
+    <tr className={classes.length === 0 ? undefined : classes.join(' ')} data-proof={proof}>
       <td className="n" data-label="Sequence">
         {seq}
       </td>
@@ -365,7 +361,8 @@ function Row({
           {toggle}
           {entry.action === 'vault.tampered' && <AlertTriangle size={13} />}
           <Sentence parts={parts} />
-          {breaks && <BreakMark />}
+          {proof === 'failed' && <BreakMark />}
+          {proof === 'unproven' && <span className="unproven-mark">not proven</span>}
         </span>
       </td>
       <td className="nowrap" data-label="Decided by">
@@ -379,146 +376,112 @@ function Row({
   );
 }
 
-/** The entry the log breaks at, said in words as well as in red. */
+/** An entry that is not what the vault signed, said in words as well as in red. */
 function BreakMark() {
   return (
     <span className="break-mark">
       <AlertTriangle size={11} />
-      breaks here
+      not as signed
     </span>
   );
 }
 
+/** Where a hole is, between the entries found around it. */
+function where(hole: { above: number | null; below: number | null }): string {
+  if (hole.above !== null && hole.below !== null) return ` between entries ${hole.below} and ${hole.above}`;
+  if (hole.below !== null) return ` after entry ${hole.below}`;
+  if (hole.above !== null) return ` before entry ${hole.above}`;
+  return '';
+}
+
 /**
- * Whether the log still verifies, beside the title.
+ * What the entries shown prove, beside the title: rendered with the page,
+ * from the answer that listed them, never a loading state.
  *
- * This replaced a card with a "Verify chain" button on it. A green result you
- * have to ask for is reassurance rather than evidence: it is checked when
- * someone is already feeling confident, and not on the morning it would have
- * mattered. Recomputing on load makes the claim continuous.
- *
- * On load it checks what was written since the newest checkpoint, which
- * vouches for everything before, so it is quick however long the log. The
- * walk from the first entry, which checks again what the checkpoints vouch
- * for, is there to ask for, a stretch a request, with how far it has got.
- * The check on load is rendered with the page, never a loading state; a
- * check that could not run says so and offers to run again, rather than
- * passing for a broken log.
+ * The vault vouches for a head of the log in the page's own call, and the
+ * server proves each entry shown against it from the tiles. So the claim is
+ * about what is on screen, every time it is shown, however long the log.
+ * An entry past the head is not proven: signed since the vault's read, or
+ * put there by a writer, which the page cannot tell apart; checking again,
+ * against a newer head, settles the first.
  */
-function ChainStatus({
-  chain,
-  walked,
-  walkFailed,
-  retrying,
-  onRetry,
-  onWalk,
+function ProofStatus({
+  head,
+  counts,
+  pruned,
+  checking,
+  onCheck,
 }: {
-  chain: ChainResult;
-  walked: { through: number | null } | null;
-  walkFailed: string | null;
-  /** The check on load is being asked again. */
-  retrying: boolean;
-  onRetry: () => void;
-  onWalk: () => void;
+  head: Head;
+  counts: Record<Proof, number>;
+  /** The log lacks entries a prune may have taken while the page read it, which checking again settles. */
+  pruned: boolean;
+  /** The page is being asked again. */
+  checking: boolean;
+  onCheck: () => void;
 }) {
-  if (walked !== null) {
-    return (
-      <span className="chain-note" role="status">
-        <Spinner size={14} />
-        {walked.through === null ? 'Verifying from the first entry…' : `Verified through ${walked.through.toLocaleString('en')}…`}
-      </span>
-    );
-  }
-
-  if (chain.integrity === 'owners-only') {
-    return (
-      <Toggletip
-        align="end"
-        label="Only auditors, admins and owners of the whole instance can check the log: it takes every entry, and you see only your projects'."
-      >
-        <button type="button" className="chain-note">
-          <Info size={14} />
-          Verified by owners
-        </button>
-      </Toggletip>
-    );
-  }
-
-  if (chain.integrity === 'unknown') {
+  const plural = (n: number) => `${n.toLocaleString('en')} ${n === 1 ? 'entry' : 'entries'}`;
+  const again = (
+    <button type="button" className="btn btn-sm" disabled={checking} onClick={onCheck}>
+      Check again
+    </button>
+  );
+  if (counts.failed > 0) {
+    // A failure stands, but the rows past the head or a prune's gap beside
+    // it are still settled by checking again.
     return (
       <div className="chain">
-        <Toggletip
-          align="end"
-          label={`coffre could not check the log: ${chain.problem}. The entries below are unverified.`}
-        >
-          <button type="button" className="chain-flag chain-flag-warn">
-            <AlertTriangle size={14} />
-            Couldn’t verify
-          </button>
-        </Toggletip>
-        <button type="button" className="btn btn-sm" disabled={retrying} onClick={onRetry}>
-          Retry
-        </button>
+        <span className="chain-flag chain-flag-bad">
+          <AlertTriangle size={14} />
+          {plural(counts.failed)} not as signed
+        </span>
+        {(counts.unproven > 0 || pruned) && again}
       </div>
     );
   }
 
-  if (chain.integrity === 'broken') {
+  if (head === null) {
     return (
-      <span className="chain-flag chain-flag-bad">
-        <AlertTriangle size={14} />
-        {chain.failedAtSeq === null ? 'Log does not verify' : `Log broken at ${chain.failedAtSeq}`}
-      </span>
+      <div className="chain">
+        <Toggletip
+          align="end"
+          label="The vault vouched for no head of the log: it has signed none yet, or the one in the database is not one it signed. No entry below is proven."
+        >
+          <button type="button" className="chain-flag chain-flag-warn">
+            <AlertTriangle size={14} />
+            Not proven
+          </button>
+        </Toggletip>
+        {again}
+      </div>
     );
   }
 
-  const signed = chain.checkpoint === null ? null : `${absolute(chain.checkpoint.signedAt, false)} UTC`;
-  const verified = chain.whole
-    ? `Audit log verified from its first entry by the app and vault keys${signed === null ? ', not signed yet' : `, last signature at ${signed}`}.`
-    : signed === null
-      ? 'Audit log verified by the app and vault keys, not signed yet.'
-      : `What was written since the last checkpoint verified by the app and vault keys; the checkpoint, signed at ${signed}, vouches for everything before it, as each was checked when it was written.`;
+  const signed = `${absolute(head.signedAt, false)} UTC`;
   return (
     <div className="chain">
-      {chain.pending > 0 && (
+      {counts.unproven > 0 && (
+        <>
+          <Toggletip
+            align="end"
+            label={`Past the head the vault signed at ${signed}, of ${head.size.toLocaleString('en')} entries: signed since, or put there by something with direct access to the database. Checking again, against a newer head, settles the first.`}
+          >
+            <button type="button" className="chain-note">
+              {plural(counts.unproven)} not proven
+            </button>
+          </Toggletip>
+          {again}
+        </>
+      )}
+      {pruned && counts.unproven === 0 && again}
+      {counts.proven > 0 && (
         <Toggletip
           align="end"
-          label="Keys released through KMS whose outcome the vault has not logged yet. Each settles within seconds, or is logged as failed."
+          label={`Each entry below the vault’s head, signed at ${signed}, is proven against it: what it records is what the vault signed, where it signed it.`}
         >
-          <button type="button" className="chain-note" role="status">
-            {chain.pending} key operation{chain.pending === 1 ? '' : 's'} in flight
-          </button>
-        </Toggletip>
-      )}
-      {chain.remaining > 0 && (
-        <Toggletip
-          align="end"
-          label={`Verified through entry ${chain.through?.toLocaleString('en') ?? 'none'}. The checkpoints are catching up with the log, a stretch every five minutes, and a check goes no further than they have.`}
-        >
-          <button type="button" className="chain-note" role="status">
-            {chain.remaining.toLocaleString('en')} newer {chain.remaining === 1 ? 'entry' : 'entries'} to verify
-          </button>
-        </Toggletip>
-      )}
-      {walkFailed !== null && (
-        <Toggletip align="end" label={`coffre could not walk the whole log: ${walkFailed}. The verdict beside it, from the newest checkpoint, stands.`}>
-          <button type="button" className="chain-flag chain-flag-warn">
-            <AlertTriangle size={14} />
-            Whole log not checked
-          </button>
-        </Toggletip>
-      )}
-      {!chain.whole && chain.remaining === 0 && (
-        <button type="button" className="btn btn-sm" onClick={onWalk}>
-          Verify whole log
-        </button>
-      )}
-      {/* No seal over a log verified only in part: what is left could be anything. */}
-      {chain.remaining === 0 && (
-        <Toggletip align="end" label={verified}>
           <button type="button" className="chain-seal">
             <ShieldCheck size={14} />
-            Verified
+            Proven
           </button>
         </Toggletip>
       )}

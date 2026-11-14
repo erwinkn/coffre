@@ -47,53 +47,46 @@ test('a run of twelve secrets is one line', () => {
   assert.equal(decidedBy(run), 'vault');
 });
 
-test("a run of a fork is a run of the fork, its parent's values counted as inherited", () => {
-  const own = entry({ action: 'secret.read', author: 'vault', project: 'market', environment: 'prod-eu', key: 'DATABASE_URL', operationId: 'op-1', metadata: { purpose: 'run' } });
-  const inherited = batch(2, { action: 'secret.read', author: 'vault', ...prod, metadata: { purpose: 'run', through: { environmentId: 'e', slug: 'prod-eu' } } });
-  assert.equal(said(own, ...inherited), 'ran market/prod-eu: 3 secrets, 2 inherited');
-});
+// What the 0.16 vault writes for each key a read released (`packages/vault/src/use.ts`): `through` is the reference asked for, by id.
+const released = (keys: { key: string; version: number }[], through: string[] = []) =>
+  keys.map(({ key, version }) => ({ key, secret: `s-${key}`, version, ...(through.includes(key) ? { through: `r-${key}` } : {}) }));
 
 test('a run of twelve secrets the vault logged as one entry reads the same, and opens to each', () => {
   const keys = Array.from({ length: 12 }, (_, i) => ({ key: `KEY_${i}`, version: i + 1 }));
-  const run = entry({
-    action: 'secret.read', author: 'vault', ...prod, operationId: 'op-1', secrets: keys,
-    metadata: { purpose: 'run', secrets: keys.map(({ key, version }) => ({ subject: `market/prod/${key}`, version })) },
-  });
+  const run = entry({ action: 'secret.read', author: 'vault', ...prod, operationId: 'op-1', secrets: keys, metadata: { purpose: 'run', keys: released(keys) } });
   assert.equal(said(run), 'ran market/prod: 12 secrets');
   const each = perSecret(run);
   assert.deepEqual(each.map((one) => [one.seq, plain(describe([one]).parts), one.version]), keys.map(({ key, version }) => [run.seq, `ran market/prod/${key}`, version]));
+  // Each its own key's part of the detail, not the list.
+  assert.deepEqual(each.map((one) => [one.metadata.secret, one.metadata.keys]), keys.map(({ key }) => [`s-${key}`, undefined]));
   // Refused as one, it says so once, with its size.
   assert.equal(said({ ...run, decision: 'deny', reason: 'no_grant' }), 'tried to run market/prod, 12 secrets: no grant');
 });
 
-test("a fork's run that inherits several values reads as a run of the fork, from one entry of its parent's", () => {
-  const keys = [{ key: 'SENTRY_DSN', version: 1 }, { key: 'STRIPE_KEY', version: 2 }];
-  const own = entry({ action: 'secret.read', author: 'vault', project: 'market', environment: 'prod-eu', key: 'DATABASE_URL', operationId: 'op-3', metadata: { purpose: 'run' } });
-  const inherited = entry({
-    action: 'secret.read', author: 'vault', ...prod, operationId: 'op-3', secrets: keys,
-    metadata: { purpose: 'run', through: { environmentId: 'e', slug: 'prod-eu' }, secrets: keys.map(({ key, version }) => ({ subject: `market/prod/${key}`, version })) },
-  });
-  assert.equal(said(own, inherited), 'ran market/prod-eu: 3 secrets, 2 inherited');
-  assert.equal(plain(describe([perSecret(inherited)[0]!]).parts), 'ran market/prod/SENTRY_DSN in market/prod-eu');
-});
-
 test('a read whose list was emptied or mangled around coffre still reads, as its place', () => {
-  const emptied = entry({ action: 'secret.read', author: 'vault', ...prod, secrets: [], metadata: { purpose: 'run', secrets: [] } });
+  const emptied = entry({ action: 'secret.read', author: 'vault', ...prod, secrets: [], metadata: { purpose: 'run', keys: [] } });
   assert.deepEqual(perSecret(emptied), [emptied]);
   assert.equal(said(emptied), 'ran market/prod');
-  const mangled = entry({ action: 'secret.read', author: 'vault', ...prod, secrets: [{ key: null, version: null }, { key: 'B', version: 2 }], metadata: { purpose: 'run', secrets: ['x', { subject: 'market/prod/B', version: 2 }] } });
+  const mangled = entry({ action: 'secret.read', author: 'vault', ...prod, secrets: [{ key: null, version: null }, { key: 'B', version: 2 }], metadata: { purpose: 'run', keys: ['x', { key: 'B', secret: 's-B', version: 2 }] } });
   assert.deepEqual(perSecret(mangled).map((one) => plain(describe([one]).parts)), ['ran market/prod', 'ran market/prod/B']);
+  // A list that does not match the keys the server named is not split.
+  const short = entry({ action: 'secret.read', author: 'vault', ...prod, secrets: [{ key: 'A', version: 1 }, { key: 'B', version: 2 }], metadata: { purpose: 'run', keys: released([{ key: 'A', version: 1 }]) } });
+  assert.deepEqual(perSecret(short), [short]);
 });
 
-test('values read through references, one entry for their source, read as a run of the holder', () => {
-  const keys = [{ key: 'DATABASE_URL', version: 3 }, { key: 'STRIPE_KEY', version: 1 }];
-  const through = entry({
-    action: 'secret.read', author: 'vault', ...prod, operationId: 'op-2', secrets: keys,
-    metadata: { purpose: 'run', secrets: keys.map(({ key, version }) => ({ subject: `market/prod/${key}`, version, via: { path: `billing/prod/${key}` } })) },
-  });
-  const own = entry({ action: 'secret.read', author: 'vault', project: 'billing', environment: 'prod', key: 'PORT', version: 1, operationId: 'op-2', metadata: { purpose: 'run' } });
-  assert.equal(said(own, through), 'ran billing/prod: 3 secrets, 2 through references');
-  assert.equal(plain(describe([perSecret(through)[1]!]).parts), 'ran market/prod/STRIPE_KEY through billing/prod/STRIPE_KEY');
+test('values read through references are read where they were asked, the reference counted', () => {
+  const keys = [{ key: 'DATABASE_URL', version: 3 }, { key: 'STRIPE_KEY', version: 1 }, { key: 'PORT', version: 1 }];
+  const run = entry({ action: 'secret.read', author: 'vault', project: 'billing', environment: 'prod', operationId: 'op-2', secrets: keys, metadata: { purpose: 'run', keys: released(keys, ['DATABASE_URL', 'STRIPE_KEY']) } });
+  assert.equal(said(run), 'ran billing/prod: 3 secrets, 2 through references');
+  assert.deepEqual(perSecret(run).map((one) => plain(describe([one]).parts)), [
+    'ran billing/prod/DATABASE_URL through a reference',
+    'ran billing/prod/STRIPE_KEY through a reference',
+    'ran billing/prod/PORT',
+  ]);
+  // One key, which the server names on the entry itself, is split all the same, for its own part.
+  const one = entry({ action: 'secret.read', author: 'vault', project: 'billing', environment: 'prod', key: 'DATABASE_URL', version: 3, metadata: { purpose: 'run', keys: released([keys[0]!], ['DATABASE_URL']) } });
+  assert.equal(said(...perSecret(one)), 'ran billing/prod/DATABASE_URL through a reference');
+  assert.equal(said(one), 'ran billing/prod/DATABASE_URL through a reference');
 });
 
 test('a write says the version it made', () => {
@@ -257,15 +250,12 @@ test('every other action has a sentence', () => {
     [{ action: 'environment.delete', project: 'market', environment: 'dev-p-3f9c2a1b~deleted-2026-10-17', metadata: { path: 'market/dev@ada@acme.example', personal: true } }, 'deleted a personal config, market/dev@ada@acme.example'],
     [{ action: 'secret.reset', project: 'market', environment: 'prod-eu', key: 'DATABASE_URL', metadata: { key: 'DATABASE_URL', from: 'prod' } }, "reset market/prod-eu/DATABASE_URL to prod's value"],
     [{ action: 'secret.rename', project: 'market', environment: 'prod-eu', key: 'OLD', metadata: { key: 'OLD', nextKey: 'NEW', parent: 'prod' } }, 'renamed market/prod-eu/OLD to NEW, as prod did'],
-    [{ action: 'secret.read', ...prod, key: 'STRIPE_KEY', metadata: { purpose: 'run', through: { environmentId: 'e', slug: 'prod-eu' } } }, 'ran market/prod/STRIPE_KEY in market/prod-eu'],
-    [{ action: 'secret.read', project: 'billing', environment: 'prod', key: 'SOURCE', metadata: { purpose: 'run', via: { path: 'market/prod/SHARED' }, through: { environmentId: 'e', slug: 'prod-eu' } } }, 'ran billing/prod/SOURCE through market/prod/SHARED in market/prod-eu'],
     [{ action: 'environment.fork', ...prod, decision: 'deny', reason: 'missing_secret_read', metadata: { from: 'prod', slug: 'staging' } }, 'tried to fork market/prod into staging: no grant to read it'],
     [{ action: 'missing.dismiss', ...prod, metadata: { key: 'SENTRY_DSN' } }, 'dismissed SENTRY_DSN in market/prod as not needed'],
     [{ action: 'missing.restore', ...prod, metadata: { key: 'SENTRY_DSN' } }, 'restored SENTRY_DSN in market/prod to the missing keys'],
     [{ action: 'secret.reference', project: 'billing', environment: 'prod', key: 'DATABASE_URL', metadata: { key: 'DATABASE_URL', source: 'market/prod/DATABASE_URL' } }, 'made billing/prod/DATABASE_URL a reference to market/prod/DATABASE_URL'],
     [{ action: 'reference.end', project: 'billing', environment: 'prod', metadata: { reason: 'broken', subject: 'billing/prod/DATABASE_URL', source: { path: 'market/prod/DATABASE_URL' } } }, 'broke the reference billing/prod/DATABASE_URL to market/prod/DATABASE_URL'],
     [{ action: 'reference.end', project: 'billing', environment: 'prod', metadata: { reason: 'replaced', subject: 'billing/prod/DATABASE_URL', source: { path: 'market/prod/DATABASE_URL' } } }, 'gave a value of its own to billing/prod/DATABASE_URL, no longer a reference to market/prod/DATABASE_URL'],
-    [{ action: 'secret.read', ...prod, key: 'DATABASE_URL', metadata: { purpose: 'run', via: { path: 'billing/prod/DATABASE_URL' } } }, 'ran market/prod/DATABASE_URL through billing/prod/DATABASE_URL'],
     [{ action: 'project.move', project: 'acme', metadata: { from: null, to: 'Clients' } }, 'moved project acme to the folder Clients'],
     [{ action: 'member.add', subject: 'user:eve@acme.example' }, 'added eve@acme.example'],
     [{ action: 'member.restore', subject: 'user:eve@acme.example' }, 'brought back eve@acme.example'],

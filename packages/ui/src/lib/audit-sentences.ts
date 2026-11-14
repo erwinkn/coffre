@@ -129,39 +129,22 @@ function plural(count: number, one: string, many = `${one}s`): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
-/** A batch reads as its environment and a count; one entry as its secret. */
 /**
- * The secrets a read or write was about. A read through a reference is a
- * read of its source, "market/prod/DATABASE_URL through
- * billing/prod/DATABASE_URL"; a run that read some that way is a run of
- * the environment that holds them. A value a fork inherits is its parent's,
- * read in the fork: "market/prod/STRIPE_KEY in market/prod-eu".
+ * The secrets a read or write was about: one entry as its secret, a batch as
+ * its environment and a count. The vault logs a read where it was asked, so
+ * a read through a reference is the reference's, "billing/prod/DATABASE_URL
+ * through a reference"; its own part of the entry names the source by id
+ * alone (`through`), which the page cannot say as a path.
  */
 function secrets(facts: Facts): Part[] {
-  const through = (entry: AuditEntry) => text((entry.metadata.via as { path?: unknown } | undefined)?.path);
-  // The fork a value was inherited in, by path: in its parent's project, which holds the reference a read went through.
-  const forkOf = (entry: AuditEntry) => {
-    const slug = text((entry.metadata.through as { slug?: unknown } | undefined)?.slug);
-    const project = through(entry)?.split('/')[0] ?? entry.project;
-    return slug === null || project === null ? null : `${project}/${slug}`;
-  };
-  if (facts.batch.length === 1) {
-    const [held, fork] = [through(facts.entry), forkOf(facts.entry)];
-    return [...place(facts.entry), ...(held === null ? [] : [' through ', { place: held }]), ...(fork === null ? [] : [' in ', { place: fork }])];
-  }
-  const fork = facts.batch.map(forkOf).find((path) => path !== null);
-  const own = facts.batch.find((entry) => through(entry) === null && forkOf(entry) === null);
-  const held = facts.batch.map(through).filter((path): path is string => path !== null);
-  const inherited = facts.batch.filter((entry) => forkOf(entry) !== null).length;
-  const where = fork !== undefined && fork !== null
-    ? [{ place: fork }]
-    : own !== undefined ? environmentOf(own) : [{ place: held[0]!.split('/').slice(0, 2).join('/') }];
+  const referred = (entry: AuditEntry) => text(entry.metadata.through) !== null;
+  if (facts.batch.length === 1) return [...place(facts.entry), ...(referred(facts.entry) ? [' through a reference'] : [])];
+  const held = facts.batch.filter(referred).length;
   return [
-    ...where,
+    ...environmentOf(facts.entry),
     facts.refused ? ', ' : ': ',
     plural(facts.count, 'secret'),
-    ...(held.length === 0 ? [] : [`, ${held.length} through ${held.length === 1 ? 'a reference' : 'references'}`]),
-    ...(inherited === 0 ? [] : [`, ${inherited} inherited`]),
+    ...(held === 0 ? [] : [`, ${held} through ${held === 1 ? 'a reference' : 'references'}`]),
   ];
 }
 
@@ -790,23 +773,24 @@ export function leadOf(batch: AuditEntry[]): AuditEntry {
 }
 
 /**
- * A read of several secrets, logged once for its place, as the entries it
- * would be about one secret each: its key and version, and what its own
- * part of the metadata says, such as the reference it went through. Any
- * other entry as it is.
+ * A read, logged once for every key it released, as the entries it would be
+ * about one key each: its key and version, and its own part of the detail
+ * (`keys`: `{ key, secret, version, through? }`), such as the reference it
+ * went through. Any other entry as it is.
  */
 export function perSecret<T extends AuditEntry>(entry: T): T[] {
-  const listed = entry.metadata.secrets;
-  // One whose list was emptied or mangled, which verification would flag, still reads as itself.
-  if (entry.secrets === null || entry.secrets.length === 0 || !Array.isArray(listed)) return [entry];
-  return entry.secrets.map(({ key, version }, i) => {
+  const listed = entry.metadata.keys;
+  const released = entry.secrets ?? [{ key: entry.key, version: entry.version }];
+  // One whose list was emptied or mangled, which its proof would flag, still reads as itself.
+  if (entry.action !== 'secret.read' || !Array.isArray(listed) || released.length === 0 || listed.length !== released.length) return [entry];
+  return released.map(({ key, version }, i) => {
     const own = listed[i];
     return {
       ...entry,
       key,
       version,
       secrets: null,
-      metadata: { ...entry.metadata, secrets: undefined, ...(typeof own === 'object' && own !== null && !Array.isArray(own) ? own : {}) },
+      metadata: { ...entry.metadata, keys: undefined, ...(typeof own === 'object' && own !== null && !Array.isArray(own) ? own : {}) },
     };
   });
 }

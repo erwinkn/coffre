@@ -3634,8 +3634,8 @@ a.env-card-name:hover {
   color: var(--red);
 }
 
-/* Where a log stops verifying: a stronger tint than a denial, ruled above
-   and below, with a solid mark that says so in words. */
+/* An entry that is not what the vault signed: a stronger tint than a
+   denial, ruled above and below, with a solid mark that says so in words. */
 .audit tr.is-break,
 .audit tr.is-break:hover {
   background: color-mix(in oklab, var(--red) 14%, var(--panel));
@@ -3654,6 +3654,22 @@ a.env-card-name:hover {
     inset 0 -1px color-mix(in oklab, var(--red) 55%, transparent);
   color: var(--red);
   font-weight: 700;
+}
+
+/* An entry past the vault's head: said quietly, since checking again
+   usually proves it. */
+.unproven-mark {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.5rem;
+  padding: 0 0.375rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--ink-3);
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+  font-weight: 550;
+  white-space: nowrap;
 }
 
 .break-mark {
