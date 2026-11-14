@@ -485,7 +485,7 @@ test('a change weighed answers what it would, in one round trip, and writes noth
   // Weighed again once spent, it still answers: the write alone sees the proofs spent.
   assert.deepEqual([await weigh(vault, exchange), await change(vault, exchange)], [{ answer: 'admin' }, { refused: 'replayed' }]);
 
-  // A check runs, and a fault in a decision is a fault: all of a change but its write.
+  // A check runs, and a decision that writes around its read is a fault, as for a change.
   let checks = 0;
   assert.deepEqual(await weigh(vault, { read: nothing, check: async () => ((checks += 1), 'seen'), decide: (_seen, _at, _unsealed, checked) => ({ writes: [], entry: said('test'), answer: checked }) }), { answer: 'seen' });
   assert.equal(checks, 1);

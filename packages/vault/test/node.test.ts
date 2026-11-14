@@ -69,7 +69,9 @@ test("the vault's database not answering crosses the socket as the outage it is,
     const socket = join(dir, 'vault.sock');
     const bugged = () => failureOf(Object.assign(new Error('invalid input syntax for type uuid: "connection timeout"'), { code: '22P02' }));
     const answers = [failureOf(lock), bugged(), failureOf(lock), bugged()];
-    const server = createServer((_req, res) => {
+    const paths: (string | undefined)[] = [];
+    const server = createServer((req, res) => {
+      paths.push(req.url);
       const { status, body } = answers.shift()!;
       res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
     });
@@ -87,6 +89,7 @@ test("the vault's database not answering crosses the socket as the outage it is,
       answers.push(failureOf(lock), bugged());
       const weighed = () => vault.weigh({ ...NOBODY, op: 'secret.write', keys: [] } as never).then(() => assert.fail('answered'), (error: unknown) => isUnavailable(error));
       assert.deepEqual([await weighed(), await weighed()], [true, false]);
+      assert.deepEqual(paths.map((path) => path?.split('/').at(-1)), ['use', 'use', 'peek', 'peek', 'weigh', 'weigh']);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

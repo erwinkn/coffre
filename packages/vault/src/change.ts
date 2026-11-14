@@ -589,15 +589,16 @@ export async function change<P extends Parts, A, C = undefined>(vault: Running, 
 
 /**
  * What a change would answer, made now: its read, its check and its
- * decision, with what it writes held to what it read, and then nothing is
- * sealed or sent. So nothing is written, no proof spent and no binding
+ * decision, with the rows it writes held to what it read, and then nothing
+ * is sealed or sent. So nothing is written, no proof spent and no binding
  * used, and no key service is asked anything: a call to one is paired with
- * an entry (docs/keys.md), and a weighing writes none. Two refusals are
- * the write's alone, which a weighing cannot tell: a proof spent before
- * (`replayed`), and a version to restore that does not open
- * (`unreadable`). Its answer is as of its read: the change made after it
- * reads and decides again. A refusal is a change's, logged as one (D236),
- * so that weighing is no way to ask what one may do and leave no entry.
+ * an entry (docs/keys.md), and a weighing writes none. What the write
+ * alone tells, a weighing answers as if it were not there: a proof spent
+ * before (`replayed`), a version the write opens that does not open
+ * (`unreadable`), and a fault in the values a decision writes. Its answer
+ * is as of its read: the change made after it reads and decides again. A
+ * weighing refused is logged as the change refused is (D236), with the
+ * same entry; one that would be made leaves nothing.
  */
 export async function weigh<P extends Parts, A, C = undefined>(vault: Running, operation: Operation<P, A, C>): Promise<{ answer: A } | Refusal> {
   const found = await decided(vault, operation);
