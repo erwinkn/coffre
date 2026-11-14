@@ -4,12 +4,14 @@
 // runs the API's own route on Approve, as the person, with the connection
 // and the approval named.
 import { apiMember, shownMember } from '@coffre/client';
-import { INSTANCE_ROLE_NAMES, INSTANCE_ROLES, makesProjects, ownsInstance, ROLE_NAMES, runsInstance, scopeInWords, type InstanceRole, type Permission } from '@coffre/core/access';
+import { INSTANCE_ROLE_NAMES, INSTANCE_ROLES, makesProjects, ownsInstance, ROLE_NAMES, runsInstance, scopeInWords, type InstanceRole, type Permission, type Role } from '@coffre/core/access';
 import { instanceRole, roleId, scopeInput, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import type { ApiContext } from '../api/context.ts';
-import { ApiError, badRequest, forbidden, notFound } from '../api/errors.ts';
+import { changed } from '../api/change.ts';
+import { ApiError, badRequest, conflict, forbidden, notFound } from '../api/errors.ts';
+import { grantsAsked, memberOf } from '../api/routes/members.ts';
 import { runRoute } from '../api/router.ts';
 import { approved, changeTool, type Replaced } from './changes.ts';
 import type { Tool, ToolContext } from './tools.ts';
@@ -125,15 +127,34 @@ const accessChanges = z.record(z.string().min(1).max(200), accessChange).refine(
 // A place as the API reads one, without spaces or slashes around it: market, or market/prod.
 const placeOf = (raw: string) => raw.trim().replace(/^\/+|\/+$/g, '');
 
+/** A grant at a place as the member list shows it, live and of the member's generation, or null for none. */
+type Held = { role: Role; expiresAt: string | null } | null;
+
 /** What `set_access` replaces: the role a member holds at each place, and until when, or nothing. */
 async function heldAt(ctx: ApiContext, member: string, changes: Record<string, AccessChange>): Promise<Replaced> {
   const named = apiMember(member);
   const held = (await runRoute('GET /members', {}, {}, ctx)).members.find((entry) => entry.member === named)?.grants ?? [];
-  const now = Object.keys(changes).map((place) => {
+  const now = Object.keys(changes).map((place): [string, Held] => {
     const grant = held.find((entry) => (entry.environment === null ? entry.project : `${entry.project}/${entry.environment}`) === placeOf(place));
-    return [place, grant === undefined ? 'nothing' : `${grant.role}${grant.expiresAt === null ? '' : ` until ${grant.expiresAt}`}`] as const;
+    return [place, grant === undefined ? null : { role: grant.role, expiresAt: grant.expiresAt }];
   });
-  return { state: Object.fromEntries(now), details: now.map(([place, was]) => ({ label: place, value: `${was} → ${shownAccess(changes[place]!)}` })) };
+  const said = (was: Held) => (was === null ? 'nothing' : `${was.role}${was.expiresAt === null ? '' : ` until ${was.expiresAt}`}`);
+  return { state: Object.fromEntries(now), details: now.map(([place, was]) => ({ label: place, value: `${said(was)} → ${shownAccess(changes[place]!)}` })) };
+}
+
+/**
+ * The grants changed over what Approve read (`heldAt`): the routes take no
+ * `was`, so the change is made here, as `PATCH /access` and `PUT /members`
+ * make theirs, in one call to the vault, which refuses `stale` a place
+ * whose grant is no longer the one the page showed.
+ */
+async function granted(ctx: ApiContext, member: string, changes: Record<string, AccessChange>, replaced: Replaced | undefined, admit: boolean): Promise<void> {
+  const held = replaced?.state as Record<string, Held> | undefined;
+  const places = Object.keys(changes);
+  if (held === undefined || !places.every((place) => Object.hasOwn(held, place))) throw conflict('coffre could not read what this replaces: open the approval again');
+  const principal = memberOf(apiMember(member));
+  const wanted = grantsAsked(changes).map(({ path: _, ...change }, i) => ({ ...change, was: held[places[i]!]! }));
+  await changed(ctx, { op: 'access.grant', principal, changes: wanted, ...(admit ? { admit } : {}) }, principal);
 }
 
 const CREATE_PROJECT = changeTool({
@@ -231,8 +252,8 @@ const SET_ACCESS = changeTool({
     },
     replaces: async (ctx, { member, changes }) => heldAt(ctx, member, changes),
     preview: async (_ctx, { member }, _viewing, replaced) => [{ label: 'Member', value: shownMember(apiMember(member)), kind: 'mono' }, ...replaced],
-    apply: async (ctx, { member, changes }) => {
-      await runRoute('PATCH /access/:member', { member: apiMember(member) }, changes, ctx);
+    apply: async (ctx, { member, changes }, { replaced }) => {
+      await granted(ctx, member, changes, replaced, false);
       return {};
     },
   },
@@ -299,8 +320,10 @@ const ADMIT = changeTool({
       ...(role === undefined || role === 'member' ? [] : [{ label: 'Where', value: scopeInWords(fullScope(scope)) }]),
       ...replaced,
     ],
-    apply: async (ctx, { member, role, scope, access }) => {
-      await runRoute('PUT /members/:member', { member: apiMember(member) }, access !== undefined ? { access } : role === undefined ? {} : { role, ...(scope === undefined ? {} : { scope }) }, ctx);
+    apply: async (ctx, { member, role, scope, access }, { replaced }) => {
+      // Its first grants over what the page showed it holds, as set_access's; else the route's role, as Approve weighed it.
+      if (access !== undefined) await granted(ctx, member, access, replaced, true);
+      else await runRoute('PUT /members/:member', { member: apiMember(member) }, role === undefined ? {} : { role, ...(scope === undefined ? {} : { scope }) }, ctx);
       return {};
     },
   },

@@ -94,6 +94,7 @@ type Checked = {
   scope: Wanted[] | null;
   label: string | null;
   replaces: string[];
+  only: boolean;
 };
 
 /** What `checkBinding`, `checkPolicy` and a profile's rule say of the binding asked, or undefined for one they refuse. */
@@ -108,7 +109,8 @@ function bindingAsked(given: NewBinding, member: string, useOnly: boolean): Chec
   const scope = given.scope === null ? null : scopeAsked(given.scope);
   if (scope === undefined || !(given.label === null || labelled(given.label))) return undefined;
   const replaces = Array.isArray(given.replaces) ? [...given.replaces] : undefined;
-  if (replaces === undefined || replaces.length > MAX_BINDINGS || !replaces.every((id) => text(id) && UUID.test(id)) || new Set(replaces).size !== replaces.length) return undefined;
+  if (replaces === undefined || replaces.length > MAX_BINDINGS || !replaces.every((id) => text(id) && UUID.test(id)) || new Set(replaces).size !== replaces.length
+    || !(given.only === undefined || typeof given.only === 'boolean')) return undefined;
   try {
     // The vault fetches nothing: whether coffre may fetch the issuer, loopback included, is the app's, which discovered its keys.
     const binding = checkBinding({ profile: given.profile, issuer: given.issuer, claims: { ...given.claims } }, { allowLoopback: true, uploaded });
@@ -127,7 +129,7 @@ function bindingAsked(given: NewBinding, member: string, useOnly: boolean): Chec
         reads = asked;
       }
     }
-    return { binding, uri: uri as string | null, jwks: uploaded ? (given.keys as { jwks: unknown }).jwks : null, rules, reads, scope, label: given.label, replaces };
+    return { binding, uri: uri as string | null, jwks: uploaded ? (given.keys as { jwks: unknown }).jwks : null, rules, reads, scope, label: given.label, replaces, only: given.only ?? false };
   } catch (error) {
     if (error instanceof BindingInvalid) return undefined;
     throw error;
@@ -358,6 +360,8 @@ function tokenBind(input: Presented & TokenBind, vault: Deciding): Operation<Par
         if (asked!.replaces.includes(other.id)) return [{ row: other, why: 'asked' }];
         return other.issuer === binding.issuer && other.jwksUri !== jwksUri ? [{ row: other, why: 'keys_moved' }] : [];
       });
+      // Asked to end only those named, as an approval page listed them: one more it would end is one the person never read.
+      if (asked!.only && replaces.some(({ why }) => why === 'keys_moved')) return { refused: 'stale' };
       // Keys uploaded, on either side, are no move of the issuer's: the bindings that would go are still good.
       if (replaces.some(({ row: other, why }) => why === 'keys_moved' && (other.jwksUri.startsWith(CARRIED) || jwksUri.startsWith(CARRIED)))) return { refused: 'keys_differ' };
       if (live.length - replaces.length + 1 > MAX_BINDINGS) return { refused: 'too_many_bindings' };

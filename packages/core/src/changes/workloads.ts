@@ -107,6 +107,9 @@ export type Renewed = { expiresAt: string };
  *   what the service still holds, or else all the service holds.
  * - `replaces`: the live bindings it takes the place of, by id. Those of
  *   its issuer whose keys are elsewhere go too (`keys_moved`).
+ * - `only`: true when `replaces` is all it may end, as an approval page
+ *   listed them: one of its issuer's whose keys are elsewhere and that it
+ *   does not name refuses `stale`, and nothing is made.
  */
 export type NewBinding = {
   profile: string;
@@ -117,6 +120,7 @@ export type NewBinding = {
   scope: Record<string, string> | null;
   label: string | null;
   replaces: string[];
+  only?: boolean;
 };
 
 /**

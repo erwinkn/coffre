@@ -6,8 +6,9 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
 
+import { canonicalClaims } from '@coffre/core/identity';
 import { rowsOf } from '@coffre/db/dialect';
-import { credential, emptyDatabase, environment, grant, identity, instance, principal, project, role, rows, secret, signerOf, user, value, write } from '@coffre/vault/testing';
+import { binding, credential, emptyDatabase, environment, grant, identity, instance, principal, project, role, rows, secret, signerOf, user, value, write } from '@coffre/vault/testing';
 import { sql } from 'drizzle-orm';
 
 import { approvalWait, STALE } from '../src/mcp/approvals.ts';
@@ -19,6 +20,8 @@ const [root, admin, dev, other] = [user('root'), user('admin'), user('dev'), use
 const ci = 'token:ci';
 const ALL = 'read write manage-access';
 approvalWait.ms = 50;
+let market: ReturnType<typeof project>;
+let prod: ReturnType<typeof environment>;
 
 /**
  * market/prod holds API_KEY and OLD_KEY. Root owns the instance, and admin administers it; dev leads
@@ -29,8 +32,8 @@ approvalWait.ms = 50;
 beforeEach(async () => {
   await emptyDatabase(world.owner);
   for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
-  const market = project('market');
-  const prod = environment(market, 'prod');
+  market = project('market');
+  prod = environment(market, 'prod');
   const people = [root, admin, dev, other].map((who) => [who, identity(who)] as const);
   await write(
     world,
@@ -231,6 +234,33 @@ test("set_access gives what the page showed it replaces: a grant changed since t
   assert.deepEqual(members.find((entry) => entry.member === other)!.grants.map(({ project, environment, role }) => [project, environment, role]), [['market', 'prod', 'viewer'], ['market', null, 'viewer']]);
 });
 
+test("set_access writes over the grant the page showed: lead given between Approve's read and the write is refused, and stands", async () => {
+  const id = await asked(await connect('dev-web', ALL), 'set_access', { member: other, changes: { market: 'viewer' } });
+  const page = await view(id, 'dev-web');
+  assert.deepEqual(page.details.find((line) => line.label === 'market'), { label: 'market', value: 'nothing → viewer' });
+  app.beforeChange.next = async () => void (await api('root-web', 'PATCH', `/access/${other}`, { market: 'lead' }));
+  const decided = await approve(id, 'dev-web', page);
+  assert.equal(app.beforeChange.next, null, 'the grant came between');
+  assert.deepEqual([decided.status, decided.body.message], [409, STALE]);
+  assert.equal((await view(id, 'dev-web')).status, 'pending', 'nothing retries');
+  const { members } = await api<{ members: { member: string; grants: { project: string; environment: string | null; role: string }[] }[] }>('root-web', 'GET', '/members');
+  assert.deepEqual(members.find((entry) => entry.member === other)!.grants.find((entry) => entry.environment === null)?.role, 'lead');
+});
+
+test('a grant of an earlier generation, and one that ended, are nothing on the page and to the vault alike: Approve gives over them', async () => {
+  const back = 'user:back@acme.example';
+  await write(world, ...rows('principals', principal(back, { generation: 1 })), ...rows('grants',
+    grant(back, 'lead', { project: market }, { generation: 0 }),
+    grant(back, 'lead', { environment: prod }, { generation: 1, expiresAt: new Date(Date.now() - 60_000) })));
+  const id = await asked(await connect('root-web', ALL), 'set_access', { member: back, changes: { market: 'viewer', 'market/prod': 'viewer' } });
+  const page = await view(id, 'root-web');
+  assert.deepEqual(page.details.filter((line) => line.label.startsWith('market')).map((line) => line.value), ['nothing → viewer', 'nothing → viewer']);
+  const decided = await approve(id, 'root-web', page);
+  assert.equal(decided.body.status, 'approved', JSON.stringify(decided.body));
+  const { members } = await api<{ members: { member: string; grants: { role: string }[] }[] }>('root-web', 'GET', '/members');
+  assert.deepEqual(members.find((entry) => entry.member === back)!.grants.map((entry) => entry.role), ['viewer', 'viewer']);
+});
+
 test('admit_member admits a service account with its first grants, and a person; one who does not run the instance sets up none until the policy row is served', async () => {
   // dev leads market, and under 0.14.7's policy could add one there: 0.16 keeps it to whoever runs the instance for now.
   assert.match(await refused(await connect('dev-web', ALL), 'admit_member', { member: 'service:deploy', access: { 'market/prod': 'viewer' } }), /you set up no service account/);
@@ -241,6 +271,17 @@ test('admit_member admits a service account with its first grants, and a person;
   const { members } = await api<{ members: { member: string; grants: { role: string }[] }[] }>('root-web', 'GET', '/members');
   assert.deepEqual(members.find((entry) => entry.member === 'token:deploy')?.grants.map((entry) => entry.role), ['viewer']);
   assert.ok(members.some((entry) => entry.member === 'user:new@acme.example'));
+});
+
+test("admit_member's first grants write over what the page showed: the account admitted with lead between Approve's read and the write is refused, and stands", async () => {
+  const id = await asked(await connect('root-web', ALL), 'admit_member', { member: 'service:deploy', access: { market: 'viewer' } });
+  const page = await view(id, 'root-web');
+  app.beforeChange.next = async () => void (await api('root-web', 'PUT', '/members/token:deploy', { access: { market: 'lead' } }));
+  const decided = await approve(id, 'root-web', page);
+  assert.equal(app.beforeChange.next, null, 'the admission came between');
+  assert.deepEqual([decided.status, decided.body.message], [409, STALE]);
+  const { members } = await api<{ members: { member: string; grants: { role: string }[] }[] }>('root-web', 'GET', '/members');
+  assert.deepEqual(members.find((entry) => entry.member === 'token:deploy')?.grants.map((entry) => entry.role), ['lead']);
 });
 
 test('offboard_member: its page counts what ends, and Approve removes the member', async () => {
@@ -326,6 +367,40 @@ test('trust_workload binds CI runs with the scope the page showed, its unfamilia
   assert.ok((await view(remove, 'dev-web')).details.some((line) => line.label === 'Runs from' && line.value === KUBE));
   assert.equal((await approve(remove, 'dev-web')).body.status, 'approved');
   assert.deepEqual(await bindings(), []);
+});
+
+/** A binding of ci's on KUBE under keys that are no longer where its discovery says, as `old-runner`. */
+const moved = () => binding(ci, {
+  profile: 'custom', issuer: KUBE, jwksUri: `${KUBE}/old/jwks`, label: 'old-runner',
+  claims: canonicalClaims({ sub: 'system:serviceaccount:ci:old' }), scope: JSON.stringify([{ projectId: market.id, environmentId: prod.id, role: 'viewer' }]),
+});
+const bindingsOfCi = async () => (await api<{ bindings: { id: string; label: string | null }[] }>('dev-web', 'GET', `/members/${ci}/bindings`)).bindings;
+const TRUST = { service: 'ci', profile: 'custom', issuer: KUBE, claims: { sub: 'system:serviceaccount:ci:runner' } };
+
+test("trust_workload's page lists each binding it ends, by label and claims and why: one on its issuer whose keys moved; Approve ends it, as the page said", async () => {
+  const old = moved();
+  await write(world, ...rows('bindings', old));
+  const id = await asked(await connect('dev-web', ALL), 'trust_workload', TRUST);
+  const page = await view(id, 'dev-web');
+  const ends = page.details.filter((line) => line.label === 'Ends');
+  assert.equal(ends.length, 1, JSON.stringify(page.details));
+  assert.deepEqual([ends[0]!.value, ends[0]!.warn], ['old-runner (sub: system:serviceaccount:ci:old)', true]);
+  assert.match((ends[0] as Line & { note?: string }).note!, /keys are elsewhere now/);
+  assert.equal((await approve(id, 'dev-web', page)).body.status, 'approved');
+  assert.deepEqual((await bindingsOfCi()).map((entry) => entry.id === old.id), [false], 'the old one ended, the new one made');
+});
+
+test("trust_workload ends what the page listed and no other: a binding on its issuer under other keys made between Approve's read and the write is refused, and stands", async () => {
+  const id = await asked(await connect('dev-web', ALL), 'trust_workload', TRUST);
+  const page = await view(id, 'dev-web');
+  assert.ok(!page.details.some((line) => line.label === 'Ends'), JSON.stringify(page.details));
+  const old = moved();
+  app.beforeChange.next = async () => void (await write(world, ...rows('bindings', old)));
+  const decided = await approve(id, 'dev-web', page);
+  assert.equal(app.beforeChange.next, null, 'the binding came between');
+  assert.deepEqual([decided.status, decided.body.message], [409, STALE]);
+  assert.equal((await view(id, 'dev-web')).status, 'pending', 'nothing retries');
+  assert.deepEqual((await bindingsOfCi()).map((entry) => entry.id), [old.id], 'nothing made, and nothing ended');
 });
 
 test("read_audit_log reads the log as the person, for whoever holds audit.read; a call too long for an approval is the tool's error, and asks nothing", async () => {

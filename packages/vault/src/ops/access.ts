@@ -357,8 +357,10 @@ type Asked = AccessGrant['changes'][number];
 
 function asked(value: unknown): value is Asked {
   if (typeof value !== 'object' || value === null) return false;
-  const { project, environment, role, expiresAt } = value as Record<string, unknown>;
-  return typeof project === 'string' && SLUG.test(project) && (environment === null || (typeof environment === 'string' && SLUG.test(environment)))
+  const { project, environment, role, expiresAt, was } = value as Record<string, unknown>;
+  const held = was as Record<string, unknown> | null | undefined;
+  return (held == null || (typeof held === 'object' && typeof held.role === 'string' && ROLE_ID.test(held.role) && (held.expiresAt === null || (typeof held.expiresAt === 'string' && Number.isFinite(Date.parse(held.expiresAt))))))
+    && typeof project === 'string' && SLUG.test(project) && (environment === null || (typeof environment === 'string' && SLUG.test(environment)))
     && (role === null || (typeof role === 'string' && ROLE_ID.test(role)))
     && (expiresAt === null || (typeof expiresAt === 'string' && ENDS.test(expiresAt) && Number.isFinite(Date.parse(expiresAt)) && aDay(expiresAt)));
 }
@@ -510,11 +512,16 @@ function accessGrant(input: Presented & AccessGrant, vault: Deciding): Operation
         writes.push(put(principals, row, member ?? null));
       }
       const lines: Record<string, unknown>[] = [];
+      // Each place's row, whatever its generation, and what the member holds there now: a grant of this membership, not lapsed.
+      const rows = places.map(({ project, environment }) => seen.held.find((row) => row.principal === principal && (environment == null ? row.projectId === project!.id : row.environmentId === environment.id)));
+      const holding = rows.map((row) => (row !== undefined && row.generation === generation && (row.expiresAt === null || row.expiresAt.getTime() > at) ? row : undefined));
+      // What an approval page showed held, as the member list says it: anything else held now is not what the person read.
+      const asShown = ({ was }: Asked, i: number) =>
+        was === undefined || (was === null ? holding[i] === undefined : holding[i]?.role === was.role && (holding[i].expiresAt?.getTime() ?? null) === (was.expiresAt === null ? null : Date.parse(was.expiresAt)));
+      if (!changes.every(asShown)) return { refused: 'stale' };
       const outcomes = changes.map(({ role, expiresAt }, i): AccessChange => {
         const { project, environment } = places[i] as { project: Row<typeof projects>; environment: Row<typeof environments> | null };
-        const was = seen.held.find((row) => row.principal === principal && (environment === null ? row.projectId === project.id : row.environmentId === environment.id));
-        // What the member holds there now: a grant of this membership, not lapsed.
-        const current = was !== undefined && was.generation === generation && (was.expiresAt === null || was.expiresAt.getTime() > at) ? was : undefined;
+        const [was, current] = [rows[i], holding[i]];
         const ends = expiresAt === null ? null : new Date(Date.parse(expiresAt));
         const place = environment === null ? { project: project.id } : { environment: environment.id };
         if (role === null) {

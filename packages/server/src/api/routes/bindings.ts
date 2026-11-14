@@ -270,6 +270,75 @@ async function discovered(ctx: ApiContext, issuer: string, workloads: WorkloadsC
 const NO_PREVIEW = new ApiError('not_implemented', "a binding's preview (?dryRun=1) is not served yet: the binding is made, and what it reaches is its answer");
 const dryRun = z.object({ dryRun: z.string().optional() }).passthrough();
 
+/** A binding as `POST /members/:member/bindings` takes it. */
+export const newBinding = z.object({
+  profile: z.string().max(64),
+  issuer: kept(2048).min(1).nullable().optional(),
+  claims: z.record(z.string(), z.unknown()),
+  scope: scopeByPath.optional(),
+  label: label.nullable().optional(),
+  replaces: z.array(rowId).max(16).refine((ids) => new Set(ids).size === ids.length, 'each binding replaced once').optional(),
+  jwks: jwks.optional(),
+  policy: z.record(z.string(), z.unknown()).refine((policy) => policy.reads === undefined || readsByPath.safeParse(policy.reads).success, 'a policy\'s reads name environments by path, and each its keys by name, or "*"').optional(),
+}).strict();
+
+/**
+ * Make a binding, or weigh it (`dryRun`), as the route does. `only`, which
+ * an MCP approval alone passes, ends nothing but `replaces`: a binding
+ * whose issuer's keys moved and that it does not name refuses `stale`.
+ */
+export async function bind(ctx: ApiContext, raw: string, input: z.output<typeof newBinding>, { dryRun, only = false }: { dryRun: boolean; only?: boolean }): Promise<{ binding: BindingMade; replaced: string[] } | BindingPlan> {
+  const workloads = workloadsOf(ctx);
+  const member = serviceIn(raw);
+  const uploaded = input.jwks !== undefined;
+  let checked: CheckedBinding;
+  try {
+    checked = checkBinding({ profile: input.profile, issuer: input.issuer ?? null, claims: input.claims }, { allowLoopback: workloads.allowLoopback, uploaded });
+    // A workload's binding: every one but a bearer binding with no policy, which a CI run's exchange takes; none under `useOnly`.
+    if (!isBearerProfile(checked.profile) || input.policy !== undefined || workloads.useOnly) {
+      const { reads, ...rest } = input.policy ?? {};
+      if (reads !== undefined && workloads.noReads) throw refusal('no_reads');
+      const rules = checkPolicy(checked.profile, rest, { service: member });
+      PROFILE_RULES[checked.profile]?.binding(checked, rules);
+    }
+  } catch (error) {
+    if (error instanceof BindingInvalid) throw badRequest(error.message);
+    throw error;
+  }
+  const { issuer } = checked;
+  const carried = uploaded ? await checkedKeys(input.jwks) : null;
+  // A URN's keys are its issuer, which keeps one source of keys.
+  const urn = Object.hasOwn(PROFILE_URNS, input.profile);
+  const binding = (keys: { uri: string } | { jwks: unknown }) => ({ profile: input.profile, issuer, claims: input.claims, keys, policy: input.policy ?? null, scope: input.scope ?? null, label: input.label ?? null, replaces: input.replaces ?? [], ...(only ? { only } : {}) });
+  let keys: { uri: string } | { jwks: unknown };
+  // Keys uploaded with it; a URN's, its issuer; else where its issuer's discovery says they are, asked only for whoever may bind.
+  if (uploaded) keys = { jwks: input.jwks };
+  else if (urn) keys = { uri: issuer };
+  else {
+    await mayBind(ctx, member);
+    keys = { uri: await discovered(ctx, issuer, workloads) };
+  }
+  const change = { op: 'token.bind', member, binding: binding(keys) } as const;
+  if (dryRun) {
+    // Weighed as it would be made, keys and all: what it reaches and what it replaces are one answer's, since a binding
+    // replaced may be what the scope it inherits comes from.
+    const plan = await bindingChange<'token.bind'>(ctx, change, member, 'weigh');
+    const asked = new Set(input.replaces ?? []);
+    return {
+      profile: checked.profile,
+      issuer,
+      jwksUri: 'uri' in keys ? keys.uri : `${CARRIED}${carried!.digest}`,
+      keys: carried?.keys ?? null,
+      claims: checked.claims,
+      scope: plan.bindings[0]!.scope,
+      policy: (input.policy as PolicyView | undefined) ?? null,
+      replaces: plan.replaced.map((id) => ({ id, why: asked.has(id) ? ('asked' as const) : ('keys_moved' as const) })),
+    };
+  }
+  const bound = await bindingChange<'token.bind'>(ctx, change, member);
+  return { binding: bound.bindings[0]!, replaced: bound.replaced };
+}
+
 export const bindingRoutes = {
   /**
    * The service's live bindings, oldest first: to the service itself, and
@@ -299,68 +368,9 @@ export const bindingRoutes = {
    * statement and one weigh; with keys uploaded or a URN, one weigh.
    */
   ...route('POST /members/:member/bindings', {
-    input: z.object({
-      profile: z.string().max(64),
-      issuer: kept(2048).min(1).nullable().optional(),
-      claims: z.record(z.string(), z.unknown()),
-      scope: scopeByPath.optional(),
-      label: label.nullable().optional(),
-      replaces: z.array(rowId).max(16).refine((ids) => new Set(ids).size === ids.length, 'each binding replaced once').optional(),
-      jwks: jwks.optional(),
-      policy: z.record(z.string(), z.unknown()).refine((policy) => policy.reads === undefined || readsByPath.safeParse(policy.reads).success, 'a policy\'s reads name environments by path, and each its keys by name, or "*"').optional(),
-    }).strict(),
+    input: newBinding,
     query: dryRun,
-    run: async (ctx, { params, input, query }): Promise<{ binding: BindingMade; replaced: string[] } | BindingPlan> => {
-      const workloads = workloadsOf(ctx);
-      const member = serviceIn(params.member);
-      const uploaded = input.jwks !== undefined;
-      let checked: CheckedBinding;
-      try {
-        checked = checkBinding({ profile: input.profile, issuer: input.issuer ?? null, claims: input.claims }, { allowLoopback: workloads.allowLoopback, uploaded });
-        // A workload's binding: every one but a bearer binding with no policy, which a CI run's exchange takes; none under `useOnly`.
-        if (!isBearerProfile(checked.profile) || input.policy !== undefined || workloads.useOnly) {
-          const { reads, ...rest } = input.policy ?? {};
-          if (reads !== undefined && workloads.noReads) throw refusal('no_reads');
-          const rules = checkPolicy(checked.profile, rest, { service: member });
-          PROFILE_RULES[checked.profile]?.binding(checked, rules);
-        }
-      } catch (error) {
-        if (error instanceof BindingInvalid) throw badRequest(error.message);
-        throw error;
-      }
-      const { issuer } = checked;
-      const carried = uploaded ? await checkedKeys(input.jwks) : null;
-      // A URN's keys are its issuer, which keeps one source of keys.
-      const urn = Object.hasOwn(PROFILE_URNS, input.profile);
-      const binding = (keys: { uri: string } | { jwks: unknown }) => ({ profile: input.profile, issuer, claims: input.claims, keys, policy: input.policy ?? null, scope: input.scope ?? null, label: input.label ?? null, replaces: input.replaces ?? [] });
-      let keys: { uri: string } | { jwks: unknown };
-      // Keys uploaded with it; a URN's, its issuer; else where its issuer's discovery says they are, asked only for whoever may bind.
-      if (uploaded) keys = { jwks: input.jwks };
-      else if (urn) keys = { uri: issuer };
-      else {
-        await mayBind(ctx, member);
-        keys = { uri: await discovered(ctx, issuer, workloads) };
-      }
-      const change = { op: 'token.bind', member, binding: binding(keys) } as const;
-      if (query.dryRun !== undefined) {
-        // Weighed as it would be made, keys and all: what it reaches and what it replaces are one answer's, since a binding
-        // replaced may be what the scope it inherits comes from.
-        const plan = await bindingChange<'token.bind'>(ctx, change, member, 'weigh');
-        const asked = new Set(input.replaces ?? []);
-        return {
-          profile: checked.profile,
-          issuer,
-          jwksUri: 'uri' in keys ? keys.uri : `${CARRIED}${carried!.digest}`,
-          keys: carried?.keys ?? null,
-          claims: checked.claims,
-          scope: plan.bindings[0]!.scope,
-          policy: (input.policy as PolicyView | undefined) ?? null,
-          replaces: plan.replaced.map((id) => ({ id, why: asked.has(id) ? ('asked' as const) : ('keys_moved' as const) })),
-        };
-      }
-      const bound = await bindingChange<'token.bind'>(ctx, change, member);
-      return { binding: bound.bindings[0]!, replaced: bound.replaced };
-    },
+    run: async (ctx, { params, input, query }) => bind(ctx, params.member, input, { dryRun: query.dryRun !== undefined }),
   }),
 
   /**

@@ -12,6 +12,7 @@ import { roleId } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import type { ApiContext } from '../api/context.ts';
+import { bind, newBinding, type BindingPlan } from '../api/routes/bindings.ts';
 import { runRoute } from '../api/router.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import { approved, changeTool, type Detail, type Replaced } from './changes.ts';
@@ -64,10 +65,38 @@ async function tokenPlan(ctx: ApiContext, { service, label, expiresInDays, scope
 type BindingArgs = { service: string; profile: string; issuer?: string | undefined; claims: BindingClaims; scope?: Scope | undefined; label?: string | undefined };
 const bindingInput = ({ profile, issuer, claims, label }: BindingArgs, scope: Scope | undefined) => ({ profile, issuer: issuer ?? null, claims, label: label ?? null, ...(scope === undefined ? {} : { scope }) });
 
-/** What a binding would reach: its dry run, one weigh, then its issuer asked where its keys are. A binding refused says why on the page. */
-async function bindingPlan(ctx: ApiContext, args: BindingArgs): Promise<Scope> {
-  const plan = await runRoute('POST /members/:member/bindings', { member: serviceMember(args.service) }, bindingInput(args, args.scope), ctx, { dryRun: '1' });
-  return (plan as { scope: Scope }).scope;
+/** The bindings a new one ends, each by id and why: named, or one of its issuer's whose keys are elsewhere. */
+type Ending = { id: string; why: 'asked' | 'keys_moved' }[];
+
+/**
+ * What a binding would reach and end: its dry run (its issuer asked where
+ * its keys are, then one weigh), as the page says it. Each binding it ends
+ * is listed by its label and claims, read from the service's list only
+ * when there is one: a binding is never edited, so its id is its basis.
+ */
+async function bindingPlan(ctx: ApiContext, args: BindingArgs): Promise<Replaced> {
+  const member = serviceMember(args.service);
+  const plan = (await runRoute('POST /members/:member/bindings', { member }, bindingInput(args, args.scope), ctx, { dryRun: '1' })) as BindingPlan;
+  const { details } = reaching(plan.scope);
+  const live = plan.replaces.length === 0 ? [] : (await runRoute('GET /members/:member/bindings', { member }, undefined, ctx)).bindings;
+  for (const { id, why } of plan.replaces) {
+    const ended = live.find((binding) => binding.id === id);
+    const claims = ended === undefined ? id : Object.entries(ended.claims).map(([claim, value]) => `${claim}: ${claimValues(value).join(', ')}`).join('; ');
+    details.push({
+      label: 'Ends',
+      value: `${ended?.label ?? 'unlabelled'} (${claims})`,
+      note: why === 'asked' ? 'Asked to replace it: its runs are refused from now on.' : "Its issuer's keys are elsewhere now: trusting a workload there ends it, and its runs are refused from now on.",
+      warn: true,
+    });
+  }
+  return { details, state: { scope: plan.scope, replaces: plan.replaces } };
+}
+
+/** The bindings the page listed as ended, and Approve found again: the binding ends those, as asked, and refuses `stale` should it end another. */
+function ending(replaced: Replaced | undefined): string[] {
+  const listed = (replaced?.state as { replaces?: Ending } | undefined)?.replaces;
+  if (listed === undefined) throw new Error('approved without what it ends');
+  return listed.map(({ id }) => id);
 }
 
 /** What the page says of an ID github.com or gitlab.com did not name. */
@@ -235,8 +264,8 @@ const TRUST = changeTool({
     // As the connection, whoever manages the account; the binding is weighed, and its issuer asked where its keys are,
     // on the page, as the person: the vault weighs nothing on an MCP token's word.
     check: (tool, { service }) => manages(tool, serviceMember(service)),
-    // What its runs will reach, as the vault weighs it: Approve refuses it changed.
-    replaces: async (ctx, args) => reaching(await bindingPlan(ctx, args)),
+    // What its runs will reach, and the bindings it ends, as the vault weighs it: Approve refuses either changed.
+    replaces: async (ctx, args) => bindingPlan(ctx, args),
     // The model picks the IDs: each is named back from GitHub or GitLab, where it can be, so the person reads what they trust.
     preview: async (_ctx, { service, profile, issuer, claims, label }, { transport }, replaced) => {
       const names = await namesOf(transport, profile, issuer ?? null, claims);
@@ -252,8 +281,9 @@ const TRUST = changeTool({
         ...(label === undefined ? [] : [{ label: 'The app calls it', value: label }]),
       ];
     },
+    // With what it reaches and the bindings it ends, as the page listed them, and no other: one more it would end is `stale`.
     apply: async (ctx, args, { replaced }) => {
-      await runRoute('POST /members/:member/bindings', { member: serviceMember(args.service) }, bindingInput(args, pinned(replaced)), ctx);
+      await bind(ctx, serviceMember(args.service), newBinding.parse({ ...bindingInput(args, pinned(replaced)), replaces: ending(replaced) }), { dryRun: false, only: true });
       return {};
     },
   },

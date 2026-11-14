@@ -121,6 +121,13 @@ then, as you, and the app only hears what became of it; **Deny** changes
 nothing. Nobody else can decide your approvals, and each expires after five
 minutes.
 
+Approve changes only what the page showed. If, after you opened it, a
+key it writes changed, someone was given another grant where it sets one,
+or a trust binding it would end appeared, nothing is changed: the page
+says so, and you open the approval again to see it as it is now. Nothing
+retries by itself. What only describes the change, such as how many
+sessions an offboarding ends, is checked when you press Approve.
+
 - **Claude Code**, and any client on MCP 2026-07-28 that can open a URL,
   asks you to open the page, and picks up the outcome by itself.
 - **claude.ai and Claude Desktop**, and any client that can't, gets the
