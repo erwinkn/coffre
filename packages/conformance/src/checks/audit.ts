@@ -124,59 +124,25 @@ export async function auditPageProofs({ admin }: People): Promise<string> {
   return `the audit page sent with its proofs, rendered by the server: ${proven} of ${proofs.length} rows proven`;
 }
 
-/** How many findings the signer's alert names, one a line (`alertOf`, `packages/vault/src/signer-host.ts`): the rest it counts. */
-const NAMED = 10;
-/** A finding's line in it, of each kind it says: `- <found> <of>: <what it says>`. */
-const FINDING = /^- (forged|replayed|stale|missing|rewritten|row|cut|lost|stopped) \S+: \S/;
-export type Alert = { count: number; findings: string[]; complete: boolean };
-
-/**
- * Each alert of the signer's in one stream's whole lines: a header counting its findings, a line per finding it names, then
- * `and n more`. Wrangler colors it and indents its findings after a blank line: neither is read. A header that does not
- * parse is an alert never complete, so that it is never fresh later.
- */
-export function alertsIn(lines: string[]): Alert[] {
-  const plain = lines.map((line) => line.replace(/\x1b\[[\d;]*m/g, '').trim()).filter((line) => line !== '');
-  return plain.flatMap((line, at) => {
-    if (!line.includes("coffre's signer reports (")) return [];
-    const count = Number(/coffre's signer reports \((\d+)\):$/.exec(line)?.[1]);
-    const findings = plain.slice(at + 1, at + 1 + Math.min(count, NAMED));
-    // A foreign line among its lines leaves it incomplete: that can only fail the check, never pass it.
-    const complete = count > 0 && findings.length === Math.min(count, NAMED) && findings.every((each) => FINDING.test(each))
-      && (count <= NAMED || plain[at + 1 + NAMED] === `and ${count - NAMED} more`);
-    return [{ count, findings, complete }];
-  });
-}
-
-/**
- * The first whole alert naming a cut of `tree` in each stream past the alerts it held before (`before`), and why it fails,
- * or null. Found afresh, it names no cut put back before; and it names every finding, so none hides among those counted.
- */
-export function cutFound(streams: string[][], before: number[], tree: 'kept' | 'aging'): { failed: string | null; alert: Alert } | undefined {
-  const names = (alert: Alert, of: string) => alert.findings.some((line) => line.startsWith(`- cut ${of}:`));
-  const alert = streams.flatMap((lines, at) => alertsIn(lines).slice(before[at] ?? 0)).find((each) => each.complete && (each.count > NAMED || names(each, tree)));
-  if (alert === undefined) return undefined;
-  if (alert.count > NAMED) return { alert, failed: 'the signer names too few of its findings to tell what it found again' };
-  return { alert, failed: names(alert, tree === 'kept' ? 'aging' : 'kept') ? 'the signer names again a cut put back before' : null };
-}
-
 /** A row of `log` as the database holds it: its bigints as text, put back as they were. */
 type LogRow = { seq: string; kept: boolean; leaf: string; body: string };
 
 /**
  * The newest signed entry of a tree cut out of the log, by the database's
  * owner (docs/design/0.16.md, "What the minute's run checks of the log"):
- * the signer's next check, within its minute, says `cut` of that tree in
- * its alert, in the processes' output, and the audit page proves the
- * entry nowhere, the gap a hole in its stretch. Put back, the page proves
- * it again, and the signer lets the finding go: the same cut is news to a
- * later check. The change cut first, then the use, whose finding says the
- * check after the change was put back has run; then the change again. An
- * entry cut further back, or the newest once another is signed after it,
- * is the re-check's, which reads the log a day after its last walk (D222):
- * not within a run (docs/conformance.md).
+ * the deployed signer's next check, within its minute, says `cut` of that
+ * tree in its alert, in the processes' output, and the audit page proves
+ * the entry nowhere, the gap a hole in its stretch. Put back, the page
+ * proves it again. The change cut first, then the use, whose finding says
+ * the alarm ran a later check. Each tree is cut once in a run, so no
+ * earlier finding can stand for it. That a finding put right is let go and
+ * said again is the vault's own tests' (signer-host.test.ts). An entry cut
+ * further back, or the newest once another is signed after it, is the
+ * re-check's, which reads the log a day after its last walk (D222): not
+ * within a run (docs/conformance.md).
  */
 export async function logCut(deployment: Deployment, { admin }: People): Promise<string> {
+  const said = (tree: string) => deployment.output().split(`- cut ${tree}:`).length - 1;
   const out: LogRow[] = [];
   const seqs = new Set<number>();
   await using(deployment.database(), async (sql) => {
@@ -184,13 +150,11 @@ export async function logCut(deployment: Deployment, { admin }: People): Promise
       // Nothing waits: an entry signed after the cut would end its tree again, and leave the cut to the walk.
       await until('nothing waiting to be signed', async () => (await query(sql, 'SELECT 1 FROM log_pending LIMIT 1')).length === 0, PUBLISHED_SECONDS);
       const tree = kept ? 'kept' : 'aging';
-      const before = deployment.lines().map((lines) => alertsIn(lines).length);
+      expect(said(tree) === 0, `the signer named a cut of the ${tree} tree before one was made`);
       const [row] = await query<LogRow>(sql, 'DELETE FROM log WHERE kept = $1 AND leaf = (SELECT max(leaf) FROM log WHERE kept = $1) RETURNING seq::text, kept, leaf::text, body', [kept]);
       expect(row !== undefined, `the log has no ${tree} entry to cut`);
       out.push(row);
-      let found: ReturnType<typeof cutFound>;
-      await until(`the signer's whole alert naming - cut ${tree}:`, async () => (found = cutFound(deployment.lines(), before, tree)) !== undefined, PUBLISHED_SECONDS);
-      expect(found!.failed === null, found!.failed!, { tree, alert: found!.alert });
+      await until(`the signer's alert naming - cut ${tree}:`, async () => said(tree) > 0, PUBLISHED_SECONDS);
       // The page's stretch lacks it, by its tree's count, and lists it nowhere as proven.
       const page = await admin.api.audit.list({ detail: '1', limit: 200 });
       const seq = Number(row.seq);
@@ -207,7 +171,6 @@ export async function logCut(deployment: Deployment, { admin }: People): Promise
     try {
       await putBack(await cut(true));
       await putBack(await cut(false));
-      await putBack(await cut(true));
     } finally {
       for (const row of [...out]) await putBack(row);
     }
@@ -225,7 +188,7 @@ export async function logCut(deployment: Deployment, { admin }: People): Promise
   const { failed, misplaced, missing } = judged!;
   const unproven = [...seqs].filter((seq) => !listed.some((entry) => entry.seq === seq && entry.proof === 'proven'));
   expect(unproven.length === 0 && failed.length === 0 && misplaced.length === 0 && missing !== null && missing.length === 0, 'the entries put back are not proven again', { unproven, failed: failed.slice(0, 5), misplaced: misplaced.slice(0, 5), missing });
-  return "the newest change and use cut out of the log, each named in the signer's alert and proven nowhere on the audit page; put back, proven again, and a change cut again named again";
+  return "the newest change and use cut out of the log, each named in the signer's alert and proven nowhere on the audit page; put back, proven again";
 }
 
 /**
