@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.1 (2026-11-15)
+
 - **After a coffre outage, a Kubernetes workload signs in again within
   about a minute, not up to 8.** `kubernetes()` counted its projected
   token used as soon as it sent it, whatever coffre answered: a sign-in
