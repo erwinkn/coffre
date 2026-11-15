@@ -110,6 +110,7 @@ export default vault((env: Env) => ({
   }),
   owners: env.OWNERS.split(','),
   signingKey: env.SIGNING_KEY, // required: see below
+  workloads: {}, // or `null`, to refuse workload sign-ins
 }));
 ```
 

@@ -24,7 +24,7 @@ import { credential, environment, grant, principal, project, role, rows, secret,
 const VAULT_KEY = randomBytes(32).toString('base64');
 // The instance's rows are written here as the Worker's vault would write them: under its keys, and by the real
 // clock, which its signer dates entries by.
-const prepared = prepareVault(resolveVaultConfig({ kek: { id: 'vault-workers-test', key: VAULT_KEY }, owners: ['root@acme.example'] }));
+const prepared = prepareVault(resolveVaultConfig({ kek: { id: 'vault-workers-test', key: VAULT_KEY }, owners: ['root@acme.example'], workloads: null }));
 const world = await openTestVault({ ...prepared, now: Date.now });
 after(() => world.close());
 

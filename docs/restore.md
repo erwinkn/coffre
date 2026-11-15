@@ -74,6 +74,7 @@ export default vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },
   owners: env.OWNERS.split(',').map((email) => email.trim()),
+  workloads: {}, // as before the restore
   // The object the signer runs in, `signer` until a restore: a new name after each.
   signerName: 'signer-2026-11-14',
 }));

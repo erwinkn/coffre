@@ -19,7 +19,7 @@ import { signerOf } from './testing.ts';
 import { credential, environment, grant, principal, project, role, rows, secret, tokenOf, user, value, write } from './world.ts';
 
 // The keys a deployment's configuration makes, for the vault that writes the instance and the one under test.
-const prepared = prepareVault(resolveVaultConfig({ kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') }, owners: ['root@acme.example'] }));
+const prepared = prepareVault(resolveVaultConfig({ kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') }, owners: ['root@acme.example'], workloads: null }));
 const world = await openTestVault(prepared);
 const vault = openLocalVault(world.db, prepared, { wake: world.wake, now: world.now });
 after(() => world.close());
@@ -121,7 +121,7 @@ test('who a request is crosses as JSON: what it holds, as the app decides on it,
 });
 
 test('the vault runs as its configuration says: its memory, and what it takes of workloads', () => {
-  const config = { kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') }, owners: ['root@acme.example'] };
+  const config = { kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') }, owners: ['root@acme.example'], workloads: null };
   const plain = prepareVault(resolveVaultConfig(config));
   assert.deepEqual([plain.memory.seconds, plain.memory.outageSeconds, plain.workloads, plain.cap], [2, 0, null, { count: 1000, windowMs: 15 * 60_000 }]);
   const told = prepareVault(resolveVaultConfig({ ...config, memorySeconds: 0, outageSeconds: 330, workloads: { useOnly: true }, bulkLimit: { count: 5, windowMinutes: 1 } }));
@@ -139,7 +139,7 @@ test('the database holds no key: not the KEK, the signing key or a key derived f
   // A local KEK alone, whose key the vault derives its own from, and one given its own signing key.
   for (const given of [{}, { signingKey: randomBytes(32).toString('base64') }]) {
     const kek = randomBytes(32);
-    const resolved = resolveVaultConfig({ kek: { id: 'scanned', key: kek.toString('base64') }, owners: ['root@acme.example'], ...given });
+    const resolved = resolveVaultConfig({ kek: { id: 'scanned', key: kek.toString('base64') }, owners: ['root@acme.example'], workloads: null, ...given });
     const keyed = prepareVault(resolved);
     const scanned = await openTestVault({ ...keyed, now: world.now });
     try {

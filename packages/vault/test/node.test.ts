@@ -40,6 +40,7 @@ test('the vault leaves an idle connection open for the server to reuse: it never
     database: db.db,
     kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') },
     owners: ['root@acme.example'],
+    workloads: null,
   }, { wake: () => {} });
   const agent = new Agent({ keepAlive: true });
   try {
@@ -64,6 +65,7 @@ test('a body that is no JSON is 400, and its words, which JSON quotes, never rea
     database: db.db,
     kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') },
     owners: ['root@acme.example'],
+    workloads: null,
   }, { wake: () => {} });
   const logged: unknown[][] = [];
   t.mock.method(console, 'error', (...args: unknown[]) => void logged.push(args));

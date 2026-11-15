@@ -13,6 +13,7 @@ export default vault((env) => ({
   database: postgres(env.VAULT_HYPERDRIVE), // coffre_vault_runtime, caching disabled
   kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY }, // or awsKms({ keyArn, credentials }), with a signingKey
   owners: env.OWNERS.split(','), // Owners of the whole instance, whom nobody demotes while named
+  workloads: {}, // what the app's signin({ workloads }) says of CI runs and apps, or null for none
 }));
 ```
 

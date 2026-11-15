@@ -23,7 +23,7 @@ const untouchable = new Proxy({}, { get: (_, name) => { throw new Error(`about r
 const owners = ['root@acme.example'];
 
 function aboutOf(kek: VaultConfig['kek'], more: Pick<VaultConfig, 'previousKeks' | 'signingKey'> = {}) {
-  return openLocalVault(untouchable, prepareVault(resolveVaultConfig({ kek, ...more, owners })), { wake: () => assert.fail('about wrote an entry') }).about();
+  return openLocalVault(untouchable, prepareVault(resolveVaultConfig({ kek, ...more, owners, workloads: null })), { wake: () => assert.fail('about wrote an entry') }).about();
 }
 
 /** A key service's KEK, as `awsKms(…)` makes one: its key never leaves it. */
@@ -81,7 +81,7 @@ test("a wrong key matches no check: another key, the vault key taken as its own 
 });
 
 test('each answer is a copy: a caller that changes one changes nothing the next is told', async () => {
-  const prepared = prepareVault(resolveVaultConfig({ kek: { id: 'k', key: b64(key()) }, owners }));
+  const prepared = prepareVault(resolveVaultConfig({ kek: { id: 'k', key: b64(key()) }, owners, workloads: null }));
   // In process, with no transport's JSON between: the vault's own answer.
   const vault = openVault(untouchable, prepared, { wake: () => {} });
   const first = await vault.about();

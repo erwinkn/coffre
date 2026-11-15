@@ -820,8 +820,9 @@ auth: signin({
 ```
 
 and the vault, which decides on each run's sign-in, is told too, in
-`vault/src/worker.ts`; left out, it refuses every run as `no_match`.
-`useOnly` and `noReads` go to both, alike:
+`vault/src/worker.ts`; `workloads: null` there refuses every run as
+`no_match`, and the vault's configuration does not build without one or
+the other. `useOnly` and `noReads` go to both, alike:
 
 ```ts
 export default vault((env: Env) => ({

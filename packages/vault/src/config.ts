@@ -66,6 +66,7 @@ export type Kek = { id: string; key: string } | KekProvider;
  *     previousKeks: [{ id: 'vault-2025-01-10-k7q2xm', key: env.OLD_VAULT_KEY }],
  *     owners: ['admin@acme.example'],
  *     signingKey: env.SIGNING_KEY, // required with a key service; derived from a local KEK otherwise
+ *     workloads: null, // or what the app's signin({ workloads }) says: { useOnly: true }
  *   }
  */
 export type VaultConfig = {
@@ -108,13 +109,15 @@ export type VaultConfig = {
    */
   outageSeconds?: number;
   /**
-   * For a deployment with workloads, what the app's `workloads` says of
-   * them, which the vault decides on: `noReads`, no binding lists values
-   * its sessions are handed back; `useOnly`, a service account is a
-   * key-bound session or nothing. Left out, the vault takes no workload's
-   * session.
+   * What the app's `signin({ workloads })` says of CI runs and apps
+   * signing in as services, which the vault decides on: `{}` takes their
+   * sessions; `noReads`, no binding lists values its sessions are handed
+   * back; `useOnly`, a service account is a key-bound session or nothing.
+   * `null` takes no workload's session. Required, so that a deployment
+   * upgraded from 0.14, whose vault said nothing of workloads, fails to
+   * build rather than refuse every one of them.
    */
-  workloads?: { noReads?: boolean; useOnly?: boolean };
+  workloads: { noReads?: boolean; useOnly?: boolean } | null;
   /**
    * How long the log keeps a use, in days: 90 unless set, and `null` keeps
    * every one (docs/design/0.16.md, "How long the log is kept"). Changes are
@@ -218,7 +221,7 @@ export function resolveVaultConfig(config: VaultConfig): ResolvedVaultConfig {
     bulkLimit: config.bulkLimit === undefined ? DEFAULT_BULK_LIMIT : checkBulkLimit(config.bulkLimit),
     memorySeconds: checkMemory(config.memorySeconds ?? DEFAULT_MEMORY_SECONDS),
     outageSeconds: checkOutage(config.outageSeconds ?? 0),
-    workloads: config.workloads === undefined ? null : { noReads: config.workloads.noReads === true, useOnly: config.workloads.useOnly === true },
+    workloads: config.workloads == null ? null : { noReads: config.workloads.noReads === true, useOnly: config.workloads.useOnly === true },
     keepUsesDays: checkKeepUsesDays(config.log?.keepUsesDays),
   };
 }

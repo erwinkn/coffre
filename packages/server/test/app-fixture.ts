@@ -70,7 +70,7 @@ export type TestApp = {
 const FETCHES_NOTHING: WorkloadTransport = { json: (url) => Promise.reject(new FetchRefused(url, "this test fetches nothing")) };
 
 export async function openApp({ database, auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }), transport, workloads, gates = null, plugins }: { database?: string; auth?: Auth; transport?: WorkloadTransport; workloads?: { noReads?: boolean; useOnly?: boolean }; gates?: Gates | null; plugins?: readonly CoffrePlugin[] } = {}): Promise<TestApp> {
-  const { world, vault } = await openConfiguredVault({ kek: { id: 'app-test', key: Buffer.alloc(32, 9).toString('base64') }, owners: ['root@acme.example'], ...(workloads === undefined ? {} : { workloads }) });
+  const { world, vault } = await openConfiguredVault({ kek: { id: 'app-test', key: Buffer.alloc(32, 9).toString('base64') }, owners: ['root@acme.example'], workloads: workloads ?? null });
   const url = new URL(APP_URL);
   if (database !== undefined) url.pathname = `/${database}`;
   checkDatabaseUrl(url.href);

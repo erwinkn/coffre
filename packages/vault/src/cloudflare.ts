@@ -10,6 +10,7 @@
  *     database: postgres(env.HYPERDRIVE),
  *     kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY }, // or awsKms({ keyArn, credentials }), with a signingKey
  *     owners: ['admin@acme.example'],
+ *     workloads: {}, // as the app's signin({ workloads }) says, or null for none
  *   }));
  *
  * It exports its signer too, and binds it (`CoffreSigner`, below): the

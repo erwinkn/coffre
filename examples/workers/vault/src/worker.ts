@@ -22,7 +22,7 @@ export default vault((env: Env) => ({
   // The Owners of the whole instance, whatever its database says: nobody demotes them while listed.
   owners: env.OWNERS.split(',').map((email) => email.trim()),
   // CI runs and apps signing in as services, which app/src/coffre.ts's
-  // signin({ workloads }) lets in: the vault decides on them, and left out
+  // signin({ workloads }) lets in: the vault decides on them, and with null
   // here it refuses every one. Say useOnly or noReads here as the app does.
   workloads: {},
   // The vault derives its signing key from the vault key. With a key a key
