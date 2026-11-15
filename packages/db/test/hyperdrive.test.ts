@@ -4,6 +4,8 @@
 // call that opened several connections at once was now and then cancelled
 // as hung, so the count of connections is what these hold it to, through a
 // proxy that sees each one, in front of the suite's Postgres.
+import { once } from 'node:events';
+import { connect, createServer } from 'node:net';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -46,6 +48,81 @@ test('a call opens one connection, and its queries and transactions take turns o
     assert.ok(tries < 100, 'the connection was left open');
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+});
+
+/**
+ * A relay to the suite's Postgres, each connection as `opening` says by its
+ * number from 0: held `ms` before its first answer, the startup's, a
+ * connection slow to open; or closed after `ms`, one that fails to.
+ */
+async function relay(opening: (n: number) => { ms: number; fails?: true }): Promise<string> {
+  const target = new URL(DATABASE);
+  let count = 0;
+  const server = createServer((client) => {
+    const { ms, fails } = opening(count++);
+    client.on('error', () => {});
+    if (fails) return void setTimeout(() => client.destroy(), ms);
+    const upstream = connect(Number(target.port), target.hostname);
+    let first = true;
+    client.on('data', (chunk: Buffer) => upstream.write(chunk));
+    upstream.on('data', (chunk: Buffer) => {
+      if (!first) return void client.write(chunk);
+      first = false;
+      upstream.pause();
+      setTimeout(() => (client.write(chunk), upstream.resume()), ms);
+    });
+    const end = () => (client.destroy(), upstream.destroy());
+    client.on('close', end);
+    upstream.on('close', end).on('error', end);
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  after(() => server.close());
+  const url = new URL(DATABASE);
+  url.port = String((server.address() as { port: number }).port);
+  return url.href;
+}
+
+test("`end` says what the call's turns took: the connection's opening apart from the first statement, then each turn, a transaction one", async () => {
+  const pool = new HyperdrivePool(await relay(() => ({ ms: 1000 })));
+  const db = createDatabase(pool);
+  await Promise.all([
+    db.execute(sql`select pg_sleep(0.1)`),
+    db.transaction(async (tx) => {
+      await tx.execute(sql`select 1`);
+      await tx.execute(sql`select pg_sleep(0.1)`);
+    }),
+    db.execute(sql`select 2`),
+  ]);
+  const timing = await pool.end();
+  assert.ok(timing !== null);
+  const { connect: opening, statements, total } = timing;
+  assert.equal(statements.length, 3, JSON.stringify(timing));
+  // Neither holds the other: the opening waited 1000 ms, the first statement 100, far below what both make.
+  assert.ok(opening >= 1000 && statements[0]! >= 100 && statements[0]! < 1000, JSON.stringify(timing));
+  assert.ok(statements[1]! >= 100, JSON.stringify(timing));
+  assert.ok(total >= opening + statements.reduce((sum, ms) => sum + ms, 0), JSON.stringify(timing));
+  // Nothing asked, nothing said; nor by a pool that outlives calls, which keeps nothing.
+  assert.equal(await new HyperdrivePool(DATABASE).end(), null);
+  const lasting = new HyperdrivePool(DATABASE, { closeIdleMs: 1000 });
+  await createDatabase(lasting).execute(sql`select 1`);
+  assert.equal(await lasting.end(), null);
+});
+
+test('an opening that fails is the opening\'s time, not a statement\'s, the first or once the connection is lost', async () => {
+  const never = new HyperdrivePool(await relay(() => ({ ms: 300, fails: true })));
+  await assert.rejects(createDatabase(never).execute(sql`select 1`));
+  const failed = await never.end();
+  assert.ok(failed !== null && failed.connect >= 300 && failed.statements.length === 0, JSON.stringify(failed));
+
+  const lost = new HyperdrivePool(await relay((n) => (n === 0 ? { ms: 0 } : { ms: 300, fails: true })));
+  const db = createDatabase(lost);
+  await db.execute(sql`select 1`);
+  await assert.rejects(db.execute(sql`select pg_terminate_backend(pg_backend_pid())`));
+  await assert.rejects(db.execute(sql`select 2`));
+  const timing = await lost.end();
+  // The first opening, then two statements; the second opening failed, after 300 ms.
+  assert.ok(timing !== null && timing.statements.length === 2 && timing.connect >= 300, JSON.stringify(timing));
 });
 
 test('reads asked together each take a turn', async () => {

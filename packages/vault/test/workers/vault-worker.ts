@@ -4,7 +4,8 @@
 // (GET /about), as the app's routes do them: the token hashed, never looked
 // up, and the vault called over a service binding. `/signer` asks the signer
 // how it stands: the one the vault calls, or the object its body names, or,
-// past the object's own calls, what it keeps, or its alarm fired.
+// past the object's own calls, what it keeps, or its alarm fired. `/logs`
+// gives the lines the isolate logged of its calls' time on the database.
 import type { Account, Vault as Contract } from '@coffre/core/vault';
 
 import { createDatabase } from '@coffre/db';
@@ -34,6 +35,14 @@ export class CoffreSigner extends Signer {
   }
 }
 
+/** What the isolate's calls logged of their time on the database (`coffre: database …`), as `console.log` writes it. */
+const timings: string[] = [];
+const log = console.log.bind(console);
+console.log = (...args: unknown[]) => {
+  if (typeof args[0] === 'string' && args[0].startsWith('coffre: database')) timings.push(args.map(String).join(' '));
+  log(...args);
+};
+
 type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY_ID: string; VAULT_KEY: string; SIGNING_KEY?: string; SIGNER_NAME?: string; VAULT: Contract; SIGNER: SignerNamespace };
 
 export const Vault = vault((env: Env) => ({
@@ -61,6 +70,7 @@ export default {
       }
     }
     // The vault's configuration, as GET /audit/keys asks it: no token, and nothing read.
+    if (new URL(request.url).pathname === '/logs') return Response.json(timings);
     if (new URL(request.url).pathname === '/about') return Response.json(await env.VAULT.about());
     if (new URL(request.url).pathname === '/signer') {
       const { name, ask } = (await request.json()) as { name?: string; ask?: 'kept' | 'ring' };
