@@ -46,6 +46,7 @@ export default vault((env: Env) => ({
   kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },
   previousKeks: [], // older vault keys: what they wrapped still opens, and what the vault signed under them verifies
   owners: ['erwin@example.com'], // Owners of the whole instance, made ones as it starts, whom nobody demotes while named
+  workloads: {}, // CI runs and services sign in with their platform's ID token; `null` refuses them
 }));
 ```
 
@@ -117,7 +118,7 @@ entry and derives from it only the keys of its sign-in state and Access
 sessions, [The server](design/0.16.md#the-server); the days a value may go unchanged before the UI and
 `coffre list` flag it for rotation: 365 if left out, `null` for none)
 and, for the vault, `{ database, kek, previousKeks?, owners,
-signingKey?, bulkLimit?, memorySeconds?, outageSeconds?, workloads?, log?, alert? }`, a vault key being a local key or `awsKms(…)`
+signingKey?, bulkLimit?, memorySeconds?, outageSeconds?, workloads, log?, alert? }`, a vault key being a local key or `awsKms(…)`
 ([keys.md](keys.md)). The vault derives its signing key from a local vault key;
 `signingKey` is required only with a vault key a key service holds.
 Each is checked when the deployment starts, and a bad value (a 31-byte key,
