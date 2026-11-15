@@ -11,7 +11,7 @@
   // files they import are gone (the v0.14.7 tag has them, and 0.14's tests). Each goes from this list when its area
   // is moved or rewritten; one named here that no longer exists fails the suite.
   "exclude": [
-    // The Node entry, in 0.16.2 (docs/design/0.16.md, "Node in 0.16.0").
+    // The Node entry, in 0.16.3 (docs/design/0.16.md, "Node in 0.16.0").
     "src/node.ts",
     "src/node-sockets.ts"
   ]

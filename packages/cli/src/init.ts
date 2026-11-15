@@ -16,11 +16,11 @@ export type Kind = (typeof KINDS)[number];
 
 /**
  * The kinds this release does not deploy, and why: 0.16.0 is Workers only
- * (D198), and its Node deployment comes back in 0.16.2. Its template stays
+ * (D198), and its Node deployment comes back in 0.16.3. Its template stays
  * here, as examples/node, for then; `init` and `setup` write none.
  */
 export const UNRELEASED: Partial<Record<Kind, string>> = {
-  node: 'coffre 0.16.0 deploys on Cloudflare Workers only: the Node deployment returns in 0.16.2. Keep a Node deployment on coffre 0.14 until then, or write a Workers one with `coffre init --workers`.',
+  node: 'coffre 0.16.0 deploys on Cloudflare Workers only: the Node deployment returns in 0.16.3. Keep a Node deployment on coffre 0.14 until then, or write a Workers one with `coffre init --workers`.',
 };
 
 /** Where a template lives: in the package when published, else in the repository. */

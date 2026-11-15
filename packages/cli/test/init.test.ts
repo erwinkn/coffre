@@ -86,7 +86,7 @@ test('coffre init --node refuses, naming the release it comes back in, and write
   const scratch = mkdtempSync(join(tmpdir(), 'coffre-init-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
   assert.throws(() => coffre(['init', '--node', 'acme'], scratch, scratch), (error: Error & { stderr: string }) => {
-    assert.match(error.stderr, /Workers only: the Node deployment returns in 0\.16\.2\. Keep a Node deployment on coffre 0\.14/);
+    assert.match(error.stderr, /Workers only: the Node deployment returns in 0\.16\.3\. Keep a Node deployment on coffre 0\.14/);
     return true;
   });
   assert.equal(existsSync(join(scratch, 'acme')), false);
