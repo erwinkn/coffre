@@ -2,219 +2,161 @@
 
 ## Unreleased
 
-- **Workers only, for now.** 0.16.0 runs on Cloudflare Workers alone, and
-  Node comes back in 0.16.1: `@coffre/server` exports no `./node`, so a
-  Node deployment that updates fails at its import of
-  `@coffre/server/node`. Stay on 0.14 until 0.16.1.
-- **Known gaps of 0.16 so far.** A token's or a binding's preview
-  (`?dryRun=1`) answers what it would reach, but not the places whose
-  sensitive values it will not read (`withheld`).
-- **A workload's alerts, as 0.14.7 said them.** The first request a
-  credential's limit refuses in its window is the deployment's `limit`
-  alert, once per workload, credential and window, on a WebSocket too. A
-  token signed by a key no binding holds is alerted once an hour per
-  service for the whole deployment, counted in the service's gate, where
-  0.16 had capped it per isolate. 0.14.7's 60 credentials a minute per
-  binding is not kept (D177): a CI sign-in has one limit, per source
-  address.
-- **Who sets up service accounts, as in 0.14.7.** `GET /api/me` says
-  `setsUpServices` for a person the instance's service-account setting
-  lets give one something, and `serviceSetup`, the setting, as 0.14.7 did,
-  still in one statement; so MCP's `admit_member` and the pages offer it
-  to them again. A workload lookup costs one statement less.
-- **An MCP tool call is not logged on its own.** 0.14.7 wrote an
-  `mcp.read` or `mcp.call` entry for every `tools/call`; 0.16 logs what
-  the call does, the vault's reads, reveals and changes, a change's ask
-  as `mcp.ask`.
-- **An MCP client without `requestState` names its approval.** It asks
-  for the outcome with the `approval` argument the link's answer gives. A
-  retry with the same arguments waits on the approval while it is
-  pending, and once it is decided opens a new one, where 0.14.7 answered
-  its outcome.
-- **`account_mismatch` names no provider.** The sign-in page says to sign
-  in with the account the email already uses, then link this one, without
-  0.14.7's `?with=` list of providers: the vault does not say which.
-- **A member with an edited sign-in account is not removed.** When a
-  database writer has edited one of a member's sign-in accounts' rows,
-  removing them is refused `tampered` (500), where 0.14.7 removed them:
-  let back in, they could sign in again with it. Whoever runs the instance
-  can still take away their role and grants. The deployment's configured
-  Owner is refused 409 `configured_owner` where 0.14.7 said 403
-  `not_allowed`.
-- **An audit entry's operation again.** `GET /api/audit` gives each entry
-  an `operationId` again, the request that wrote it: the one a reveal's
-  or a change's answer names, so `coffre verify instance` finds its
-  reveal's entry, which it waits up to 90 s for the signer to publish.
-  Entries one request wrote share it, and the audit page shows them as
-  one line, as 0.14.7 did. `coffre grant` to someone never admitted, 404
-  `not_a_member` since 0.16 (0.14: 409), says to admit them first again.
-- **The Vault KV adapter is back** (`vaultKv()`, `docs/vault.md`): External
-  Secrets Operator, `vault kv get` and the rest read through `/v1` as on
-  0.14, a read the API's reveal as the token's holder (one vault `use`),
-  and ESO's Kubernetes login a workload exchange. Two answers change. An
-  environment that is not there is 403, as one the token cannot read,
-  where 0.14 said 404: the vault says neither which, and ESO keeps its
-  target rather than delete it. Behind Cloudflare Access, which 0.16.0
-  serves to browsers alone, every token is refused before anything is
-  read. A plugin's context gives `api(token)`, `exchange` and `signOut`
-  again, each coffre's own route in process.
-- **Postgres only.** coffre no longer runs on SQLite. `@coffre/db` drops its
-  SQLite schema, migrations and driver (`@libsql/client`), and a `file:`
-  URL is refused wherever a database URL is taken (`createCoffre`,
-  `serveVault`, `localVault`, `coffre-server migrate`). There is no
-  converter: a Node deployment that ran on SQLite for local development
-  starts again on Postgres, and can drop `@libsql/client` from its
-  dependencies. Node conformance, the packed consumer test and `pnpm
-  bench:node` run the Node example on a Postgres database of their own,
-  each process through its own login, as Workers did.
-- **One Postgres driver, coffre's own.** `@coffre/db` speaks Postgres
-  through its own copy of postgres.js, in TypeScript, on Node and on
-  Workers alike, where it used node-postgres (`pg`). No package of coffre's
-  depends on `pg` or `pg-connection-string` any more, and a deployment
-  installs no driver. Database URLs are read as before, TLS included.
-  A deployment that put a pooler in front of Postgres needs one that keeps
-  prepared statements (PgBouncer 1.21 or later with
-  `max_prepared_statements`), or the database's direct endpoint: a use's
-  read is prepared by name once per connection, and in PgBouncer's
-  transaction mode without them every use after the first fails (`42P05`
-  or `26000`).
-- **`previousAuditChainKeys` is gone.** The app key signs no log entry in
-  0.16, so nothing verifies with a key it replaced: `createCoffre` no
-  longer takes the option, and a deployment that passes it fails its
-  typecheck until the line goes. `auditChainKey` stays, as the key the
-  sign-in state and Access sessions are sealed under.
+0.16.0 is a new core under 0.14.7's features: a smaller vault on new
+tables, whose signer signs and checks the audit log
+([design](docs/design/0.16.md)). It upgrades from 0.14.7 alone, and these
+notes are written for a deployment on it. 0.15.0 is not a path.
 
-- **A proxied use's entry says where the value went again.** As in 0.14.7,
-  it names the host and whether the request left through the deployment's
-  egress, and one key sent through two credentials or to two hosts within
-  the minute is two entries. `UseInput.upstream` is `{ credential, host?,
-  egress?: true }`, no longer the credential's name alone. A presigned
-  URL's method, path and expiry are no longer logged: an entry stands for a
-  minute of the credential's uses, and says only what holds for all of them.
-- **A workload signs in with its key again.** `POST /api/auth/workload`
-  (a platform's ID token, or a signed `GetCallerIdentity`), `POST
-  /api/auth/workload/renew` and `POST /api/auth/logout` with the session's
-  DPoP proof are served on 0.16, each decided by the vault. A binding's
-  `sources` outside the request's address now refuse `no_match` (0.14.7:
-  `source`), an AWS proof signed in the future `too_old` (0.14.7:
-  `not_yet_valid`), and a session's token sent to `logout` as a bearer is
-  refused 401 `workload`.
-- **Re-keying's preview is served again.** `POST
-  /members/:member/bindings/keys?dryRun=1` (`coffre trust … --replace-keys`
-  without `--apply`) answers 0.14.7's `KeysPlan`: the keys as checked, the
-  bindings on the issuer they would replace, and the places whose sensitive
-  values the new bindings would withhold. It was 501.
-- **No word for a handle from before 0.9.** One that names no
-  environment is answered as one whose environment is gone (409), no
-  longer told to run `coffre run` again: 0.16 upgrades only from 0.14.7,
-  and a handle lasts a week at most.
-- **A binding with no scope says it reaches nothing.** One of 0.4 never
-  sealed, which the upgrade carries as it is, issues credentials that
-  reach nothing; `coffre trust` and the service page said "all its
-  account holds", as the Trust dialog did of one it replaces.
-- **The vault is told of workloads too.** It decides each CI run's
-  sign-in now, on its own configuration: a deployment that trusts
-  workloads adds `workloads: {}` to `vault(env => …)` in
-  `vault/src/worker.ts`, with `useOnly` or `noReads` as the app's
-  `signin({ workloads })` says them. The field is required: one that
-  trusts none says `workloads: null`, and the vault refuses every run as
-  `no_match` (401), whatever bindings the owners made
-  ([deploy.md](docs/deploy.md#ci-runs-without-a-stored-token)). A vault
-  upgraded from 0.14, which said nothing of workloads, fails to typecheck
-  until it says one or the other.
-  `/api/me`'s `features.workloads` says whether sign-in trusts workloads,
-  where it always said `false`.
-- **A run's trail on the audit page.** Each entry a CI run's credential
-  wrote, its reads included, names the run again (`run`, with the
-  exchange's `seq` and the issuer's claims), as 0.14.7's page did, read
-  from the log alone, so it outlives the credential, and only once the
-  head proves the exchange as it proves the entry. A token out of its
-  time is refused as `too_old`, where 0.14.7 also said `too_long` and
-  `not_yet_valid`, and its message now names all three cases. A
-  binding removed ends the credentials its runs hold within the vault's
-  memory, 2 seconds, where 0.14.7 ended them at once.
+### Before you upgrade
 
-- **A reveal says which version it opened.** `POST /api/reveals` answers
-  `versions` and `secrets` beside `values`: each value's version number,
-  and the id of the secret it is held in (a reference's source, a fork's
-  parent), from the vault's one answer, at no extra cost; an environment's
-  listing names each key's the same way (`secret`). The environment page
-  keeps a revealed value, or an edit's starting value, only while both are
-  the row's: a read that opened another version than the listing showed
-  refetches the listing first, and one the listing has moved past by then
-  hides, where it was shown under the number the row had when clicked. A
-  fork's key reset to its parent's and overridden again can reach the
-  parent's number; the secret tells the two apart.
-- **A key marked in place, as one change.** `coffre mark` (`{ "KEY": {
-  "sensitivity" } }` alone in a write) is served again: the value is kept
-  as the key's next version, with its first date, recipe and pair. A
-  request that makes any key looser, a sensitive value made a secret by an
-  Owner of the project, is logged as one `secret.loosen` entry naming every
-  key, where 0.14.7 logged one entry a key. A key with no value is a 404
-  `no_value`, where 0.14.7 answered 409. One request marks 8 MiB of stored
-  values at most, and a fork copies as much at most, `too_much_to_copy`
-  (409), with nothing written: mark fewer keys at once, or fork by
-  references or inheritance. A restore comes back no looser than the
-  value's newest copy, a mark's included.
-- **A key service that does not answer is 503 `unavailable`.** AWS KMS
-  down, throttling past its retries or out of time fails a read, a write, a
-  mark or a fork with 503 and `Retry-After`, where 0.14.7 answered 500.
-  Nothing is written, so the same request may be sent again: the CLI's
-  `get`, `run` and `export`, and so the Action, do so by themselves; `set`,
-  `mark` and a fork leave it to their caller. KMS refusing
-  coffre's credentials, or its key disabled or gone, stays a 500: asked
-  again, it says the same. A key service of a deployment's own throws
-  `KekRefusedError` (`@coffre/vault`) for what asking again does not mend,
-  and `KekUnavailableError` for the rest.
+- **The upgrade is offline and one way.** Follow
+  [Upgrade from 0.14](docs/design/0.16.md#upgrade-from-014): `coffre
+  verify log` on 0.14.7, both runtime logins `NOLOGIN`, a backup checked
+  with `coffre@0.14.7 verify backup --keys`, `coffre migrate` and the
+  deploy, then the logins `LOGIN`. The vault adopts the database at its
+  first call, and answers 503 `adopting` until then. `coffre migrate`
+  refuses while a runtime login can still connect, and names what 0.14.7
+  must settle first. The way back is the backup: what 0.16 wrote since is
+  lost ([restore.md](docs/restore.md#going-back-after-the-upgrade-from-014)).
+  A copy of a real deployment (908,307 log entries, 894 versions) was down
+  86.5 seconds, plus the pipeline's two deploys.
+- **Workers only.** `@coffre/server` exports no `./node`: a Node deployment
+  stays on 0.14 until 0.16.1.
+- **Postgres only.** SQLite's schema, migrations and `@libsql/client` are
+  gone, and a `file:` or `libsql:` URL is refused.
+- **coffre's own Postgres driver**, a copy of postgres.js, replaces `pg`.
+  A pooler must keep prepared statements (PgBouncer 1.21 or later with
+  `max_prepared_statements`), or coffre uses the database's direct
+  endpoint: a use's read is prepared by name, and PgBouncer's transaction
+  mode without them fails it (`42P05`). A URL naming several hosts,
+  `query_timeout`, `channel_binding=require`, no user, or an `sslmode`
+  libpq does not know is refused.
+- **Hand edits**, which `coffre update` does not make:
+  1. The signer: `vault/wrangler.jsonc` binds `SIGNER` to `CoffreSigner`
+     (a Durable Object, migration tag `signer`, `new_sqlite_classes`), and
+     `vault/src/worker.ts` exports `CoffreSigner` from
+     `@coffre/vault/cloudflare`, as `examples/workers` does. Without it the
+     vault answers no call.
+  2. `workloads` on `vault(env => …)`, required: `{}`, with `useOnly` or
+     `noReads` as the app's `signin({ workloads })` has them, lets CI runs
+     and services sign in as workloads; `null` refuses each one `no_match`
+     (401) ([deploy.md](docs/deploy.md#ci-runs-without-a-stored-token)).
+  3. The audit watch out of the app: the `audit-watch` plugin,
+     `durableAnchor`, `ANCHOR` in `Env`. Keep the `CoffreAnchor` binding
+     and class until the release after, so that going back finds its
+     storage.
+  4. A backup or check of your own that reads `audit_chain_head` or
+     `audit_log`, ported: neither table is there after the upgrade.
+- **Configuration.** `previousAuditChainKeys` is gone: the app key signs
+  no entry. Remove it, since TypeScript does not flag it inside
+  `createCoffre((env) => ({ … }))`. `credentialProxy({ cacheSeconds })` is
+  read and ignored: to serve proxied uses through a database outage, set
+  the vault's `outageSeconds`, off by default. The signer's alerts (what
+  it finds in the database that the vault did not write, or that it
+  stopped checking) go to the vault's `alert`, or to the vault Worker's
+  log; `signin({ workloads: { alert } })` gets workload alerts alone. The
+  log keeps uses (reads, sign-ins, CI exchanges) 90 days and changes for
+  good, where 0.14.7 kept everything: the vault's `log: { keepUsesDays:
+  null }` keeps them all. `@coffre/server` no longer exports
+  `CoffrePlugin`, `PluginContext` or `memoryAnchor`, and `coffre.Workload`, which
+  answered 501, is gone.
+- **Commands.** `coffre verify log` and `coffre audit accept-loss` are gone,
+  with their routes; `coffre enroll` and `coffre approve` too, their routes
+  answering 501. `coffre backup`, `restore` and `verify backup` exit 1 until
+  they read 0.16's tables: back up with `pg_dump` ([restore.md](docs/restore.md)).
+  `coffre verify keys` checks the vault key, or its signing key, alone, and
+  needs 0.16's CLI.
+- **Behind Cloudflare Access, browsers only.** The CLI and machines come
+  back in 0.16.x, with coffre's own credentials. The CLI no longer starts
+  `cloudflared` or takes an Access service token, and says so
+  ([deployment-auth.md](docs/deployment-auth.md)); the Vault KV adapter
+  refuses every token. A deployment whose CLI, CI or workloads go through
+  Access stays on 0.14.
+- **After the deploy, sign in.** `/readyz` says only that the database is
+  migrated: with a wrong vault key the vault refuses to adopt, writes
+  nothing and answers every call 503 `adopting`, while `/readyz` says ok.
 
-- **The vault adopts its database by itself.** At the vault Worker's
-  first call, its signer's Durable Object adopts the database, a fresh
-  one or one upgraded from 0.14.7, and signs the log's first entry; every
-  call is answered 503 `adopting` until then, and a fresh install's first
-  sign-in waits for it. Nothing to configure: `CoffreSigner` takes the
-  vault's keys and Owners from the same `vault(env => …)`. An adoption
-  that fails writes nothing, says why in the Worker's log, and is tried
-  again by a call 10 seconds on. It must fit in one call of the object,
-  which Cloudflare resets past 30 seconds (5 seconds at 10,000 versions on
-  the local key): one cut off says so in the log and in `status` at the
-  next try, and an instance it does not fit waits for 0.16.x. A signer
-  whose storage was empty and adopted a database that was not says so
-  once in the log and in `status` (`took`), though not when it signs an
-  adoption entry it found pending: the upgrade does at its adoption,
-  and at any other time it means the storage was lost, and the database
-  is taken as it stands. Keep the vault down and restore a backup taken
-  before the loss (`docs/restore.md`, "If the signer's storage is lost").
+### What behaves differently
 
-- **Behind Cloudflare Access, browsers only.** 0.16.0 signs people in
-  there through the browser, and the CLI and machines come back in 0.16.x,
-  with coffre's own credentials. The CLI no longer starts `cloudflared` or
-  takes an Access service token: `coffre login` behind Access, `coffre login
-  --access-client-id` and `--auth-mode cloudflare` say so before they read
-  or send anything, as does any command with a session 0.14's CLI saved
-  there; any other says so from Access's answer, and the CLI follows no
-  redirect with a credential (`docs/deployment-auth.md`). A deployment
-  whose CLI or CI reaches coffre through Access stays on 0.14 until 0.16.x,
-  when its machines will need coffre tokens.
-- **No `coffre verify log` or `coffre audit accept-loss`.** 0.16.0's vault
-  watches the audit log itself: its signer checks the log's end every minute
-  and re-checks older entries a few blocks a minute, and the audit page
-  proves each entry it shows against the head the signer signed, marking any
-  past it as not proven. `coffre verify log` says so; a walk of the whole
-  log, `coffre verify --full`, is designed, not built. `coffre verify
-  instance`, as the owner, holds the log's newest page, 200 entries, to the
-  head the signer signed (`owner log proofs`), where 0.14.7 walked the whole
-  log; as a token, it no longer checks the log.
-- **A project or environment that is there already is refused.** Its
-  `PUT` answers 409 `exists`, where 0.14.7 answered it unchanged, `created:
-  false`. `coffre projects create` and `coffre environments create` still
-  say it exists already and that nothing changed, and succeed, so a script
-  that makes what it needs runs as before; `coffre fork` into an
-  environment that is there is refused, where 0.14.7 filled it.
-- **A restored version comes back as typed.** Restoring a version a recipe
-  made, or one half of a key pair, writes it as a value typed by hand:
-  Regenerate no longer makes its next one by that recipe, and the pair's
-  other half is not restored with it. Regenerate it, or write it again
-  with `--generate`, to have a recipe again.
+- **The vault checks the log.** Its signer checks the log's end every
+  minute and re-checks older entries a few blocks a minute, and the audit
+  page proves each entry against the head it signed. `coffre verify
+  instance` holds the newest 200 entries to that head, where 0.14.7 walked
+  the whole log, and no longer checks the log as a token. The audit page
+  starts at the upgrade: 0.14's log stays in the database as
+  `audit_archive`, which nothing shows.
+- **Fewer entries.** A credential's reads of one version for one purpose
+  are logged once a minute per isolate, where 0.14.7 logged every read. A
+  presigned URL's method, path and expiry are not logged. An MCP tool call
+  is logged as what it does (reads, changes, `mcp.ask`), not as `mcp.read`
+  or `mcp.call`, so one that only lists writes nothing. Workload alerts
+  are not logged. Marking keys looser is one `secret.loosen` entry, not
+  one a key, and a restore a `secret.write`, not `secret.restore`.
+- **A revocation takes up to 2 seconds** by default, the vault's
+  `memorySeconds`, to stop a use it has seen; 0.14.7's API ended it at once.
+- **Freezes work**: `coffre freeze` stops a workload's uses under the
+  instance, a service, a binding or a session; 0.14.7 answered 501.
+- **Workload sign-ins** lose 0.14.7's 60 credentials a minute per binding
+  (D177), and keep the limits per source address and in total.
+- **Behind Cloudflare Access, an account binds by Access's `sub`**, the
+  first time by email, where 0.14.7 matched the email: someone whose `sub`
+  changes is refused until removed and added again. A browser holds a
+  coffre session, 12 hours unless `browserSessionHours` says otherwise,
+  and signing out ends it.
+- **A member with an edited sign-in account is not removed**: removing
+  them is 500 `tampered`, where 0.14.7 removed them. Their role and grants
+  can still be taken away.
+- **A restored version comes back as typed**, with no recipe and no pair:
+  `coffre set … --generate <recipe>` gives the key a recipe again.
+- **A reveal says which version it opened**: `POST /api/reveals` answers
+  `versions` and `secrets`, a listing names each key's `secret`, and when a
+  reveal opened another version than the row showed, the environment page
+  refetches the listing, where 0.14.7 showed the value under the row's
+  number.
+- **Limits.** One request marks 8 MiB of stored values at most, and a fork
+  copies as much and 2,000 values at most, 409 `too_much_to_copy` or
+  `too_many_keys`, nothing written: fork by inheritance instead.
+- **An MCP client without `requestState`** names its approval with the
+  `approval` argument; a retry waits on a pending one, and opens a new one
+  once it is decided, where 0.14.7 answered its outcome.
+- **Answers that changed**, each 0.14.7's after it:
+  - AWS KMS down or throttled: 503 `unavailable` with `Retry-After`
+    (500), nothing written; `get`, `export` and `run` read again by
+    themselves. A key service of your own throws `KekUnavailableError` for
+    that and `KekRefusedError` (new) for what asking again does not mend.
+  - Creating a project or environment that exists: 409 `exists`
+    (`created: false`); the CLI still succeeds. `coffre fork` into one
+    that exists is refused (0.14.7 filled an empty one).
+  - Marking a key that is not there: 404 `unknown_key`; one whose
+    reference is broken: 404 `no_value` (both 409 `no_value`).
+  - `coffre grant` to someone never admitted: 404 `not_a_member` (409).
+  - Vault KV, an environment that is not there: 403, as one the token
+    cannot read (404).
+  - A binding's `sources` missing the address: `no_match` (`source`). A
+    token out of its time or an AWS proof from the future: `too_old`
+    (`too_long`, `not_yet_valid`).
+  - An Owner removing the configured Owner: 409 `configured_owner` (403
+    `not_allowed`).
+  - `account_mismatch` names no provider (`?with=`).
+
+### Known gaps
+
+- Node, in 0.16.1.
+- `/readyz` stays green on a wrong vault key or KEK, and the signer's state
+  is served nowhere: a new entry shown proven on the audit page within a
+  minute says it signs, and the vault Worker's log says what failed.
+- `coffre backup`, `restore` and `verify backup`; enrollment codes,
+  approving a workload's session and freezing an upstream credential (501);
+  the CLI and machines behind Cloudflare Access.
+- The adoption must fit one call of the signer's object, which Cloudflare
+  resets past 30 seconds: 5 seconds for 10,000 versions on a local key. On
+  a key service, past 4,900 versions raise the vault Worker's
+  `limits.subrequests` to twice the versions plus 100, and past about
+  3,700 it may not fit ([step 4](docs/design/0.16.md#the-steps)).
+- [Still to design](docs/design/0.16.md#still-to-design): the minute's
+  check past 100,000 rows, rotating the app key, a signer that lost its
+  storage and finds the log emptied or an old entry put back, and a bound
+  on a use's read when the database stops answering.
 
 ## 0.14.7 (2026-11-13)
 
