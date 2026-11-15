@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { createHook } from 'node:async_hooks';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -180,6 +181,32 @@ test('kubernetes() gives up after 10 minutes of the same token, with what to che
 });
 
 /**
+ * A wait for the test's real I/O to end: each request Node hands its thread
+ * pool (a file's read, a WebCrypto signature) is in flight from
+ * its start until its callback has run, and the code that callback resumes
+ * starts its next one in the same turn. So once none is in flight, the code
+ * waits on mocked time alone, however slow the disk or the CPU.
+ */
+function settled(t: test.TestContext) {
+  const flying = new Map<number, string>();
+  const hook = createHook({
+    // But random bytes: `getRandomValues` runs its job at once, with no callback, and only collection ends it.
+    init: (id, type) => void (type.includes('REQ') && type !== 'RANDOMBYTESREQUEST' && flying.set(id, type)),
+    after: (id) => void flying.delete(id),
+    destroy: (id) => void flying.delete(id),
+  }).enable();
+  t.after(() => hook.disable());
+  return async () => {
+    for (const end = performance.now() + 10_000; ; ) {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (flying.size === 0) return;
+      if (performance.now() > end) throw new Error(`still in flight after 10 seconds: ${[...flying.values()].join(', ')}`);
+      await new Promise((resolve) => realSetTimeout(resolve, 1));
+    }
+  };
+}
+
+/**
  * A pod's sidecar on mocked time: `workload()` with `kubernetes()` on a
  * token file, signed in with `token-1`, against a fake coffre whose
  * sign-ins `answer` decides (200, for 100 seconds, unless it gives one).
@@ -200,13 +227,13 @@ async function sidecar(t: test.TestContext, answer: (token: string) => Response 
   };
   const session = await workload({ url: 'https://secrets.acme.example', service: 'api-prod', proof: kubernetes(file), fetch: fetch as typeof globalThis.fetch, log: (line) => said.push(line), sigterm: false });
   t.after(() => session.close().catch(() => undefined));
-  /** Mocked time moved on a second at a time, with real time in between for the file's reads and the requests' signatures. */
+  const idle = settled(t);
+  /** Mocked time moved on a second at a time, each once the file's reads and the requests' signatures it started are done. */
   const advance = async (ms: number) => {
     for (let at = 0; at < ms; at += 1000) {
       t.mock.timers.tick(1000);
-      await new Promise((resolve) => realSetTimeout(resolve, 5));
+      await idle();
     }
-    await new Promise((resolve) => realSetTimeout(resolve, 50));
   };
   return { file, sent, said, advance };
 }
