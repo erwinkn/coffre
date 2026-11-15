@@ -111,8 +111,23 @@ notes are written for a deployment on it. 0.15.0 is not a path.
 - **A member with an edited sign-in account is not removed**: removing
   them is 500 `tampered`, where 0.14.7 removed them. Their role and grants
   can still be taken away.
-- **A restored version comes back as typed**, with no recipe and no pair:
-  `coffre set … --generate <recipe>` gives the key a recipe again.
+- **A member's report lists 200 at most** of their issued service tokens,
+  of their personal tokens and of the references they made, where 0.14.7
+  listed all: `totals` counts them all.
+- **References show only what stands.** A listing and a member's report
+  leave out a reference that was ended or replaced, `endedBy` and
+  `endedAt` are always null, and no reference is `replaced`. The write
+  that ended one is in the audit log, or in `audit_archive` from before
+  the upgrade.
+- **Bringing a value back needs `secret.read`**: restoring a version,
+  unarchiving a key or undoing a reset, where 0.14.7 asked `secret.use` of
+  a sensitive value and nothing of a plain one. A restored version comes
+  back as typed, with no recipe and no pair: `coffre set … --generate
+  <recipe>` gives the key a recipe again.
+- **A write's dry run needs the write's own permissions**, where 0.14.7
+  asked `secret.read` alone: a Viewer's preview is refused. A writer who
+  cannot read may preview, and each value they cannot read shows
+  `changed`.
 - **A reveal says which version it opened**: `POST /api/reveals` answers
   `versions` and `secrets`, a listing names each key's `secret`, and when a
   reveal opened another version than the row showed, the environment page
