@@ -53,6 +53,8 @@ export interface Proof {
    * has it.
    */
   spent?(context: ProofContext): Promise<boolean>;
+  /** After the exchange took the proof (200): one whose platform's tokens are each taken once sends it no more. */
+  accepted?(): void;
 }
 
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
@@ -82,17 +84,21 @@ export const KUBERNETES_TOKEN = '/var/run/secrets/coffre/token';
 /**
  * A Kubernetes projected service account token, read from its file before
  * each exchange: the pod spec's `serviceAccountToken` with coffre's URL as
- * its `audience`. Such a token is spent once used, so a file still holding
- * the token this process exchanged last is never sent again: the proof
- * waits for the kubelet's next, which it writes at 80% of the token's life,
- * watching the file for up to 10 minutes. That is the normal renewal in a
- * long-running pod (the session re-proves at 90% of its life, and the
- * kubelet's next volume sync can land after that), and so is the other
- * case: a restarted process finds the token an earlier one used, which the
- * exchange says (`replayed`), and `spent()` waits the same way.
+ * its `audience`. Such a token is spent once coffre took it, so a file
+ * still holding the token coffre took last (`accepted()`) is never sent
+ * again: the proof waits for the kubelet's next, which it writes at 80% of
+ * the token's life, watching the file for up to 10 minutes. That is the
+ * normal renewal in a long-running pod (the session re-proves at 90% of its
+ * life, and the kubelet's next volume sync can land after that), and so is
+ * the other case: a restarted process finds the token an earlier one used,
+ * which the exchange says (`replayed`), and `spent()` waits the same way.
+ * A token coffre did not take (503 while its database is out, a network
+ * failure) is not spent: the next try sends it again.
  */
 export function kubernetes(path: string = KUBERNETES_TOKEN): Proof {
   /** The token this process sent last. */
+  let sent: string | null = null;
+  /** The last token coffre took, or said was spent: never sent again. */
   let last: string | null = null;
   const read = async () => (await (await import('node:fs/promises')).readFile(path, 'utf8')).trim();
   /** The file's next token once it differs from `last`, polled every second, or null after 10 minutes. */
@@ -115,9 +121,13 @@ export function kubernetes(path: string = KUBERNETES_TOKEN): Proof {
       });
       const fresh = token === last || token === '' ? await next(context) : token;
       if (fresh === null) throw new Error(`the kubelet wrote no new token at ${path} in 10 minutes: check the projected volume and its expirationSeconds`);
-      return { oidc: (last = fresh) };
+      return { oidc: (sent = fresh) };
     },
-    spent: async (context) => (await next(context)) !== null,
+    accepted: () => void (last = sent),
+    spent: async (context) => {
+      last = sent;
+      return (await next(context)) !== null;
+    },
   };
 }
 

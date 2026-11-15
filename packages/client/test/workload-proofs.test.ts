@@ -1,10 +1,15 @@
 import test from 'node:test';
+import { createHook } from 'node:async_hooks';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { workload } from '../src/workload.ts';
 import { aws, azure, enrollment, gcp, github, keyAudience, kubernetes, sigv4, vercel, type ProofContext } from '../src/workload-proofs.ts';
+
+/** The real one, for the tests that mock time: their I/O (a token's file, WebCrypto) runs on it. */
+const realSetTimeout = globalThis.setTimeout;
 
 /** A proof's context, its platform's answers given by `reply`, each request it made kept. */
 function context(reply: (url: string, init: RequestInit) => Response) {
@@ -117,17 +122,21 @@ function tokenFile(t: test.TestContext, token: string) {
   return file;
 }
 
-test('kubernetes() never sends the token it sent already: it waits for the kubelet to write the next, and says so once', async (t) => {
+test('kubernetes() never sends a token coffre took: it waits for the kubelet to write the next, and says so once', async (t) => {
   const file = tokenFile(t, 'token-1');
   const said: string[] = [];
   const { given } = context(() => new Response(null, { status: 500 }));
   given.log = (line) => said.push(line);
   const proof = kubernetes(file);
   assert.deepEqual(await proof.prove(given), { oidc: 'token-1' });
+  // Not taken (a 503, a network failure): sent again.
+  assert.deepEqual(await proof.prove(given), { oidc: 'token-1' });
+  proof.accepted!();
   setTimeout(() => writeFileSync(file, 'token-2\n'), 1500);
   assert.deepEqual(await proof.prove(given), { oidc: 'token-2' });
   assert.deepEqual(said, [`coffre: the token at ${file} is already used; waiting for the next one (up to 10 minutes)`]);
   // The next is not waited for when the kubelet wrote it before the renewal.
+  proof.accepted!();
   writeFileSync(file, 'token-3\n');
   assert.deepEqual(await proof.prove(given), { oidc: 'token-3' });
   assert.equal(said.length, 1);
@@ -140,6 +149,7 @@ test('kubernetes() stops waiting when the session closes', async (t) => {
   given.signal = closing.signal;
   const proof = kubernetes(file);
   await proof.prove(given);
+  proof.accepted!();
   const waiting = proof.prove(given);
   setTimeout(() => closing.abort(), 200);
   await assert.rejects(waiting, (error: Error) => error.name === 'AbortError');
@@ -150,6 +160,7 @@ test('kubernetes() gives up after 10 minutes of the same token, with what to che
   const { given } = context(() => new Response(null, { status: 500 }));
   const proof = kubernetes(file);
   await proof.prove(given);
+  proof.accepted!();
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
   /** Time, moved on a second at a time, with the file reads in between on real I/O, until the wait ends. */
   const waitOut = async <T>(running: Promise<T>) => {
@@ -167,4 +178,105 @@ test('kubernetes() gives up after 10 minutes of the same token, with what to che
   };
   await assert.rejects(waitOut(proof.prove(given)), /wrote no new token at .* in 10 minutes/);
   assert.equal(await waitOut(proof.spent!(given)), false);
+});
+
+/**
+ * A wait for the test's real I/O to end: each request Node hands its thread
+ * pool (a file's read, a WebCrypto signature) is in flight from
+ * its start until its callback has run, and the code that callback resumes
+ * starts its next one in the same turn. So once none is in flight, the code
+ * waits on mocked time alone, however slow the disk or the CPU.
+ */
+function settled(t: test.TestContext) {
+  const flying = new Map<number, string>();
+  const hook = createHook({
+    // But random bytes: `getRandomValues` runs its job at once, with no callback, and only collection ends it.
+    init: (id, type) => void (type.includes('REQ') && type !== 'RANDOMBYTESREQUEST' && flying.set(id, type)),
+    after: (id) => void flying.delete(id),
+    destroy: (id) => void flying.delete(id),
+  }).enable();
+  t.after(() => hook.disable());
+  return async () => {
+    for (const end = performance.now() + 10_000; ; ) {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (flying.size === 0) return;
+      if (performance.now() > end) throw new Error(`still in flight after 10 seconds: ${[...flying.values()].join(', ')}`);
+      await new Promise((resolve) => realSetTimeout(resolve, 1));
+    }
+  };
+}
+
+/**
+ * A pod's sidecar on mocked time: `workload()` with `kubernetes()` on a
+ * token file, signed in with `token-1`, against a fake coffre whose
+ * sign-ins `answer` decides (200, for 100 seconds, unless it gives one).
+ * The session proves again at 90% of that, 90 seconds on.
+ */
+async function sidecar(t: test.TestContext, answer: (token: string) => Response | undefined = () => undefined) {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  const file = tokenFile(t, 'token-1');
+  const sent: string[] = [];
+  const said: string[] = [];
+  let end = '';
+  const fetch = async (input: string | URL | Request, init: RequestInit = {}) => {
+    if (new URL(String(input)).pathname !== '/api/auth/workload') return Response.json({ expiresAt: end });
+    const token = (JSON.parse(String(init.body)) as { proof: { oidc: string } }).proof.oidc;
+    sent.push(token);
+    end = new Date(Date.now() + 100_000).toISOString();
+    return answer(token) ?? Response.json({ token: `coffre_wl_${sent.length}`, tokenType: 'DPoP', expiresAt: end, notAfter: end, places: [] });
+  };
+  const session = await workload({ url: 'https://secrets.acme.example', service: 'api-prod', proof: kubernetes(file), fetch: fetch as typeof globalThis.fetch, log: (line) => said.push(line), sigterm: false });
+  t.after(() => session.close().catch(() => undefined));
+  const idle = settled(t);
+  /** Mocked time moved on a second at a time, each once the file's reads and the requests' signatures it started are done. */
+  const advance = async (ms: number) => {
+    for (let at = 0; at < ms; at += 1000) {
+      t.mock.timers.tick(1000);
+      await idle();
+    }
+  };
+  return { file, sent, said, advance };
+}
+
+const unavailable = () => Response.json({ error: 'unavailable', reason: 'migrating', message: 'coffre is migrating' }, { status: 503 });
+const replayed = () => Response.json({ error: 'unauthenticated', reason: 'replayed', message: 'this token was exchanged already' }, { status: 401 });
+const WAITING = /is already used; waiting for the next one/;
+
+test('a token coffre answered 503 to is sent again at the retry: the sidecar signs in again with no new token from the kubelet', async (t) => {
+  const answers = [unavailable()];
+  const { file, sent, said, advance } = await sidecar(t, (token) => (token === 'token-2' ? answers.shift() : undefined));
+  // The kubelet's next, written before the session proves again.
+  writeFileSync(file, 'token-2\n');
+  await advance(90_000);
+  assert.deepEqual(sent, ['token-1', 'token-2']);
+  // The retry, a second or so on, sends the token coffre did not take, and coffre takes it.
+  await advance(2000);
+  assert.deepEqual(sent, ['token-1', 'token-2', 'token-2']);
+  assert.deepEqual(said, []);
+});
+
+test('a token coffre took but answered 5xx for is refused replayed when sent again: the sidecar waits for the kubelet\'s next, as before', async (t) => {
+  const answers = [unavailable(), replayed()];
+  const { file, sent, said, advance } = await sidecar(t, (token) => (token === 'token-2' ? answers.shift() : undefined));
+  writeFileSync(file, 'token-2\n');
+  await advance(93_000);
+  assert.deepEqual(sent, ['token-1', 'token-2', 'token-2']);
+  assert.equal(said.length, 1);
+  assert.match(said[0]!, WAITING);
+  await advance(5000);
+  assert.equal(sent.length, 3, 'nothing sent while the file holds the spent token');
+  writeFileSync(file, 'token-3\n');
+  await advance(2000);
+  assert.deepEqual(sent, ['token-1', 'token-2', 'token-2', 'token-3']);
+});
+
+test('a token coffre took is never sent again: proving again, the sidecar waits for the kubelet\'s next', async (t) => {
+  const { file, sent, said, advance } = await sidecar(t);
+  await advance(100_000);
+  assert.deepEqual(sent, ['token-1'], 'it waits, and sends nothing, while the file holds the token coffre took');
+  assert.equal(said.length, 1);
+  assert.match(said[0]!, WAITING);
+  writeFileSync(file, 'token-2\n');
+  await advance(2000);
+  assert.deepEqual(sent, ['token-1', 'token-2']);
 });

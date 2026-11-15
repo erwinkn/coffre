@@ -406,13 +406,17 @@ For a private cluster, coffre takes the cluster's public keys with the
 binding, as [kubernetes.md](kubernetes.md) does today. With the SDK
 instead, mount the same volume in the app's container and use
 `kubernetes()`, which reads `/var/run/secrets/coffre/token` unless given
-another path. A projected token is spent once used, so the SDK never sends
-one twice: at a renewal, and when a restarted app finds the last start's
-token, it waits for the kubelet's next, which comes at 80% of the token's
-life (8 minutes with 600 seconds) on the kubelet's next volume sync, which
-can land a minute or so late, after the session's re-proof is due. It logs
+another path. A projected token is spent once coffre takes it, so the SDK
+never sends one coffre took: at a renewal, and when a restarted app finds
+the last start's token (`replayed`), it waits for the kubelet's next, which
+comes at 80% of the token's life (8 minutes with 600 seconds) on the
+kubelet's next volume sync, which can land a minute or so late, after the
+session's re-proof is due. It logs
 `coffre: the token at <path> is already used; waiting for the next one`
 once per wait, and the old session keeps serving until its token expires.
+A token coffre did not take (a 503 while its database is out or it
+migrates, a network failure) is not spent: the retry sends it again, so a
+pod signs in again within a minute or so of coffre's return.
 
 ### ECS, Lambda, EC2, EKS
 
