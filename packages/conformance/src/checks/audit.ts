@@ -126,6 +126,39 @@ export async function auditPageProofs({ admin }: People): Promise<string> {
 
 /** How many findings the signer's alert names, one a line (`alertOf`, `packages/vault/src/signer-host.ts`): the rest it counts. */
 const NAMED = 10;
+/** A finding's line in it, of each kind it says: `- <found> <of>: <what it says>`. */
+const FINDING = /^- (forged|replayed|stale|missing|rewritten|row|cut|lost|stopped) \S+: \S/;
+export type Alert = { count: number; findings: string[]; complete: boolean };
+
+/**
+ * Each alert of the signer's in one stream's whole lines: a header counting its findings, a line per finding it names, then
+ * `and n more`. Wrangler colors it and indents its findings after a blank line: neither is read. A header that does not
+ * parse is an alert never complete, so that it is never fresh later.
+ */
+export function alertsIn(lines: string[]): Alert[] {
+  const plain = lines.map((line) => line.replace(/\x1b\[[\d;]*m/g, '').trim()).filter((line) => line !== '');
+  return plain.flatMap((line, at) => {
+    if (!line.includes("coffre's signer reports (")) return [];
+    const count = Number(/coffre's signer reports \((\d+)\):$/.exec(line)?.[1]);
+    const findings = plain.slice(at + 1, at + 1 + Math.min(count, NAMED));
+    // A foreign line among its lines leaves it incomplete: that can only fail the check, never pass it.
+    const complete = count > 0 && findings.length === Math.min(count, NAMED) && findings.every((each) => FINDING.test(each))
+      && (count <= NAMED || plain[at + 1 + NAMED] === `and ${count - NAMED} more`);
+    return [{ count, findings, complete }];
+  });
+}
+
+/**
+ * The first whole alert naming a cut of `tree` in each stream past the alerts it held before (`before`), and why it fails,
+ * or null. Found afresh, it names no cut put back before; and it names every finding, so none hides among those counted.
+ */
+export function cutFound(streams: string[][], before: number[], tree: 'kept' | 'aging'): { failed: string | null; alert: Alert } | undefined {
+  const names = (alert: Alert, of: string) => alert.findings.some((line) => line.startsWith(`- cut ${of}:`));
+  const alert = streams.flatMap((lines, at) => alertsIn(lines).slice(before[at] ?? 0)).find((each) => each.complete && (each.count > NAMED || names(each, tree)));
+  if (alert === undefined) return undefined;
+  if (alert.count > NAMED) return { alert, failed: 'the signer names too few of its findings to tell what it found again' };
+  return { alert, failed: names(alert, tree === 'kept' ? 'aging' : 'kept') ? 'the signer names again a cut put back before' : null };
+}
 
 /** A row of `log` as the database holds it: its bigints as text, put back as they were. */
 type LogRow = { seq: string; kept: boolean; leaf: string; body: string };
@@ -144,28 +177,6 @@ type LogRow = { seq: string; kept: boolean; leaf: string; body: string };
  * not within a run (docs/conformance.md).
  */
 export async function logCut(deployment: Deployment, { admin }: People): Promise<string> {
-  // Each alert the signer sent, in order: one per check that found something, a header counting its
-  // findings and, on the lines right after it, one per finding it names (`NAMED` at most), then `and n more`
-  // for the rest. Output arrives in chunks: a line has arrived once another follows it in its process's
-  // output, so the last line before each `--- <process>` and the very last may still be growing. An alert
-  // is complete once its header and every line it owes have arrived and read as such; one still arriving,
-  // or garbled, is counted among those sent, so it is never fresh later, and is never read.
-  const alerts = () => {
-    const lines = deployment.output().split('\n');
-    const arrived = (at: number) => at + 1 < lines.length && !lines[at + 1].startsWith('--- ');
-    return lines.flatMap((line, at) => {
-      const header = /coffre's signer reports \((\d+)\):$/.exec(line);
-      if (header === null && !line.includes("coffre's signer reports (")) return [];
-      const count = Number(header?.[1]);
-      const named = lines.slice(at + 1, at + 1 + Math.min(count, NAMED));
-      const rest = count > NAMED ? lines[at + 1 + NAMED] : undefined;
-      const owed = Math.min(count, NAMED) + (count > NAMED ? 1 : 0);
-      const complete = Number.isInteger(count) && count > 0 && arrived(at) && Array.from({ length: owed }, (_, i) => at + 1 + i).every(arrived)
-        && named.every((each) => each.startsWith('- ')) && (rest === undefined || rest === `and ${count - NAMED} more`);
-      return [{ text: [line, ...named, ...(rest === undefined ? [] : [rest])].join('\n'), count, findings: named, complete }];
-    });
-  };
-  const trees = ['kept', 'aging'] as const;
   const out: LogRow[] = [];
   const seqs = new Set<number>();
   await using(deployment.database(), async (sql) => {
@@ -173,19 +184,13 @@ export async function logCut(deployment: Deployment, { admin }: People): Promise
       // Nothing waits: an entry signed after the cut would end its tree again, and leave the cut to the walk.
       await until('nothing waiting to be signed', async () => (await query(sql, 'SELECT 1 FROM log_pending LIMIT 1')).length === 0, PUBLISHED_SECONDS);
       const tree = kept ? 'kept' : 'aging';
-      const before = alerts().length;
+      const before = deployment.lines().map((lines) => alertsIn(lines).length);
       const [row] = await query<LogRow>(sql, 'DELETE FROM log WHERE kept = $1 AND leaf = (SELECT max(leaf) FROM log WHERE kept = $1) RETURNING seq::text, kept, leaf::text, body', [kept]);
       expect(row !== undefined, `the log has no ${tree} entry to cut`);
       out.push(row);
-      let alert: ReturnType<typeof alerts>[number] | undefined;
-      const names = (found: string[], other: string) => found.some((line) => line.startsWith(`- cut ${other}:`));
-      // One that counts more than it names is read too, and fails below: it cannot say what it leaves out.
-      await until(`the signer's whole alert naming - cut ${tree}:`, async () => (alert = alerts().slice(before).find((each) => each.complete && (each.count > NAMED || names(each.findings, tree)))) !== undefined, PUBLISHED_SECONDS);
-      // Found afresh: the check that names it names no cut put back before, so a finding let go is not one said again.
-      // Every finding is named, so none put back hides among those it only counts.
-      expect(alert!.count <= NAMED, 'the signer names too few of its findings to tell what it found again', { tree, alert: alert!.text });
-      const again = trees.filter((other) => other !== tree && names(alert!.findings, other));
-      expect(again.length === 0, 'the signer names again a cut put back before', { tree, again, alert: alert!.text });
+      let found: ReturnType<typeof cutFound>;
+      await until(`the signer's whole alert naming - cut ${tree}:`, async () => (found = cutFound(deployment.lines(), before, tree)) !== undefined, PUBLISHED_SECONDS);
+      expect(found!.failed === null, found!.failed!, { tree, alert: found!.alert });
       // The page's stretch lacks it, by its tree's count, and lists it nowhere as proven.
       const page = await admin.api.audit.list({ detail: '1', limit: 200 });
       const seq = Number(row.seq);

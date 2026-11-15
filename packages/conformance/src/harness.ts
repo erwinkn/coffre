@@ -16,6 +16,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { postgres, using, type Sql } from './database.ts';
@@ -60,6 +61,8 @@ export type Deployment = {
   clientDir: string;
   /** The processes' output: all of it, or the last `tail` characters of each. */
   output(tail?: number): string;
+  /** Each stream of each process, its stdout and its stderr apart, as the whole lines it has written so far. */
+  lines(): string[][];
   stop(): Promise<void>;
 };
 
@@ -73,7 +76,18 @@ const OWNER = 'root@conformance.example';
  */
 export const OWNER_VARS = { OWNERS: OWNER, BOOTSTRAP_OWNERS: OWNER, ROOT_ADMINS: OWNER };
 
-type Child = { name: string; child: ChildProcess; daemon: boolean; exited: boolean; output: Buffer[] };
+type Child = { name: string; child: ChildProcess; daemon: boolean; exited: boolean; output: Buffer[]; lines: string[][] };
+
+/** A stream's chunks, pushed to `lines` once each line is whole, a character split across chunks too; its last at its end. */
+export function lineReader(lines: string[]): { write: (chunk: Buffer) => void; end: () => void } {
+  const decoder = new StringDecoder('utf8');
+  let rest = '';
+  const write = (chunk: Buffer) => {
+    lines.push(...(rest + decoder.write(chunk)).split('\n'));
+    rest = lines.pop()!;
+  };
+  return { write, end: () => (rest += decoder.end()) && lines.push(rest) };
+}
 
 /**
  * The CLI the deployment pins, as its pipeline runs it: `pnpm exec coffre`,
@@ -118,6 +132,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
   const output = (tail = Infinity) =>
     children.map((entry) => `--- ${entry.name}\n${Buffer.concat(entry.output).toString('utf8').slice(-tail)}`).join('\n');
   const logs = () => output(4000);
+  const lines = () => children.flatMap((entry) => entry.lines);
   const alive = () => !children.some((entry) => entry.daemon && entry.exited);
 
   function start(name: string, command: string, args: string[], env: Record<string, string>, daemon = true, input?: string): Child {
@@ -132,9 +147,12 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       child.stdin!.on('error', () => {});
       child.stdin!.end(input);
     }
-    const entry: Child = { name, child, daemon, exited: false, output: [] };
-    child.stdout!.on('data', (chunk: Buffer) => entry.output.push(chunk));
-    child.stderr!.on('data', (chunk: Buffer) => entry.output.push(chunk));
+    const entry: Child = { name, child, daemon, exited: false, output: [], lines: [[], []] };
+    [child.stdout!, child.stderr!].forEach((stream, at) => {
+      const reader = lineReader(entry.lines[at]);
+      stream.on('data', (chunk: Buffer) => (entry.output.push(chunk), reader.write(chunk)));
+      stream.once('end', reader.end);
+    });
     child.once('exit', () => (entry.exited = true));
     // Not started at all: no 'exit' may follow.
     child.once('error', (error) => {
@@ -278,6 +296,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       vaultRuntime: () => postgres(vaultRuntime),
       clientDir: join(dir, 'app/dist/client'),
       output,
+      lines,
       stop,
     };
   }
@@ -339,6 +358,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       vaultRuntime: () => postgres(vaultRuntime),
       clientDir: join(dir, 'app/dist/client'),
       output,
+      lines,
       stop,
     };
   }
