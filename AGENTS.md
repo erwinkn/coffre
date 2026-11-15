@@ -2,7 +2,7 @@
 
 `coffre` is a pnpm monorepo secrets manager, shipped as packages a deployment imports
 and configures in code: `packages/server` (`@coffre/server`: `/api`, sign-in,
-its queries in `src/db`; `/cloudflare` and, from 0.16.2, `/node` entry
+its queries in `src/db`; `/cloudflare` and, from 0.16.3, `/node` entry
 points (`docs/design/0.16.md`, "Node in 0.16.0"); the optional plugins a deployment adds, in `src/plugins`,
 `docs/design/plugins.md`), `packages/db` (`@coffre/db`: the Drizzle schema for Postgres, its
 migrations and migrator, the dialect helpers, and the connections, Hyperdrive's

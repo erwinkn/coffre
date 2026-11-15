@@ -9,6 +9,8 @@
   statement's or transaction's from its turn to its answer, and the whole,
   with nothing of what it asked. `wrangler tail` shows them; a deployment
   that wants fewer sets `observability.head_sampling_rate`.
+- **The Node deployment comes back in 0.16.3, not 0.16.2** as 0.16.1's notes
+  said. 0.16.2 carries the database timing line above alone.
 
 ## 0.16.1 (2026-11-15)
 
@@ -45,7 +47,7 @@ notes are written for a deployment on it. 0.15.0 is not a path.
   A copy of a real deployment (908,307 log entries, 894 versions) was down
   86.5 seconds, plus the pipeline's two deploys.
 - **Workers only.** `@coffre/server` exports no `./node`: a Node deployment
-  stays on 0.14 until 0.16.2.
+  stays on 0.14 until 0.16.3.
 - **Postgres only.** SQLite's schema, migrations and `@libsql/client` are
   gone, and a `file:` or `libsql:` URL is refused.
 - **coffre's own Postgres driver**, a copy of postgres.js, replaces `pg`.
@@ -255,7 +257,7 @@ notes are written for a deployment on it. 0.15.0 is not a path.
 
 ### Known gaps
 
-- Node, in 0.16.2.
+- Node, in 0.16.3.
 - `/readyz` stays green on a wrong vault key or KEK, and the signer's state
   is served nowhere: a new entry shown proven on the audit page within a
   minute says it signs, and the vault Worker's log says what failed.

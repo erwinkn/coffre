@@ -5,7 +5,7 @@
 // then logs in to the real database with it and pipes bytes. Its group is asked again on
 // a timer, a `peek` that opens nothing, and a revocation, a lost grant or a freeze ends
 // it. 0.14.7's assertions (credential-proxy-tunnel.test.ts, which drives Node's upgrade
-// and is left for 0.16.2), on the vault: queries as the real login, the handle as the
+// and is left for 0.16.3), on the vault: queries as the real login, the handle as the
 // password, a cancel request, the hosts a tunnel reaches, a network binding, and a
 // workload's session. The database tunnelled to is the suite's own, as the app's login.
 import assert from 'node:assert/strict';

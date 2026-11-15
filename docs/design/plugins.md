@@ -183,7 +183,7 @@ else is needed.
   the environments it was made for, which the proxy's stable URL resolves to.
 - `routes.socket`: a WebSocket under the plugin's prefix, its bytes and TCP
   out. On 0.16, on Workers, through `createCoffre(…).upgrade` and the Sockets
-  Durable Object (`coffre.Sockets`); Node's returns in 0.16.2.
+  Durable Object (`coffre.Sockets`); Node's returns in 0.16.3.
 
 **Added since, for workload access** ([workload-access.md](workload-access.md), its PR 1a):
 
