@@ -30,7 +30,7 @@ notes are written for a deployment on it. 0.15.0 is not a path.
   endpoint: a use's read is prepared by name, and PgBouncer's transaction
   mode without them fails it (`42P05`). A URL naming several hosts,
   `query_timeout`, `channel_binding=require`, no user, or an `sslmode`
-  libpq does not know is refused.
+  other than libpq's and `no-verify` is refused.
 - **Hand edits**, which `coffre update` does not make:
   1. The signer: `vault/wrangler.jsonc` binds `SIGNER` to `CoffreSigner`
      (a Durable Object, migration tag `signer`, `new_sqlite_classes`), and
@@ -90,6 +90,8 @@ notes are written for a deployment on it. 0.15.0 is not a path.
 - **Fewer entries.** A credential's reads of one version for one purpose
   are logged once a minute per isolate, where 0.14.7 logged every read. A
   refused read or use writes no entry, where 0.14.7 logged a denial. A
+  refused change is logged once a minute per caller and action, per
+  isolate, where 0.14.7 logged each one. A
   presigned URL's method, path and expiry are not logged. An MCP tool call
   is logged as what it does (reads, changes, `mcp.ask`), not as `mcp.read`
   or `mcp.call`, so one that only lists writes nothing. Workload alerts
@@ -133,8 +135,9 @@ notes are written for a deployment on it. 0.15.0 is not a path.
   - Creating a project or environment that exists: 409 `exists`
     (`created: false`); the CLI still succeeds. `coffre fork` into one
     that exists is refused (0.14.7 filled an empty one).
-  - Marking a key that is not there: 404 `unknown_key`; one whose
-    reference is broken: 404 `no_value` (both 409 `no_value`).
+  - Marking a key that is not there: 404 `unknown_key`; one with no
+    value of its own: 404 `no_value` (both 409 in 0.14.7). Marking a
+    reference is still refused with 409, now `is_reference`.
   - `coffre grant` to someone never admitted: 404 `not_a_member` (409).
   - Vault KV, an environment that is not there: 403, as one the token
     cannot read (404).
