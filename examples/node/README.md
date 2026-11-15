@@ -2,7 +2,7 @@
 
 coffre 0.16.0 ships for Cloudflare Workers only: `@coffre/server` exports
 no `./node`, so this deployment stays on 0.14 until Node comes back in
-0.16.1 ([Node in 0.16.0](https://github.com/erwinkn/coffre/blob/main/docs/design/0.16.md#node-in-0160)).
+0.16.2 ([Node in 0.16.0](https://github.com/erwinkn/coffre/blob/main/docs/design/0.16.md#node-in-0160)).
 What follows is 0.14's.
 
 Two processes, configured in code:
