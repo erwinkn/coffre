@@ -165,6 +165,67 @@ notes are written for a deployment on it. 0.15.0 is not a path.
     `not_allowed`).
   - `account_mismatch` names no provider (`?with=`).
 
+### API and MCP changes from 0.14.7
+
+- A project's or environment's `PATCH` makes one change (slug, archiving,
+  folder or protection), and a key's rename goes alone: more is a 400,
+  where 0.14.7 made them together. Send one request each.
+- A place's `name` is taken, ignored and answered as its slug, so names set
+  before the upgrade are gone: read `slug`.
+- A key's history answers 20 versions with `more`, and the oldest's number
+  as `before` asks for the next 20; only the current one has a recipe.
+  0.14.7 answered every version with its recipe.
+- `POST /api/reveals` drops `plain`, `environment` and `keys` (a listing
+  says each key's `sensitivity`). A key's `PATCH` answers only what it was
+  sent, and a reset no longer `from`, `folder` or `archived`.
+- Members' `tampered` and `declared` are always `false`: no view shows the
+  configured Owners or an edited member row, which the vault still
+  refuses, 500 `tampered`.
+- Reading a whole fork that inherits sensitive keys from an environment
+  the person cannot read is 403 `parent_unreadable`, where 0.14.7 listed
+  them in `sensitive`: name the fork's own keys (`keys`).
+- Audit pages read a stretch of the log and answer `next`; a filtered page
+  can be short or empty with `more` true. Continue with `next` (as
+  `before`), even after an empty page, not from the oldest entry shown.
+- A fork's copies are in its `environment.create` entry, which names each
+  key; 0.14.7 logged a read for `copy` and a write.
+- A role change's `revision` covers that role alone, not the whole policy,
+  and its answer's `grants` is `null`: `GET /api/roles` counts them.
+- A missing project or environment answers as one the caller holds nothing
+  in, 403 `vault_refused` with reason `no_access` (0.14.7: 404). Also:
+
+  | Request | 0.14.7 | 0.16.0 |
+  | --- | --- | --- |
+  | Add an environment to an archived project | 409 | 403 `no_access` |
+  | Grant a role on a personal config | 400 | 403 `no_access` |
+  | Grant yourself a role | 409 | 403 `no_access` |
+  | Grant a role the instance does not have | 400 | 409 `invalid` |
+  | Remove a member already removed | 404 | 409 `removed` |
+  | References of a key that is not there | 404 | empty list |
+  | References of a place you hold nothing in, naming no reference you see | empty list | 403 `no_access` |
+  | A service account lists its sessions or accounts | empty lists | 403 |
+- Limits: `GET /api/sessions` lists the 200 last used and
+  `GET /api/identities` the 50 oldest, with `more`. Deleting a project or
+  environment over 20,000 versions holding a value is 409 `too_large`,
+  nothing erased: deleting a project's environments first helps only if
+  each is under it, and one over it cannot be deleted. One access change
+  names 1,000 places (2,000 in 0.14.7). Weighing a role change past 1,000
+  roles, members, grants of one or environments is 409
+  `too_many_to_weigh`: make it unweighed. An MCP change's arguments are
+  4,096 characters of JSON at most, and registration stops at 10,000 apps,
+  503 `temporarily_unavailable` (a client metadata document needs none).
+- MCP results come from the call's arguments: `request_secret_value` and
+  `generate_secret_value` drop `version`; `restore_secret_version` answers
+  `restored`, the version asked, not the new `version`; `admit_member`
+  drops `scope` and `created`, `offboard_member` `revoked` and `toRotate`,
+  `issue_service_token` `id` and `scope`, `trust_workload` the binding's
+  id. `secret_history` and `describe_member` have them.
+- MCP `requestState` is the approval's id, not a sealed token: one from
+  before the upgrade is refused ("no such approval"), so call again. An
+  approval whose change fails on Approve stays pending, for the person to
+  approve again or deny (0.14.7: `failed`); one they decline to open stays
+  pending too (0.14.7 cancelled it), holding one of the five places.
+
 ### Known gaps
 
 - Node, in 0.16.1.
