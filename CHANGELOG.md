@@ -192,7 +192,10 @@ notes are written for a deployment on it. 0.15.0 is not a path.
 - A role change's `revision` covers that role alone, not the whole policy,
   and its answer's `grants` is `null`: `GET /api/roles` counts them.
 - A missing project or environment answers as one the caller holds nothing
-  in, 403 `vault_refused` with reason `no_access` (0.14.7: 404). Also:
+  in, 403 `vault_refused` with reason `no_access` (0.14.7: 404). The
+  audit log is the exception: `GET /api/audit?path=…` still answers 404
+  to a caller who reads the whole log, and 403 `forbidden` to anyone
+  else. Also:
 
   | Request | 0.14.7 | 0.16.0 |
   | --- | --- | --- |
