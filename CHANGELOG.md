@@ -65,7 +65,9 @@ notes are written for a deployment on it. 0.15.0 is not a path.
   answering 501. `coffre backup`, `restore` and `verify backup` exit 1 until
   they read 0.16's tables: back up with `pg_dump` ([restore.md](docs/restore.md)).
   `coffre verify keys` checks the vault key, or its signing key, alone, and
-  needs 0.16's CLI.
+  needs 0.16's CLI. So does writing a plain value: 0.14.7's CLI sends
+  `{ "value": …, "plain": true }`, which 0.16.0 refuses with a 400; an API
+  caller sends `"sensitivity": "plain"` instead.
 - **Behind Cloudflare Access, browsers only.** The CLI and machines come
   back in 0.16.x, with coffre's own credentials. The CLI no longer starts
   `cloudflared` or takes an Access service token, and says so
