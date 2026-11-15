@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.0 (2026-11-15)
+
 0.16.0 is a new core under 0.14.7's features: a smaller vault on new
 tables, whose signer signs and checks the audit log
 ([design](docs/design/0.16.md)). It upgrades from 0.14.7 alone, and these
