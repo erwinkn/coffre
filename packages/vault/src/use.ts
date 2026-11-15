@@ -7,7 +7,7 @@ import type { BindingPolicy, Constraints } from '@coffre/core/identity';
 import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { callerOf, endOf, ID, live, touch, type Caller, type CallerRead, type Workloads } from './caller.ts';
+import { callerOf, endOf, ID, live, touch, touched, touching, type Caller, type CallerRead, type Workloads } from './caller.ts';
 import { bounded, keep, MOST, type Refusal, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts';
@@ -24,11 +24,13 @@ import { contextOf, natureOf } from './value.ts';
  * 3. The values, opened.
  * 4. One write, for the keys this credential was not logged reading in the
  *    last minute: who has seen which key, the log entry, and the bulk cap,
- *    which refuses it all.
+ *    which refuses it all; and, every five minutes, the credential's last
+ *    use. With none of those keys, the last use alone, when it is due.
  *
  * It takes no lock and waits on no change: its write touches `exposures`
  * and the log's pending entries, which no change writes and which point at
- * no other table. Within the vault's short memory a repeat is no database
+ * no other table, and a credential's last use, whose row it skips while a
+ * change holds it. Within the vault's short memory a repeat is no database
  * call at all: the rows are remembered from when they were read, and
  * decided on again as of now. Not a person's own read: what they read,
  * they may just have written, and they read it again (`remembered`).
@@ -411,6 +413,8 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
   const mark = ({ held, version }: Given) => JSON.stringify([caller.credential.id, ask.purpose, held.id, version.version, ask.upstream?.credential ?? null, ask.upstream?.host ?? null, ask.upstream?.egress === true]);
   const fresh = read.filter((item) => (memory.logged.get(mark(item))?.at ?? -Infinity) + LOGGED_MS <= at);
   const { workload } = caller;
+  // An access token's use is its connection's, which Connected apps lists: the token is gone within the hour.
+  const used = caller.mcp?.connection ?? caller.credential;
   const answered: Answer = { principal: caller.principal, credential: caller.credential.id, expiresAt: new Date(endOf(caller.credential, found.seen.ancestor)).toISOString(), values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
   if (down) {
     // Nowhere to write it: counted from the first one, for the entry this credential's next proxied use writes.
@@ -447,12 +451,18 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
     const entries = [entry, ...[...sources.values()].map((items) => said([`project:${items[0]!.held.projectId}`, `environment:${items[0]!.held.environmentId}`, ...who, ...items.map((item) => `secret:${item.held.id}`)], items, (item) => item.held.key))];
     const time = sql`${new Date(written).toISOString()}::timestamptz`;
     const since = sql`${new Date(written - vault.cap.windowMs).toISOString()}::timestamptz`;
+    // The credential's last use, when it is due, moves on in the same statement, and only if the use is answered: no
+    // round trip of its own. It waits on nothing, a row a change holds being skipped. Written ahead of the other writes,
+    // which Postgres runs the last-written first, it runs after them, and holds its row until the commit alone; in any
+    // order, a change would wait on it no longer than this write's own waits, and it on no change.
+    const moved = touching(memory, used, ask.ip, at, sql`(SELECT ok FROM cap)`);
     // The cap counts the keys this principal was given in the window, these among them. Uses side by side each count
     // without the other's, so it can be overshot by what is in flight (D217). The rows are written in one order,
     // `ORDER BY id`, by every use: two that write the same ones wait in line, never on each other.
     const [{ ok }] = await bounded<{ ok: boolean }>(vault.db, sql`
       WITH ids AS (SELECT id FROM unnest(${sql.param(ids)}::uuid[]) AS id),
-        cap AS (SELECT (SELECT count(*) FROM exposures WHERE principal = ${caller.principal} AND seen_at > ${since} AND secret_id NOT IN (SELECT id FROM ids)) + ${ids.length} <= ${vault.cap.count} AS ok),
+        cap AS (SELECT (SELECT count(*) FROM exposures WHERE principal = ${caller.principal} AND seen_at > ${since} AND secret_id NOT IN (SELECT id FROM ids)) + ${ids.length} <= ${vault.cap.count} AS ok),${moved === undefined ? sql`` : sql`
+        used AS (${moved}),`}
         seen AS (INSERT INTO exposures (principal, secret_id, seen_at) SELECT ${caller.principal}, id, ${time} FROM ids, cap WHERE cap.ok ORDER BY id ON CONFLICT (principal, secret_id) DO UPDATE SET seen_at = greatest(exposures.seen_at, excluded.seen_at)),
         entry AS (INSERT INTO log_pending (kept, body, mac) SELECT ${entry.kept}, body, decode(mac, 'hex') FROM unnest(${sql.param(entries.map((each) => each.body))}::text[], ${sql.param(entries.map((each) => each.mac.toString('hex')))}::text[]) WITH ORDINALITY AS e(body, mac, n), cap WHERE cap.ok ORDER BY n)
       SELECT ok FROM cap`) as [{ ok: boolean }];
@@ -467,9 +477,8 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
     // Remembered by the entry's own date: the minute a use is logged once in starts there.
     for (const item of fresh) memory.logged.set(mark(item), { at: written });
     keep(memory.logged, mark(fresh[0]!), { at: written }, at - LOGGED_MS);
-  }
-
-  await touch(vault, caller.mcp?.connection ?? caller.credential, ask.ip, at);
+    if (moved !== undefined) touched(memory, used, at);
+  } else await touch(vault, used, ask.ip, at);
   // Answered and logged as a proxied use: what an outage may be answered from.
   if (ask.purpose === 'use') found.used = true;
   remember(memory, ask, found, at);
