@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.2 (2026-11-15)
+
 - **The vault Worker logs where each call's time on the database goes.**
   Each call that reached the database writes one line once it has
   answered, `coffre: database {"connect":21,"statements":[38],"total":59}`:
