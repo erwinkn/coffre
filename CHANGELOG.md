@@ -75,6 +75,8 @@ notes are written for a deployment on it. 0.15.0 is not a path.
 - **After the deploy, sign in.** `/readyz` says only that the database is
   migrated: with a wrong vault key the vault refuses to adopt, writes
   nothing and answers every call 503 `adopting`, while `/readyz` says ok.
+  A `coffre login` still waiting for approval when the upgrade starts must
+  be started again.
 
 ### What behaves differently
 
@@ -87,6 +89,7 @@ notes are written for a deployment on it. 0.15.0 is not a path.
   `audit_archive`, which nothing shows.
 - **Fewer entries.** A credential's reads of one version for one purpose
   are logged once a minute per isolate, where 0.14.7 logged every read. A
+  refused read or use writes no entry, where 0.14.7 logged a denial. A
   presigned URL's method, path and expiry are not logged. An MCP tool call
   is logged as what it does (reads, changes, `mcp.ask`), not as `mcp.read`
   or `mcp.call`, so one that only lists writes nothing. Workload alerts
@@ -115,7 +118,10 @@ notes are written for a deployment on it. 0.15.0 is not a path.
   number.
 - **Limits.** One request marks 8 MiB of stored values at most, and a fork
   copies as much and 2,000 values at most, 409 `too_much_to_copy` or
-  `too_many_keys`, nothing written: fork by inheritance instead.
+  `too_many_keys`, nothing written: fork by inheritance instead. The bulk
+  cap keeps its window and count, but reads side by side each count without
+  the others' in flight, so together they can go past it, where 0.14.7
+  counted them in turn.
 - **An MCP client without `requestState`** names its approval with the
   `approval` argument; a retry waits on a pending one, and opens a new one
   once it is decided, where 0.14.7 answered its outcome.
