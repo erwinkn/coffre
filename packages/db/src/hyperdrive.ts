@@ -16,9 +16,10 @@ export function postgres(hyperdrive: { readonly connectionString: string }): Pos
  * What a call waited on the database for, in milliseconds, as `end` gives it:
  * durations alone, nothing of what was asked. `connect`: from asking for the
  * connection to its being ready for a statement (socket, startup,
- * authentication). `statements`: each turn, a statement or a whole
- * transaction, in order, from the start of its turn to its answer, not from
- * when it was asked. `total`: from the first turn's start to the last's answer.
+ * authentication), a failed opening's whole wait included. `statements`: each turn, a statement or a whole
+ * transaction that reached the database, in order, from the start of its
+ * turn, or the connection's being ready, to its answer, not from when it was
+ * asked. `total`: from the first turn's start to the last's answer.
  */
 export type Timing = { connect: number; statements: number[]; total: number };
 
@@ -64,6 +65,10 @@ export class HyperdrivePool implements Client {
   #timing: { connect: number; statements: number[]; first: number; last: number } | null = null;
   /** When the turn under way started, or its connection was ready, if it opened one. */
   #since = 0;
+  /** Whether the client's connection is ready for a statement: a turn that starts without one is opening it until it is. */
+  #ready = false;
+  /** Whether the turn under way is still opening the connection: if it ends so, its whole wait was the opening's. */
+  #opening = false;
 
   /**
    * `closeIdleMs`: for what outlives a call, a Durable Object, which queries
@@ -115,7 +120,7 @@ export class HyperdrivePool implements Client {
     await new Promise((resolve) => setTimeout(resolve, 0));
     while (this.#busy > 0) await new Promise<void>((resolve) => this.#idle.push(resolve));
     const [client, timing] = [this.#client, this.#timing];
-    [this.#client, this.#timing] = [null, null];
+    [this.#client, this.#timing, this.#ready] = [null, null, false];
     await client?.end().catch(() => {});
     return timing && { connect: timing.connect, statements: timing.statements, total: timing.last - timing.first };
   }
@@ -135,21 +140,25 @@ export class HyperdrivePool implements Client {
   async #timed<T>(go: () => PromiseLike<T>): Promise<T> {
     if (this.#closeIdleMs !== undefined) return go();
     this.#since = Date.now();
+    this.#opening = !this.#ready;
     const timing = (this.#timing ??= { connect: 0, statements: [], first: this.#since, last: this.#since });
     try {
       return await go();
     } finally {
       timing.last = Date.now();
-      timing.statements.push(timing.last - this.#since);
+      if (this.#opening) timing.connect += timing.last - this.#since;
+      else timing.statements.push(timing.last - this.#since);
     }
   }
 
   /** The connection is ready: the turn that opened it spent the time since it started opening it, and its statement starts now. */
-  #opened(): void {
+  #opened(client: PostgresClient): void {
+    if (this.#client !== client) return;
+    this.#ready = true;
     if (this.#timing === null) return;
     const now = Date.now();
     this.#timing.connect += now - this.#since;
-    this.#since = now;
+    [this.#since, this.#opening] = [now, false];
   }
 
   /** One turn done: once none is left, what waits for the pool to be idle goes on. */
@@ -160,13 +169,16 @@ export class HyperdrivePool implements Client {
 
   /** The call's client, made the first time. postgres.js opens its connection again when one is lost. */
   #connected(): PostgresClient {
-    this.#client ??= textTypes(postgresClient(this.#connectionString, {
+    if (this.#client !== null) return this.#client;
+    const client: PostgresClient = textTypes(postgresClient(this.#connectionString, {
       max: 1,
       idle_timeout: this.#closeIdleMs === undefined ? undefined : this.#closeIdleMs / 1000,
       // No timer left to outlive the call: `end` closes the connection, or idling does.
       max_lifetime: null,
-      onconnect: () => this.#opened(),
+      onconnect: () => this.#opened(client),
+      // Lost or closed: the next turn opens it again. A client `end` let go of no longer says.
+      onclose: () => void (this.#client === client && (this.#ready = false)),
     }));
-    return this.#client;
+    return (this.#client = client);
   }
 }
