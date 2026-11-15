@@ -11,6 +11,8 @@
   `expirationSeconds: 600`) while every use through it hung. A token is
   now used once coffre took it (200), or says it was (`replayed`); after
   any other answer, the retry sends it again. In 0.14.6 and 0.16.0.
+- **The Node deployment comes back in 0.16.2, not 0.16.1** as 0.16.0's notes
+  said. 0.16.1 carries the Kubernetes token fix above alone.
 
 ## 0.16.0 (2026-11-15)
 
@@ -33,7 +35,7 @@ notes are written for a deployment on it. 0.15.0 is not a path.
   A copy of a real deployment (908,307 log entries, 894 versions) was down
   86.5 seconds, plus the pipeline's two deploys.
 - **Workers only.** `@coffre/server` exports no `./node`: a Node deployment
-  stays on 0.14 until 0.16.1.
+  stays on 0.14 until 0.16.2.
 - **Postgres only.** SQLite's schema, migrations and `@libsql/client` are
   gone, and a `file:` or `libsql:` URL is refused.
 - **coffre's own Postgres driver**, a copy of postgres.js, replaces `pg`.
@@ -243,7 +245,7 @@ notes are written for a deployment on it. 0.15.0 is not a path.
 
 ### Known gaps
 
-- Node, in 0.16.1.
+- Node, in 0.16.2.
 - `/readyz` stays green on a wrong vault key or KEK, and the signer's state
   is served nowhere: a new entry shown proven on the audit page within a
   minute says it signs, and the vault Worker's log says what failed.
