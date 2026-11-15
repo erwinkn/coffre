@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **After a coffre outage, a Kubernetes workload signs in again within
+  about a minute, not up to 8.** `kubernetes()` counted its projected
+  token used as soon as it sent it, whatever coffre answered: a sign-in
+  answered 503 (the database out, `migrating`, `adopting`) or lost on the
+  network spent a token coffre never took, and the SDK, `coffre serve`'s
+  sidecar included, waited for the kubelet's next one (8 minutes at
+  `expirationSeconds: 600`) while every use through it hung. A token is
+  now used once coffre took it (200), or says it was (`replayed`); after
+  any other answer, the retry sends it again. In 0.14.6 and 0.16.0.
+
 ## 0.16.0 (2026-11-15)
 
 0.16.0 is a new core under 0.14.7's features: a smaller vault on new

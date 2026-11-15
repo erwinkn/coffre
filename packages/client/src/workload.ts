@@ -200,6 +200,7 @@ export async function workload(options: WorkloadOptions): Promise<Workload> {
       const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
       const [expiresAt, notAfter] = [Date.parse(String(body?.expiresAt)), Date.parse(String(body?.notAfter))];
       if (response.status === 200 && typeof body?.token === 'string' && Number.isFinite(expiresAt) && Number.isFinite(notAfter)) {
+        options.proof.accepted?.();
         const places = Array.isArray(body.places) ? body.places.filter((place): place is string => typeof place === 'string') : [];
         return { token: body.token, expiresAt, notAfter, places, issuedAt: Date.now() };
       }
