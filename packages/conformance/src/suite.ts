@@ -4,7 +4,7 @@ import type { Deployment } from './harness.ts';
 import { Report } from './report.ts';
 import { UNSERVED } from './unserved.ts';
 import { bulkLimit, crossSite, grantScoping, instanceRoles, membersOnly, offboarding } from './checks/access.ts';
-import { auditPageProofs, auditProven, noAuditNoValue, revealAudited, writesAgree } from './checks/audit.ts';
+import { auditPageProofs, auditProven, logCut, noAuditNoValue, revealAudited, writesAgree } from './checks/audit.ts';
 import { deletion } from './checks/deletion.ts';
 import { folders, forks, inheritance, loosening, missingKeys, personalConfigs, references } from './checks/environments.ts';
 import { appLogin, vaultLogin } from './checks/logins.ts';
@@ -105,6 +105,7 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('forged identity', { people }, ({ people }) => forgedIdentity(deployment, people));
   await report.check('forged approval', { people }, ({ people }) => forgedApproval(deployment, people));
   await report.check('edited generation', { people }, ({ people }) => editedGeneration(deployment, people));
+  await report.check('log cut', { people }, ({ people }) => logCut(deployment, people));
   await report.check('canary scan', all, ({ people, canaries }) => canaryScan(deployment, people, canaries));
   return report.failed;
 }

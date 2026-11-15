@@ -156,6 +156,7 @@ and fails with what the page showed if the entry is not there by then:
 | forged grant, forged member, stale member | A forged grant on prod reads nothing (403 `no_access`), nor does a member row edited to Owner (401 `unauthenticated`); a genuine older grant put back still reads dev, served until someone acts, as 0.16 promises (D216). The signer names the forged and the restored grant in its alert, in the processes' output, within the minute; the edited member row, under the MAC it had, is refused and not named, since the minute's check compares MACs (`docs/design/0.16.md`, "How long the log is kept"). 0.14 refused all three at use and logged `vault.tampered`, which 0.16 does not write |
 | sealing race | A grant inserted while a change waits on the vault's held change lock is not sealed by the change, which goes through once the lock is let go, keeps no MAC, and reads nothing; removal recovers the member. 0.14's race held the log's head, which no 0.16 change locks |
 | forged credential, forged identity, forged approval, edited generation | Owner-written authentication rows cannot mint sessions or revive old tokens. The signer names the inserted credential and identity in its alert; the approval and the generation, edited under the rows' own MACs, are refused and not named, as above |
+| log cut | As the database's owner, with nothing waiting to be signed, the newest signed change is deleted from `log`: within its minute, the deployed signer's check names `cut kept` in its alert, in the processes' output, and the audit page proves the entry nowhere, its stretch holding a hole of changes where it was. Put back, the newest use is cut the same way and named (`cut aging`), which says the signer's alarm ran a later check. Each row goes back as it was, and the page proves every entry again. About two minutes: two of the signer's checks, a minute apart. The check reads the output for the finding's line, `- cut <tree>:`; each tree is cut once in a run, and the output must not name a cut of it before then, but the check is not otherwise held to a signer that names a cut where none was made. That a finding put right is let go and said again when the fault comes back, and what an alert holds and how it is written, are the vault's own tests' (`packages/vault/test/signer-host.test.ts`). Only the newest entry of a tree is held within a run. One cut further back, or the newest once another is signed after it, is the re-check's (D222, `packages/vault/src/upkeep.ts`): three blocks of 256 a minute, in a walk that starts a day after the last one started. A deployment's first walk reads the log at its first check, a minute after the signer first opens, so such a cut in a run's log of about 260 entries, two blocks, is named about a day after boot, in that walk's first minute, and the check does not wait for it |
 
 A check that waits on a revocation, a reused MCP refresh token's, a service or personal token revoked by the CLI, or a row the vault no longer takes, waits the vault's default memory of a caller, 2 seconds (`memorySeconds`, D218), and a second more: a deployment that raised it raises the wait.
 
@@ -186,7 +187,7 @@ missing entries, the earlier checkpoint and the deleted tail) went with the
 route, and `checkpoint refused`, `checkpoint missing` and `middle cut` with
 the heartbeat and checkpoint they tested: in 0.16 readiness never turns red
 on tampering, and the signer's full check reports a cut to the alert
-function or the Worker's log.
+function or the Worker's log, which `log cut` reads.
 In 0.16 the audit page proves each entry it lists against the head
 the vault signed: `audit proven` requires every entry the head numbers
 proven, only those past it not, and the page's stretch lacking none
@@ -196,7 +197,7 @@ can leave the whole page past it, and a pruning committed in between can
 leave the older head counting aging entries it removed), and `audit page proofs` that the page is sent
 with them rendered, each row's proof in `data-proof`, at least one proven
 and none failed (it asks again while every row is past the head, for the
-same race). Conformance does not hold either to a tampered log yet.
+same race). `log cut` holds the page to a log with an entry cut out.
 
 ## What it does not show
 
