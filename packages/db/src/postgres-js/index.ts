@@ -52,6 +52,8 @@ export interface Options {
   onnotice?: (notice: Notice) => void;
   /** Each connection's close, by its id. */
   onclose?: (connectionId: number) => void;
+  /** Each connection's opening, by its id: once Postgres is ready for its first statement, which is sent then. */
+  onconnect?: (connectionId: number) => void;
   /** The stream to speak Postgres on, made for each connection, rather than a TCP socket to `host`. */
   socket?: () => Socket | Promise<Socket>;
 }
@@ -77,6 +79,7 @@ export interface Settings {
   connection: Record<string, string | number | boolean | undefined>;
   onnotice: ((notice: Notice) => void) | undefined;
   onclose: ((connectionId: number) => void) | undefined;
+  onconnect: ((connectionId: number) => void) | undefined;
   socket: (() => Socket | Promise<Socket>) | undefined;
   parsers: Parsers;
   serializers: Serializers;
@@ -670,6 +673,7 @@ function settle(options: Options): Settings {
     connection: { application_name: 'postgres.js', ...options.connection },
     onnotice: options.onnotice,
     onclose: options.onclose,
+    onconnect: options.onconnect,
     socket: options.socket,
     ...defaultTypes(),
     parameters: {},

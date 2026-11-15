@@ -626,6 +626,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     connectTimer.cancel();
 
     if (initial) {
+      // Coffre: told, before what opened it goes, so that what times the statement can tell it from the opening.
+      options.onconnect?.(id);
       // Open: what opened it goes now, a statement sent, a reservation given the connection.
       if (!isReservation(initial)) execute(initial);
       options.shared.retries = 0;

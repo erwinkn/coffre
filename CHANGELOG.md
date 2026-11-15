@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **The vault Worker logs where each call's time on the database goes.**
+  Each call that reached the database writes one line once it has
+  answered, `coffre: database {"connect":21,"statements":[38],"total":59}`:
+  the milliseconds to open its connection through Hyperdrive, each
+  statement's or transaction's from its turn to its answer, and the whole,
+  with nothing of what it asked. `wrangler tail` shows them; a deployment
+  that wants fewer sets `observability.head_sampling_rate`.
+
 ## 0.16.1 (2026-11-15)
 
 - **After a coffre outage, a Kubernetes workload signs in again within

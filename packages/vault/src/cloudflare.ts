@@ -117,7 +117,13 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     try {
       return await run(openVault(createDatabase(pool), prepared, { wake }));
     } finally {
-      this.ctx.waitUntil(pool.end());
+      // After the answer, one line of what the call waited on the database for, if it reached it: durations alone
+      // (`Timing`), which a tail reads. A deployment that wants fewer samples them, `observability.head_sampling_rate`.
+      this.ctx.waitUntil(
+        pool.end().then((timing) => {
+          if (timing !== null) console.log(`coffre: database ${JSON.stringify(timing)}`);
+        }),
+      );
     }
   }
 

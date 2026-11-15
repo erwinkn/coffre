@@ -31,14 +31,15 @@ after(() => world.close());
 const [ada, bo] = [user('ada'), user('bo')];
 const KEYS = Array.from({ length: 8 }, (_, i) => `KEY_${i}`);
 
-/** `market/prod` with eight keys, which Ada reads. */
-async function instance(): Promise<void> {
+/** `market/prod` with eight keys, which Ada reads: its project. */
+async function instance(): Promise<{ id: string }> {
   await emptyDatabase(world.owner);
   const market = project('market');
   const prod = environment(market, 'prod');
   const secrets = await Promise.all(KEYS.map((key) => value(world, secret(prod, key), `value of ${key}`)));
   await write(world, ...rows('projects', market), ...rows('environments', prod), ...rows('secrets', ...secrets), ...rows('roles', role(false, 'viewer', ['secret.read']), role(false, 'developer', ['secret.read', 'secret.write'])),
     ...rows('principals', principal(ada), principal(bo)), ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market })), ...rows('credentials', credential('ada-cli', ada), credential('bo-cli', bo)));
+  return market;
 }
 
 /** A fresh isolate of the vault Worker and its signer, over the suite's database through the vault's login. */
@@ -285,6 +286,34 @@ test('a fresh isolate answers a burst of first calls, each on one connection: on
   } finally {
     await vault.stop();
     await database.close();
+  }
+});
+
+test("each call that reached the database logs one line of its time there, durations alone; one answered from the vault's memory logs none", { timeout: 120_000 }, async () => {
+  // A service's reads, which the memory answers again: a person's own never are.
+  const [market, ci] = [await instance(), 'token:ci'];
+  await write(world, ...rows('principals', principal(ci)), ...rows('grants', grant(ci, 'viewer', { project: market })), ...rows('credentials', credential('ci-token', ci, { scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) })));
+  const vault = await freshVault(VAULT_URL);
+  const logged = async () => (await vault.get('/logs')) as string[];
+  try {
+    assert.equal((await vault.reveal('ci-token', 'market/prod', ['KEY_0'])).status, 200);
+    await until(async () => (await logged()).length === 1, 10_000, 'the reveal logged its line');
+    // The same within the vault's memory: neither its caller nor its rows read again. Then another key, which is.
+    assert.deepEqual(given(await vault.reveal('ci-token', 'market/prod', ['KEY_0'])), [{ key: 'KEY_0', value: 'value of KEY_0' }]);
+    assert.equal((await vault.reveal('ci-token', 'market/prod', ['KEY_1'])).status, 200);
+    await until(async () => (await logged()).length >= 2, 10_000, 'the third reveal logged its line');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const lines = await logged();
+    assert.equal(lines.length, 2, lines.join('\n'));
+    for (const line of lines) {
+      const timing = JSON.parse(/^coffre: database (\{.*\})$/.exec(line)![1]!) as Record<string, unknown>;
+      assert.deepEqual(Object.keys(timing), ['connect', 'statements', 'total'], line);
+      const statements = timing.statements as unknown[];
+      assert.ok([timing.connect, timing.total, ...statements].every((ms) => Number.isInteger(ms) && (ms as number) >= 0) && statements.length > 0, line);
+      for (const word of ['KEY_', 'value of', 'market', 'ci', 'token']) assert.ok(!line.includes(word), line);
+    }
+  } finally {
+    await vault.stop();
   }
 });
 

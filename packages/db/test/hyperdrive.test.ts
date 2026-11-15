@@ -4,6 +4,8 @@
 // call that opened several connections at once was now and then cancelled
 // as hung, so the count of connections is what these hold it to, through a
 // proxy that sees each one, in front of the suite's Postgres.
+import { once } from 'node:events';
+import { connect, createServer } from 'node:net';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -46,6 +48,57 @@ test('a call opens one connection, and its queries and transactions take turns o
     assert.ok(tries < 100, 'the connection was left open');
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+});
+
+/** A relay to the suite's Postgres that holds its first answer, the startup's, `ms`: a connection slow to open. */
+async function slowToOpen(ms: number): Promise<string> {
+  const target = new URL(DATABASE);
+  const server = createServer((client) => {
+    const upstream = connect(Number(target.port), target.hostname);
+    let first = true;
+    client.on('data', (chunk: Buffer) => upstream.write(chunk));
+    upstream.on('data', (chunk: Buffer) => {
+      if (!first) return void client.write(chunk);
+      first = false;
+      upstream.pause();
+      setTimeout(() => (client.write(chunk), upstream.resume()), ms);
+    });
+    const end = () => (client.destroy(), upstream.destroy());
+    client.on('close', end).on('error', end);
+    upstream.on('close', end).on('error', end);
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  after(() => server.close());
+  const url = new URL(DATABASE);
+  url.port = String((server.address() as { port: number }).port);
+  return url.href;
+}
+
+test("`end` says what the call's turns took: the connection's opening apart from the first statement, then each turn, a transaction one", async () => {
+  const pool = new HyperdrivePool(await slowToOpen(300));
+  const db = createDatabase(pool);
+  await Promise.all([
+    db.execute(sql`select pg_sleep(0.1)`),
+    db.transaction(async (tx) => {
+      await tx.execute(sql`select 1`);
+      await tx.execute(sql`select pg_sleep(0.1)`);
+    }),
+    db.execute(sql`select 2`),
+  ]);
+  const timing = await pool.end();
+  assert.ok(timing !== null);
+  const { connect: opening, statements, total } = timing;
+  assert.equal(statements.length, 3, JSON.stringify(timing));
+  // Neither holds the other: the opening waited 300 ms, the first statement 100.
+  assert.ok(opening >= 300 && statements[0]! >= 100 && statements[0]! < 300, JSON.stringify(timing));
+  assert.ok(statements[1]! >= 100, JSON.stringify(timing));
+  assert.ok(total >= opening + statements.reduce((sum, ms) => sum + ms, 0), JSON.stringify(timing));
+  // Nothing asked, nothing said; nor by a pool that outlives calls, which keeps nothing.
+  assert.equal(await new HyperdrivePool(DATABASE).end(), null);
+  const lasting = new HyperdrivePool(DATABASE, { closeIdleMs: 1000 });
+  await createDatabase(lasting).execute(sql`select 1`);
+  assert.equal(await lasting.end(), null);
 });
 
 test('reads asked together each take a turn', async () => {

@@ -11,7 +11,7 @@ import postgres, { type Options, type Sql } from './postgres-js/index.ts';
 export type PostgresClient = Sql;
 
 /** What a client may be opened with beside its URL. */
-export type ClientOptions = Pick<Options, 'max' | 'idle_timeout' | 'connect_timeout' | 'max_lifetime' | 'onnotice' | 'debug' | 'onclose'> & {
+export type ClientOptions = Pick<Options, 'max' | 'idle_timeout' | 'connect_timeout' | 'max_lifetime' | 'onnotice' | 'debug' | 'onclose' | 'onconnect'> & {
   /** The stream to speak Postgres on, made for each connection, rather than a TCP socket: a tunnel's. */
   socket?: Options['socket'];
   /** Postgres's `application_name` for the connection. */

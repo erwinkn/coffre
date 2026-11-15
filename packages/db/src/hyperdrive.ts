@@ -12,6 +12,16 @@ export function postgres(hyperdrive: { readonly connectionString: string }): Pos
   return { engine: 'postgres', hyperdrive };
 }
 
+/**
+ * What a call waited on the database for, in milliseconds, as `end` gives it:
+ * durations alone, nothing of what was asked. `connect`: from asking for the
+ * connection to its being ready for a statement (socket, startup,
+ * authentication). `statements`: each turn, a statement or a whole
+ * transaction, in order, from the start of its turn to its answer, not from
+ * when it was asked. `total`: from the first turn's start to the last's answer.
+ */
+export type Timing = { connect: number; statements: number[]; total: number };
+
 /** A statement asked of the pool, sent at its turn once awaited or `execute`d, as postgres.js sends one. */
 type Statement = Promise<unknown> & { values(): Statement; execute(): Statement };
 
@@ -34,8 +44,9 @@ type Statement = Promise<unknown> & { values(): Statement; execute(): Statement 
  * transaction: a query on the database there would wait for the transaction
  * to end, which waits for it. Neither the vault nor the server does.
  *
- * Closed by `end`, once what was asked has answered; asked again after, as
- * a call's background work may, it opens a connection again.
+ * Closed by `end`, once what was asked has answered, which says what the
+ * turns took (`Timing`); asked again after, as a call's background work may,
+ * it opens a connection again.
  */
 export class HyperdrivePool implements Client {
   readonly #connectionString: string;
@@ -49,6 +60,10 @@ export class HyperdrivePool implements Client {
   #busy = 0;
   /** What waits for every turn to be done: `end`. */
   readonly #idle: (() => void)[] = [];
+  /** What the turns since the first took; null before it, and in a pool that outlives calls (`closeIdleMs`), which keeps none. */
+  #timing: { connect: number; statements: number[]; first: number; last: number } | null = null;
+  /** When the turn under way started, or its connection was ready, if it opened one. */
+  #since = 0;
 
   /**
    * `closeIdleMs`: for what outlives a call, a Durable Object, which queries
@@ -93,26 +108,48 @@ export class HyperdrivePool implements Client {
   readonly begin = ((...args: unknown[]) =>
     this.#turn(() => (this.#connected().begin as (...beginArgs: unknown[]) => Promise<unknown>)(...args))) as PostgresClient['begin'];
 
-  /** Close the connection once every turn asked is done: what a Worker hands `waitUntil` when the call is done. */
-  async end(): Promise<void> {
+  /** Close the connection once every turn asked is done: what a Worker hands `waitUntil` when the call is done. Its `Timing`, or null if no turn ran. */
+  async end(): Promise<Timing | null> {
     // A statement awaited just before reaches the pool a few promise steps later, through Drizzle's session: a task
     // later, every one has taken its turn, and none opens a connection that this would leave open.
     await new Promise((resolve) => setTimeout(resolve, 0));
     while (this.#busy > 0) await new Promise<void>((resolve) => this.#idle.push(resolve));
-    const client = this.#client;
-    this.#client = null;
+    const [client, timing] = [this.#client, this.#timing];
+    [this.#client, this.#timing] = [null, null];
     await client?.end().catch(() => {});
+    return timing && { connect: timing.connect, statements: timing.statements, total: timing.last - timing.first };
   }
 
   /** `go` once every turn asked before it is done. */
   #turn<T>(go: () => PromiseLike<T>): Promise<T> {
     this.#busy += 1;
-    const answer = this.#tail.then(go);
+    const answer = this.#tail.then(() => this.#timed(go));
     this.#tail = answer.then(
       () => this.#done(),
       () => this.#done(),
     );
     return answer;
+  }
+
+  /** `go`, its time kept, but in a pool that outlives calls: one that `end` never closes would keep it for ever. */
+  async #timed<T>(go: () => PromiseLike<T>): Promise<T> {
+    if (this.#closeIdleMs !== undefined) return go();
+    this.#since = Date.now();
+    const timing = (this.#timing ??= { connect: 0, statements: [], first: this.#since, last: this.#since });
+    try {
+      return await go();
+    } finally {
+      timing.last = Date.now();
+      timing.statements.push(timing.last - this.#since);
+    }
+  }
+
+  /** The connection is ready: the turn that opened it spent the time since it started opening it, and its statement starts now. */
+  #opened(): void {
+    if (this.#timing === null) return;
+    const now = Date.now();
+    this.#timing.connect += now - this.#since;
+    this.#since = now;
   }
 
   /** One turn done: once none is left, what waits for the pool to be idle goes on. */
@@ -128,6 +165,7 @@ export class HyperdrivePool implements Client {
       idle_timeout: this.#closeIdleMs === undefined ? undefined : this.#closeIdleMs / 1000,
       // No timer left to outlive the call: `end` closes the connection, or idling does.
       max_lifetime: null,
+      onconnect: () => this.#opened(),
     }));
     return this.#client;
   }
