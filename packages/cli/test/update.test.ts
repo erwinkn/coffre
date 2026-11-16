@@ -17,7 +17,10 @@ import {
   minimumReleaseAge,
   HeldBack,
   install,
+  installed,
+  lockedVersions,
   pinPackageManager,
+  projectLockfile,
   removeCleared,
   resolveAgain,
   movePins,
@@ -253,6 +256,88 @@ test("a deployment pins coffre's pnpm, beside \"private\", whatever it had", () 
     assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))), ['name', 'private', 'packageManager', 'type']);
     assert.equal(pinPackageManager(dir, 'pnpm@11.8.0'), null, 'right already');
     assert.equal(pinPackageManager(dir, 'pnpm@12.0.0'), 'pnpm@11.8.0');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A deployment's lockfile as pnpm 11 wrote it: one document, the project's. */
+const projectDocument = [
+  "lockfileVersion: '9.0'",
+  '',
+  'importers:',
+  '',
+  '  .:',
+  '    dependencies:',
+  '      proto:',
+  '        specifier: 1.0.0',
+  '        version: 1.0.0',
+  '',
+  'packages:',
+  '',
+  '  proto@1.0.0:',
+  '    resolution: {integrity: sha512-proto}',
+  '',
+  'snapshots:',
+  '',
+  '  proto@1.0.0: {}',
+  '',
+].join('\n');
+
+/** The same as pnpm 12 writes it: a document naming pnpm itself first, then the project's. */
+const withPnpmDocument = [
+  '---',
+  "lockfileVersion: '9.0'",
+  '',
+  'importers:',
+  '',
+  '  .:',
+  '    configDependencies: {}',
+  '    packageManagerDependencies:',
+  '      pnpm:',
+  '        specifier: 12.18.0',
+  '        version: 12.18.0',
+  '',
+  'packages:',
+  '',
+  "  '@pnpm/exe.linux-x64@12.18.0':",
+  '    resolution: {integrity: sha512-exe}',
+  '    cpu: [x64]',
+  '    os: [linux]',
+  '',
+  '  pnpm@12.18.0:',
+  '    resolution: {integrity: sha512-pnpm}',
+  '',
+  'snapshots:',
+  '',
+  "  '@pnpm/exe.linux-x64@12.18.0':",
+  '    optional: true',
+  '',
+  '  pnpm@12.18.0:',
+  '    optionalDependencies:',
+  "      '@pnpm/exe.linux-x64': 12.18.0",
+  '',
+  '---',
+  projectDocument,
+].join('\n');
+
+test("a lockfile is read by its project's document: pnpm 12's own, first, names pnpm and is no install to do", () => {
+  assert.equal(projectLockfile(withPnpmDocument), projectDocument);
+  assert.equal(projectLockfile(projectDocument), projectDocument, "pnpm 11's, whole");
+  for (const lockfile of [projectDocument, withPnpmDocument]) {
+    assert.deepEqual(lockedVersions(lockfile), new Map([['proto', new Set(['1.0.0'])]]));
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-lockfile-'));
+  try {
+    mkdirSync(join(dir, 'node_modules', '.pnpm'), { recursive: true });
+    // pnpm keeps the project's document alone in node_modules, whichever pnpm wrote the lockfile.
+    writeFileSync(join(dir, 'node_modules', '.pnpm', 'lock.yaml'), projectDocument);
+    for (const lockfile of [projectDocument, withPnpmDocument]) {
+      writeFileSync(join(dir, 'pnpm-lock.yaml'), lockfile);
+      assert.equal(installed(dir), true);
+    }
+    writeFileSync(join(dir, 'pnpm-lock.yaml'), withPnpmDocument.replaceAll('proto@1.0.0', 'proto@1.0.1'));
+    assert.equal(installed(dir), false, 'another project document is an install to do');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
