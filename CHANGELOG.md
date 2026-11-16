@@ -27,6 +27,9 @@
   the handle, so a use costs no more round trips. A handle made by an
   earlier release names no credential and lasts until its own end, twelve
   hours unless told.
+- **The Node deployment does not come back in 0.16.3** as 0.16.2's notes
+  said, and no release is named for it: it returns in a later release. A
+  Node deployment stays on 0.14 until it does, as `coffre init --node` says.
 
 ## 0.16.2 (2026-11-15)
 
