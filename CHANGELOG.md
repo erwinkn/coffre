@@ -41,6 +41,24 @@
   (`unknown_credential`, ended by hand say) counts as ended. `export`'s
   handle outlives the command: it says so, with its id, how long it works
   and how to end it.
+- **Deployments move to pnpm 12.18.0.** `coffre init` pins it, and
+  `coffre update` moves a deployment's `packageManager` from 11.8.0 to it.
+  pnpm 11.8.0 has three published advisories, GHSA-vq4v-j7r6-jq4m,
+  GHSA-c59q-g84q-2gj5 and CVE-2026-101043; 12.18.0 is outside all three.
+  It is the newest pnpm 12 that a deployment's `minimumReleaseAge`, a
+  week, lets install today. What changes for a deployment:
+  - Its `pnpm-lock.yaml` gains a first document naming pnpm itself and
+    its binaries, before the packages', which are unchanged: commit it.
+    `coffre` reads the packages' document, so a deployment installed
+    once is not installed again.
+  - Corepack runs pnpm 12 from 0.34.5 on, which Node 24.12, 22.22.1 and
+    20.20.1 and later ship. An older Node's Corepack fails to start it
+    (`Cannot find module …/bin/pnpm.cjs`): update Node, or run
+    `npm install -g corepack@latest`. The deploy workflow `coffre init`
+    writes takes the newest Node 24, so it needs nothing.
+  - A setting pnpm 12 does not know in `pnpm-workspace.yaml` now fails
+    the install, where pnpm 11 ignored it: the settings `coffre init`
+    writes are all known.
 
 ## 0.16.3 (2026-11-16)
 

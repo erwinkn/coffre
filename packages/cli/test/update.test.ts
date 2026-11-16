@@ -17,7 +17,10 @@ import {
   minimumReleaseAge,
   HeldBack,
   install,
+  installed,
+  lockedVersions,
   pinPackageManager,
+  projectLockfile,
   removeCleared,
   resolveAgain,
   movePins,
@@ -249,10 +252,92 @@ test("a deployment pins coffre's pnpm, beside \"private\", whatever it had", () 
   const dir = mkdtempSync(join(tmpdir(), 'coffre-pnpm-'));
   try {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'secrets', private: true, type: 'module' }));
-    assert.equal(pinPackageManager(dir, 'pnpm@11.8.0'), undefined);
+    assert.equal(pinPackageManager(dir, 'pnpm@12.18.0'), undefined);
     assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))), ['name', 'private', 'packageManager', 'type']);
-    assert.equal(pinPackageManager(dir, 'pnpm@11.8.0'), null, 'right already');
-    assert.equal(pinPackageManager(dir, 'pnpm@12.0.0'), 'pnpm@11.8.0');
+    assert.equal(pinPackageManager(dir, 'pnpm@12.18.0'), null, 'right already');
+    assert.equal(pinPackageManager(dir, 'pnpm@11.8.0'), 'pnpm@12.18.0');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** A deployment's lockfile as pnpm 11 wrote it: one document, the project's. */
+const projectDocument = [
+  "lockfileVersion: '9.0'",
+  '',
+  'importers:',
+  '',
+  '  .:',
+  '    dependencies:',
+  '      proto:',
+  '        specifier: 1.0.0',
+  '        version: 1.0.0',
+  '',
+  'packages:',
+  '',
+  '  proto@1.0.0:',
+  '    resolution: {integrity: sha512-proto}',
+  '',
+  'snapshots:',
+  '',
+  '  proto@1.0.0: {}',
+  '',
+].join('\n');
+
+/** The same as pnpm 12 writes it: a document naming pnpm itself first, then the project's. */
+const withPnpmDocument = [
+  '---',
+  "lockfileVersion: '9.0'",
+  '',
+  'importers:',
+  '',
+  '  .:',
+  '    configDependencies: {}',
+  '    packageManagerDependencies:',
+  '      pnpm:',
+  '        specifier: 12.18.0',
+  '        version: 12.18.0',
+  '',
+  'packages:',
+  '',
+  "  '@pnpm/exe.linux-x64@12.18.0':",
+  '    resolution: {integrity: sha512-exe}',
+  '    cpu: [x64]',
+  '    os: [linux]',
+  '',
+  '  pnpm@12.18.0:',
+  '    resolution: {integrity: sha512-pnpm}',
+  '',
+  'snapshots:',
+  '',
+  "  '@pnpm/exe.linux-x64@12.18.0':",
+  '    optional: true',
+  '',
+  '  pnpm@12.18.0:',
+  '    optionalDependencies:',
+  "      '@pnpm/exe.linux-x64': 12.18.0",
+  '',
+  '---',
+  projectDocument,
+].join('\n');
+
+test("a lockfile is read by its project's document: pnpm 12's own, first, names pnpm and is no install to do", () => {
+  assert.equal(projectLockfile(withPnpmDocument), projectDocument);
+  assert.equal(projectLockfile(projectDocument), projectDocument, "pnpm 11's, whole");
+  for (const lockfile of [projectDocument, withPnpmDocument]) {
+    assert.deepEqual(lockedVersions(lockfile), new Map([['proto', new Set(['1.0.0'])]]));
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-lockfile-'));
+  try {
+    mkdirSync(join(dir, 'node_modules', '.pnpm'), { recursive: true });
+    // pnpm keeps the project's document alone in node_modules, whichever pnpm wrote the lockfile.
+    writeFileSync(join(dir, 'node_modules', '.pnpm', 'lock.yaml'), projectDocument);
+    for (const lockfile of [projectDocument, withPnpmDocument]) {
+      writeFileSync(join(dir, 'pnpm-lock.yaml'), lockfile);
+      assert.equal(installed(dir), true);
+    }
+    writeFileSync(join(dir, 'pnpm-lock.yaml'), withPnpmDocument.replaceAll('proto@1.0.0', 'proto@1.0.1'));
+    assert.equal(installed(dir), false, 'another project document is an install to do');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -471,7 +556,7 @@ test('held back, update on a terminal lets them through by name, until each is o
     assert.equal(run.code, 0, run.output);
     const pins = coffrePins(dir);
     assert.ok(Object.values(pins).every((version) => version === '9.9.9'));
-    assert.equal((JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { packageManager: string }).packageManager, 'pnpm@11.8.0');
+    assert.equal((JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { packageManager: string }).packageManager, 'pnpm@12.18.0');
     assert.match(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8'), /  - 'pg-protocol@1\.16\.1' # coffre update: until \S+, for coffre 9\.9\.9/);
   } finally {
     close();
@@ -518,7 +603,7 @@ test("an earlier release's CLI moves a deployment with the pages and pins the re
     const plan = {
       pages: { changes: [{ path: later, was: null, becomes: '// a page coffre 9.9.9 adds\n' }] },
       start: [{ name: 'react', from: '19.2.7', to: '19.9.0' }],
-      packageManager: 'pnpm@11.8.0',
+      packageManager: 'pnpm@12.18.0',
     };
     planner(dir, `console.error('a warning first'); console.log(${JSON.stringify(JSON.stringify(plan))});`);
     const run = await updateIn(dir, env);
@@ -612,7 +697,7 @@ test('a plan that reaches outside the routes, pins another package or names no p
     excludeUntil(dir, [{ spec: 'pg-protocol@1.16.1', clears: new Date('2026-01-01T00:00:00Z') }], 'for coffre 0.4.0');
     const files = ['package.json', 'pnpm-workspace.yaml'];
     const before = files.map((name) => readFileSync(join(dir, name), 'utf8'));
-    const valid = { pages: { changes: [] }, start: [], packageManager: 'pnpm@11.8.0' };
+    const valid = { pages: { changes: [] }, start: [], packageManager: 'pnpm@12.18.0' };
     // Beside the deployment, named after it: no other run's.
     const sentinel = `${basename(dir)}.sentinel`;
     const plans: [string, unknown][] = [
@@ -644,13 +729,13 @@ test('a plan is taken as this release knows it: fields it does not know left out
     const valid = {
       pages: { changes: [{ path: page, was: 'as coffre wrote it\n', becomes: null, later: true }] },
       start: [{ name: 'react', from: '19.0.0', to: '19.2.7-rc.1', why: 'later' }],
-      packageManager: 'pnpm@11.8.0+sha512.0a1b',
+      packageManager: 'pnpm@12.18.0+sha512.0a1b',
       later: { anything: 1 },
     };
     assert.deepEqual(parsePlan(valid, dir), {
       pages: { changes: [{ path: page, was: 'as coffre wrote it\n', becomes: null }] },
       start: [{ name: 'react', from: '19.0.0', to: '19.2.7-rc.1' }],
-      packageManager: 'pnpm@11.8.0+sha512.0a1b',
+      packageManager: 'pnpm@12.18.0+sha512.0a1b',
     });
     assert.deepEqual(parsePlan({ ...valid, pages: { problems: ['moved'] }, packageManager: null }, dir).pages, { problems: ['moved'] });
     const refused = (plan: unknown, why: RegExp) => assert.throws(() => parsePlan(plan, dir), why);
@@ -777,7 +862,7 @@ test('a deployment moved from pnpm 10 to 11 installs without a terminal, its nod
 
 /**
  * A deployment whose lockfile an older pnpm wrote, holding proto@1.0.1, a
- * day old: what pnpm 11 then holds back. `allowed`, the range pg-like asks
+ * day old: what pnpm 12 then holds back. `allowed`, the range pg-like asks
  * of proto: one 1.0.0, a month old, fits, or not.
  */
 async function lockedYoung(range: string) {
@@ -787,7 +872,7 @@ async function lockedYoung(range: string) {
     'pg-like': [{ version: '1.0.0', daysAgo: 30, dependencies: { proto: range, other: '^2.0.0' } }],
   });
   const dir = mkdtempSync(join(tmpdir(), 'coffre-locked-'));
-  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'deployment', private: true, packageManager: 'pnpm@11.8.0', dependencies: { 'pg-like': '1.0.0' } }));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'deployment', private: true, packageManager: 'pnpm@12.18.0', dependencies: { 'pg-like': '1.0.0' } }));
   writeFileSync(join(dir, '.npmrc'), `registry=${published.origin}/\n`);
   writeFileSync(join(dir, 'pnpm-workspace.yaml'), 'minimumReleaseAge: 0\n');
   await install(dir);
@@ -795,7 +880,7 @@ async function lockedYoung(range: string) {
   return { dir, close: () => (published.close(), rmSync(dir, { recursive: true, force: true })) };
 }
 
-test('held back by an old lockfile, resolving again picks a version old enough, and nothing is let through', needsPnpm('11.8.0'), async () => {
+test('held back by an old lockfile, resolving again picks a version old enough, and nothing is let through', needsPnpm('12.18.0'), async () => {
   const { dir, close } = await lockedYoung('^1.0.0');
   try {
     await assert.rejects(install(dir), (error: unknown) => error instanceof HeldBack && error.held.map(({ spec }) => spec).join() === 'proto@1.0.1');
@@ -807,7 +892,7 @@ test('held back by an old lockfile, resolving again picks a version old enough, 
   }
 });
 
-test('when no version old enough fits, resolving again says which, and puts the lockfile back', needsPnpm('11.8.0'), async () => {
+test('when no version old enough fits, resolving again says which, and puts the lockfile back', needsPnpm('12.18.0'), async () => {
   const { dir, close } = await lockedYoung('^1.0.1');
   try {
     const lockfile = readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8');

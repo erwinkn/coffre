@@ -62,7 +62,17 @@ export function installed(dir: string): boolean {
   const lockfile = join(dir, 'pnpm-lock.yaml');
   if (!existsSync(lockfile)) return existsSync(join(dir, 'node_modules'));
   const copy = join(dir, 'node_modules', '.pnpm', 'lock.yaml');
-  return existsSync(copy) && readFileSync(copy, 'utf8') === readFileSync(lockfile, 'utf8');
+  return existsSync(copy) && projectLockfile(readFileSync(copy, 'utf8')) === projectLockfile(readFileSync(lockfile, 'utf8'));
+}
+
+/**
+ * The project's own document of a lockfile. pnpm 12 writes one of its own
+ * first, naming pnpm itself, then the project's after a `---`; its copy in
+ * node_modules holds only the project's. A lockfile pnpm 11 wrote is one
+ * document, read whole.
+ */
+export function projectLockfile(lockfile: string): string {
+  return lockfile.split(/^---\n/m).at(-1)!;
 }
 
 /**
@@ -281,10 +291,10 @@ export function installFailure(output: string): string {
   return `pnpm install failed: ${output.trim().split('\n').slice(-3).join(' ')}`;
 }
 
-/** Each package's locked versions, from a pnpm lockfile's `packages:`. */
+/** Each package's locked versions, from the `packages:` of a pnpm lockfile's project document. */
 export function lockedVersions(lockfile: string): Map<string, Set<string>> {
   const versions = new Map<string, Set<string>>();
-  const section = /^packages:\n([\s\S]*?)(?=^\S|(?![\s\S]))/m.exec(lockfile)?.[1] ?? '';
+  const section = /^packages:\n([\s\S]*?)(?=^\S|(?![\s\S]))/m.exec(projectLockfile(lockfile))?.[1] ?? '';
   for (const match of section.matchAll(/^  '?(@?[^@\s']+)@([^:('\s]+)/gm)) {
     const set = versions.get(match[1]!) ?? new Set<string>();
     set.add(match[2]!);

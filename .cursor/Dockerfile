@@ -1,7 +1,7 @@
 # Cursor Cloud base image for coffre.
 #
 # Provides the system-level toolchain the repo needs: Node 24 (via nvm),
-# pnpm 11.8.0 (via corepack), and a Docker engine configured to run inside the
+# pnpm 12.18.0 (via corepack), and a Docker engine configured to run inside the
 # Cloud Agent VM (fuse-overlayfs, no containerd snapshotter, legacy iptables) so
 # the Postgres service in docker-compose.yml works. Repo dependencies are
 # installed later by the environment `install` command, after checkout.
@@ -67,7 +67,7 @@ RUN curl --retry 3 -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/in
     && nvm install 24 \
     && nvm alias default 24 \
     && corepack enable \
-    && corepack prepare pnpm@11.8.0 --activate \
+    && corepack prepare pnpm@12.18.0 --activate \
     && NODE_BIN="$(dirname "$(nvm which default)")" \
     && printf '%s\n' "export PATH=\"$NODE_BIN:\$PATH\"" | cat - "$HOME/.bashrc" > "$HOME/.bashrc.new" \
     && mv "$HOME/.bashrc.new" "$HOME/.bashrc" \

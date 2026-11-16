@@ -54,7 +54,7 @@ Running a package's `.ts` with plain `node` outside those scripts needs the flag
 
 ## Setup
 
-**Toolchain.** Node **>= 24** and pnpm 11.8.0 (via corepack). Node 24 is a hard requirement
+**Toolchain.** Node **>= 24** and pnpm 12.18.0 (via corepack). Node 24 is a hard requirement
 for workspace source, not just an `engines` field: the CLI, dev IdP, migrations, and the
 `node --test` suite all execute TypeScript source (`*.ts`) directly with plain `node`,
 which relies on native type-stripping (default only in Node 23.6+/24). The
@@ -209,10 +209,11 @@ unsupported diff select full validation.
   `schema.ts` alone to have the same schema. It needs Docker.
 - `pnpm build` builds every package in dependency order (core and client first). The
   UI builds as a library, `vite build`, each page a module of its own
-  (`@coffre/ui/pages/<name>`), which the examples' file routes name, and Start splits. Core and client build
-  in a run of their own: core's tests use conformance's dev IdP, and
-  conformance runs the CLI, which bundles core, so the graph has a cycle that
-  pnpm would order as it likes. The CLI's build fails on an import it cannot
+  (`@coffre/ui/pages/<name>`), which the examples' file routes name, and Start splits. Core's tests
+  use conformance's dev IdP, and conformance runs the CLI, which bundles core
+  and db, so the graph has a cycle, which pnpm refuses inside one run. The
+  script names the order instead, a run each: core and client, then db, then
+  the CLI, then the rest. The CLI's build fails on an import it cannot
   resolve rather than ship it. Conformance, the examples' typecheck and
   `test:consumer` want it first.
 - `pnpm conformance:workers` / `pnpm conformance:node` run an example's own
@@ -290,7 +291,9 @@ unsupported diff select full validation.
   their 0.14 cases.
 - `pnpm typecheck` covers every package, `dev/deployment` and both examples. It does
   not need Postgres, but on a fresh checkout it fails until `pnpm build` has run:
-  that writes the `dist/` the deployments typecheck against.
+  that writes the `dist/` the deployments typecheck against. It runs them in no
+  order (`--no-sort`): none needs another's, and pnpm refuses the cycle in a
+  sorted run.
 - Run an example's scripts from the root, `pnpm --filter coffre-workers <script>`, not
   with `--dir`: each example has its own `pnpm-workspace.yaml` (as `init` output
   needs), so pnpm would treat it as a separate, uninstalled workspace.
@@ -312,7 +315,7 @@ with `@coffre/*` exempt so that a coffre fix is not held back a week.
 ## Cursor
 
 The Cloud Agent environment is defined in-repo by `.cursor/environment.json` and
-`.cursor/Dockerfile` (Node 24 via nvm, pnpm 11.8.0 via corepack, and a Docker engine set
+`.cursor/Dockerfile` (Node 24 via nvm, pnpm 12.18.0 via corepack, and a Docker engine set
 up for the nested VM). Two things worth knowing:
 
 - **Docker and Postgres** come up each boot via `.cursor/start.sh`
