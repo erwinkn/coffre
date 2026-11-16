@@ -25,6 +25,22 @@
   server reads as a dot segment (`..;x`, `..%20`, `..%00`), or one encoded
   twice (`%252e%252e`), is a 400, so a presigned URL stays within the
   credential's `paths`.
+- **`coffre run` says when the revoke of its handle at exit fails, and
+  `run` and `export` say how long their handle lasts.** `run` said "the
+  handle lasts until <local time> (`coffre tokens` lists it)", but it
+  revokes its handle when its command ends; and when that revoke was
+  refused or got no answer in 3 seconds, it said nothing, though the handle
+  could still work for up to twelve hours. Now `run` says the handle ends
+  with the command, by its end (UTC) at the latest; and a revoke at exit
+  not confirmed is said on stderr, with the handle's id, how long it may
+  work (while the session or personal token it was made on stands, until
+  its end at the latest) and how to end it: `coffre --url <instance> tokens
+  revoke <id> --apply` on a session, or Personal tokens on the account's
+  Sessions page for a personal token, which `tokens revoke` refuses. The
+  exit code stays the command's. A handle the server no longer knows
+  (`unknown_credential`, ended by hand say) counts as ended. `export`'s
+  handle outlives the command: it says so, with its id, how long it works
+  and how to end it.
 
 ## 0.16.3 (2026-11-16)
 
