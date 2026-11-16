@@ -24,6 +24,11 @@
   `methodOverride('X-Do')`, Spring's `methodParam`). Hold such a
   credential to `paths` instead
   ([credential-proxy.md](docs/design/credential-proxy.md), section 4).
+- **A presigned URL's path is held as a request's is.** Its segments go
+  through the same check as a request's through the credential: one a
+  server reads as a dot segment (`..;x`, `..%20`, `..%00`), or one encoded
+  twice (`%252e%252e`), is a 400, so a presigned URL stays within the
+  credential's `paths`.
 
 ## 0.16.3 (2026-11-16)
 

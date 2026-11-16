@@ -1500,9 +1500,8 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   if (typeof asked.path !== 'string' || !asked.path.startsWith('/') || /[?#\u0000-\u001F\u007F]/.test(asked.path)) return failure(400, 'presign a path under the credential as a URL has it, /bucket/key, each segment encoded: the query goes in query');
   const query = asked.query ?? {};
   if (typeof query !== 'object' || query === null || Object.values(query).some((value) => typeof value !== 'string')) return failure(400, 'query is a map of strings, response-content-disposition and the like');
-  // The same rules as a request through it, on the path asked and again on the path the URL made, the one signed.
-  const climbsOut = (pathname: string) => pathname.split('/').some((segment) => /^(\.|%2e){1,2}$/i.test(segment) || /%2f|%5c|\\/i.test(segment));
-  if (climbsOut(asked.path)) return failure(400, 'the path may not climb out of the credential\'s upstream');
+  // The same rule as a request through it, `climbs`, on the path asked and again on the path the URL made, the one signed.
+  if (asked.path.split('/').some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   const target = new URL(`${credential.base.href.replace(/\/$/, '')}${asked.path}`);
   for (const [name, value] of Object.entries(query as Record<string, string>)) {
     if (name.toLowerCase().startsWith('x-amz-')) return failure(400, 'the X-Amz- parameters are the signature\'s own');
@@ -1510,7 +1509,7 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   }
   const under = credential.base.pathname.replace(/\/$/, '');
   if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) return failure(400, `${credential.name} reaches ${credential.base.href} only`);
-  if (climbsOut(target.pathname)) return failure(400, 'the path may not climb out of the credential\'s upstream');
+  if (target.pathname.split('/').some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   const relative = target.pathname.slice(under.length) || '/';
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
     return failure(403, `${credential.name} is not for ${relative}`);

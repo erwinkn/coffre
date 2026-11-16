@@ -779,7 +779,11 @@ credential's upstream with the real key pair, for at most an hour and never
 past the handle, and answers `{ url, expiresAt }`. The URL is the
 upstream's own (MinIO's, S3's), for a browser to use until it expires. It
 holds the access key's id and a signature, never the secret or the handle:
-a path or query that carries the handle is refused. S3's URLs leave the
+a path or query that carries the handle is refused. Its path is held to
+`methods` and `paths` and to the rule a request's is (section 4,
+"Where"): a segment a server reads as a dot segment, `..;x`, `..%20`,
+`..%00`, or one encoded twice, `%252e%252e`, is a 400, on the path asked
+and again on the URL made of it. S3's URLs leave the
 payload unsigned, as its own presigner does; any other service's sign the
 empty body a GET has.
 Each URL is one use in the log, naming the path and its lifetime, never
