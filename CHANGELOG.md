@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **A credential's methods refuse a method override.** Many upstreams act
+  on a POST that says `X-HTTP-Method-Override: DELETE`, or
+  `?_method=DELETE`, as on a DELETE. Where a credential's `methods` are
+  set, a request that carries `X-HTTP-Method-Override`, `X-HTTP-Method`,
+  `X-Method-Override` or `X-DW-HTTP-Method-Override`, or a query key
+  `_method`, `_HttpMethod`, `$httpMethod` or one of those headers' names,
+  is a 405, whatever method it names, before anything goes upstream
+  (through a handle, before any value opens, and before its body is read
+  unless the handle is in it). A narrowed session's `methods` refuse it
+  the same way, a 403 `narrowed`, and a presigned URL's `query` too. An
+  app that sends one through such a credential sends its method as the
+  request's own instead. A credential with no `methods` is unchanged.
+  **Not covered:** a `_method` field in a POST's form or multipart body,
+  which Rails, Laravel and Spring honour, goes on unchecked, as does an
+  override under a name the upstream chose, or one only ASP.NET's `%uXXXX`
+  decoding names. Against such an upstream, hold the credential to
+  `paths` instead ([credential-proxy.md](docs/design/credential-proxy.md),
+  section 4).
+- **A presigned URL's path is held as a request's is.** Its segments go
+  through the same check as a request's through the credential: one a
+  server reads as a dot segment (`..;x`, `..%20`, `..%00`), or one encoded
+  twice (`%252e%252e`), is a 400, so a presigned URL stays within the
+  credential's `paths`.
 - **Deployments move to pnpm 12.18.0.** `coffre init` pins it, and
   `coffre update` moves a deployment's `packageManager` from 11.8.0 to it.
   pnpm 11.8.0 has three published advisories, GHSA-vq4v-j7r6-jq4m,
