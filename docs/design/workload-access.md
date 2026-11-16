@@ -1190,7 +1190,10 @@ differences:
   - **`methods` and `paths`** are checked against the resolved upstream
     target, the URL the proxy is about to send, never the path as received.
     For `presign`, they are checked against the presigned request's method
-    and path.
+    and path. A method override in a header or the query
+    (`X-HTTP-Method-Override`, `?_method=`) is held to `methods` as the
+    request's own method is; one in a body is not read
+    ([credential-proxy.md](credential-proxy.md), section 4).
   - **A child with `paths` or `methods` set** is refused `sign`, `verify`,
     `mint` and the tunnel. Those have no path to check, and a constraint
     that cannot be checked refuses.

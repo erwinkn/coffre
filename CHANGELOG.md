@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **A method override is held to a credential's methods.** Many upstreams
+  act on a POST that says `X-HTTP-Method-Override: DELETE`, or
+  `?_method=DELETE`, as on a DELETE. Each method a request names in
+  `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override`, or in
+  a query parameter named `_method` or as one of those headers
+  (ServiceStack, ASP.NET MVC), must be one the credential's `methods` take,
+  or the request is a 405, before anything goes upstream (through a
+  handle, before any value opens, and before its body is read unless the
+  handle is in it). A narrowed session's `methods` hold it the same way,
+  a 403 `narrowed`, and a presigned URL's `query` too. Each value counts
+  as written as well as uppercased, since ASP.NET and Hono keep its case:
+  `methods: ['POST', 'PATCH']` refuses `pAtCh` and `patch`, in a header or
+  the query, and takes `PATCH`. An override the methods take goes on as it
+  came; a credential with no `methods` is unchanged. **Not covered:** a
+  `_method` field in a POST's form or multipart body, which Rails, Laravel
+  and Spring honour, goes on unchecked, so a method limit does not hold
+  against such an upstream; nor does one hold against an upstream
+  configured to read an override under a name of its own (Express's
+  `methodOverride('X-Do')`, Spring's `methodParam`). Hold such a
+  credential to `paths` instead
+  ([credential-proxy.md](docs/design/credential-proxy.md), section 4).
+
 ## 0.16.3 (2026-11-16)
 
 - **A use logged costs two statements at most, not three.** Every five
