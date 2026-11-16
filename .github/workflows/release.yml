@@ -105,7 +105,8 @@ jobs:
         # a mistaken dispatch from a branch from publishing. The revision is
         # the CLI's, its release tag's commit, as OCI defines it; the
         # attestation names the commit that built the image, main's for a
-        # dispatch.
+        # dispatch. The tag is looked up as refs/tags/…, so that a branch
+        # named v<version> is no release.
         run: |
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
             echo "::error::publish an image from main, not $GITHUB_REF: gh workflow run release.yml --ref main -f version=<version>"
@@ -116,7 +117,7 @@ jobs:
             echo "::error::$version is no version"
             exit 1
           fi
-          if ! revision="$(gh api "repos/$GITHUB_REPOSITORY/commits/v$version" --jq .sha)"; then
+          if ! revision="$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/v$version" --jq .sha)"; then
             echo "::error::no tag v$version: an image is of a tagged release"
             exit 1
           fi
