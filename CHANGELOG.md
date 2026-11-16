@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.3 (2026-11-16)
+
 - **A use logged costs two statements at most, not three.** Every five
   minutes a credential's use also moved its last-used time on, in a
   statement of its own after the use's write; it now goes in that write,
