@@ -7,9 +7,9 @@
   `?_method=DELETE`, as on a DELETE. Each method a request names in
   `X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override` or
   `X-DW-HTTP-Method-Override`, or in a query parameter named `_method`,
-  `_HttpMethod` (Salesforce) or as one of those headers (ServiceStack,
-  ASP.NET MVC), must be one the credential's `methods` take,
-  or the request is a 405, before anything goes upstream (through a
+  `_HttpMethod` (Salesforce), `$httpMethod` (Google) or as one of those
+  headers (ServiceStack, ASP.NET MVC), must be one the credential's
+  `methods` take, or the request is a 405, before anything goes upstream (through a
   handle, before any value opens, and before its body is read unless the
   handle is in it). A narrowed session's `methods` hold it the same way,
   a 403 `narrowed`, and a presigned URL's `query` too. Each value counts

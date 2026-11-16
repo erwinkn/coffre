@@ -615,7 +615,7 @@ DELETE (Google's and ASP.NET's APIs; OData's `X-HTTP-Method`; Express's
 each method a request names in `X-HTTP-Method-Override`, `X-HTTP-Method`,
 `X-Method-Override` or `X-DW-HTTP-Method-Override` (or the same with `_`
 or `.`, as Rack and PHP read them), or in a `_method` or `_HttpMethod`
-query parameter, must be one the credential's
+query parameter (or Google's `$httpMethod`), must be one the credential's
 `methods` take, or the request is a 405 naming it, before anything goes
 upstream: through a handle, before any value opens, and before its body
 is read unless the handle is in it (a stable URL's `form` or `json`
@@ -664,10 +664,10 @@ holds what it may do. The same holds for an override under a name of the
 upstream's own: the conventional names above are held, but every
 framework listed lets a deployment rename its override (Express's
 `methodOverride('X-Do')`, Spring's `methodParam`, Hono's `header` and
-`query` options, Restlet's `?method=`), and a POST with `X-Do: DELETE`
-goes on as it came. A bare `method` parameter is not held either:
-RPC-style APIs name a call with it (`?method=flickr.photos.search`), and
-refusing those would break them.
+`query` options), and a POST with `X-Do: DELETE` goes on as it came. A
+bare `method` parameter is not held either, though Restlet's tunnel reads
+one by default: RPC-style APIs name a call with it
+(`?method=flickr.photos.search`), and refusing those would break them.
 
 **The capability it needs.** The plugin mechanism gives plugins the API
 as a caller, and a read there hands values back, which is exactly what a

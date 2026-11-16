@@ -999,7 +999,7 @@ function trimmed(text: string): string {
 /**
  * Whether a query parameter's name, decoded, is `_method` to some framework that takes a request's method from it
  * (Rails, Laravel and Symfony, Spring's `HiddenHttpMethodFilter`, gorilla's, Express's `method-override`), Salesforce's
- * `_HttpMethod`, or an
+ * `_HttpMethod`, Google's `$httpMethod`, or an
  * override header's, which ServiceStack and ASP.NET MVC read from a query too: as PHP reads a name, up to a NUL or a
  * `[` (`_method[]`), leading spaces dropped, `.` and spaces as `_` (`.method`), or as Tomcat does, trimmed of every
  * character up to a space at both ends, as Java's `trim` is (`_method `); in any ASCII case.
@@ -1007,7 +1007,7 @@ function trimmed(text: string): string {
 function namesMethod(name: string): boolean {
   return [name, trimmed(name)].some((each) => {
     const read = each.split(/[\0[]/, 1)[0]!.replace(/^ +/, '').replace(/[. ]/g, '_').replace(/[A-Z]/g, (char) => char.toLowerCase());
-    return read === '_method' || read === '_httpmethod' || OVERRIDE_HEADER.test(read);
+    return read === '_method' || read === '_httpmethod' || read === '$httpmethod' || OVERRIDE_HEADER.test(read);
   });
 }
 

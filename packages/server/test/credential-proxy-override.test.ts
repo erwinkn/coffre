@@ -109,8 +109,10 @@ test("a request whose override asks for a method the credential's methods do not
     ['/items/1?%u0058-HTTP-Method-Override=DELETE', {}],
     ['/items/1?%u005Fmethod=DELETE', {}],
     ['/items/1?_method=%u0044ELETE', {}],
-    // Salesforce's REST API reads `_HttpMethod`.
+    // Salesforce's REST API reads `_HttpMethod`, Google's `$httpMethod`.
     ['/items/1?_HttpMethod=PATCH', {}],
+    ['/items/1?%24httpMethod=DELETE', {}],
+    ['/items/1?$httpMethod=DELETE', {}],
     ['/items/1?X-DW-HTTP-Method-Override=DELETE', {}],
   ];
   for (const [path, init] of asks) {
@@ -194,6 +196,7 @@ test("a narrowed session's methods hold an override too; a workload's is read fr
     ['/items/1', { headers: { 'x-http-method-override': 'DELETE' } }],
     ['/items/1?_method=DELETE', {}],
     ['/items/1?%u0058-HTTP-Method-Override=DELETE', {}],
+    ['/items/1?$httpMethod=DELETE', {}],
   ];
   for (const [path, init] of refusals) {
     const answer = await ask(`/market/dev/api${path}`, { method: 'POST', as: 'workload', ...init });
@@ -267,10 +270,10 @@ test('an override in a query is held as it came as well as uppercased, whatever 
   }
   assert.deepEqual(listed.opened, []);
   // `delete` is DELETE either way, as fetch reads a request's own `delete`.
-  for (const query of ['X-HTTP-Method-Override=PATCH', '_method=PATCH', '_method=delete']) {
+  for (const query of ['X-HTTP-Method-Override=PATCH', '_method=PATCH', '_method=delete', '$httpMethod=PATCH']) {
     assert.equal((await listed.ask(`/market/dev/api/items/1?${query}`, { method: 'POST' })).status, 200, query);
   }
-  assert.deepEqual(listed.reached.map((each) => each.url.search), ['?X-HTTP-Method-Override=PATCH', '?_method=PATCH', '?_method=delete']);
+  assert.deepEqual(listed.reached.map((each) => each.url.search), ['?X-HTTP-Method-Override=PATCH', '?_method=PATCH', '?_method=delete', '?$httpMethod=PATCH']);
 });
 
 // A presigned URL goes to the upstream without coffre: an override its signed query names is held when it is made, as
