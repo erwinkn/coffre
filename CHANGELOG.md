@@ -7,7 +7,9 @@
   they are signed in with; each use through it also requires that
   credential to stand: revoked, expired, frozen, its account unlinked or
   its person removed, every handle made on it is refused (401) within the
-  vault's memory, 2 seconds by default, with no write to the handles. The
+  vault's memory, 2 seconds by default (and, while the database cannot be
+  reached, the deployment's `outageSeconds`, as for any revocation), with
+  no write to the handles. The
   vault reads it in the same statement as the handle, so a use costs no
   more round trips. A handle made by an earlier release names no
   credential and lasts until its own end, twelve hours unless told.
