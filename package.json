@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "pnpm -r --filter ./packages/core --filter ./packages/client run build && pnpm --filter ./packages/db run build && pnpm --filter ./packages/cli run build && pnpm -r --filter \"./packages/*\" --filter \"!./packages/core\" --filter \"!./packages/client\" --filter \"!./packages/db\" --filter \"!./packages/cli\" run build",
-    "typecheck": "pnpm -r --filter \"./packages/*\" --filter \"./examples/*\" --filter \"!./examples/node\" --filter ./dev run typecheck",
+    "typecheck": "pnpm -r --no-sort --filter \"./packages/*\" --filter \"./examples/*\" --filter \"!./examples/node\" --filter ./dev run typecheck",
     "dev": "./dev/start.sh",
     "test": "pnpm lint && ./scripts/test-suite.sh",
     "test:properties": "node --conditions=coffre:source scripts/test-properties.mjs",

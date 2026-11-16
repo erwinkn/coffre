@@ -291,7 +291,9 @@ unsupported diff select full validation.
   their 0.14 cases.
 - `pnpm typecheck` covers every package, `dev/deployment` and both examples. It does
   not need Postgres, but on a fresh checkout it fails until `pnpm build` has run:
-  that writes the `dist/` the deployments typecheck against.
+  that writes the `dist/` the deployments typecheck against. It runs them in no
+  order (`--no-sort`): none needs another's, and pnpm refuses the cycle in a
+  sorted run.
 - Run an example's scripts from the root, `pnpm --filter coffre-workers <script>`, not
   with `--dir`: each example has its own `pnpm-workspace.yaml` (as `init` output
   needs), so pnpm would treat it as a separate, uninstalled workspace.
