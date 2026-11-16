@@ -19,9 +19,11 @@ export function postgres(hyperdrive: { readonly connectionString: string }): Pos
  * authentication), a failed opening's whole wait included. `statements`: each turn, a statement or a whole
  * transaction that reached the database, in order, from the start of its
  * turn, or the connection's being ready, to its answer, not from when it was
- * asked. `total`: from the first turn's start to the last's answer.
+ * asked. `total`: from the first turn's start to the last's answer. `ping`,
+ * where `end` was asked it: a bare `select 1` on the same connection, once
+ * every turn was done, a round trip with nothing to plan.
  */
-export type Timing = { connect: number; statements: number[]; total: number };
+export type Timing = { connect: number; statements: number[]; total: number; ping?: number };
 
 /** A statement asked of the pool, sent at its turn once awaited or `execute`d, as postgres.js sends one. */
 type Statement = Promise<unknown> & { values(): Statement; execute(): Statement };
@@ -113,16 +115,22 @@ export class HyperdrivePool implements Client {
   readonly begin = ((...args: unknown[]) =>
     this.#turn(() => (this.#connected().begin as (...beginArgs: unknown[]) => Promise<unknown>)(...args))) as PostgresClient['begin'];
 
-  /** Close the connection once every turn asked is done: what a Worker hands `waitUntil` when the call is done. Its `Timing`, or null if no turn ran. */
-  async end(): Promise<Timing | null> {
+  /**
+   * Close the connection once every turn asked is done: what a Worker hands `waitUntil` when the call is done. Its
+   * `Timing`, or null if no turn ran. `ping`: a `select 1` first, timed, on the connection the turns left open, and
+   * none on one they lost, which it would open again.
+   */
+  async end({ ping = false }: { ping?: boolean } = {}): Promise<Timing | null> {
     // A statement awaited just before reaches the pool a few promise steps later, through Drizzle's session: a task
     // later, every one has taken its turn, and none opens a connection that this would leave open.
     await new Promise((resolve) => setTimeout(resolve, 0));
     while (this.#busy > 0) await new Promise<void>((resolve) => this.#idle.push(resolve));
-    const [client, timing] = [this.#client, this.#timing];
+    const [client, timing, ready] = [this.#client, this.#timing, this.#ready];
     [this.#client, this.#timing, this.#ready] = [null, null, false];
+    const since = Date.now();
+    const pinged = ping && ready && timing !== null ? await client!.unsafe('select 1').then(() => ({ ping: Date.now() - since }), () => ({})) : {};
     await client?.end().catch(() => {});
-    return timing && { connect: timing.connect, statements: timing.statements, total: timing.last - timing.first };
+    return timing && { connect: timing.connect, statements: timing.statements, total: timing.last - timing.first, ...pinged };
   }
 
   /** `go` once every turn asked before it is done. */

@@ -402,17 +402,31 @@ export function refusedTo<S extends Seen<ReturnType<typeof callerParts>>>(
 const TOUCHED_MS = 5 * 60_000;
 
 /**
- * When the credential was last used, and from where: its row's own
- * statement, since it shares one with nothing a change may lock. It only
- * says when, so it never costs the call: a row a change holds is skipped,
- * not waited for, a failure is dropped, and a later time is never put back.
+ * The statement that moves a credential's last use on, and from where, if
+ * it is due; undefined if this isolate or the row says it moved within the
+ * last five minutes. It only says when, so it waits on nothing: a row a
+ * change holds is skipped, and a later time is never put back. `only`, a
+ * condition it is made under: a use's write moves it on only if the use is
+ * answered (use.ts).
+ */
+export function touching(memory: Memory, credential: Row<typeof credentials>, ip: string | null, at: number, only: SQL = sql`true`): SQL | undefined {
+  if (Math.max(credential.lastUsedAt?.getTime() ?? -Infinity, memory.touched.get(credential.id)?.at ?? -Infinity) + TOUCHED_MS > at) return undefined;
+  const when = sql`${new Date(at).toISOString()}::timestamptz`;
+  const free = sql`SELECT id FROM credentials WHERE ${only} AND id = ${credential.id} AND (last_used_at IS NULL OR last_used_at < ${when}) FOR NO KEY UPDATE SKIP LOCKED`;
+  return sql`UPDATE credentials SET last_used_at = ${when}, last_used_ip = ${ip} WHERE id IN (${free})`;
+}
+
+/** What `touching` moved on, once its statement has run: not asked again for five minutes. */
+export const touched = (memory: Memory, credential: Row<typeof credentials>, at: number) => keep(memory.touched, credential.id, { at }, at - TOUCHED_MS);
+
+/**
+ * When the credential was last used, and from where, in a statement of its
+ * own, for a call that writes nothing else: it never costs the call, so a
+ * failure is dropped.
  */
 export async function touch(vault: Pick<Running, 'db'> & { memory: Memory }, credential: Row<typeof credentials>, ip: string | null, at: number): Promise<void> {
-  const { touched } = vault.memory;
-  if (Math.max(credential.lastUsedAt?.getTime() ?? -Infinity, touched.get(credential.id)?.at ?? -Infinity) + TOUCHED_MS > at) return;
-  const when = sql`${new Date(at).toISOString()}::timestamptz`;
-  const free = sql`SELECT id FROM credentials WHERE id = ${credential.id} AND (last_used_at IS NULL OR last_used_at < ${when}) FOR NO KEY UPDATE SKIP LOCKED`;
-  await vault.db.execute(sql`UPDATE credentials SET last_used_at = ${when}, last_used_ip = ${ip} WHERE id IN (${free})`).then(() => keep(touched, credential.id, { at }, at - TOUCHED_MS), () => {});
+  const statement = touching(vault.memory, credential, ip, at);
+  if (statement !== undefined) await vault.db.execute(statement).then(() => touched(vault.memory, credential, at), () => {});
 }
 
 /** The log's head as its row holds it, in the words its MAC covers (`headText`): what rides beside a caller's rows when a page asks. */

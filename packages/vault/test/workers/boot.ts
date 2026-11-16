@@ -17,8 +17,8 @@ type SignerStatus = { checked: number; standing: unknown[]; adopted: boolean; ad
 /** The vault's keys, as its configuration names them: a local KEK, and the signing key, derived from it unless given. */
 export type WorkerKeys = { id: string; key: string; signingKey?: string };
 
-/** `signerName`: the vault's, as its configuration names it. `state`: where the objects' storage is kept, from one boot to the next; new otherwise. */
-type Booted = { signer?: boolean; signerName?: string; state?: string };
+/** `signerName` and `ping`: the vault's, as its configuration names them. `state`: where the objects' storage is kept, from one boot to the next; new otherwise. */
+type Booted = { signer?: boolean; signerName?: string; ping?: true; state?: string };
 
 export type VaultWorker = {
   reveal(bearer: string, path: string, keys: string[] | null): Promise<Answer>;
@@ -36,7 +36,7 @@ export type VaultWorker = {
 };
 
 /** A fresh isolate of the vault Worker and its signer, whose storage is new unless `state` keeps it, over `database` through the vault's login. */
-export async function vaultWorker(database: string, keys: WorkerKeys, { signer = true, signerName, state }: Booted = {}): Promise<VaultWorker> {
+export async function vaultWorker(database: string, keys: WorkerKeys, { signer = true, signerName, ping, state }: Booted = {}): Promise<VaultWorker> {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-worker-'));
   const name = 'coffre-vault-workers-test';
   writeFileSync(
@@ -45,7 +45,7 @@ export async function vaultWorker(database: string, keys: WorkerKeys, { signer =
       name,
       compatibility_date: '2026-08-06',
       compatibility_flags: ['nodejs_compat'],
-      vars: { VAULT_KEY_ID: keys.id, VAULT_KEY: keys.key, ...(keys.signingKey === undefined ? {} : { SIGNING_KEY: keys.signingKey }), ...(signerName === undefined ? {} : { SIGNER_NAME: signerName }) },
+      vars: { VAULT_KEY_ID: keys.id, VAULT_KEY: keys.key, ...(keys.signingKey === undefined ? {} : { SIGNING_KEY: keys.signingKey }), ...(signerName === undefined ? {} : { SIGNER_NAME: signerName }), ...(ping === undefined ? {} : { PING: 'true' }) },
       hyperdrive: [{ binding: 'VAULT_HYPERDRIVE', id: 'vault-workers-test', localConnectionString: database }],
       services: [{ binding: 'VAULT', service: name, entrypoint: 'Vault' }],
       // As a deployment's vault/wrangler.jsonc.
