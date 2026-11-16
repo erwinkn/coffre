@@ -608,66 +608,48 @@ request sent on:
 coffre's own refusals carry `coffre-proxy: refused`, so the app can tell
 them from the upstream's.
 
-**A method override is held to `methods`.** Many upstreams act on a POST
-that says `X-HTTP-Method-Override: DELETE`, or `?_method=DELETE`, as on a
-DELETE (Google's and ASP.NET's APIs; OData's `X-HTTP-Method`; Express's
-`method-override`; Rails, Laravel, Symfony and Spring; Salesforce). So
-each method a request names in `X-HTTP-Method-Override`, `X-HTTP-Method`,
-`X-Method-Override` or `X-DW-HTTP-Method-Override` (or the same with `_`
-or `.`, as Rack and PHP read them), or in a `_method` or `_HttpMethod`
-query parameter (or Google's `$httpMethod`), must be one the credential's
-`methods` take, or the request is a 405 naming it, before anything goes
-upstream: through a handle, before any value opens, and before its body
-is read unless the handle is in it (a stable URL's `form` or `json`
-field, which is read first to find the handle); a workload's, one in its
-query before its body is read, one in a header after its signed body is
-checked (the proof says which headers go on), and either before its
-values open. A name is `_method` as
-PHP and Tomcat read one too (`.method`, `_method[]`, `_method `, any
-case), and a parameter named as one of those headers counts as one, as
-ServiceStack and ASP.NET MVC read them, ASP.NET's `%uXXXX` decoded too
-(`%u0058-HTTP-Method-Override`). An empty value names no method and
-changes nothing (`?_method=`). Every override, header or query, is held
-both as written and uppercased, because upstreams disagree: Express, Rack,
-Laravel and Symfony uppercase it, while ASP.NET Core, ASP.NET MVC,
-ServiceStack and Hono set the request's method to it as written. So
-`methods: ['POST', 'PATCH']` refuses `X-HTTP-Method-Override: pAtCh`,
-`?_method=pAtCh` and `?_method=patch` alike, as it would a request whose
-own method is `pAtCh` or `patch` (`delete` is DELETE, as fetch reads it).
-A client that writes `PATCH` is never refused for its case. An override
-the methods take goes on as it came (Google's `PATCH` through a POST): the
-upstream acts on a method the list allows either way, so refusing what it
-does not take closes the gap and breaks no client that stays inside the
-list, where stripping the override would quietly change what such a
-client asked for. A credential with no `methods` looks for none, and its
-`paths` hold as before. A narrowed session's `methods` hold the override
-the same way, a 403 `narrowed`, where they hold the request's own method:
-on the vault's answer about the session, so after its use and before
-anything goes upstream. The check reads the headers that go upstream: one
-a workload's proof does not sign is dropped on the way, so an override
-header it leaves unsigned is no override. A presigned URL's `query` is
-held the same way when it is made, since the URL then goes to the
-upstream without coffre; a header its holder adds to it is beyond
-coffre's reach.
+**A method override where `methods` are limited.** Many upstreams act on a
+POST that says `X-HTTP-Method-Override: DELETE`, or `?_method=DELETE`, as
+on a DELETE. So where a credential's `methods` are set, a request that
+carries a method override is a 405, whatever method it names: the
+`X-HTTP-Method-Override` (Google, ASP.NET, Express's `method-override`),
+`X-HTTP-Method` (OData), `X-Method-Override` or
+`X-DW-HTTP-Method-Override` (Salesforce Commerce Cloud) header, or a query
+key `_method` (Rails, Laravel, Symfony, Spring, Express, Hono),
+`_HttpMethod` (Salesforce), `$httpMethod` (Google) or one of those
+headers' names (ServiceStack, ASP.NET MVC). A name is read trimmed, in any
+case, with `_` and `.` as `-` (Rack and PHP's `X_HTTP_METHOD_OVERRIDE`,
+PHP's `.method`); a query key decoded once, as a form's, its pairs split
+at `&` and at `;` (Rack before 3.0). The value is never read: an override
+naming a method the list takes, or an empty one, is refused too, so there
+is no reading of it to get wrong, and an app that sends one through a
+method-limited credential sends its method as the request's own instead.
+The refusal comes before anything goes upstream: through a handle, before
+any value opens, and before its body is read unless the handle is in it
+(a stable URL's `form` or `json` field, which is read first to find the
+handle); a workload's, one in its query before its body is read, one in a
+header after its signed body is checked (the proof says which headers go
+on: one it leaves unsigned is dropped, and is no override), and either
+before its values open. A narrowed session's `methods` refuse one the same
+way, a 403 `narrowed`, where they hold the request's own method: on the
+vault's answer about the session, so after its use and before anything
+goes upstream. A presigned URL's `query` is held the same way when it is
+made. A credential, or a session, with no `methods` looks for none.
 
-**A body is not read for one** (D179). A method-limited credential does
-not stop an override hidden in a POST's body: a `_method` field of a form
-or multipart body, which Rails, Laravel, Symfony and Spring honour
-(Laravel reads one in JSON too), goes on as it came. `methods: ['POST']`
-refuses a POST with `X-HTTP-Method-Override: DELETE` or
-`?_method=DELETE`, but lets `_method=DELETE` in its form through, and such
-an upstream deletes. Reading bodies the way every framework parses them is
-a contest coffre cannot win (multipart framing, header folding, encoded
-names, compression), so against such an upstream a method limit is not a
-boundary: hold its credential to `paths`, or to a key whose own scope
-holds what it may do. The same holds for an override under a name of the
-upstream's own: the conventional names above are held, but every
-framework listed lets a deployment rename its override (Express's
-`methodOverride('X-Do')`, Spring's `methodParam`, Hono's `header` and
-`query` options), and a POST with `X-Do: DELETE` goes on as it came. A
-bare `method` parameter is not held either, though Restlet's tunnel reads
-one by default: RPC-style APIs name a call with it
-(`?method=flickr.photos.search`), and refusing those would break them.
+**What is not read** (D179 for the body). A `_method` field of a POST's
+form or multipart body, which Rails, Laravel, Symfony and Spring honour
+(Laravel reads one in JSON too), goes on as it came: reading bodies the
+way every framework parses them is a contest coffre cannot win (multipart
+framing, header folding, encoded names, compression). Nor are the readings
+of a query key that need a parser of their own: ASP.NET's `%uXXXX`
+(`%u0058-HTTP-Method-Override`), PHP's name cut at `[` or a NUL
+(`_method[]`), or a key encoded twice. Nor is an override under a name the
+upstream chose (Express's `methodOverride('X-Do')`, Spring's
+`methodParam`, Hono's options), nor a bare `method` parameter, which
+Restlet's tunnel reads by default but RPC-style APIs name a call with
+(`?method=flickr.photos.search`). Against an upstream that reads any of
+these, a method limit is not a boundary: hold its credential to `paths`,
+or to a key whose own scope holds what it may do.
 
 **The capability it needs.** The plugin mechanism gives plugins the API
 as a caller, and a read there hands values back, which is exactly what a

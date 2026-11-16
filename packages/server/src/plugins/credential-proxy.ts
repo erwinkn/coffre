@@ -55,8 +55,8 @@ import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 
 import { CoffreError } from '@coffre/client';
-import { bodyDigest, bodyLine, contentDigest, declaredDigest, fetchMethod, MAX_DIGESTED_BODY, METHOD_TOKEN, UNSIGNED_BODY } from '@coffre/client/dpop';
-import { constraintsAllow, type Constraints } from '@coffre/core/identity';
+import { bodyDigest, bodyLine, contentDigest, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_BODY } from '@coffre/client/dpop';
+import { constraintsAllow } from '@coffre/core/identity';
 import { parseRecipe } from '@coffre/core/recipe';
 import type { Upstream } from '@coffre/core/vault';
 
@@ -934,9 +934,9 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
 async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string, peeked?: Fillable): Promise<Response> {
   const aimed = aim(request, credential, rest, search);
   if (aimed instanceof Response) return aimed;
-  // A method override the credential's methods do not take, before the body is read, or anything opened.
+  // A method override where the credential's methods are limited, before the body is read, or anything opened.
   const headers = outbound(request, null);
-  const override = overridden(credential, aimed, headers);
+  const override = overrideRefused(credential.methods, credential.name, headers, aimed.target);
   if (override !== null) return override;
   const { target, relative } = aimed;
   const inject = credential.inject;
@@ -978,104 +978,29 @@ function outbound(request: Request, signed: readonly string[] | null): Headers {
 }
 
 /**
- * The headers an upstream may take a request's method from instead of its own, lowercase: Google's and ASP.NET's
- * `X-HTTP-Method-Override`, OData's `X-HTTP-Method`, `X-Method-Override`, and Salesforce Commerce Cloud's
- * `X-DW-HTTP-Method-Override`; with any character but a letter or a digit between the words, as a CGI-style server
- * reads a name, each the `_` of an `HTTP_` variable. Rack and PHP read `X_HTTP_METHOD_OVERRIDE`, and PHP
- * `X.HTTP.Method.Override` too, as `HTTP_X_HTTP_METHOD_OVERRIDE`, which Symfony takes for the dashed one. One test,
- * allocating nothing: every header of every request passes it.
+ * The names an upstream reads a request's method from instead of its own, as `overrideName` reads one: the headers
+ * `X-HTTP-Method-Override` (Google, ASP.NET, Express's `method-override`), `X-HTTP-Method` (OData), `X-Method-Override`
+ * and `X-DW-HTTP-Method-Override` (Salesforce Commerce Cloud), which ServiceStack and ASP.NET MVC read from the query
+ * too; and the query's `_method` (Rails, Laravel and Symfony, Spring, gorilla, Express, Hono), `_HttpMethod`
+ * (Salesforce) and `$httpMethod` (Google).
  */
-const OVERRIDE_HEADER = /^x[^a-z0-9](?:(?:dw[^a-z0-9])?http[^a-z0-9]method(?:[^a-z0-9]override)?|method[^a-z0-9]override)$/;
+const OVERRIDES = new Set(['x-http-method-override', 'x-http-method', 'x-method-override', 'x-dw-http-method-override', '-method', '-httpmethod', '$httpmethod']);
 
-/** `text` without the characters up to a space at either end, as Java's `trim`; a loop, linear however long the run. */
-function trimmed(text: string): string {
-  let start = 0;
-  let end = text.length;
-  while (start < end && text.charCodeAt(start) <= 0x20) start++;
-  while (end > start && text.charCodeAt(end - 1) <= 0x20) end--;
-  return text.slice(start, end);
-}
+/** Whether a header's or a query key's name is an override's: trimmed, in any case, `_` and `.` read as `-`, as Rack and PHP write `X_HTTP_METHOD_OVERRIDE` and read `.method` as `_method`. */
+const overrideName = (name: string) => OVERRIDES.has(name.trim().toLowerCase().replace(/[_.]/g, '-'));
 
 /**
- * Whether a query parameter's name, decoded, is `_method` to some framework that takes a request's method from it
- * (Rails, Laravel and Symfony, Spring's `HiddenHttpMethodFilter`, gorilla's, Express's `method-override`), Salesforce's
- * `_HttpMethod`, Google's `$httpMethod`, or an
- * override header's, which ServiceStack and ASP.NET MVC read from a query too: as PHP reads a name, up to a NUL or a
- * `[` (`_method[]`), leading spaces dropped, `.` and spaces as `_` (`.method`), or as Tomcat does, trimmed of every
- * character up to a space at both ends, as Java's `trim` is (`_method `); in any ASCII case.
+ * A request that carries a method override, refused where `methods` limit what it may do (a credential's, a 405; a
+ * narrowed session's, a 403 `narrowed`), whatever method it names: in a header that goes upstream (`outbound`), or as a
+ * key of the query, decoded once as a form's, its pairs split at `&` and at `;`, as Rack before 3.0 splits them. Null
+ * for none, or no limit. A body is not read for one (D179).
  */
-function namesMethod(name: string): boolean {
-  return [name, trimmed(name)].some((each) => {
-    const read = each.split(/[\0[]/, 1)[0]!.replace(/^ +/, '').replace(/[. ]/g, '_').replace(/[A-Z]/g, (char) => char.toLowerCase());
-    return read === '_method' || read === '_httpmethod' || read === '$httpmethod' || OVERRIDE_HEADER.test(read);
-  });
-}
-
-/**
- * A query's name or value as frameworks decode one: as a form's, `+` a space and `%XX` a byte; and where it holds a
- * `%uXXXX`, as ASP.NET's decoder reads that too, one UTF-16 unit (`%u0058` an `X`), in the same pass.
- */
-function readingsOf(part: string): string[] {
-  if (!/[%+]/.test(part)) return [part];
-  const spaced = part.replace(/\+/g, ' ');
-  const plain = bytesOf(spaced);
-  if (!/%u[0-9a-f]{4}/i.test(spaced)) return [plain];
-  const wide = spaced.replace(/%u([0-9a-f]{4})|%([0-9a-f]{2})/gi, (_, unit: string | undefined, byte: string | undefined) => String.fromCharCode(parseInt(unit ?? byte!, 16)));
-  return wide === plain ? [plain] : [plain, wide];
-}
-
-/** The values of a query's method pairs (`namesMethod`), each as any reading of it says (`readingsOf`): pairs split at `&` and `;`, as Rack before 3.0 splits them. */
-function methodPairs(text: string): string[] {
-  const found: string[] = [];
-  // Most queries hold neither: no pair is decoded then, however many there are.
-  if (!/method|%/i.test(text)) return found;
-  for (const [pair] of text.matchAll(/[^&;]+/g)) {
-    const equals = pair.indexOf('=');
-    if (!readingsOf(equals === -1 ? pair : pair.slice(0, equals)).some(namesMethod)) continue;
-    found.push(...readingsOf(equals === -1 ? '' : pair.slice(equals + 1)));
-  }
-  return found;
-}
-
-/**
- * A request whose method override asks for a method its credential's `methods`, or its narrowed session's, do not
- * take, refused: many upstreams act on a POST that says `X-HTTP-Method-Override: DELETE`, or `?_method=DELETE`, as on a
- * DELETE, which the list refuses. Each value of an override header counts (each of a list's, as Express's
- * `method-override` takes the first of one), and each of a method query parameter. An override the list takes too goes
- * on as it came, Google's `PATCH` through a POST say: what coffre lets through is the same either way. Read from what
- * goes upstream, `headers` (`outbound`): a header a workload's proof does not sign never gets there. Nothing is looked
- * for where neither the credential nor the session limits methods.
- *
- * A body is not read for one (D179): a `_method` field of a POST's form or multipart body, which Rails, Laravel and
- * Spring honour, goes on unchecked, as `docs/design/credential-proxy.md` says.
- */
-function overridden(credential: Resolved, aimed: { target: URL; relative: string }, headers: Headers, session: { constraints: Constraints | null; place: string } | null = null): Response | null {
-  const narrowed = session?.constraints?.methods !== undefined;
-  if (credential.methods === undefined && !narrowed) return null;
-  const asked: { method: string; via: string }[] = [];
-  for (const [name, value] of headers) {
-    if (!OVERRIDE_HEADER.test(name)) continue;
-    for (const each of value.split(',')) if (each.trim() !== '') asked.push({ method: each, via: `its ${name} header` });
-  }
-  // An empty value names no method: Express's `method-override` leaves the request's own then, as for an empty header.
-  for (const value of methodPairs(aimed.target.search.slice(1))) if (value.trim() !== '') asked.push({ method: value, via: 'a method query parameter' });
-  for (const { method: raw, via } of asked) {
-    // Every override, wherever it is written, counts both ways an upstream may read it: uppercased, as Express, Rack,
-    // Laravel and Symfony do, and as it came, as ASP.NET Core, ASP.NET MVC, ServiceStack and Hono do, held as the
-    // request's own method would be (`fetchMethod`): a list or session that takes `PATCH` takes no `pAtCh`, nor `patch`.
-    const value = raw.trim();
-    const readings = new Set([value.replace(/[a-z]/g, (char) => char.toUpperCase())]);
-    if (METHOD_TOKEN.test(value)) readings.add(fetchMethod(value));
-    for (const method of readings) {
-      if (credential.methods !== undefined && !credential.methods.includes(method)) {
-        return failure(405, `${credential.name} takes ${credential.methods.join(', ')}, and this request asks for ${method} in ${via}: an upstream may act on it as that method`);
-      }
-      if (session !== null && !constraintsAllow(session.constraints, { place: session.place, credential: credential.name, request: { method, url: aimed.target } })) {
-        return failure(403, `this narrowed session may not ${method} ${aimed.relative} through ${credential.name}, which this request asks for in ${via}`, 'narrowed');
-      }
-    }
-  }
-  return null;
+function overrideRefused(methods: readonly string[] | undefined, who: string, headers: Headers, target: URL, narrowed = false): Response | null {
+  if (methods === undefined) return null;
+  const named = [...headers.keys()].find(overrideName) ?? [...target.search.slice(1).matchAll(/[^&;]+/g)].map(([pair]) => bytesOf(pair.split('=', 1)[0]!.replace(/\+/g, ' '))).find(overrideName);
+  if (named === undefined) return null;
+  const said = `${who} takes ${methods.join(', ')} alone, and this request names a method in \`${named}\`, which an upstream may act on instead of its own`;
+  return narrowed ? failure(403, said, 'narrowed') : failure(405, said);
 }
 
 /** The session token a workload's request carries (`Authorization: DPoP coffre_wl_…`), which goes no further than coffre; null for none, a Cloudflare call's. */
@@ -1129,9 +1054,9 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   if (sessionToken(request) === null) return null;
   const aimed = aim(request, credential, rest, search);
   if (aimed instanceof Response) return aimed;
-  // A method override in the query the credential's methods do not take, before the body is read; its headers' wait for
-  // the proof, which says which of them go on.
-  const queried = overridden(credential, aimed, new Headers());
+  // A method override in the query where the credential's methods are limited, before the body is read; one in a header
+  // waits for the proof, which says which headers go on.
+  const queried = overrideRefused(credential.methods, credential.name, new Headers(), aimed.target);
   if (queried !== null) return queried;
   const content = await carried(request, credential);
   if (content instanceof Response) return content;
@@ -1163,16 +1088,16 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     if (field instanceof Response) return field;
     // Only what the proof signs goes on, of what the app sent: a header added on the way, by a library or a proxy, is dropped.
     const headers = outbound(request, caller.hdr);
-    // A method override in what goes on that the credential's methods do not take, before the values open.
-    const override = overridden(credential, aimed, headers);
+    // A method override in what goes on, where the credential's methods are limited, before the values open.
+    const override = overrideRefused(credential.methods, credential.name, headers, aimed.target);
     if (override !== null) return override;
     const used = await coffre.use(caller, { path: caller.path, keys: credential.keys, purpose: 'use', upstream: sentTo(credential, aimed.target) });
     const constraints = used.workload?.constraints ?? null;
     if (!constraintsAllow(constraints, { place: caller.path, credential: credential.name, request: { method: request.method, url: aimed.target } })) {
       return failure(403, `this narrowed session may not ${request.method} ${aimed.relative} through ${credential.name}`, 'narrowed');
     }
-    // And one the narrowed session's methods do not take, where the request's own method is held to them.
-    const narrowed = overridden(credential, aimed, headers, { constraints, place: caller.path });
+    // And where the narrowed session's are, where the request's own method is held to them.
+    const narrowed = overrideRefused(constraints?.methods, 'this narrowed session', headers, aimed.target, true);
     if (narrowed !== null) return narrowed;
     if (body === UNSIGNED_BODY && used.workload?.policy.unsignedUploads !== true) {
       return failure(403, "an unsigned upload (UNSIGNED-PAYLOAD) binds no body to its proof, and this workload's binding does not say unsignedUploads: send x-amz-content-sha256 as the body's SHA-256", 'unsigned_upload');
@@ -1516,11 +1441,11 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   }
   // A URL is for sharing: the handle goes in none, its path or its query, encoded or not.
   if (HANDLE.test(bytesOf(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
-  // A method override the URL's query names is held as one a request through the credential names: its methods first, before anything opens.
-  const override = overridden(credential, { target, relative }, new Headers());
+  // A method override in the URL's query, as in a request's through the credential: its methods first, before anything opens.
+  const override = overrideRefused(credential.methods, credential.name, new Headers(), target);
   if (override !== null) return override;
   const { values, expiresAt, workload } = await used(coffre, proxy, path, who, credential.name, credential.keys, { method, url: target });
-  const narrowed = overridden(credential, { target, relative }, new Headers(), { constraints: workload?.constraints ?? null, place: path });
+  const narrowed = overrideRefused(workload?.constraints?.methods, 'this narrowed session', new Headers(), target, true);
   if (narrowed !== null) return narrowed;
   // Never past the handle's or the session's end, the vault's word: a revoke or a freeze since stops none already made.
   // One moment counts its life, and its second, the URL's X-Amz-Date, signs it and says when it ends, however long signing takes.
