@@ -209,10 +209,11 @@ unsupported diff select full validation.
   `schema.ts` alone to have the same schema. It needs Docker.
 - `pnpm build` builds every package in dependency order (core and client first). The
   UI builds as a library, `vite build`, each page a module of its own
-  (`@coffre/ui/pages/<name>`), which the examples' file routes name, and Start splits. Core and client build
-  in a run of their own: core's tests use conformance's dev IdP, and
-  conformance runs the CLI, which bundles core, so the graph has a cycle that
-  pnpm would order as it likes. The CLI's build fails on an import it cannot
+  (`@coffre/ui/pages/<name>`), which the examples' file routes name, and Start splits. Core's tests
+  use conformance's dev IdP, and conformance runs the CLI, which bundles core
+  and db, so the graph has a cycle, which pnpm refuses inside one run. The
+  script names the order instead, a run each: core and client, then db, then
+  the CLI, then the rest. The CLI's build fails on an import it cannot
   resolve rather than ship it. Conformance, the examples' typecheck and
   `test:consumer` want it first.
 - `pnpm conformance:workers` / `pnpm conformance:node` run an example's own
