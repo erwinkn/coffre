@@ -934,6 +934,10 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
 async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string, peeked?: Fillable): Promise<Response> {
   const aimed = aim(request, credential, rest, search);
   if (aimed instanceof Response) return aimed;
+  // A method override where the credential's methods are limited, before the body is read, or anything opened.
+  const headers = outbound(request, null);
+  const override = overrideRefused(credential.methods, credential.name, headers, aimed.target);
+  if (override !== null) return override;
   const { target, relative } = aimed;
   const inject = credential.inject;
   // A form or JSON rule's handle is in the body's field: the body read whole first, and the field found.
@@ -958,8 +962,6 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const content = early?.content ?? (await carried(request, credential));
   if (content instanceof Response) return content;
   const opened = await valuesFor(coffre, proxy, handle, path, credential, target);
-  const headers = new Headers();
-  for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
   // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
   // with an environment of the handle's would name that environment, and another credential (`/use/schumann/dev/maps/…`).
   return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${path}/${credential.name}`, back, field, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' } });
@@ -967,6 +969,40 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
 
 /** Whether a header of the app's goes on upstream: none about one hop, nor any that would tell the upstream about coffre's caller. */
 const sent = (name: string) => !DROPPED.has(name) && !name.startsWith('cf-') && !name.startsWith('x-forwarded-');
+
+/** The app's headers that go on upstream (`sent`), and of a workload's, only those its proof signs, `signed`. */
+function outbound(request: Request, signed: readonly string[] | null): Headers {
+  const headers = new Headers();
+  for (const [name, value] of request.headers) if ((signed === null || signed.includes(name)) && sent(name)) headers.set(name, value);
+  return headers;
+}
+
+/**
+ * The names an upstream reads a request's method from instead of its own, as `overrideIn` reads one: the headers
+ * `X-HTTP-Method-Override` (Google, ASP.NET, Express's `method-override`), `X-HTTP-Method` (OData), `X-Method-Override`
+ * and `X-DW-HTTP-Method-Override` (Salesforce Commerce Cloud), which ServiceStack and ASP.NET MVC read from the query
+ * too; and in the query alone, `_method` (Rails, Laravel and Symfony, Spring, gorilla, Express, Hono), `_HttpMethod`
+ * (Salesforce) and `$httpMethod` (Google).
+ */
+const OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-http-method', 'x-method-override', 'x-dw-http-method-override']);
+const OVERRIDE_KEYS = new Set([...OVERRIDE_HEADERS, '-method', '-httpmethod', '$httpmethod']);
+
+/** The first of `names` that is one of `overrides`: trimmed, in any case, `_` and `.` read as `-`, as Rack and PHP write `X_HTTP_METHOD_OVERRIDE` and read `.method` as `_method`. */
+const overrideIn = (names: Iterable<string>, overrides: ReadonlySet<string>) => [...names].find((name) => overrides.has(name.trim().toLowerCase().replace(/[_.]/g, '-')));
+
+/**
+ * A request that carries a method override, refused where `methods` limit what it may do (a credential's, a 405; a
+ * narrowed session's, a 403 `narrowed`), whatever method it names: in a header that goes upstream (`outbound`), or as a
+ * key of the query, decoded once as a form's, its pairs split at `&` and at `;`, as Rack before 3.0 splits them. Null
+ * for none, or no limit. A body is not read for one (D179).
+ */
+function overrideRefused(methods: readonly string[] | undefined, who: string, headers: Headers, target: URL, narrowed = false): Response | null {
+  if (methods === undefined) return null;
+  const named = overrideIn(headers.keys(), OVERRIDE_HEADERS) ?? overrideIn([...target.search.slice(1).matchAll(/[^&;]+/g)].map(([pair]) => bytesOf(pair.split('=', 1)[0]!.replace(/\+/g, ' '))), OVERRIDE_KEYS);
+  if (named === undefined) return null;
+  const said = `${who} takes ${methods.join(', ')} alone, and this request names a method in \`${named}\`, which an upstream may act on instead of its own`;
+  return narrowed ? failure(403, said, 'narrowed') : failure(405, said);
+}
 
 /** The session token a workload's request carries (`Authorization: DPoP coffre_wl_…`), which goes no further than coffre; null for none, a Cloudflare call's. */
 function sessionToken(request: Request): string | null {
@@ -1019,6 +1055,10 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   if (sessionToken(request) === null) return null;
   const aimed = aim(request, credential, rest, search);
   if (aimed instanceof Response) return aimed;
+  // A method override in the query where the credential's methods are limited, before the body is read; one in a header
+  // waits for the proof, which says which headers go on.
+  const queried = overrideRefused(credential.methods, credential.name, new Headers(), aimed.target);
+  if (queried !== null) return queried;
   const content = await carried(request, credential);
   if (content instanceof Response) return content;
   // The body's line in `req`, and the payload hash a sigv4 credential signs again: one value, so what goes out is what
@@ -1047,17 +1087,22 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     // A form or JSON rule's field, whatever the app put there, as a header rule's header: it holds no handle.
     const field = inBody(credential.inject) ? fieldIn(request, content.body, credential.name, credential.inject) : null;
     if (field instanceof Response) return field;
+    // Only what the proof signs goes on, of what the app sent: a header added on the way, by a library or a proxy, is dropped.
+    const headers = outbound(request, caller.hdr);
+    // A method override in what goes on, where the credential's methods are limited, before the values open.
+    const override = overrideRefused(credential.methods, credential.name, headers, aimed.target);
+    if (override !== null) return override;
     const used = await coffre.use(caller, { path: caller.path, keys: credential.keys, purpose: 'use', upstream: sentTo(credential, aimed.target) });
     const constraints = used.workload?.constraints ?? null;
     if (!constraintsAllow(constraints, { place: caller.path, credential: credential.name, request: { method: request.method, url: aimed.target } })) {
       return failure(403, `this narrowed session may not ${request.method} ${aimed.relative} through ${credential.name}`, 'narrowed');
     }
+    // And where the narrowed session's are, where the request's own method is held to them.
+    const narrowed = overrideRefused(constraints?.methods, 'this narrowed session', headers, aimed.target, true);
+    if (narrowed !== null) return narrowed;
     if (body === UNSIGNED_BODY && used.workload?.policy.unsignedUploads !== true) {
       return failure(403, "an unsigned upload (UNSIGNED-PAYLOAD) binds no body to its proof, and this workload's binding does not say unsignedUploads: send x-amz-content-sha256 as the body's SHA-256", 'unsigned_upload');
     }
-    // Only what the proof signs goes on, of what the app sent: a header added on the way, by a library or a proxy, is dropped.
-    const headers = new Headers();
-    for (const [name, value] of request.headers) if ((caller.hdr === null || caller.hdr.includes(name)) && sent(name)) headers.set(name, value);
     const proxied = `${coffre.publicUrl}/use/${path === null ? '' : `${path}/`}${credential.name}`;
     const token = sessionToken(request)!;
     const secret = { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
@@ -1381,9 +1426,8 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   if (typeof asked.path !== 'string' || !asked.path.startsWith('/') || /[?#\u0000-\u001F\u007F]/.test(asked.path)) return failure(400, 'presign a path under the credential as a URL has it, /bucket/key, each segment encoded: the query goes in query');
   const query = asked.query ?? {};
   if (typeof query !== 'object' || query === null || Object.values(query).some((value) => typeof value !== 'string')) return failure(400, 'query is a map of strings, response-content-disposition and the like');
-  // The same rules as a request through it, on the path asked and again on the path the URL made, the one signed.
-  const climbsOut = (pathname: string) => pathname.split('/').some((segment) => /^(\.|%2e){1,2}$/i.test(segment) || /%2f|%5c|\\/i.test(segment));
-  if (climbsOut(asked.path)) return failure(400, 'the path may not climb out of the credential\'s upstream');
+  // The same rule as a request through it, `climbs`, on the path asked and again on the path the URL made, the one signed.
+  if (asked.path.split('/').some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   const target = new URL(`${credential.base.href.replace(/\/$/, '')}${asked.path}`);
   for (const [name, value] of Object.entries(query as Record<string, string>)) {
     if (name.toLowerCase().startsWith('x-amz-')) return failure(400, 'the X-Amz- parameters are the signature\'s own');
@@ -1391,14 +1435,19 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   }
   const under = credential.base.pathname.replace(/\/$/, '');
   if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) return failure(400, `${credential.name} reaches ${credential.base.href} only`);
-  if (climbsOut(target.pathname)) return failure(400, 'the path may not climb out of the credential\'s upstream');
+  if (target.pathname.split('/').some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   const relative = target.pathname.slice(under.length) || '/';
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
     return failure(403, `${credential.name} is not for ${relative}`);
   }
   // A URL is for sharing: the handle goes in none, its path or its query, encoded or not.
   if (HANDLE.test(bytesOf(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
-  const { values, expiresAt } = await used(coffre, proxy, path, who, credential.name, credential.keys, { method, url: target });
+  // A method override in the URL's query, as in a request's through the credential: its methods first, before anything opens.
+  const override = overrideRefused(credential.methods, credential.name, new Headers(), target);
+  if (override !== null) return override;
+  const { values, expiresAt, workload } = await used(coffre, proxy, path, who, credential.name, credential.keys, { method, url: target });
+  const narrowed = overrideRefused(workload?.constraints?.methods, 'this narrowed session', new Headers(), target, true);
+  if (narrowed !== null) return narrowed;
   // Never past the handle's or the session's end, the vault's word: a revoke or a freeze since stops none already made.
   // One moment counts its life, and its second, the URL's X-Amz-Date, signs it and says when it ends, however long signing takes.
   const now = Date.now();
