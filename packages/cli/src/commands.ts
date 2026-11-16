@@ -101,7 +101,7 @@ export const SECTIONS = [
           'unless told, a week at most; every entry it makes names it',
         ],
       },
-      { command: 'tokens revoke', usage: ['tokens revoke <id> [--apply]'], about: ['ends that personal token; `coffre logout` with it, too'] },
+      { command: 'tokens revoke', usage: ['tokens revoke <id> [--apply]'], about: ['ends that personal token, or the handle of a run or export; `coffre logout` with it, too'] },
       { command: 'identities', usage: ['identities [--json]'], about: ['the accounts you sign in with'] },
       { command: 'identities unlink', usage: ['identities unlink <id> [--apply]'], about: ['stops that account signing you in'] },
     ],
