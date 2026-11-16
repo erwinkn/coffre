@@ -6,7 +6,7 @@ processes. Both use one Postgres database, each through its own login.
 
 ```sh
 coffre init --workers acme-secrets   # two Workers, two Hyperdrive configs
-coffre init --node acme-secrets      # two Node processes, one Unix socket: back in 0.16.3, 0.16.0 is Workers only
+coffre init --node acme-secrets      # two Node processes, one Unix socket: back in a later release, 0.16.0 is Workers only
 cd acme-secrets
 pnpm install
 ```

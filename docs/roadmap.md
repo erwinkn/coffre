@@ -9,7 +9,7 @@ first live instance.
 - **The product works end to end:** the API, the CLI, the web UI, coffre's own
   sign-in, offboarding, and conformance for every deployment.
 - **It is packages** (phase 2): `coffre init --workers` writes a
-  deployment (`--node` too, which waits for 0.16.3), and `coffre setup` prepares its database and keys in one go
+  deployment (`--node` too, which waits for Node's return), and `coffre setup` prepares its database and keys in one go
   ([deploy.md](deploy.md)). Releases are on npm, published from a version
   tag with provenance.
 - **One database** (#22 to #46, designed in
@@ -78,7 +78,7 @@ Done. coffre is eight packages a deployment imports and configures in code
 - Postgres through Drizzle;
 - the vault, `@coffre/vault`, which holds the vault key and decides access, as a
   Worker behind a service binding (a Node process behind a Unix socket
-  again from 0.16.3);
+  again once Node returns);
 - `coffre init`, whose output is `examples/workers` and `examples/node`, a
   test diffing the two, and `coffre-conformance`, which holds every
   deployment to what it must never do ([conformance.md](conformance.md)).

@@ -60,7 +60,7 @@ invocation's database client, closed once coffre's work for the request is
 done.
 
 0.16.0 runs on Workers only: a Node deployment stays on 0.14 until Node
-comes back in 0.16.3 ([Node in 0.16.0](design/0.16.md#node-in-0160)). For tests,
+comes back in a later release ([Node in 0.16.0](design/0.16.md#node-in-0160)). For tests,
 `localVault(config, options)`, from `@coffre/vault/node`, runs the vault in
 the server's process, on the same Postgres database.
 
@@ -70,7 +70,7 @@ service binding, the Cron trigger and the UI's static files). Both Workers
 use one Postgres database: `HYPERDRIVE` connects as `coffre_runtime`,
 `VAULT_HYPERDRIVE` as `coffre_vault_runtime`, with caching disabled on both.
 `coffre init --node` writes [examples/node](../examples/node), which waits
-for 0.16.3.
+for Node's return.
 
 ## Packages
 

@@ -38,6 +38,9 @@
   publishes the image alone for a version already on npm, and Validate
   builds both platforms from the revision's packed CLI and runs
   `coffre serve` in the image against a fake coffre (`pnpm test:image`).
+- **The Node deployment does not come back in 0.16.3** as 0.16.2's notes
+  said, and no release is named for it: it returns in a later release. A
+  Node deployment stays on 0.14 until it does, as `coffre init --node` says.
 
 ## 0.16.2 (2026-11-15)
 

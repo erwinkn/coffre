@@ -1,7 +1,7 @@
 # @coffre/server
 
 coffre's API under `/api`, sign-in and the audit log's pages, on Cloudflare
-Workers (Node comes back in 0.16.3), in a deployment's own TanStack Start app. A
+Workers (Node comes back in a later release), in a deployment's own TanStack Start app. A
 deployment configures it once, in code:
 
 ```ts

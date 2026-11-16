@@ -82,11 +82,11 @@ test('coffre init names the project after its directory and pins coffre at its o
   }
 });
 
-test('coffre init --node refuses, naming the release it comes back in, and writes nothing (D198)', (t) => {
+test('coffre init --node refuses, naming no release for its return, and writes nothing (D198)', (t) => {
   const scratch = mkdtempSync(join(tmpdir(), 'coffre-init-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
   assert.throws(() => coffre(['init', '--node', 'acme'], scratch, scratch), (error: Error & { stderr: string }) => {
-    assert.match(error.stderr, /Workers only: the Node deployment returns in 0\.16\.3\. Keep a Node deployment on coffre 0\.14/);
+    assert.match(error.stderr, /Workers only: the Node deployment returns in a later release\. Keep a Node deployment on coffre 0\.14/);
     return true;
   });
   assert.equal(existsSync(join(scratch, 'acme')), false);
