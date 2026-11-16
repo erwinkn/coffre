@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
@@ -823,6 +824,46 @@ test('a credential\'s last use moves on every five minutes, under no MAC, and ta
   assert.deepEqual(await used(), [{ at: first + 5 * 60_000 }]);
 });
 
+test("a use logged moves its credential's last use on in its write, a round trip less; one the cap refuses moves nothing; one with nothing to log, in a statement of its own", async () => {
+  // Each statement or transaction asked of the database, a round trip each.
+  let statements = 0;
+  const db = new Proxy(vault.db, {
+    get(target, name, receiver) {
+      const member = Reflect.get(target, name, receiver) as unknown;
+      if ((name !== 'execute' && name !== 'transaction') || typeof member !== 'function') return member;
+      return (...args: unknown[]) => ((statements += 1), (member as (...args: unknown[]) => unknown).apply(target, args));
+    },
+  });
+  const counted = { ...vault, db };
+  const counting = async (asked: Ask) => {
+    statements = 0;
+    const result = await use(counted, asked);
+    return ['refused' in result ? result.refused : given(result.values), statements];
+  };
+  const used = () => rowsOf<{ label: string; at: number }>(vault.owner, sql`SELECT label, (extract(epoch FROM last_used_at) * 1000)::float8 AS at FROM credentials WHERE last_used_at IS NOT NULL ORDER BY label`);
+  const first = vault.now();
+  // Its read, then its write: the exposure, the entry and the last use.
+  assert.deepEqual(await counting(ask('ci', 'market/prod', ['FLAG'])), [{ FLAG: 'on' }, 2]);
+  assert.deepEqual([await used(), (await logged()).length], [[{ label: 'ci', at: first }], 1]);
+  // Past the cap, nothing is written: no entry, and no last use of the other credential of the same account.
+  counted.cap = { count: 1, windowMs: 60_000 };
+  assert.deepEqual(await counting(ask('ci-sensitive', 'market/prod', ['DATABASE_URL'])), ['bulk_limit', 2]);
+  assert.deepEqual([await used(), (await logged()).length], [[{ label: 'ci', at: first }], 1]);
+  // Logged within the minute, its last use due all the same: the read, then the last use alone.
+  vault.tick(3000);
+  vault.memory.touched.clear();
+  await vault.owner.execute(sql`UPDATE credentials SET last_used_at = NULL`);
+  assert.deepEqual(await counting(ask('ci', 'market/prod', ['FLAG'])), [{ FLAG: 'on' }, 2]);
+  assert.deepEqual([await used(), (await logged()).length], [[{ label: 'ci', at: first + 3000 }], 1]);
+  // Neither due: the read alone.
+  vault.tick(3000);
+  assert.deepEqual(await counting(ask('ci', 'market/prod', ['FLAG'])), [{ FLAG: 'on' }, 1]);
+  // Once the cap has room, the other credential's use moves its last use on, which the refusal did not.
+  counted.cap = { count: 1000, windowMs: 60_000 };
+  assert.deepEqual(await counting(ask('ci-sensitive', 'market/prod', ['DATABASE_URL'])), [{ DATABASE_URL: 'postgres://prod' }, 2]);
+  assert.deepEqual((await used()).map((row) => row.label), ['ci', 'ci-sensitive']);
+});
+
 /** Whatever was remembered is forgotten, and nothing the setup wrote is counted. */
 async function settled(): Promise<void> {
   vault.memory = memoryOf(2);
@@ -1034,6 +1075,49 @@ test('a handle reaches what its scope does; an upstream credential frozen in an 
   assert.deepEqual(await got(ask('ada', 'market/staging', ['DATABASE_URL'], { purpose: 'use', upstream: { credential: 'stripe' } })), { DATABASE_URL: 'postgres://staging' });
   // Nobody is told a credential is frozen in a place they hold nothing in.
   assert.equal(await got(ask('dee', 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: { credential: 'stripe' } })), 'no_access');
+});
+
+test('a handle stands while the session or personal token it was made on does, and ends when that one does', async () => {
+  const scope = scopeOf({ projectId: w.market.id, environmentId: w.prod.id, role: 'viewer' });
+  const [account, unlinked] = [identity(ada), identity(ada, { revokedAt: new Date(0), revokedBy: ada })];
+  const makers = {
+    cli: credential('m-cli', ada),
+    browser: credential('m-browser', ada, { kind: 'browser', identityId: account.id }),
+    personal: credential('m-personal', ada, { kind: 'personal', scope, expiresAt: new Date(vault.now() + 60_000) }),
+    unlinked: credential('m-unlinked', ada, { kind: 'browser', identityId: unlinked.id }),
+    revoked: credential('m-revoked', ada, { revokedAt: new Date(0), revokedBy: ada }),
+    frozen: credential('m-frozen', ada, { frozenAt: new Date(0) }),
+    expired: credential('m-expired', ada, { expiresAt: new Date(vault.now()) }),
+    others: credential('m-others', bo),
+    handle: credential('m-handle', ada, { kind: 'handle', scope }),
+  };
+  const on = (label: string, ancestors: string | null) => credential(label, ada, { kind: 'handle', scope, ancestors });
+  await write(
+    vault,
+    ...rows('identities', account, unlinked),
+    ...rows('credentials', ...Object.values(makers), ...Object.entries(makers).map(([name, maker]) => on(`on-${name}`, JSON.stringify([maker.id]))),
+      on('on-nothing', JSON.stringify([randomUUID()])), on('on-two', JSON.stringify([makers.cli.id, makers.browser.id])), on('on-junk', 'not json'), on('on-none', null)),
+  );
+  await settled();
+  const uses = (label: string) => got(ask(label, 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: { credential: 'stripe' } }));
+  for (const label of ['on-cli', 'on-browser', 'on-personal', 'on-none']) assert.deepEqual(await uses(label), { DATABASE_URL: 'postgres://prod' }, label);
+  for (const label of ['on-unlinked', 'on-revoked', 'on-frozen', 'on-expired', 'on-others', 'on-handle', 'on-nothing', 'on-two', 'on-junk']) assert.equal(await uses(label), 'unauthenticated', label);
+  // A refused use writes nothing: no last use moved on, on the handle or its maker.
+  const moved = await rowsOf<{ label: string }>(vault.owner, sql`SELECT label FROM credentials WHERE last_used_at IS NOT NULL ORDER BY label`);
+  assert.deepEqual(moved.map((row) => row.label), ['on-browser', 'on-cli', 'on-none', 'on-personal']);
+
+  // It says it ends when its personal token does, and is refused from then.
+  const answered = await use(vault, ask('on-personal', 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: { credential: 'stripe' } }));
+  assert.ok(!('refused' in answered));
+  assert.equal(answered.expiresAt, makers.personal.expiresAt.toISOString());
+  vault.tick(60_000);
+  assert.equal(await uses('on-personal'), 'unauthenticated');
+  assert.deepEqual(await uses('on-cli'), { DATABASE_URL: 'postgres://prod' });
+  // The session revoked, or its account unlinked, ends the handle made on it.
+  await amend(vault, 'credentials', sql`id = ${makers.cli.id}`, { revokedAt: new Date(vault.now()), revokedBy: ada });
+  await amend(vault, 'identities', sql`id = ${account.id}`, { revokedAt: new Date(vault.now()), revokedBy: ada });
+  vault.tick(2000);
+  for (const label of ['on-cli', 'on-browser']) assert.equal(await uses(label), 'unauthenticated', label);
 });
 
 test("a peek says what `coffre run` generates by: each key's version id, its recipe, whether it is the caller's own, and whether the read found their personal config", async () => {

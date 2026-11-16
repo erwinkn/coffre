@@ -43,7 +43,7 @@ async function instance(): Promise<{ id: string }> {
 }
 
 /** A fresh isolate of the vault Worker and its signer, over the suite's database through the vault's login. */
-const freshVault = (database: string, more?: { signer?: boolean; signerName?: string; state?: string }) => vaultWorker(database, { id: 'vault-workers-test', key: VAULT_KEY }, more);
+const freshVault = (database: string, more?: { signer?: boolean; signerName?: string; ping?: true; state?: string }) => vaultWorker(database, { id: 'vault-workers-test', key: VAULT_KEY }, more);
 
 const count = async (table: 'log' | 'log_pending') => (await rowsOf<{ n: number }>(world.owner, sql`SELECT count(*)::int AS n FROM ${sql.identifier(table)}`))[0]!.n;
 const reads = async () => (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log WHERE NOT kept ORDER BY seq`)).map(({ body }) => JSON.parse(body) as { action: string; actor: string; detail: { keys: { key: string }[] } });
@@ -289,11 +289,11 @@ test('a fresh isolate answers a burst of first calls, each on one connection: on
   }
 });
 
-test("each call that reached the database logs one line of its time there, durations alone; one answered from the vault's memory logs none", { timeout: 120_000 }, async () => {
+test("each call that reached the database logs one line of its time there, durations alone, a bare `select 1`'s with them where the deployment asks; one answered from the vault's memory logs none", { timeout: 120_000 }, async () => {
   // A service's reads, which the memory answers again: a person's own never are.
   const [market, ci] = [await instance(), 'token:ci'];
   await write(world, ...rows('principals', principal(ci)), ...rows('grants', grant(ci, 'viewer', { project: market })), ...rows('credentials', credential('ci-token', ci, { scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) })));
-  const vault = await freshVault(VAULT_URL);
+  const vault = await freshVault(VAULT_URL, { ping: true });
   const logged = async () => (await vault.get('/logs')) as string[];
   try {
     assert.equal((await vault.reveal('ci-token', 'market/prod', ['KEY_0'])).status, 200);
@@ -307,9 +307,11 @@ test("each call that reached the database logs one line of its time there, durat
     assert.equal(lines.length, 2, lines.join('\n'));
     for (const line of lines) {
       const timing = JSON.parse(/^coffre: database (\{.*\})$/.exec(line)![1]!) as Record<string, unknown>;
-      assert.deepEqual(Object.keys(timing), ['connect', 'statements', 'total'], line);
+      assert.deepEqual(Object.keys(timing), ['connect', 'statements', 'total', 'ping'], line);
       const statements = timing.statements as unknown[];
-      assert.ok([timing.connect, timing.total, ...statements].every((ms) => Number.isInteger(ms) && (ms as number) >= 0) && statements.length > 0, line);
+      assert.ok([timing.connect, timing.total, timing.ping, ...statements].every((ms) => Number.isInteger(ms) && (ms as number) >= 0), line);
+      // The read, then the write: the first moves the token's last use on in it, with no statement of its own.
+      assert.equal(statements.length, 2, line);
       for (const word of ['KEY_', 'value of', 'market', 'ci', 'token']) assert.ok(!line.includes(word), line);
     }
   } finally {

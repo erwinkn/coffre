@@ -28,8 +28,9 @@ export type CallerRows = {
   environments: readonly Row<typeof environments>[];
   /** The trust binding that issued the credential, for one a binding issued. */
   binding: readonly Row<typeof bindings>[];
-  /** A workload's session's: the sessions it was narrowed from, and the instance's policy, which says whether every workload is frozen. */
+  /** What the credential stands under: a narrowed session's sessions above it, an MCP token's connection, a handle's maker. */
   ancestors: readonly Row<typeof credentials>[];
+  /** A workload's session's: the instance's policy, which says whether every workload is frozen. */
   policy: readonly Row<typeof policy>[];
 };
 
@@ -206,10 +207,19 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
       credentialScope = null;
       break;
     case 'personal':
-    case 'handle':
+    case 'handle': {
       if (issued) return null;
+      // A handle stands while the session or personal token it was made on does: one ended, expired, frozen, of an account
+      // unlinked or of a member removed since ends every handle made on it, with no write of theirs. One an earlier release made names none, and stands on its own row.
+      const above = credential.kind === 'handle' && credential.ancestors !== null ? parsed(credential.ancestors) : [];
+      if (!Array.isArray(above) || above.length > 1) return null;
+      const maker = above.length === 0 ? null : rows.ancestors.find((row) => row.id === above[0]);
+      if (maker !== null && (maker === undefined || !['browser', 'cli', 'personal'].includes(maker.kind) || maker.principal !== credential.principal || maker.generation !== credential.generation
+        || maker.revokedAt !== null || maker.frozenAt !== null || endOf(maker) <= at
+        || (maker.identityId === null ? maker.kind === 'browser' : !rows.identity.some((identity) => identity.id === maker.identityId && identity.revokedAt === null)))) return null;
       credentialScope = capOf(credential.scope);
       break;
+    }
     case 'service':
       // A token a CI run exchanged its ID token for reaches what its binding does, a binding with no policy: one with a policy makes sessions.
       if (workloads?.useOnly === true || (issued && (binding === undefined || binding.policy !== null))) return null;
@@ -392,17 +402,31 @@ export function refusedTo<S extends Seen<ReturnType<typeof callerParts>>>(
 const TOUCHED_MS = 5 * 60_000;
 
 /**
- * When the credential was last used, and from where: its row's own
- * statement, since it shares one with nothing a change may lock. It only
- * says when, so it never costs the call: a row a change holds is skipped,
- * not waited for, a failure is dropped, and a later time is never put back.
+ * The statement that moves a credential's last use on, and from where, if
+ * it is due; undefined if this isolate or the row says it moved within the
+ * last five minutes. It only says when, so it waits on nothing: a row a
+ * change holds is skipped, and a later time is never put back. `only`, a
+ * condition it is made under: a use's write moves it on only if the use is
+ * answered (use.ts).
+ */
+export function touching(memory: Memory, credential: Row<typeof credentials>, ip: string | null, at: number, only: SQL = sql`true`): SQL | undefined {
+  if (Math.max(credential.lastUsedAt?.getTime() ?? -Infinity, memory.touched.get(credential.id)?.at ?? -Infinity) + TOUCHED_MS > at) return undefined;
+  const when = sql`${new Date(at).toISOString()}::timestamptz`;
+  const free = sql`SELECT id FROM credentials WHERE ${only} AND id = ${credential.id} AND (last_used_at IS NULL OR last_used_at < ${when}) FOR NO KEY UPDATE SKIP LOCKED`;
+  return sql`UPDATE credentials SET last_used_at = ${when}, last_used_ip = ${ip} WHERE id IN (${free})`;
+}
+
+/** What `touching` moved on, once its statement has run: not asked again for five minutes. */
+export const touched = (memory: Memory, credential: Row<typeof credentials>, at: number) => keep(memory.touched, credential.id, { at }, at - TOUCHED_MS);
+
+/**
+ * When the credential was last used, and from where, in a statement of its
+ * own, for a call that writes nothing else: it never costs the call, so a
+ * failure is dropped.
  */
 export async function touch(vault: Pick<Running, 'db'> & { memory: Memory }, credential: Row<typeof credentials>, ip: string | null, at: number): Promise<void> {
-  const { touched } = vault.memory;
-  if (Math.max(credential.lastUsedAt?.getTime() ?? -Infinity, touched.get(credential.id)?.at ?? -Infinity) + TOUCHED_MS > at) return;
-  const when = sql`${new Date(at).toISOString()}::timestamptz`;
-  const free = sql`SELECT id FROM credentials WHERE id = ${credential.id} AND (last_used_at IS NULL OR last_used_at < ${when}) FOR NO KEY UPDATE SKIP LOCKED`;
-  await vault.db.execute(sql`UPDATE credentials SET last_used_at = ${when}, last_used_ip = ${ip} WHERE id IN (${free})`).then(() => keep(touched, credential.id, { at }, at - TOUCHED_MS), () => {});
+  const statement = touching(vault.memory, credential, ip, at);
+  if (statement !== undefined) await vault.db.execute(statement).then(() => touched(vault.memory, credential, at), () => {});
 }
 
 /** The log's head as its row holds it, in the words its MAC covers (`headText`): what rides beside a caller's rows when a page asks. */

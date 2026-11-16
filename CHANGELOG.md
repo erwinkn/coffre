@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **A use logged costs two statements at most, not three.** Every five
+  minutes a credential's use also moved its last-used time on, in a
+  statement of its own after the use's write; it now goes in that write,
+  only if the use is answered, and still skips a row a change holds. A use
+  with nothing to log moves it alone, as before. On Workers through
+  Hyperdrive, where each statement is a round trip, that is one fewer for
+  about a third of uses.
+- **A deployment can time a bare `select 1` beside its statements.**
+  `vault(env => ({ …, ping: true }))` has each call that reached the
+  database send one on its connection once it has answered, and say how
+  long it took in its line: `coffre: database {"connect":3,"statements":[25,24],"total":52,"ping":22}`.
+  A round trip with nothing to plan, which tells the network from the
+  statements. Off unless set: it costs the database a round trip a call,
+  and the caller none.
+- **A handle stands while the session or personal token it was made on
+  does.** `coffre run` and `coffre export` make a handle on the credential
+  they are signed in with; each use through it also requires that
+  credential to stand: revoked, expired, frozen, its account unlinked or
+  its person removed, every handle made on it is refused (401) within the
+  vault's memory, 2 seconds by default (and, while the database cannot be
+  reached, the deployment's `outageSeconds`, as for any revocation), with
+  no write to the handles. The vault reads it in the same statement as
+  the handle, so a use costs no more round trips. A handle made by an
+  earlier release names no credential and lasts until its own end, twelve
+  hours unless told.
 - **The CLI is an image again.** Each release publishes
   `ghcr.io/erwinkn/coffre-cli` for amd64 and arm64, tagged `<version>`,
   `<major>.<minor>` and `latest`, after npm: npm's own tarball of the
