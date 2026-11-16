@@ -136,6 +136,8 @@ test('what is no override goes on: a parameter named otherwise, a JSON-RPC metho
     ['/rpc/1?method=getMe', { method: 'POST' }],
     ['/rpc/1?methods=x&my_method=DELETE&_methodx=DELETE&a=_method', { method: 'POST' }],
     ['/rpc/1', { method: 'POST', headers: { ...JSON_TYPE, 'x-method': 'DELETE' }, body: '{"jsonrpc":"2.0","method":"eth_call","params":[],"id":1}' }],
+    // A query-only name in a header is no override: no framework reads a `_method` header.
+    ['/rpc/1', { method: 'POST', headers: { _method: 'metadata' } }],
   ];
   for (const [path, init] of asks) assert.equal((await ask(`/market/dev/api${path}`, init)).status, 200, `${path} ${JSON.stringify(init)}`);
   assert.equal(reached.length, asks.length);

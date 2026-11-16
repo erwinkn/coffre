@@ -614,10 +614,11 @@ on a DELETE. So where a credential's `methods` are set, a request that
 carries a method override is a 405, whatever method it names: the
 `X-HTTP-Method-Override` (Google, ASP.NET, Express's `method-override`),
 `X-HTTP-Method` (OData), `X-Method-Override` or
-`X-DW-HTTP-Method-Override` (Salesforce Commerce Cloud) header, or a query
-key `_method` (Rails, Laravel, Symfony, Spring, Express, Hono),
-`_HttpMethod` (Salesforce), `$httpMethod` (Google) or one of those
-headers' names (ServiceStack, ASP.NET MVC). A name is read trimmed, in any
+`X-DW-HTTP-Method-Override` (Salesforce Commerce Cloud) header; or a
+query key named as one of those headers (ServiceStack, ASP.NET MVC), or
+`_method` (Rails, Laravel, Symfony, Spring, Express, Hono), `_HttpMethod`
+(Salesforce) or `$httpMethod` (Google). Those last three are query keys
+alone: no framework reads them as headers. A name is read trimmed, in any
 case, with `_` and `.` as `-` (Rack and PHP's `X_HTTP_METHOD_OVERRIDE`,
 PHP's `.method`); a query key decoded once, as a form's, its pairs split
 at `&` and at `;` (Rack before 3.0). The value is never read: an override

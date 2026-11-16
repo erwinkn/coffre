@@ -978,16 +978,17 @@ function outbound(request: Request, signed: readonly string[] | null): Headers {
 }
 
 /**
- * The names an upstream reads a request's method from instead of its own, as `overrideName` reads one: the headers
+ * The names an upstream reads a request's method from instead of its own, as `overrideIn` reads one: the headers
  * `X-HTTP-Method-Override` (Google, ASP.NET, Express's `method-override`), `X-HTTP-Method` (OData), `X-Method-Override`
  * and `X-DW-HTTP-Method-Override` (Salesforce Commerce Cloud), which ServiceStack and ASP.NET MVC read from the query
- * too; and the query's `_method` (Rails, Laravel and Symfony, Spring, gorilla, Express, Hono), `_HttpMethod`
+ * too; and in the query alone, `_method` (Rails, Laravel and Symfony, Spring, gorilla, Express, Hono), `_HttpMethod`
  * (Salesforce) and `$httpMethod` (Google).
  */
-const OVERRIDES = new Set(['x-http-method-override', 'x-http-method', 'x-method-override', 'x-dw-http-method-override', '-method', '-httpmethod', '$httpmethod']);
+const OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-http-method', 'x-method-override', 'x-dw-http-method-override']);
+const OVERRIDE_KEYS = new Set([...OVERRIDE_HEADERS, '-method', '-httpmethod', '$httpmethod']);
 
-/** Whether a header's or a query key's name is an override's: trimmed, in any case, `_` and `.` read as `-`, as Rack and PHP write `X_HTTP_METHOD_OVERRIDE` and read `.method` as `_method`. */
-const overrideName = (name: string) => OVERRIDES.has(name.trim().toLowerCase().replace(/[_.]/g, '-'));
+/** The first of `names` that is one of `overrides`: trimmed, in any case, `_` and `.` read as `-`, as Rack and PHP write `X_HTTP_METHOD_OVERRIDE` and read `.method` as `_method`. */
+const overrideIn = (names: Iterable<string>, overrides: ReadonlySet<string>) => [...names].find((name) => overrides.has(name.trim().toLowerCase().replace(/[_.]/g, '-')));
 
 /**
  * A request that carries a method override, refused where `methods` limit what it may do (a credential's, a 405; a
@@ -997,7 +998,7 @@ const overrideName = (name: string) => OVERRIDES.has(name.trim().toLowerCase().r
  */
 function overrideRefused(methods: readonly string[] | undefined, who: string, headers: Headers, target: URL, narrowed = false): Response | null {
   if (methods === undefined) return null;
-  const named = [...headers.keys()].find(overrideName) ?? [...target.search.slice(1).matchAll(/[^&;]+/g)].map(([pair]) => bytesOf(pair.split('=', 1)[0]!.replace(/\+/g, ' '))).find(overrideName);
+  const named = overrideIn(headers.keys(), OVERRIDE_HEADERS) ?? overrideIn([...target.search.slice(1).matchAll(/[^&;]+/g)].map(([pair]) => bytesOf(pair.split('=', 1)[0]!.replace(/\+/g, ' '))), OVERRIDE_KEYS);
   if (named === undefined) return null;
   const said = `${who} takes ${methods.join(', ')} alone, and this request names a method in \`${named}\`, which an upstream may act on instead of its own`;
   return narrowed ? failure(403, said, 'narrowed') : failure(405, said);
