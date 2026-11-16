@@ -452,7 +452,8 @@ export function sealedScope(issued: readonly Issued[]): ScopeGrant[] {
  * - A handle: a person on a session or a personal token; each environment
  *   named and each parent it inherits from that they read or use, `viewer`
  *   where they read and `contributor` where they only use; never past the
- *   personal token it is made on, in what it reaches or when it ends.
+ *   personal token it is made on, in what it reaches or when it ends; and
+ *   standing while the credential it is made on does (`ancestors`).
  * - A service's token: whoever manages the service (`managesService`), each
  *   grant one the service holds and the caller could give it
  *   (`issuesCredential`); every grant it holds when none is asked; and the
@@ -656,7 +657,7 @@ function tokenCreate(input: Presented & TokenCreate, vault: Deciding): Operation
           id, kind, tokenHash: Buffer.from(token.token, 'hex'), tokenHint: hint, previousTokenHash: null, codeHash: null, generation, principal, identityId: null,
           scope: JSON.stringify(scope), places: places === null ? null : JSON.stringify(places), label: token.label, createdAt: now, createdBy: caller.principal, expiresAt,
           lastUsedAt: null, lastUsedIp: null, frozenAt: null, revokedAt: null, revokedBy: null,
-          jkt: null, notAfter: null, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
+          jkt: null, notAfter: null, ancestors: kind === 'handle' ? JSON.stringify([caller.credential.id]) : null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null, run: null, client: null, challenge: null,
         })],
         entry: {
           ...by(caller, shown),

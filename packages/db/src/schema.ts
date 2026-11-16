@@ -586,7 +586,8 @@ export const credentials = pgTable(
     // the thumbprint of the key its proofs are signed by, and its hard end.
     jkt: text(),
     notAfter: at('not_after'),
-    // A `narrow` child's: its ancestors' IDs, root first, JSON, and its limits (`Constraints`), canonical JSON.
+    // A `narrow` child's: its ancestors' IDs, root first, JSON, and its limits (`Constraints`), canonical JSON. An MCP access
+    // token's: its connection's ID. A handle's: the ID of the session or personal token it was made on, which it stands with.
     // The IDs exactly as `JSON.stringify` writes an array of them, lowercase and with no space: a use reads no other shape.
     ancestors: text(),
     constraints: text(),
