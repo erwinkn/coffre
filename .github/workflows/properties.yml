@@ -38,7 +38,9 @@ jobs:
           echo "::notice title=Seed ${seed}::replay with: pnpm test:properties:server --long --seed=${seed}"
       - name: Core properties
         run: pnpm test:properties --long --seed=${{ steps.seed.outputs.seed }}
+      # Even when Core failed, so that one red never hides the other.
       - name: Server properties
+        if: ${{ !cancelled() && steps.seed.outcome == 'success' }}
         run: pnpm test:properties:server --long --seed=${{ steps.seed.outputs.seed }}
       - name: Name the seed that failed
         if: failure() && steps.seed.outputs.seed != ''
