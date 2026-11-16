@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **The pinned pnpm moves from 11.8.0 to 11.28.11.** Deployments written
+  by `coffre init` pin it, and `coffre update` moves an existing deployment
+  to it, as it does for any `packageManager` that differs. 11.8.0 has three
+  published advisories, GHSA-vq4v-j7r6-jq4m, GHSA-c59q-g84q-2gj5 and
+  CVE-2026-101043, fixed in 11.11.0. 11.28.11 is not the very newest
+  11.x, 11.28.12, because the workspace's release-age policy
+  (`minimumReleaseAge`) holds a release back for a week.
+
 ## 0.16.3 (2026-11-16)
 
 - **A use logged costs two statements at most, not three.** Every five

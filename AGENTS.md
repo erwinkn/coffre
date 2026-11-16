@@ -54,7 +54,7 @@ Running a package's `.ts` with plain `node` outside those scripts needs the flag
 
 ## Setup
 
-**Toolchain.** Node **>= 24** and pnpm 11.8.0 (via corepack). Node 24 is a hard requirement
+**Toolchain.** Node **>= 24** and pnpm 11.28.11 (via corepack). Node 24 is a hard requirement
 for workspace source, not just an `engines` field: the CLI, dev IdP, migrations, and the
 `node --test` suite all execute TypeScript source (`*.ts`) directly with plain `node`,
 which relies on native type-stripping (default only in Node 23.6+/24). The
@@ -312,7 +312,7 @@ with `@coffre/*` exempt so that a coffre fix is not held back a week.
 ## Cursor
 
 The Cloud Agent environment is defined in-repo by `.cursor/environment.json` and
-`.cursor/Dockerfile` (Node 24 via nvm, pnpm 11.8.0 via corepack, and a Docker engine set
+`.cursor/Dockerfile` (Node 24 via nvm, pnpm 11.28.11 via corepack, and a Docker engine set
 up for the nested VM). Two things worth knowing:
 
 - **Docker and Postgres** come up each boot via `.cursor/start.sh`
