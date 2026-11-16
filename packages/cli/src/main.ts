@@ -1373,9 +1373,10 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
     handleId: handle.id,
     made,
     // A run's handle ends with its command (`run`): no app it started holds it after. A refusal, or an instance out of
-    // reach, is the caller's to say. The server's own `unknown_credential` is a handle ended already, by hand say.
+    // reach, is the caller's to say: sent by plain fetch, as `fetching` would end the CLI on an Access answer. The
+    // server's own `unknown_credential` is a handle ended already, by hand say.
     revoke: () =>
-      createClient({ url: to.origin, headers: () => headersFor(to), transport: once }).handles.revoke(handle.id).then(
+      createClient({ url: to.origin, headers: () => headersFor(to), transport: (request) => fetch(request, { redirect: 'manual' }) }).handles.revoke(handle.id).then(
         () => undefined,
         (error: unknown) => {
           if (!(error instanceof CoffreError && error.status === 404 && error.reason === 'unknown_credential')) throw error;

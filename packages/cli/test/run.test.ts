@@ -788,6 +788,12 @@ test("a person's run still says its handle could not be confirmed ended when the
   }
 });
 
+test("a person's run whose revoke at exit meets Cloudflare Access says so too, and exits with its command's code", async (t) => {
+  const ran = await withHandle(t, ['run', 'market/dev', '--', process.execPath, '-e', 'process.exit(7)'], (res) => void res.writeHead(302, { location: 'https://acme.cloudflareaccess.com/cdn-cgi/access/login' }).end(), 'session');
+  assert.equal(ran.code, 7, ran.stderr);
+  assert.equal(unconfirmed(ran.stderr).length, 1, ran.stderr);
+});
+
 test("a person's export says its handle outlives the command, while their session stands and to its expiry in UTC at the latest, and how to end it, on its instance", async (t) => {
   const exported = await withHandle(t, ['export', 'market/dev'], (res) => void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ revoked: true })), 'session');
   assert.equal(exported.code, 0, exported.stderr);
