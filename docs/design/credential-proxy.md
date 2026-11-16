@@ -611,15 +611,18 @@ them from the upstream's.
 **A method override is held to `methods`.** Many upstreams act on a POST
 that says `X-HTTP-Method-Override: DELETE`, or `?_method=DELETE`, as on a
 DELETE (Google's and ASP.NET's APIs; OData's `X-HTTP-Method`; Express's
-`method-override`; Rails, Laravel, Symfony and Spring). So each method a
-request names in `X-HTTP-Method-Override`, `X-HTTP-Method` or
-`X-Method-Override` (or the same with `_` or `.`, as Rack and PHP read
-them), or in a `_method` query parameter, must be one the credential's
+`method-override`; Rails, Laravel, Symfony and Spring; Salesforce). So
+each method a request names in `X-HTTP-Method-Override`, `X-HTTP-Method`,
+`X-Method-Override` or `X-DW-HTTP-Method-Override` (or the same with `_`
+or `.`, as Rack and PHP read them), or in a `_method` or `_HttpMethod`
+query parameter, must be one the credential's
 `methods` take, or the request is a 405 naming it, before anything goes
 upstream: through a handle, before any value opens, and before its body
 is read unless the handle is in it (a stable URL's `form` or `json`
-field, which is read first to find the handle); a workload's, after its
-signed body is checked and before its values open. A name is `_method` as
+field, which is read first to find the handle); a workload's, one in its
+query before its body is read, one in a header after its signed body is
+checked (the proof says which headers go on), and either before its
+values open. A name is `_method` as
 PHP and Tomcat read one too (`.method`, `_method[]`, `_method `, any
 case), and a parameter named as one of those headers counts as one, as
 ServiceStack and ASP.NET MVC read them, ASP.NET's `%uXXXX` decoded too

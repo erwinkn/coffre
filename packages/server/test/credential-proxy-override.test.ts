@@ -61,8 +61,9 @@ function proxy(credential: Partial<Credential>, constraints: Constraints | null 
     if (init.as === 'workload') headers.set('authorization', `DPoP ${SESSION}`);
     else if (init.as === 'bearer') headers.set('authorization', `Bearer ${HANDLE}`);
     else headers.set('x-coffre-handle', HANDLE);
-    const answer = await plugin.routes!.fetch(new Request(`${PUBLIC}/use${path}`, { ...init, headers }), coffre);
-    return { status: answer.status, body: await answer.text() };
+    const request = new Request(`${PUBLIC}/use${path}`, { ...init, headers });
+    const answer = await plugin.routes!.fetch(request, coffre);
+    return { status: answer.status, body: await answer.text(), read: request.bodyUsed };
   };
   return { reached, opened, ask };
 }
@@ -86,6 +87,8 @@ test("a request whose override asks for a method the credential's methods do not
     ['/items/1', { headers: { 'X-HTTP-Method': 'delete' } }],
     ['/items/1', { headers: { 'x-method-override': ' Delete ' } }],
     ['/items/1', { headers: { x_http_method_override: 'DELETE' } }],
+    // Salesforce Commerce Cloud's.
+    ['/items/1', { headers: { 'x-dw-http-method-override': 'DELETE' } }],
     ['/items/1', { headers: { 'x-http-method-override': 'GET, DELETE' } }],
     ['/items/1', { headers: { 'x-http-method-override': 'PATCH' } }],
     // A name the methods do not hold.
@@ -106,6 +109,9 @@ test("a request whose override asks for a method the credential's methods do not
     ['/items/1?%u0058-HTTP-Method-Override=DELETE', {}],
     ['/items/1?%u005Fmethod=DELETE', {}],
     ['/items/1?_method=%u0044ELETE', {}],
+    // Salesforce's REST API reads `_HttpMethod`.
+    ['/items/1?_HttpMethod=PATCH', {}],
+    ['/items/1?X-DW-HTTP-Method-Override=DELETE', {}],
   ];
   for (const [path, init] of asks) {
     const answer = await ask(`/market/dev/api${path}`, { method: 'POST', ...init });
@@ -171,6 +177,10 @@ test('a POST that streams, its digest declared, is refused for its override head
   });
   const refused = await ask('/market/dev/api/items/1', await streaming({ 'x-http-method-override': 'DELETE' }));
   assert.equal(refused.status, 405, refused.body);
+  assert.equal(refused.read, false, 'refused before its body is read');
+  const whole = await ask('/market/dev/api/items/1?_method=DELETE', { method: 'POST', headers: JSON_TYPE, body });
+  assert.equal(whole.status, 405, whole.body);
+  assert.equal(whole.read, false);
   assert.equal((await ask('/market/dev/api/items/1', await streaming())).status, 200);
   assert.equal(reached.length, 1);
   assert.equal(reached[0]!.body, body);
@@ -200,6 +210,10 @@ test("a narrowed session's methods hold an override too; a workload's is read fr
   const listed = proxy({ methods: ['POST'] });
   const refused = await listed.ask('/market/dev/api/items/1', { method: 'POST', as: 'workload', headers: { 'x-http-method-override': 'DELETE' } });
   assert.equal(refused.status, 405, refused.body);
+  // One in its query, before its body is read too: its headers wait for the proof, which signs the body.
+  const queried = await listed.ask('/market/dev/api/items/1?_HttpMethod=DELETE', { method: 'POST', as: 'workload', headers: JSON_TYPE, body: '{}' });
+  assert.equal(queried.status, 405, queried.body);
+  assert.equal(queried.read, false);
   assert.deepEqual(listed.opened, []);
   // An override header its proof does not sign never gets there: nothing to refuse.
   const unsigned = proxy({ methods: ['POST'] }, null, ['content-type']);

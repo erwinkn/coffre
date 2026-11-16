@@ -979,12 +979,13 @@ function outbound(request: Request, signed: readonly string[] | null): Headers {
 
 /**
  * The headers an upstream may take a request's method from instead of its own, lowercase: Google's and ASP.NET's
- * `X-HTTP-Method-Override`, OData's `X-HTTP-Method`, and `X-Method-Override`; with any character but a letter or a
- * digit between the words, as a CGI-style server reads a name, each the `_` of an `HTTP_` variable. Rack and PHP read
- * `X_HTTP_METHOD_OVERRIDE`, and PHP `X.HTTP.Method.Override` too, as `HTTP_X_HTTP_METHOD_OVERRIDE`, which Symfony
- * takes for the dashed one. One test, allocating nothing: every header of every request passes it.
+ * `X-HTTP-Method-Override`, OData's `X-HTTP-Method`, `X-Method-Override`, and Salesforce Commerce Cloud's
+ * `X-DW-HTTP-Method-Override`; with any character but a letter or a digit between the words, as a CGI-style server
+ * reads a name, each the `_` of an `HTTP_` variable. Rack and PHP read `X_HTTP_METHOD_OVERRIDE`, and PHP
+ * `X.HTTP.Method.Override` too, as `HTTP_X_HTTP_METHOD_OVERRIDE`, which Symfony takes for the dashed one. One test,
+ * allocating nothing: every header of every request passes it.
  */
-const OVERRIDE_HEADER = /^x[^a-z0-9](?:http[^a-z0-9]method(?:[^a-z0-9]override)?|method[^a-z0-9]override)$/;
+const OVERRIDE_HEADER = /^x[^a-z0-9](?:(?:dw[^a-z0-9])?http[^a-z0-9]method(?:[^a-z0-9]override)?|method[^a-z0-9]override)$/;
 
 /** `text` without the characters up to a space at either end, as Java's `trim`; a loop, linear however long the run. */
 function trimmed(text: string): string {
@@ -997,7 +998,8 @@ function trimmed(text: string): string {
 
 /**
  * Whether a query parameter's name, decoded, is `_method` to some framework that takes a request's method from it
- * (Rails, Laravel and Symfony, Spring's `HiddenHttpMethodFilter`, gorilla's, Express's `method-override`), or an
+ * (Rails, Laravel and Symfony, Spring's `HiddenHttpMethodFilter`, gorilla's, Express's `method-override`), Salesforce's
+ * `_HttpMethod`, or an
  * override header's, which ServiceStack and ASP.NET MVC read from a query too: as PHP reads a name, up to a NUL or a
  * `[` (`_method[]`), leading spaces dropped, `.` and spaces as `_` (`.method`), or as Tomcat does, trimmed of every
  * character up to a space at both ends, as Java's `trim` is (`_method `); in any ASCII case.
@@ -1005,7 +1007,7 @@ function trimmed(text: string): string {
 function namesMethod(name: string): boolean {
   return [name, trimmed(name)].some((each) => {
     const read = each.split(/[\0[]/, 1)[0]!.replace(/^ +/, '').replace(/[. ]/g, '_').replace(/[A-Z]/g, (char) => char.toLowerCase());
-    return read === '_method' || OVERRIDE_HEADER.test(read);
+    return read === '_method' || read === '_httpmethod' || OVERRIDE_HEADER.test(read);
   });
 }
 
@@ -1127,6 +1129,10 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   if (sessionToken(request) === null) return null;
   const aimed = aim(request, credential, rest, search);
   if (aimed instanceof Response) return aimed;
+  // A method override in the query the credential's methods do not take, before the body is read; its headers' wait for
+  // the proof, which says which of them go on.
+  const queried = overridden(credential, aimed, new Headers());
+  if (queried !== null) return queried;
   const content = await carried(request, credential);
   if (content instanceof Response) return content;
   // The body's line in `req`, and the payload hash a sigv4 credential signs again: one value, so what goes out is what
