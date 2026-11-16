@@ -280,6 +280,41 @@ test('a handle on a personal token reaches nothing past it, and ends when it doe
   assert.deepEqual(await checked(), []);
 });
 
+test('a handle stands while the session or personal token it was made on does: that one revoked or expired, its handles are refused, and every other stands', async () => {
+  // Cy's second personal token, an hour's, made on her session; then a handle on each token and one on the session, each asked for twelve hours.
+  const second = await vault.change(personal('cy-cli', { 'market/dev': 'viewer' }));
+  assert.ok(!('refused' in second), JSON.stringify(second));
+  const handles = { 'on-pat': 'cy-pat', 'on-second': 'minted', 'on-cli': 'cy-cli' };
+  for (const [as, on] of Object.entries(handles)) {
+    const done = await vault.change({ ...handle(on, ['market/dev']), credential: { ...made(12 * 60, 'run'), token: tokenOf(as).toString('hex') } });
+    assert.ok(!('refused' in done), JSON.stringify(done));
+  }
+  const makers = await rowsOf<{ label: string; ancestors: string | null }>(world.owner, sql`SELECT m.label, h.ancestors FROM credentials h JOIN credentials m ON h.ancestors = '["' || m.id || '"]' WHERE h.kind = 'handle' ORDER BY m.label`);
+  assert.deepEqual(makers.map((row) => row.label), ['cy-cli', 'cy-pat', 'deploy']);
+  const all = async () => {
+    world.memory.reads.clear();
+    return Object.fromEntries(await Promise.all(Object.keys(handles).map(async (as) => [as, await uses('market/dev', as)])));
+  };
+  assert.deepEqual(await all(), { 'on-pat': 'postgres://dev', 'on-second': 'postgres://dev', 'on-cli': 'postgres://dev' });
+
+  // Cy revokes her first token: its handle goes with it, and nothing else.
+  const revoked = await vault.change({ ...shown('cy-cli'), op: 'credential.end', credential: ids['cy-pat']!, of: { member: cy } } as Asked<'credential.end'>);
+  assert.ok(!('refused' in revoked), JSON.stringify(revoked));
+  assert.deepEqual(await all(), { 'on-pat': 'unauthenticated', 'on-second': 'postgres://dev', 'on-cli': 'postgres://dev' });
+
+  // An hour on, the second token has expired, and its handle with it; the session's stands.
+  world.tick(3_600_000 - 1);
+  assert.deepEqual(await all(), { 'on-pat': 'unauthenticated', 'on-second': 'postgres://dev', 'on-cli': 'postgres://dev' });
+  world.tick(1);
+  assert.deepEqual(await all(), { 'on-pat': 'unauthenticated', 'on-second': 'unauthenticated', 'on-cli': 'postgres://dev' });
+
+  // Cy signs out: her session's handle ends with it.
+  const out = await vault.change({ ...shown('cy-cli'), op: 'credential.end', credential: null, of: null } as Asked<'credential.end'>);
+  assert.ok(!('refused' in out), JSON.stringify(out));
+  assert.deepEqual(await all(), { 'on-pat': 'unauthenticated', 'on-second': 'unauthenticated', 'on-cli': 'unauthenticated' });
+  assert.deepEqual(await checked(), []);
+});
+
 test("a service's token, asked nothing: every grant it holds, sealed explicitly, each place reading sensitive values only if its maker is an Owner of its project", async () => {
   const done = await vault.change(serviceToken('root-cli', ci, null, 366 * 24 * 60));
   assert.ok(!('refused' in done), JSON.stringify(done));

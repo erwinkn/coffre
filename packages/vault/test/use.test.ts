@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { after, beforeEach, test } from 'node:test';
 
@@ -1074,6 +1075,49 @@ test('a handle reaches what its scope does; an upstream credential frozen in an 
   assert.deepEqual(await got(ask('ada', 'market/staging', ['DATABASE_URL'], { purpose: 'use', upstream: { credential: 'stripe' } })), { DATABASE_URL: 'postgres://staging' });
   // Nobody is told a credential is frozen in a place they hold nothing in.
   assert.equal(await got(ask('dee', 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: { credential: 'stripe' } })), 'no_access');
+});
+
+test('a handle stands while the session or personal token it was made on does, and ends when that one does', async () => {
+  const scope = scopeOf({ projectId: w.market.id, environmentId: w.prod.id, role: 'viewer' });
+  const [account, unlinked] = [identity(ada), identity(ada, { revokedAt: new Date(0), revokedBy: ada })];
+  const makers = {
+    cli: credential('m-cli', ada),
+    browser: credential('m-browser', ada, { kind: 'browser', identityId: account.id }),
+    personal: credential('m-personal', ada, { kind: 'personal', scope, expiresAt: new Date(vault.now() + 60_000) }),
+    unlinked: credential('m-unlinked', ada, { kind: 'browser', identityId: unlinked.id }),
+    revoked: credential('m-revoked', ada, { revokedAt: new Date(0), revokedBy: ada }),
+    frozen: credential('m-frozen', ada, { frozenAt: new Date(0) }),
+    expired: credential('m-expired', ada, { expiresAt: new Date(vault.now()) }),
+    others: credential('m-others', bo),
+    handle: credential('m-handle', ada, { kind: 'handle', scope }),
+  };
+  const on = (label: string, ancestors: string | null) => credential(label, ada, { kind: 'handle', scope, ancestors });
+  await write(
+    vault,
+    ...rows('identities', account, unlinked),
+    ...rows('credentials', ...Object.values(makers), ...Object.entries(makers).map(([name, maker]) => on(`on-${name}`, JSON.stringify([maker.id]))),
+      on('on-nothing', JSON.stringify([randomUUID()])), on('on-two', JSON.stringify([makers.cli.id, makers.browser.id])), on('on-junk', 'not json'), on('on-none', null)),
+  );
+  await settled();
+  const uses = (label: string) => got(ask(label, 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: { credential: 'stripe' } }));
+  for (const label of ['on-cli', 'on-browser', 'on-personal', 'on-none']) assert.deepEqual(await uses(label), { DATABASE_URL: 'postgres://prod' }, label);
+  for (const label of ['on-unlinked', 'on-revoked', 'on-frozen', 'on-expired', 'on-others', 'on-handle', 'on-nothing', 'on-two', 'on-junk']) assert.equal(await uses(label), 'unauthenticated', label);
+  // A refused use writes nothing: no last use moved on, on the handle or its maker.
+  const moved = await rowsOf<{ label: string }>(vault.owner, sql`SELECT label FROM credentials WHERE last_used_at IS NOT NULL ORDER BY label`);
+  assert.deepEqual(moved.map((row) => row.label), ['on-browser', 'on-cli', 'on-none', 'on-personal']);
+
+  // It says it ends when its personal token does, and is refused from then.
+  const answered = await use(vault, ask('on-personal', 'market/prod', ['DATABASE_URL'], { purpose: 'use', upstream: { credential: 'stripe' } }));
+  assert.ok(!('refused' in answered));
+  assert.equal(answered.expiresAt, makers.personal.expiresAt.toISOString());
+  vault.tick(60_000);
+  assert.equal(await uses('on-personal'), 'unauthenticated');
+  assert.deepEqual(await uses('on-cli'), { DATABASE_URL: 'postgres://prod' });
+  // The session revoked, or its account unlinked, ends the handle made on it.
+  await amend(vault, 'credentials', sql`id = ${makers.cli.id}`, { revokedAt: new Date(vault.now()), revokedBy: ada });
+  await amend(vault, 'identities', sql`id = ${account.id}`, { revokedAt: new Date(vault.now()), revokedBy: ada });
+  vault.tick(2000);
+  for (const label of ['on-cli', 'on-browser']) assert.equal(await uses(label), 'unauthenticated', label);
 });
 
 test("a peek says what `coffre run` generates by: each key's version id, its recipe, whether it is the caller's own, and whether the read found their personal config", async () => {

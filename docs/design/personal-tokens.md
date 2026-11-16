@@ -98,6 +98,11 @@ An hour suits a script or an agent's task; a week is the most, so a token
 never quietly becomes a standing credential. Whoever needs one longer
 makes another, as a person. Service tokens keep their days (1 to 366).
 
+A handle made on a token (`coffre run` signed in with one) ends no later
+than it, and stands only while it does: the token revoked or expired, each
+use through its handles is refused (401), with no write to them. The same
+holds of a handle made on a session, which ends with it.
+
 ## Label, and the log
 
 A label is required, and kept on the row and in the `token.create` entry

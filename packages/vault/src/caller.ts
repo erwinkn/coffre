@@ -28,8 +28,9 @@ export type CallerRows = {
   environments: readonly Row<typeof environments>[];
   /** The trust binding that issued the credential, for one a binding issued. */
   binding: readonly Row<typeof bindings>[];
-  /** A workload's session's: the sessions it was narrowed from, and the instance's policy, which says whether every workload is frozen. */
+  /** What the credential stands under: a narrowed session's sessions above it, an MCP token's connection, a handle's maker. */
   ancestors: readonly Row<typeof credentials>[];
+  /** A workload's session's: the instance's policy, which says whether every workload is frozen. */
   policy: readonly Row<typeof policy>[];
 };
 
@@ -206,10 +207,19 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
       credentialScope = null;
       break;
     case 'personal':
-    case 'handle':
+    case 'handle': {
       if (issued) return null;
+      // A handle stands while the session or personal token it was made on does: one ended, expired, frozen, of an account
+      // unlinked or of a member removed since ends every handle made on it, with no write of theirs. One an earlier release made names none, and stands on its own row.
+      const above = credential.kind === 'handle' && credential.ancestors !== null ? parsed(credential.ancestors) : [];
+      if (!Array.isArray(above) || above.length > 1) return null;
+      const maker = above.length === 0 ? null : rows.ancestors.find((row) => row.id === above[0]);
+      if (maker !== null && (maker === undefined || !['browser', 'cli', 'personal'].includes(maker.kind) || maker.principal !== credential.principal || maker.generation !== credential.generation
+        || maker.revokedAt !== null || maker.frozenAt !== null || endOf(maker) <= at
+        || (maker.identityId === null ? maker.kind === 'browser' : !rows.identity.some((identity) => identity.id === maker.identityId && identity.revokedAt === null)))) return null;
       credentialScope = capOf(credential.scope);
       break;
+    }
     case 'service':
       // A token a CI run exchanged its ID token for reaches what its binding does, a binding with no policy: one with a policy makes sessions.
       if (workloads?.useOnly === true || (issued && (binding === undefined || binding.policy !== null))) return null;

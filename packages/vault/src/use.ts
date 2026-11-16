@@ -229,18 +229,19 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
       chain AS (SELECT * FROM base UNION SELECT * FROM mine UNION SELECT e.* FROM environments e JOIN chain ON e.id = chain.parent_id),
       -- By the project too: the index on secrets leads with it, and an environment's parents are its project's.
       keyed AS (SELECT s.* FROM secrets s WHERE s.project_id = (SELECT id FROM p) AND s.environment_id IN (SELECT id FROM chain) AND ${keyed(sql`s.key`)}),
-      held AS (SELECT * FROM keyed UNION SELECT s.* FROM secrets s WHERE s.id IN (SELECT source_id FROM keyed))
+      held AS (SELECT * FROM keyed UNION SELECT s.* FROM secrets s WHERE s.id IN (SELECT source_id FROM keyed)),
+      -- A narrowed session's sessions above it, an MCP token's connection and a handle's maker: an array the statement works out once, so each id is one lookup by the key.
+      -- Read before its MAC is checked, so only what is shaped like ids is cast: a row someone else wrote is no row, not an error.
+      lineage AS (SELECT t.* FROM credentials t WHERE t.id = ANY(ARRAY(SELECT above.id::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind IN ('workload', 'mcp', 'handle') AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id))))
     SELECT part, row, clock_timestamp() AS read_at FROM (
     SELECT 'credential' AS part, to_jsonb(c) AS row FROM c
     UNION ALL SELECT 'principal', to_jsonb(t) FROM principals t, c WHERE t.id = c.principal
-    UNION ALL SELECT 'identity', to_jsonb(t) FROM identities t, c WHERE t.id = c.identity_id
+    UNION ALL SELECT 'identity', to_jsonb(t) FROM identities t WHERE t.id IN (SELECT identity_id FROM c UNION ALL SELECT identity_id FROM lineage)
     UNION ALL SELECT 'grant', to_jsonb(t) FROM grants t, c WHERE t.principal = c.principal
     UNION ALL SELECT 'role', to_jsonb(t) FROM roles t
-    -- What a trust binding issued names it, and a narrowed session the sessions above it: each by its id, and only for a row that has them.
-    -- Read before its MAC is checked, so only what is shaped like ids is cast: a row someone else wrote is no row, not an error.
+    -- What a trust binding issued names it, by its id, and only for a row that has one: cast only when shaped like one, as above.
     UNION ALL SELECT 'binding', to_jsonb(t) FROM bindings t, c WHERE t.id = CASE WHEN c.created_by ~ '^binding:${ID}$' THEN substr(c.created_by, 9)::uuid END
-    -- An array the statement works out once, so each id is one lookup by the key.
-    UNION ALL SELECT 'ancestor', to_jsonb(t) FROM credentials t WHERE t.id = ANY(ARRAY(SELECT above.id::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind IN ('workload', 'mcp') AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id)))
+    UNION ALL SELECT 'ancestor', to_jsonb(t) FROM lineage t
     UNION ALL SELECT 'policy', to_jsonb(t) FROM policy t, c WHERE c.kind = 'workload'
     UNION ALL SELECT 'project', to_jsonb(t) FROM projects t WHERE t.id IN (SELECT project_id FROM held UNION ALL SELECT id FROM p)
     UNION ALL SELECT 'environment', to_jsonb(t) FROM environments t WHERE t.id IN (SELECT environment_id FROM held UNION ALL SELECT id FROM chain)
