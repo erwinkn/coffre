@@ -9,7 +9,7 @@ import test from 'node:test';
 import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 
-import { githubEnvironment, githubMasks } from '../src/github-env.ts';
+import { githubEnvironment, githubMasks, RUNS_CODE, runsCode } from '../src/github-env.ts';
 import { choose, emptyStore, instanceOrigin, localFor, parseRepoFile, pinFor, type Local, type Pins } from '../src/instance.ts';
 import { awkwardValue, keyName, value } from '../../../scripts/properties/domain.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
@@ -28,9 +28,13 @@ const githubValue = gs.oneOf(
   awkwardValue,
   gs.arrays(gs.oneOf(gs.sampledFrom(ODD), gs.text({ maxSize: 3 }), keyName.map((key) => `\n${key}<<EOF\n`)), { maxSize: 8 }).map((parts) => parts.join('').replaceAll('\0', '')),
 ).map(wellFormedText);
-/** Entries with distinct keys, none the runner refuses to set (NODE_OPTIONS, in any case). */
+/**
+ * Entries with distinct keys, none that githubEnvironment refuses (`runsCode`: NODE_OPTIONS, which the runner refuses
+ * itself, and the rest of `RUNS_CODE`, in any case): short names are drawn often, and AR, CC and LD are build tools'.
+ * The refusals are a property of their own, below.
+ */
 const githubEntries = gs.arrays(gs.tuples(keyName, githubValue), { maxSize: 6 })
-  .map((drawn) => [...new Map(drawn.filter(([key]) => key.toUpperCase() !== 'NODE_OPTIONS')).entries()]);
+  .map((drawn) => [...new Map(drawn.filter(([key]) => !runsCode(key))).entries()]);
 
 /**
  * `$GITHUB_ENV` as GitHub's runner reads it after the step, transcribed from
@@ -109,6 +113,21 @@ test(`GitHub's runner refuses NODE_OPTIONS from $GITHUB_ENV, and githubEnvironme
   const at = tc.draw(gs.integers({ minValue: 0, maxValue: entries.length }));
   const all = [...entries.slice(0, at), [name, tc.draw(githubValue)] as [string, string], ...entries.slice(at)];
   assert.throws(() => githubEnvironment(all), /cannot be set through GITHUB_ENV/);
+}, settings));
+
+/** A name `RUNS_CODE` lists, a family's `*` filled with any run of letters, digits and underscores, in any case. */
+const runsCodeName = gs.composite((tc) => {
+  const parts = tc.draw(gs.sampledFrom(RUNS_CODE)).split('*');
+  const name = parts.map((part, i) => (i === 0 ? part : `${tc.draw(gs.fromRegex('[A-Za-z0-9_]{0,8}', { fullmatch: true }))}${part}`)).join('');
+  return [...name].map((character) => (tc.draw(gs.booleans()) ? character.toLowerCase() : character.toUpperCase())).join('');
+});
+
+test(`githubEnvironment refuses every name RUNS_CODE lists, in any case and wherever it comes, before writing anything, seed ${settings.seed}`, () => hegel.test((tc) => {
+  const entries = tc.draw(githubEntries);
+  const name = tc.draw(runsCodeName);
+  const at = tc.draw(gs.integers({ minValue: 0, maxValue: entries.length }));
+  const all = [...entries.slice(0, at), [name, tc.draw(githubValue)] as [string, string], ...entries.slice(at)];
+  assert.throws(() => githubEnvironment(all), (error: Error) => error.message === `${name} cannot be set through GITHUB_ENV: a later step's shell, loader or runtime would take code to run from it`);
 }, settings));
 
 /** .NET's char.IsWhiteSpace: Unicode's space separators, line and paragraph separators, and \t to \r, NEL and NBSP. */
