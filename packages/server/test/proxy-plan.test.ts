@@ -168,7 +168,7 @@ async function planOf(path: string, handle: string): Promise<{ plan: Plan; calls
   }
 }
 
-/** Names each statement and transaction the vault runs on its own connection, until put back: a use's read, its write (the log entry and the exposures, in one transaction), or the credential's last use. */
+/** Names each statement and transaction the vault runs on its own connection, until put back: a use's read, its write (the log entry, the exposures and, when due, the credential's last use, in one transaction), or the last use alone. */
 function counting(vault: TestVault, count: (what: string) => void): () => void {
   const db = vault.db as unknown as Record<'execute' | 'transaction', (...args: unknown[]) => unknown>;
   const was = { execute: db.execute, transaction: db.transaction };
@@ -262,8 +262,8 @@ test('a plan with no JWT placeholder is two calls to the vault and no statement;
     world.memory.seconds = seconds;
     const { plan, calls, statements, vault } = await planOf('market/staging', handleOf(who, staging));
     assert.deepEqual(plan, { environment: 'market/staging', env: { TWILIO_SID: SID, TWILIO_TOKEN: handleOf(who, staging), WEBHOOK_SECRET: 'whsec_staging' }, credentials: { twilio: `${PUBLIC_URL}/use/market/staging/twilio` }, tunnels: {}, left: [] });
-    // The peek's read; the use's own, since it names its keys and no ask the peek's rows answer; its one write; and the handle's last use, once a minute.
-    assert.deepEqual([calls, statements, vault], [['peek', 'use'], 0, ['read', 'read', 'write', 'last use']], `memory ${seconds}s`);
+    // The peek's read; the use's own, since it names its keys and no ask the peek's rows answer; and its one write, which moves the handle's last use on too.
+    assert.deepEqual([calls, statements, vault], [['peek', 'use'], 0, ['read', 'read', 'write']], `memory ${seconds}s`);
   }
   // Again within the minute: both reads again, the memory on or off (a plan reads now, `fresh`: it follows the writes
   // `coffre run` just made, test/generated-values.test.ts), and no write.
@@ -354,7 +354,7 @@ test("a handle reads a protected prod as its person does: a Maintainer's is hand
   assert.equal(ada.response.status, 200, await ada.response.clone().text());
   assert.deepEqual(ada.plan.env, { TWILIO_SID: SID, TWILIO_TOKEN: handleOf(ADA, prod) }, 'the placeholders of what she uses, and its plain value, as 0.14.7 gave it');
   assert.deepEqual(ada.plan.left, ['WEBHOOK_SECRET']);
-  assert.deepEqual([ada.calls, ada.statements, ada.vault], [['peek', 'use'], 0, ['read', 'read', 'write', 'last use']]);
+  assert.deepEqual([ada.calls, ada.statements, ada.vault], [['peek', 'use'], 0, ['read', 'read', 'write']]);
   assert.deepEqual((await logged()).at(-1), { purpose: 'expose', keys: ['TWILIO_SID'] }, 'the secret she only uses was never opened');
   // Her own read of prod is refused as it was: a reveal, a plain value's too, and a run's.
   const cli = generateToken('cli');

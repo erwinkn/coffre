@@ -823,6 +823,46 @@ test('a credential\'s last use moves on every five minutes, under no MAC, and ta
   assert.deepEqual(await used(), [{ at: first + 5 * 60_000 }]);
 });
 
+test("a use logged moves its credential's last use on in its write, a round trip less; one the cap refuses moves nothing; one with nothing to log, in a statement of its own", async () => {
+  // Each statement or transaction asked of the database, a round trip each.
+  let statements = 0;
+  const db = new Proxy(vault.db, {
+    get(target, name, receiver) {
+      const member = Reflect.get(target, name, receiver) as unknown;
+      if ((name !== 'execute' && name !== 'transaction') || typeof member !== 'function') return member;
+      return (...args: unknown[]) => ((statements += 1), (member as (...args: unknown[]) => unknown).apply(target, args));
+    },
+  });
+  const counted = { ...vault, db };
+  const counting = async (asked: Ask) => {
+    statements = 0;
+    const result = await use(counted, asked);
+    return ['refused' in result ? result.refused : given(result.values), statements];
+  };
+  const used = () => rowsOf<{ label: string; at: number }>(vault.owner, sql`SELECT label, (extract(epoch FROM last_used_at) * 1000)::float8 AS at FROM credentials WHERE last_used_at IS NOT NULL ORDER BY label`);
+  const first = vault.now();
+  // Its read, then its write: the exposure, the entry and the last use.
+  assert.deepEqual(await counting(ask('ci', 'market/prod', ['FLAG'])), [{ FLAG: 'on' }, 2]);
+  assert.deepEqual([await used(), (await logged()).length], [[{ label: 'ci', at: first }], 1]);
+  // Past the cap, nothing is written: no entry, and no last use of the other credential of the same account.
+  counted.cap = { count: 1, windowMs: 60_000 };
+  assert.deepEqual(await counting(ask('ci-sensitive', 'market/prod', ['DATABASE_URL'])), ['bulk_limit', 2]);
+  assert.deepEqual([await used(), (await logged()).length], [[{ label: 'ci', at: first }], 1]);
+  // Logged within the minute, its last use due all the same: the read, then the last use alone.
+  vault.tick(3000);
+  vault.memory.touched.clear();
+  await vault.owner.execute(sql`UPDATE credentials SET last_used_at = NULL`);
+  assert.deepEqual(await counting(ask('ci', 'market/prod', ['FLAG'])), [{ FLAG: 'on' }, 2]);
+  assert.deepEqual([await used(), (await logged()).length], [[{ label: 'ci', at: first + 3000 }], 1]);
+  // Neither due: the read alone.
+  vault.tick(3000);
+  assert.deepEqual(await counting(ask('ci', 'market/prod', ['FLAG'])), [{ FLAG: 'on' }, 1]);
+  // Once the cap has room, the other credential's use moves its last use on, which the refusal did not.
+  counted.cap = { count: 1000, windowMs: 60_000 };
+  assert.deepEqual(await counting(ask('ci-sensitive', 'market/prod', ['DATABASE_URL'])), [{ DATABASE_URL: 'postgres://prod' }, 2]);
+  assert.deepEqual((await used()).map((row) => row.label), ['ci', 'ci-sensitive']);
+});
+
 /** Whatever was remembered is forgotten, and nothing the setup wrote is counted. */
 async function settled(): Promise<void> {
   vault.memory = memoryOf(2);

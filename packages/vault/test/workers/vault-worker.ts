@@ -43,13 +43,14 @@ console.log = (...args: unknown[]) => {
   log(...args);
 };
 
-type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY_ID: string; VAULT_KEY: string; SIGNING_KEY?: string; SIGNER_NAME?: string; VAULT: Contract; SIGNER: SignerNamespace };
+type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY_ID: string; VAULT_KEY: string; SIGNING_KEY?: string; SIGNER_NAME?: string; PING?: string; VAULT: Contract; SIGNER: SignerNamespace };
 
 export const Vault = vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE),
   kek: { id: env.VAULT_KEY_ID, key: env.VAULT_KEY },
   ...(env.SIGNING_KEY === undefined ? {} : { signingKey: env.SIGNING_KEY }),
   ...(env.SIGNER_NAME === undefined ? {} : { signerName: env.SIGNER_NAME }),
+  ping: env.PING === 'true',
   owners: ['root@acme.example'],
   workloads: null,
 }));

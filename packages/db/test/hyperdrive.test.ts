@@ -125,6 +125,21 @@ test('an opening that fails is the opening\'s time, not a statement\'s, the firs
   assert.ok(timing !== null && timing.statements.length === 2 && timing.connect >= 300, JSON.stringify(timing));
 });
 
+test('`end`, asked to ping, times a bare `select 1` on the connection the turns left, apart from them; none on one they lost, nor for a call that asked nothing', async () => {
+  // Through a relay that holds the startup's answer 300 ms: a ping that opened a connection again would take as long.
+  const pool = new HyperdrivePool(await relay(() => ({ ms: 300 })));
+  await createDatabase(pool).execute(sql`select pg_sleep(0.1)`);
+  const timing = await pool.end({ ping: true });
+  assert.ok(timing !== null && Object.keys(timing).join() === 'connect,statements,total,ping', JSON.stringify(timing));
+  assert.ok(timing.statements.length === 1 && Number.isInteger(timing.ping) && timing.ping! >= 0 && timing.ping! < 100, JSON.stringify(timing));
+  assert.equal(await new HyperdrivePool(DATABASE).end({ ping: true }), null);
+
+  const lost = new HyperdrivePool(await relay((n) => (n === 0 ? { ms: 0 } : { ms: 300, fails: true })));
+  await assert.rejects(createDatabase(lost).execute(sql`select pg_terminate_backend(pg_backend_pid())`));
+  const gone = await lost.end({ ping: true });
+  assert.ok(gone !== null && !('ping' in gone), JSON.stringify(gone));
+});
+
 test('reads asked together each take a turn', async () => {
   const proxy = await counted();
   const pool = new HyperdrivePool(proxy.url);

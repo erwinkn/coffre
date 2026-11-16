@@ -47,6 +47,14 @@ export type WorkersVaultConfig = VaultConfig & {
    * the old object is left (docs/restore.md).
    */
   signerName?: string;
+  /**
+   * Each call that reached the database times a bare `select 1` on its
+   * connection too, once it has answered: `ping` in its line, `coffre:
+   * database {…}`, a round trip with nothing to plan, which tells the
+   * network from the statements. A round trip more for the database, none
+   * for the caller. Off unless true.
+   */
+  ping?: boolean;
 };
 
 /** The signer's object, as the configuration names it. */
@@ -65,7 +73,7 @@ let configure: ((env: never) => WorkersVaultConfig) | null = null;
  * and that the signer said the database is adopted, once it has.
  */
 const ready = new WeakMap<object, Ready>();
-type Ready = { database: PostgresDatabase; prepared: PreparedVault; signer: string; adopted: boolean };
+type Ready = { database: PostgresDatabase; prepared: PreparedVault; signer: string; ping: boolean; adopted: boolean };
 
 /**
  * How long a call waits for the signer to adopt the database. An empty one
@@ -92,7 +100,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
    */
   async #call<T>(run: (vault: Vault) => Promise<T>): Promise<T | Refused> {
     const entry = this.#ready();
-    const { prepared, database } = entry;
+    const { prepared, database, ping } = entry;
     const { SIGNER: namespace } = this.env as { SIGNER?: SignerNamespace };
     if (namespace === undefined) throw new Error('the vault Worker binds its signer: a durable_objects binding SIGNER to CoffreSigner, which it exports (docs/design/0.16.md, "The signer")');
     if (!entry.adopted) {
@@ -120,7 +128,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
       // After the answer, one line of what the call waited on the database for, if it reached it: durations alone
       // (`Timing`), which a tail reads. A deployment that wants fewer samples them, `observability.head_sampling_rate`.
       this.ctx.waitUntil(
-        pool.end().then((timing) => {
+        pool.end({ ping }).then((timing) => {
           if (timing !== null) console.log(`coffre: database ${JSON.stringify(timing)}`);
         }),
       );
@@ -151,7 +159,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     if (entry === undefined) {
       if (configure === null) throw new Error('the vault Worker must export default vault(…)');
       const config = configure(env as never);
-      entry = { database: config.database, prepared: prepareVault(resolveVaultConfig(config)), signer: signerNameOf(config), adopted: false };
+      entry = { database: config.database, prepared: prepareVault(resolveVaultConfig(config)), signer: signerNameOf(config), ping: config.ping === true, adopted: false };
       ready.set(env, entry);
     }
     return entry;
