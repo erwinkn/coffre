@@ -608,6 +608,52 @@ request sent on:
 coffre's own refusals carry `coffre-proxy: refused`, so the app can tell
 them from the upstream's.
 
+**A method override where `methods` are limited.** Many upstreams act on a
+POST that says `X-HTTP-Method-Override: DELETE`, or `?_method=DELETE`, as
+on a DELETE. So where a credential's `methods` are set, a request that
+carries a method override is a 405, whatever method it names: the
+`X-HTTP-Method-Override` (Google, ASP.NET, Express's `method-override`),
+`X-HTTP-Method` (OData), `X-Method-Override` or
+`X-DW-HTTP-Method-Override` (Salesforce Commerce Cloud) header; or a
+query key named as one of those headers (ServiceStack, ASP.NET MVC), or
+`_method` (Rails, Laravel, Symfony, Spring, Express, Hono), `_HttpMethod`
+(Salesforce) or `$httpMethod` (Google). Those last three are query keys
+alone: no framework reads them as headers. A name is read trimmed, in any
+case, with `_` and `.` as `-` (Rack and PHP's `X_HTTP_METHOD_OVERRIDE`,
+PHP's `.method`); a query key decoded once, as a form's, its pairs split
+at `&` and at `;` (Rack before 3.0). The value is never read: an override
+naming a method the list takes, or an empty one, is refused too, so there
+is no reading of it to get wrong, and an app that sends one through a
+method-limited credential sends its method as the request's own instead.
+The refusal comes before anything goes upstream: through a handle, before
+any value opens, and before its body is read unless the handle is in it
+(a stable URL's `form` or `json` field, which is read first to find the
+handle); a workload's, one in its query before its body is read, one in a
+header after its signed body is checked (the proof says which headers go
+on: one it leaves unsigned is dropped, and is no override), and either
+before its values open. A narrowed session's `methods` refuse one the same
+way, a 403 `narrowed`, where they hold the request's own method: on the
+vault's answer about the session, so after its use and before anything
+goes upstream. A presigned URL's `query` is held the same way when it is
+made. A credential, or a session, with no `methods` looks for none.
+
+**What is not read** (D179 for the body). A `_method` field of a POST's
+form or multipart body, which Rails, Laravel, Symfony and Spring honour
+(Laravel reads one in JSON too), goes on as it came: reading bodies the
+way every framework parses them is a contest coffre cannot win (multipart
+framing, header folding, encoded names, compression). Nor are the readings
+of a query key that need a parser of their own: ASP.NET's `%uXXXX`
+(`%u0058-HTTP-Method-Override`), PHP's name cut at `[` or a NUL
+(`_method[]`), or a key encoded twice. Nor is an override under a name the
+upstream chose (Express's `methodOverride('X-Do')`, Spring's
+`methodParam`, Hono's options), nor an `X-Method` header, which Apache
+Juneau reads once a deployment turns its override headers on and which an
+app may send for its own ends, nor a bare `method` parameter, which
+Restlet's tunnel reads by default but RPC-style APIs name a call with
+(`?method=flickr.photos.search`). Against an upstream that reads any of
+these, a method limit is not a boundary: hold its credential to `paths`,
+or to a key whose own scope holds what it may do.
+
 **The capability it needs.** The plugin mechanism gives plugins the API
 as a caller, and a read there hands values back, which is exactly what a
 person may no longer get. So plugins gain one capability, `use(handle,
@@ -718,7 +764,11 @@ credential's upstream with the real key pair, for at most an hour and never
 past the handle, and answers `{ url, expiresAt }`. The URL is the
 upstream's own (MinIO's, S3's), for a browser to use until it expires. It
 holds the access key's id and a signature, never the secret or the handle:
-a path or query that carries the handle is refused. S3's URLs leave the
+a path or query that carries the handle is refused. Its path is held to
+`methods` and `paths` and to the rule a request's is (section 4,
+"Where"): a segment a server reads as a dot segment, `..;x`, `..%20`,
+`..%00`, or one encoded twice, `%252e%252e`, is a 400, on the path asked
+and again on the URL made of it. S3's URLs leave the
 payload unsigned, as its own presigner does; any other service's sign the
 empty body a GET has.
 Each URL is one use in the log, naming the path and its lifetime, never
