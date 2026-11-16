@@ -646,7 +646,9 @@ of a query key that need a parser of their own: ASP.NET's `%uXXXX`
 (`%u0058-HTTP-Method-Override`), PHP's name cut at `[` or a NUL
 (`_method[]`), or a key encoded twice. Nor is an override under a name the
 upstream chose (Express's `methodOverride('X-Do')`, Spring's
-`methodParam`, Hono's options), nor a bare `method` parameter, which
+`methodParam`, Hono's options), nor an `X-Method` header, which Apache
+Juneau reads once a deployment turns its override headers on and which an
+app may send for its own ends, nor a bare `method` parameter, which
 Restlet's tunnel reads by default but RPC-style APIs name a call with
 (`?method=flickr.photos.search`). Against an upstream that reads any of
 these, a method limit is not a boundary: hold its credential to `paths`,
