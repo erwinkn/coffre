@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.4 (2026-11-16)
+
 - **A credential's methods refuse a method override.** Many upstreams act
   on a POST that says `X-HTTP-Method-Override: DELETE`, or
   `?_method=DELETE`, as on a DELETE. Where a credential's `methods` are
