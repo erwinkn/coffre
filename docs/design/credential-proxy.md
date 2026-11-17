@@ -89,7 +89,7 @@ decide what a read hands back:
 | Who | A `secret` key | A `sensitive` key |
 |---|---|---|
 | A person, on any credential of theirs: a browser session, a `coffre login`, a personal token, an MCP connection, a handle | The value, where their role reads it | **A placeholder.** The value is opened only for coffre to use for them: the vault refuses a read that would hand it back (`sensitive`), and allows the proxy's `use` and a fork's `copy` |
-| A service account: a service token, a CI run's or a cluster's ID token | The value | The value, on a token or binding an Owner of its project issued: CI and production read their environment once, at full speed. On anyone else's, refused (`not_owner_issued`, R32) |
+| A service account: a service token, a CI run's or a cluster's ID token | The value | The value, on a token or binding an Owner of the key's project issued (a reference's own, not its source's): CI and production read their environment once, at full speed. On anyone else's, refused (`not_owner_issued`, R32) |
 
 The rule is in the vault, the one place every read goes through, not in
 the CLI or the API's routes. `coffre get`, the UI's reveal, `POST
@@ -379,14 +379,15 @@ sensitive values there, true only where its issuer was an Owner of the
 project, of the whole instance or by a grant or role scoped to it, as a
 person on no credential's scope (`ownsProject`). The vault hands a
 service a sensitive value only on a credential that says so for the
-value's own project (`readsSensitive`, `not_owner_issued`): a fork's
-parent's for what it inherits, and a reference's source's, whose value
-it lends. Its permission is still decided where it is held: a token an
-Owner of `billing` issued for `billing/dev` reads a reference there into
-`backend/prod` only if it says so for `backend` too, else Bo, a
-Developer of `backend` and an Owner of `billing`, would read prod's
-sensitive values that way. Everything else the account
-reads as before, and its credential's maker is told, when it is made,
+project the key lives in (`readsSensitive`, `not_owner_issued`): a fork's
+parent's, of the same project, for what it inherits, and a reference's
+own, as any key held there. A reference's source lends its value and
+nature, and gates only the reference's making (R23), where its maker
+reads the source, and uses it if it is sensitive (`secret.write`): a
+token an Owner of `billing` issued for `billing/dev` reads
+`billing/dev/LEAK`, a reference to `backend/prod`'s sensitive key,
+whatever it says for `backend`, and one a Developer of `billing` issued
+does not. Everything else the account reads as before, and its credential's maker is told, when it is made,
 which places hold a sensitive value it will not read (`withheld`). A
 personal token or a handle cannot take the path at all: the route that
 issues service tokens and bindings refuses both, and a test holds this.

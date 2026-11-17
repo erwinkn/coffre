@@ -443,15 +443,15 @@ test('malformed asks throw before anything is read', () => {
   assert.throws(() => OPERATIONS['token.unbind'](unbind('root-cli', 'user:x', '00000000-0000-4000-8000-000000000000'), deciding), TypeError);
 });
 
-test("an Owner's binding reads a sensitive value through a reference into another project only on a scope reaching that project: decided where the value is held", async () => {
+test("an Owner's binding reads a sensitive value through a reference into another project on a scope reaching the reference alone: decided where the reference lives", async () => {
   // billing/dev refers to market/dev's sensitive TOKEN, and ci views billing/dev too.
   const leak = secret({ id: ids.billingDev!, projectId: ids.billing! }, 'LEAK', { sourceId: ids.token! });
   await write(world, ...rows('secrets', leak), ...rows('grants', grant(ci, 'viewer', { environment: { id: ids.billingDev! } })));
-  // Root owns every project: bound to billing/dev alone, its say is billing's, and billing/dev lends market's value.
+  // Root owns every project: bound to billing/dev alone, its say is billing's, where LEAK lives, whose value market lends.
   const narrow = await vault.change(bind('root-cli', ci, { scope: { 'billing/dev': 'viewer' } }));
   const wide = await vault.change(bind('root-cli', ci, { claims: { sub: 'system:serviceaccount:ci:wide' } }));
   if ('refused' in narrow || 'refused' in wide) assert.fail(JSON.stringify([narrow, wide]));
-  assert.deepEqual(narrow.answer.bindings[0]!.withheld, ['billing/dev']);
+  assert.deepEqual(narrow.answer.bindings[0]!.withheld, []);
   assert.deepEqual([wide.answer.bindings[0]!.scope, wide.answer.bindings[0]!.withheld], [{ 'billing/dev': 'viewer', 'market/dev': 'developer', 'market/prod': 'viewer' }, []]);
   // A run of each, as /api/auth/oidc issues it.
   const run = (label: string, made: typeof narrow) => credential(label, ci, { createdBy: `binding:${made.answer.bindings[0]!.id}` });
@@ -460,6 +460,6 @@ test("an Owner's binding reads a sensitive value through a reference into anothe
     const answer = await use(world, ask(label, 'billing/dev', ['LEAK']));
     return 'refused' in answer ? answer.refused : answer.values.map((each) => ('refused' in each ? each.refused : each.value.toString()));
   };
-  assert.deepEqual(await read('narrow-run'), ['not_owner_issued']);
+  assert.deepEqual(await read('narrow-run'), ['tok']);
   assert.deepEqual(await read('wide-run'), ['tok']);
 });

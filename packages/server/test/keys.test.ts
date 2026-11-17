@@ -710,16 +710,16 @@ test("a token that reads only dev lists the keys its project's other environment
   assert.equal((await reveal('gate-token', 'market/prod'))[0], 403);
 });
 
-test("not_owner_issued is decided where the value is held: through a reference in its project, a reference from another, and a fork's inherited value", async () => {
+test("not_owner_issued is decided where the key lives: through a reference in its project, a reference from another, and a fork's inherited value", async () => {
   // staging's RS and billing/prod's LEAK refer to prod's sensitive S; dev inherits S, its own reset. ci maintains billing too.
   const [staging, billed] = [{ id: ids.staging!, projectId: ids.market! }, { id: ids.billed!, projectId: ids.billing! }];
-  const scope = (...owned: string[]) => JSON.stringify(owned.map((projectId) => ({ projectId, environmentId: null, role: 'maintainer', sensitive: true })));
+  const scope = (owned: string[], more: string[] = []) => JSON.stringify([...owned.map((projectId) => ({ projectId, environmentId: null, role: 'maintainer', sensitive: true })), ...more.map((projectId) => ({ projectId, environmentId: null, role: 'maintainer' }))]);
   await write(
     world,
     ...rows('secrets', secret(staging, 'RS', { sourceId: ids.s! }), secret(billed, 'LEAK', { sourceId: ids.s! }), value(world, secret(billed, 'OWNED'), 'owned', { sensitive: true })),
     ...rows('grants', grant(ci, 'maintainer', { project: { id: ids.billing! } })),
-    // One an Owner of billing issued, and one an Owner of both did.
-    ...rows('credentials', credential('billing-token', ci, { scope: scope(ids.billing!) }), credential('both-token', ci, { scope: scope(ids.billing!, ids.market!) })),
+    // One an Owner of billing issued, one nobody's Owner did, and one an Owner of market alone did, reaching billing too.
+    ...rows('credentials', credential('billing-token', ci, { scope: scope([ids.billing!]) }), credential('plain-token', ci, { scope: scope([], [ids.billing!]) }), credential('market-token', ci, { scope: scope([ids.market!], [ids.billing!]) })),
   );
   const got = async (label: string, path: string) => {
     const [status, body] = await reveal(label, path);
@@ -730,13 +730,14 @@ test("not_owner_issued is decided where the value is held: through a reference i
   assert.deepEqual(await got('cj-token', 'market/staging/RS'), NOT_OWNER_ISSUED);
   assert.deepEqual(await got('cj-token', 'market/dev/S'), NOT_OWNER_ISSUED);
   assert.deepEqual([await got('ci-token', 'market/staging/RS'), await got('ci-token', 'market/dev/S')], [{ RS: 's' }, { S: 's' }]);
-  // From billing: an Owner of billing's say lends billing's own sensitive value, not market's, which LEAK holds.
-  assert.deepEqual(await got('billing-token', 'billing/prod/OWNED'), { OWNED: 'owned' });
-  assert.deepEqual(await got('billing-token', 'billing/prod/LEAK'), NOT_OWNER_ISSUED);
-  const [status, body] = await reveal('billing-token', 'billing/prod');
+  // From billing: LEAK is billing's key, whose value market lends. An Owner of billing's say gives it, as it gives billing's own
+  // sensitive value; market's Owner's does not, nor anyone's but an Owner's.
+  assert.deepEqual(await got('billing-token', 'billing/prod'), { LEAK: 's', LINK: 'a', OWNED: 'owned' });
+  assert.deepEqual(await got('market-token', 'billing/prod/LEAK'), NOT_OWNER_ISSUED);
+  assert.deepEqual(await got('plain-token', 'billing/prod/LEAK'), NOT_OWNER_ISSUED);
+  const [status, body] = await reveal('market-token', 'billing/prod');
   assert.deepEqual([status, body.reason], [403, 'not_owner_issued']);
   assert.match(body.message!, /^billing\/prod\/LEAK: /);
-  assert.deepEqual(await got('both-token', 'billing/prod/LEAK'), { LEAK: 's' });
 });
 
 test("a reader of a fork alone, whose parent holds only a sensitive key, is refused the fork whole, parent_unreadable, where 0.14.7 left that key out by name", async () => {

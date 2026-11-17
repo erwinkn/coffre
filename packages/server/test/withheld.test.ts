@@ -103,12 +103,11 @@ test("a fork's inherited sensitive value counts where it is read; a place with n
   assert.deepEqual(await token('owen-cli', ci), { scope: all, withheld: [] });
 });
 
-test("a reference lends its source's sensitive value: withheld from a token of the holder's project alone, whoever issued it", async () => {
-  // Bo owns billing: its own sensitive values, his to give; LEAK is backend's, which he does not own.
-  assert.deepEqual(await token('bo-cli', boCi, { billing: 'viewer' }), { scope: { billing: 'viewer' }, withheld: ['billing'] });
-  assert.deepEqual(await token('bo-cli', boCi, { 'billing/dev': 'viewer', 'billing/ops': 'viewer' }), { scope: { 'billing/dev': 'viewer', 'billing/ops': 'viewer' }, withheld: ['billing/dev'] });
-  // Even whoever runs the instance gives a token of billing alone nothing of backend's: LEAK is read where it is held, which it does not reach.
-  assert.deepEqual(await token('root-cli', boCi), { scope: { billing: 'viewer' }, withheld: ['billing'] });
+test("a reference lends its source's sensitive value, read where the reference lives: withheld from no token an Owner of the holder's project issues", async () => {
+  // Bo owns billing: its own sensitive values and LEAK, held there though backend's value, are his to give.
+  assert.deepEqual(await token('bo-cli', boCi, { billing: 'viewer' }), { scope: { billing: 'viewer' }, withheld: [] });
+  assert.deepEqual(await token('bo-cli', boCi, { 'billing/dev': 'viewer', 'billing/ops': 'viewer' }), { scope: { 'billing/dev': 'viewer', 'billing/ops': 'viewer' }, withheld: [] });
+  assert.deepEqual(await token('root-cli', boCi), { scope: { billing: 'viewer' }, withheld: [] });
 });
 
 test('a personal token and its preview name no `withheld`: a person reads no sensitive value, whoever made the token', async () => {

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **A reference's sensitive value is read where the reference lives.**
+  Once made, a reference is decided by the place that holds it; its
+  source lends only its value and nature. One check still asked the
+  source's project: a service account read a sensitive value through a
+  reference only on a credential an Owner of the source's project issued.
+  It now asks the reference's own project, as for any key held there: a
+  token an Owner of `billing` issued for `billing/dev` reads
+  `billing/dev/LEAK`, a reference to `backend/prod`'s sensitive key,
+  whatever it says for `backend`, and one a Developer of `billing` issued
+  still does not (`not_owner_issued`). A new service token or binding's
+  `withheld` names a place for its own project's Owners only, the same
+  way. References that exist already follow at once, with nothing
+  migrated: a service credential an Owner of the holder's project issued
+  reads the sensitive values they lend from its next read, and one an
+  Owner of the source's project alone issued, reaching the holder too, no
+  longer does. Making a reference asks what it asked before.
+
 ## 0.16.4 (2026-11-16)
 
 - **A credential's methods refuse a method override.** Many upstreams act
