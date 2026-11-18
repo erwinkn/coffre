@@ -322,11 +322,22 @@ function momentary(status: number, body: { error?: unknown; reason?: unknown } |
 }
 
 /**
+ * Whether `fetch` threw for the network: the connection reset, timed out or
+ * closed, or the name did not resolve (undici's `TypeError: fetch failed`,
+ * whose `cause` says which). Not an abort, a DOMException, nor `fetching`'s
+ * refusal of a redirect, which has no cause.
+ */
+function dropped(error: unknown): boolean {
+  return error instanceof TypeError && error.cause !== undefined;
+}
+
+/**
  * A CI run signed in as `service`: its ID token, the one given or a fresh
  * one from GitHub's runner, traded for a credential. Asked again while the
- * instance cannot answer it yet (`momentary`), each time with a fresh
- * ID token from GitHub: an exchange that committed and lost its answer has
- * spent the one before (docs/design/oidc.md, section 3).
+ * instance cannot answer it yet (`momentary`), or the connection dropped
+ * before it answered, each time with a fresh ID token from GitHub: an
+ * exchange that committed and lost its answer has spent the one before
+ * (docs/design/oidc.md, section 3).
  */
 async function signIn(origin: string, service: string, given?: string): Promise<{ issued: { token: string; expiresAt: string }; idTokens: string[] }> {
   // Each ID token it asked for, to hide from the log: one whose exchange failed may still be good until it expires.
@@ -337,10 +348,11 @@ async function signIn(origin: string, service: string, given?: string): Promise<
     try {
       return { issued: await exchange(origin, service, token, http), idTokens };
     } catch (error) {
-      if (!(error instanceof ExchangeFailed && momentary(error.status, error.body))) throw error;
-      const wait = unavailableWait(attempt, error.retryAfter);
+      const unanswered = error instanceof ExchangeFailed && momentary(error.status, error.body);
+      if (!unanswered && !dropped(error)) throw error;
+      const wait = unavailableWait(attempt, unanswered ? error.retryAfter : null);
       if (wait === undefined) throw error;
-      if (sessionFlags.verbose) stderr(`the instance could not answer POST /api/auth/oidc: asking again in ${took(wait)}`);
+      if (sessionFlags.verbose) stderr(`${unanswered ? 'the instance could not answer POST /api/auth/oidc' : 'POST /api/auth/oidc got no answer'}: asking again in ${took(wait)}`);
       await sleep(wait);
     }
   }
@@ -412,17 +424,29 @@ async function retryingPolicyChange(request: Request): Promise<Response> {
 
 /**
  * A read of values, `retryingPolicyChange`, asked again too while the
- * instance cannot answer it yet (`momentary`). Each read the vault
- * answered is in the audit log, the one whose answer was lost included.
+ * instance cannot answer it yet (`momentary`), or when the connection
+ * dropped before it answered. Each read the vault answered is in the audit
+ * log, the one whose answer was lost included.
  */
 async function reading(request: Request): Promise<Response> {
   for (let attempt = 0; ; attempt++) {
     const again = request.clone();
-    const response = await retryingPolicyChange(request);
+    const line = requestLine(request.method, new URL(request.url));
+    let response: Response;
+    try {
+      response = await retryingPolicyChange(request);
+    } catch (error) {
+      const wait = unavailableWait(attempt, null);
+      if (wait === undefined || !dropped(error)) throw error;
+      if (sessionFlags.verbose) stderr(`${line} got no answer: asking again in ${took(wait)}`);
+      await sleep(wait);
+      request = again;
+      continue;
+    }
     const wait = unavailableWait(attempt, response.headers.get('retry-after'));
     // The status first: a body is parsed only when it may say the instance cannot answer yet.
     if (wait === undefined || response.status !== 503 || !momentary(response.status, await response.clone().json().catch(() => null))) return response;
-    if (sessionFlags.verbose) stderr(`the instance could not answer ${requestLine(request.method, new URL(request.url))}: asking again in ${took(wait)}`);
+    if (sessionFlags.verbose) stderr(`the instance could not answer ${line}: asking again in ${took(wait)}`);
     await sleep(wait);
     request = again;
   }

@@ -45,6 +45,8 @@ type Environment = {
   conflicts?: string[];
   /** Its lists' and reads' 503 answers, one apiece, before any other: `unavailable` with its reason or none, or a whole body (`{ error: 'migrating' }`, or `'<html>'`, as Cloudflare's page). */
   unavailable?: (string | null | Record<string, string>)[];
+  /** How many of its first reads lose their connection, reset before any answer. */
+  dropped?: number;
   /** The `Retry-After` its 503s say, in seconds. */
   retryAfter?: string;
   /** The instance's threshold, 365 if not given; `'unsaid'` for an instance before it, which leaves it out. */
@@ -71,6 +73,10 @@ async function instance(t: test.TestContext, environments: Record<string, Enviro
     const environment = path === undefined ? undefined : environments[path.split('/').slice(0, 2).join('/')];
     if (environment === undefined) return send(404, { error: 'not_found', message: 'unknown project or environment' });
     if (environment.refused !== undefined) return send(environment.refused, { error: 'forbidden', message: 'you do not have permission to do that' });
+    if (environment.dropped) {
+      environment.dropped -= 1;
+      return req.socket.resetAndDestroy();
+    }
     const unavailable = environment.unavailable?.shift();
     if (unavailable === '<html>') return res.writeHead(503, { 'content-type': 'text/html' }).end('<html>Service Unavailable</html>');
     if (typeof unavailable === 'object' && unavailable !== null) return send(503, unavailable);
@@ -460,6 +466,30 @@ test('a read the instance cannot answer three times ends as a refusal does, and 
     assert.deepEqual(coffre.requests, Array(reads).fill('reveal deploy/prod/TOKEN'), JSON.stringify(unavailable));
     if (reads === 3) assert.ok(performance.now() - started >= 3500, 'it asked again at once');
   }
+});
+
+test('a read whose connection dropped is asked again, a second or so later, and the step goes on', async (t) => {
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, dropped: 1 } });
+  const read = await coffre.coffre(['--verbose', 'export', 'deploy/prod', '--format', 'json']);
+  assert.equal(read.code, 0, read.stderr);
+  assert.deepEqual(JSON.parse(read.stdout), { TOKEN: 'deploy-token-value' });
+  assert.deepEqual(coffre.requests, ['reveal deploy/prod', 'reveal deploy/prod']);
+  assert.deepEqual(read.stderr.replace(/ (in|after) \d+(\.\d)? m?s/g, ' $1 t').split('\n'), [
+    'coffre: POST /api/reveals: failed after t (ECONNRESET)',
+    'coffre: POST /api/reveals got no answer: asking again in t',
+    'coffre: POST /api/reveals: 200 in t',
+    '',
+  ]);
+  assert.match(read.stderr, /asking again in (1\.\d|2\.\d|3\.0) s/);
+});
+
+test('a read whose connection drops three times ends as an unreachable instance does', async (t) => {
+  const coffre = await instance(t, { 'deploy/prod': { values: { TOKEN: 'deploy-token-value' }, dropped: 3 } });
+  const read = await coffre.coffre(['get', 'deploy/prod/TOKEN'], {}, 20_000);
+  assert.equal(read.code, 1);
+  assert.equal(read.stdout, '');
+  assert.match(read.stderr, /^coffre: could not reach http:\/\/127\.0\.0\.1:\d+: read ECONNRESET\n$/);
+  assert.deepEqual(coffre.requests, Array(3).fill('reveal deploy/prod/TOKEN'));
 });
 
 test("a read waits at least the instance's Retry-After before it asks again", async (t) => {
