@@ -19,6 +19,44 @@
   Owner of the source's project alone issued, reaching the holder too, no
   longer does. Making a reference asks what it asked before.
 
+## 0.16.5 (2026-11-18)
+
+- **A CI run's sign-in survives a moment when its issuer's keys cannot be
+  fetched (T258).** Between 2026-11-11 and 11-16, seven of a deployment's
+  CI jobs failed on `POST /api/auth/oidc`, 503 `issuer_unavailable`: once
+  an isolate's copy of GitHub's JWKS was past its ten minutes, one fetch
+  that timed out at 5 s refused every sign-in from that issuer for a
+  minute, with the last good set still in hand, and the `Retry-After: 60`
+  it answered was past what the CLI waits, so the CLI did not ask again.
+  Now a fetch the issuer did not answer (the deadline, a network error, a
+  408, 429 or 5xx) is asked once more at once, but for a 429, when nothing
+  can stand in for it; a set past its ten minutes stands in for one the
+  issuer could not serve, as long as its `Cache-Control` max-age, an hour
+  at most (GitHub's says an hour), and never for a key it lacks; the
+  isolate waits ten seconds, not a minute, before fetching again, and says
+  `Retry-After: 10`, which the CLI waits out and asks again; an exchange
+  that fails during that pause is told what is left of it. The 503 names
+  the issuer and says the failed request was coffre's, not the token's:
+  `coffre could not fetch the signing keys of the issuer
+  https://token.actions.githubusercontent.com (…/.well-known/jwks: timed
+  out after 5 s): its own request to the issuer failed, not the token or
+  the job that sent it; try again in 10 s`. Each failed fetch logs
+  `workload_keys_unfetched`. An unknown `kid` still holds back the next
+  fetch for an unknown key a minute, `Retry-After: 60`, but no longer a
+  stale set's refresh. An answer that is not keys still waits a minute,
+  `Retry-After: 60`, and lets no set stand in meanwhile, nor does a fetch
+  that ends after another exchange heard such an answer, or after its
+  set's hour. This is 0.15's #565, brought to 0.16.
+
+- **A CI run asks again when its connection drops.** The sign-in of a CI
+  run (`POST /api/auth/oidc`, with a fresh ID token each time) and the
+  reads of `get`, `run` and `export` are asked again when the connection
+  drops before the instance answers (reset, timed out, closed, a name that
+  did not resolve), on the schedule of a momentary 503: about 2 s, then
+  5 s, then the error stands. `--verbose` says `POST /api/reveals got no
+  answer: asking again in 2.1 s`. A write is never sent again: one whose
+  answer was lost may have committed ([ci.md](docs/ci.md)).
+
 ## 0.16.4 (2026-11-16)
 
 - **A credential's methods refuse a method override.** Many upstreams act

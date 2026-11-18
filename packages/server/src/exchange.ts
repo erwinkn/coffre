@@ -166,8 +166,8 @@ async function exchanged(request: Request, runtime: CoffreRuntime, workloads: Wo
     try {
       claims = await verifyWithKeys(runtime.transport, newest.jwksUri, body.token, { issuer, audience: runtime.publicUrl, now: new Date() });
     } catch (error) {
-      // Its keys are not fetched again for a minute (`workloads/keys.ts`): no sooner is any use.
-      if (error instanceof IssuerUnavailable) return refuse('issuer_unavailable', error.message, 503, '60');
+      // Its keys are not fetched again until then (`workloads/keys.ts`): no sooner is any use.
+      if (error instanceof IssuerUnavailable) return refuse('issuer_unavailable', error.message, 503, String(error.retryAfter));
       if (error instanceof WorkloadTokenRefused) {
         logRefusal(RUN, error.reason, service, sourceIp, {});
         return refuse(error.reason, error.message);
@@ -311,7 +311,7 @@ async function signedIn(request: Request, runtime: CoffreRuntime, workloads: Wor
       try {
         await verifyWithKeys(runtime.transport, newest.jwksUri, given, { issuer, audience, now: new Date(), ...(repeats ? { maxAge: null } : {}) });
       } catch (error) {
-        if (error instanceof IssuerUnavailable) return refuse('issuer_unavailable', error.message, 503, '60');
+        if (error instanceof IssuerUnavailable) return refuse('issuer_unavailable', error.message, 503, String(error.retryAfter));
         if (error instanceof WorkloadTokenRefused) return said(error.reason, error.message);
         throw error;
       }
