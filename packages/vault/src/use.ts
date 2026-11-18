@@ -346,12 +346,13 @@ export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): 
     if (version === undefined || natureOf(version) !== held.nature) return { key, refused: 'unreadable' };
     // A value no plain one is handed only to who reads it where its key lives: their role there (an inherited key's
     // parent, a reference's own environment), and for a workload, its credential's listing where the value is held.
-    // A person is handed no sensitive value, ever; a service account one, on a credential an Owner of the value's project issued.
+    // A person is handed no sensitive value, ever; a service account one, on a credential an Owner of the project its key
+    // lives in issued: a reference's own, never its source's, which gates only the reference's making.
     // A plain value is no secret, use-only to nobody: and it opens as plain, or not at all (`answer`).
     const reads = () => may(layer, ['secret.read']) && !useOnly(caller.holds, { projectId: held.projectId, environmentId: held.environmentId, secretId: held.id });
     if (handed && version.plaintext === null && !reads()) return { key, refused: 'use_only' };
     if (handed && version.sensitive && caller.holds.service !== true) return { key, refused: 'sensitive' };
-    if (handed && version.sensitive && !readsSensitive(caller.holds, held.projectId)) return { key, refused: 'not_owner_issued' };
+    if (handed && version.sensitive && !readsSensitive(caller.holds, asked.projectId)) return { key, refused: 'not_owner_issued' };
     // A value held in a personal config is read there alone: a reference's source is in none.
     return { key, held, asked, version, owner: asked === held ? layer.owner : null };
   };

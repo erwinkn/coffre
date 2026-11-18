@@ -154,9 +154,10 @@ export const MAX_PARENTS = 3;
  * What rides beside the read of a service's token or binding (R32,
  * `Operation.beside`): each environment of `projects` but personal
  * configs, which no service reads, that holds a sensitive value now, and
- * the projects that hold those values: its own, for one of its keys; a
- * reference's source's; and, for a fork, what it inherits from its
- * parents. No decision goes by it, only what the answer tells
+ * the projects whose Owners give those values: its own, for one of its
+ * keys, a reference held there (whose source's project gave only its
+ * making) and, for a fork, what it inherits from its parents. No decision
+ * goes by it, only what the answer tells
  * (`withheldOf`). Read by the projects' and environments' keys, a few
  * rows: one per environment.
  */
@@ -164,7 +165,7 @@ export const sensitiveIn = (projects: SQL): SQL => sql`WITH RECURSIVE lineage (e
     SELECT e.id, e.project_id, e.id, 0 FROM environments e WHERE e.project_id IN ${projects} AND e.owner IS NULL AND strpos(e.slug, '~') = 0
     UNION ALL SELECT l.environment, l.project, e.parent_id, l.depth + 1 FROM lineage l JOIN environments e ON e.id = l.at WHERE e.parent_id IS NOT NULL AND l.depth < ${MAX_PARENTS}
   )
-  SELECT jsonb_build_object('environment', l.environment, 'project', l.project, 'from', jsonb_agg(DISTINCT coalesce(src.project_id, s.project_id))) AS row
+  SELECT jsonb_build_object('environment', l.environment, 'project', l.project, 'from', jsonb_agg(DISTINCT s.project_id)) AS row
   FROM lineage l JOIN secrets s ON s.project_id = l.project AND s.environment_id = l.at AND s.archived_at IS NULL LEFT JOIN secrets src ON src.id = s.source_id
   WHERE (s.source_id IS NULL AND s.nature = 'sensitive') OR src.nature = 'sensitive'
   GROUP BY l.environment, l.project`;

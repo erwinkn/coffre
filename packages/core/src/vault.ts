@@ -324,7 +324,8 @@ export type RefusalCode =
   | 'sensitive'
   /**
    * A service account asked for a sensitive value to be handed back on a
-   * credential no Owner of its project issued (`readsSensitive`, R32): it
+   * credential no Owner of the project its key lives in issued, a
+   * reference's own, not its source's (`readsSensitive`, R32): it
    * reads every other value there, and that one once an Owner issues it a
    * token or binding.
    */
