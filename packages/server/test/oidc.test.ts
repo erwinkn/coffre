@@ -339,8 +339,11 @@ test("claims no binding trusts are named, never the values a binding expects", a
 
 test("an issuer whose keys cannot be fetched is the app's 503, with when to come back, and no vault call", async () => {
   published.clear();
+  fetched.length = 0;
   const [answer, calls] = await cost(() => exchange(idToken()));
-  assert.deepEqual([refused(answer), answer.retryAfter, calls], [[503, 'unavailable', 'issuer_unavailable'], '60', []]);
+  // Asked twice, then not again for ten seconds: no sooner, it says, which the CLI waits for (`unavailableWait`).
+  assert.deepEqual([refused(answer), answer.retryAfter, calls, fetched], [[503, 'unavailable', 'issuer_unavailable'], '10', [], [KEYS, KEYS]]);
+  assert.match(answer.body.message!, /^coffre could not fetch the signing keys of the issuer https:\/\/token\.actions\.githubusercontent\.com \(.*: answered 503\): its own request to the issuer failed, not the token or the job that sent it; try again in 10 s$/);
 });
 
 test("a binding removed ends the credentials it issued once the vault's memory of their caller lapses, and the next run is refused at once", async () => {
