@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.5 (2026-11-18)
+
 - **A CI run's sign-in survives a moment when its issuer's keys cannot be
   fetched (T258).** Between 2026-11-11 and 11-16, seven of a deployment's
   CI jobs failed on `POST /api/auth/oidc`, 503 `issuer_unavailable`: once
