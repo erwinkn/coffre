@@ -70,15 +70,21 @@ for (const linked of [false, true]) {
  * request. It plays GitHub's runner too, at /runner: an ID token for its
  * own origin alone. Its first `unavailable` exchanges answer 503
  * `unavailable`, each with its reason, or none; so do its first
- * `meUnavailable` answers at /api/me.
+ * `meUnavailable` answers at /api/me. Each request `dropped` names
+ * (`POST /api/auth/oidc`) loses its connection once, reset before any answer.
  */
-async function ciInstance(t: test.TestContext, { unavailable = [] as (string | null)[], meUnavailable = 0 } = {}) {
+async function ciInstance(t: test.TestContext, { unavailable = [] as (string | null)[], meUnavailable = 0, dropped = [] as string[] } = {}) {
   const seen: { method: string; url: string; headers: Record<string, string | string[] | undefined>; body: string }[] = [];
   let origin = '';
   const server = createServer(async (req, res) => {
     let body = '';
     for await (const chunk of req) body += String(chunk);
     seen.push({ method: req.method!, url: req.url!, headers: req.headers, body });
+    const drop = dropped.indexOf(`${req.method} ${req.url}`);
+    if (drop !== -1) {
+      dropped.splice(drop, 1);
+      return req.socket.resetAndDestroy();
+    }
     const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
     if (req.url === '/api/auth') return send(200, { signin: { providers: [] }, access: null });
     if (req.url === '/api/auth/device') return send(200, { device_code: 'device', user_code: 'BCDF-GHJK', verification_uri_complete: `${origin}/approve`, interval: 1, expires_in: 60 });
@@ -170,6 +176,30 @@ test('a CI run the instance cannot sign in yet asks again, with a fresh ID token
     assert.match(login.stderr, new RegExp(`would not sign this run in as token:deploy${unavailable[0] === null ? '' : ' \\(wrong_kek\\)'}: coffre cannot reach what it depends on right now`));
     assert.equal(signIns(down.seen).length, exchanges, unavailable.join(' '));
   }
+});
+
+test('a CI run whose sign-in lost its connection asks again with a fresh ID token; a write that lost its connection is not asked again', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'coffre-login-dropped-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lost = await ciInstance(t, { dropped: ['POST /api/auth/oidc', 'PATCH /api/secrets/app/prod'] });
+  const runner = { ACTIONS_ID_TOKEN_REQUEST_URL: `${lost.origin}/runner`, ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'bearer' };
+  const signed = await cli(home, ['--url', lost.origin, '--service', 'deploy', '--verbose', 'whoami'], '', undefined, false, runner);
+  assert.equal(signed.status, 0, signed.stderr);
+  assert.deepEqual(lost.seen.map(({ url }) => url.split('?')[0]), ['/runner', '/api/auth/oidc', '/runner', '/api/auth/oidc', '/api/me']);
+  assert.deepEqual(signed.stderr.replace(/ (in|after) \d+(\.\d)? m?s/g, ' $1 t').split('\n').slice(0, 5), [
+    'coffre: GET /runner: 200 in t',
+    'coffre: POST /api/auth/oidc: failed after t (ECONNRESET)',
+    'coffre: POST /api/auth/oidc got no answer: asking again in t',
+    'coffre: GET /runner: 200 in t',
+    'coffre: POST /api/auth/oidc: 200 in t',
+  ]);
+
+  // A write whose answer was lost may have committed: it is not sent again.
+  const before = lost.seen.length;
+  const set = await cli(home, ['--url', lost.origin, '--service', 'deploy', 'set', 'app/prod/KEY'], 'value\n', undefined, false, runner);
+  assert.equal(set.status, 1);
+  assert.match(set.stderr, /could not reach http:\/\/127\.0\.0\.1:\d+: read ECONNRESET/);
+  assert.deepEqual(lost.seen.slice(before).map(({ method, url }) => `${method} ${url.split('?')[0]}`).filter((line) => line.startsWith('PATCH')), ['PATCH /api/secrets/app/prod']);
 });
 
 test('a CI run signs in with what login asks it for, piped in, and later commands use that session', async (t) => {

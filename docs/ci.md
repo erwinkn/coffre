@@ -423,9 +423,12 @@ minute) fails the step at once. An issuer that did not answer the
 instance's fetch of its keys is a 503 `issuer_unavailable` that says 10 s,
 and is asked again. Each wait varies by up to half, so that
 the jobs of one run do not all ask again at once, and each sign-in asks
-GitHub for a fresh ID token. A 503 an operator or a deploy must clear
-(`wrong_kek`, `vault_outdated`, `app_key`, `migrating`) fails the step at
-once. `coffre --service <name> run` against an instance that signs it in
+GitHub for a fresh ID token. So are the sign-in and the reads of values
+when the connection drops before the instance answers (reset, timed out,
+closed, or a name that did not resolve), on the same schedule; a write
+never is, since one whose answer was lost may have committed. A 503 an
+operator or a deploy must clear (`wrong_kek`, `vault_outdated`, `app_key`,
+`migrating`) fails the step at once. `coffre --service <name> run` against an instance that signs it in
 with a key of its own (a key-bound session) is not asked again yet:
 
 ```text

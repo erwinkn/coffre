@@ -29,6 +29,15 @@
   that ends after another exchange heard such an answer, or after its
   set's hour. This is 0.15's #565, brought to 0.16.
 
+- **A CI run asks again when its connection drops.** The sign-in of a CI
+  run (`POST /api/auth/oidc`, with a fresh ID token each time) and the
+  reads of `get`, `run` and `export` are asked again when the connection
+  drops before the instance answers (reset, timed out, closed, a name that
+  did not resolve), on the schedule of a momentary 503: about 2 s, then
+  5 s, then the error stands. `--verbose` says `POST /api/reveals got no
+  answer: asking again in 2.1 s`. A write is never sent again: one whose
+  answer was lost may have committed ([ci.md](docs/ci.md)).
+
 ## 0.16.4 (2026-11-16)
 
 - **A credential's methods refuse a method override.** Many upstreams act
