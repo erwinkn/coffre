@@ -178,12 +178,23 @@ export function prefix(prefix: string): Placeholder {
 export type Rule = { verdict: 'allow' | 'deny'; methods: '*' | readonly string[]; path: string; body?: BodyCheck };
 
 /**
- * Whether an allow lets a request's JSON body go on: given the body as
- * `JSON.parse` reads it, `true` lets it, anything else (a throw included)
- * refuses it. It holds what goes upstream, which is that value written
- * again, `JSON.stringify`'s, never the bytes the app sent.
+ * Whether an allow lets a request's JSON body go on: given the body and the
+ * place the request comes from (`{ project: 'ops', environment: 'prod' }`,
+ * a personal config's its environment's), `true` lets it, anything else (a
+ * throw included) refuses it. The body it is given is what goes upstream:
+ * the app's JSON parsed, written again (`JSON.stringify`) and read again,
+ * so `1e400`, which goes as `null`, is checked as `null`.
  */
-export type BodyCheck = (body: unknown) => boolean;
+export type BodyCheck = (body: unknown, place: Place) => boolean;
+
+/** A request's place, as a body check reads it. */
+export type Place = { project: string; environment: string };
+
+/** The place at `path` (`market/dev`), a personal config's (`market/dev@me`) its environment's. */
+function placeOf(path: string): Place {
+  const at = path.indexOf('/');
+  return { project: path.slice(0, at), environment: path.slice(at + 1).replace(/@me$/, '') };
+}
 
 /**
  * A rule that lets requests of `methods` (`'GET'`, `['PATCH', 'DELETE']`, or
@@ -198,13 +209,15 @@ export type BodyCheck = (body: unknown) => boolean;
  *
  * With `body`, it lets only the JSON bodies `body` passes go on:
  * `allow('POST', '/instances/{uuid}/endpoints', { body: (spec) => … })`,
- * where which address an endpoint takes is in the body. Matched, it decides
- * as any rule does: a body it refuses is refused, never left to the rules
- * after it. The body is read whole, 64 KiB at most, `application/json`,
+ * where which address an endpoint takes is in the body, and `body` is also
+ * given the request's place, so each environment's may differ. Matched, it
+ * decides as any rule does: a body it refuses is refused, never left to the
+ * rules after it. The body is read whole, 64 KiB at most, `application/json`,
  * UTF-8 and not compressed, and parsed; what goes upstream is that value
- * written again (`JSON.stringify`), so a key the body gives twice, or an
- * escape, reads upstream as `body` read it. A credential whose key goes in
- * the body, or signs it (`sigv4`), checks none.
+ * written again (`JSON.stringify`), as `Content-Type: application/json`, and
+ * `body` checks those bytes, read again: a key the body gives twice, an
+ * escape or a number JSON cannot hold reads upstream as `body` read it. A
+ * credential whose key goes in the body, or signs it (`sigv4`), checks none.
  */
 export function allow(methods: '*' | string | readonly string[], pattern: string, options: { body?: BodyCheck } = {}): Rule {
   return { verdict: 'allow', methods: methods === '*' ? '*' : typeof methods === 'string' ? [methods] : methods, path: pattern, ...(options.body === undefined ? {} : { body: options.body }) };
@@ -945,7 +958,7 @@ function within(credential: Resolved, rest: readonly string[], search: string): 
  */
 function forEnvironment(credential: Resolved, path: string): Resolved | Response {
   if (credential.upstreams === undefined) return credential;
-  const environment = path.slice(path.indexOf('/') + 1).replace(/@me$/, '');
+  const { environment } = placeOf(path);
   const base = credential.upstreams.get(environment);
   if (base === undefined) return failure(403, `${credential.name} has no upstream for ${environment}, only for ${[...credential.upstreams.keys()].join(', ')}: the deployment's credentialProxy names each environment's`, 'no_upstream');
   const { upstreams: _, ...one } = credential;
@@ -978,14 +991,18 @@ function ruledOut(credential: Resolved, method: string, relative: string): Respo
 }
 
 /**
- * The body that goes upstream of a request an allow with `body` let in: the app's JSON, parsed, written again, once
- * `checks` passes it; or the refusal, 403 `rule`, before anything opens. Nothing of the body is quoted: a secret may be in it.
+ * The body that goes upstream of a request from `path` an allow with `body` let in: the app's JSON, parsed and written
+ * again, once `checks` passes it as read again; or the refusal, 403 `rule`, before anything opens. It goes as
+ * `Content-Type: application/json` (`JSON_TYPE`), whatever parameter the app's had. Nothing of the body is quoted: a
+ * secret may be in it.
  */
-function checkedBody(request: Request, credential: Resolved, relative: string, checks: BodyCheck, body: Uint8Array | undefined): Uint8Array<ArrayBuffer> | Response {
+function checkedBody(request: Request, credential: Resolved, relative: string, checks: BodyCheck, body: Uint8Array | undefined, path: string): Uint8Array<ArrayBuffer> | Response {
   const asked = `${request.method.toUpperCase()} ${relative}`;
-  const [media, ...parameters] = (request.headers.get('content-type') ?? '').split(';').map((part) => part.trim().toLowerCase());
-  const charset = parameters.find((parameter) => parameter.startsWith('charset='))?.slice('charset='.length).replace(/^"(.*)"$/, '$1');
-  if (body === undefined || body.length === 0 || media !== 'application/json' || (charset !== undefined && charset !== 'utf-8') || !/^(identity)?$/i.test(request.headers.get('content-encoding') ?? '')) {
+  const [media, ...parameters] = (request.headers.get('content-type') ?? '').split(';');
+  // Each charset the type names, spaced or quoted as it may be (`charset = "UTF-8"`): any but UTF-8 is refused.
+  const charsets = parameters.map((parameter) => [parameter.slice(0, Math.max(parameter.indexOf('='), 0)), parameter.slice(parameter.indexOf('=') + 1)] as const)
+    .filter(([name]) => name.trim().toLowerCase() === 'charset').map(([, value]) => value.trim().replace(/^"(.*)"$/, '$1').toLowerCase());
+  if (body === undefined || body.length === 0 || media!.trim().toLowerCase() !== 'application/json' || charsets.some((charset) => charset !== 'utf-8') || !/^(identity)?$/i.test(request.headers.get('content-encoding') ?? '')) {
     return failure(403, `${credential.name} allows ${asked} with a JSON body it checks: application/json, UTF-8 and not compressed`, 'rule');
   }
   let value: unknown;
@@ -994,15 +1011,19 @@ function checkedBody(request: Request, credential: Resolved, relative: string, c
   } catch {
     return failure(403, `${credential.name} allows ${asked} with a JSON body it checks, and this one is no JSON`, 'rule');
   }
-  // Written before the check, so what goes is what was parsed, whatever the check does with its value.
-  const written = new TextEncoder().encode(JSON.stringify(value));
-  return passes(checks, value) ? written : failure(403, `${credential.name} refuses ${asked}: its body is none its allow takes`, 'rule');
+  // Written before the check, and the check given what was written, read again: what goes is what it passed, whatever
+  // JSON could not write as the app sent it (`1e400` goes as `null`, `-0` as `0`), and whatever it does with its value.
+  const text = JSON.stringify(value);
+  return passes(checks, text, placeOf(path)) ? new TextEncoder().encode(text) : failure(403, `${credential.name} refuses ${asked}: its body is none its allow takes`, 'rule');
 }
 
-/** Whether `checks` lets a body go on: `true`, and nothing else, a throw included. */
-function passes(checks: BodyCheck, value: unknown): boolean {
+/** The type a body a rule checked goes upstream as: JSON is UTF-8, and no parameter can say otherwise. */
+const JSON_TYPE = 'application/json';
+
+/** Whether `checks` lets the JSON `text` go on from `place`: `true`, and nothing else, a throw included. */
+function passes(checks: BodyCheck, text: string, place: Place): boolean {
   try {
-    return checks(value) === true;
+    return checks(JSON.parse(text), place) === true;
   } catch {
     return false;
   }
@@ -1020,14 +1041,15 @@ function deciding(ruled: readonly Ruled[], method: string, relative: string): Ru
 /**
  * What `rules` decide for a request of `method` to `path`, the path under the upstream as the app sends it, as the
  * proxy decides: whether it goes on, and the rule that said so, as written (`deny(*, /instances/…/**)`), or null where
- * none matches and it is refused. `body`, the request's JSON body as a value, for an allow with `body` to check, as
- * written and read again, as the proxy has it; none, and such an allow refuses. For a deployment's own tests of its
- * rules, one request at a time: `assert.equal(decide(rules, 'DELETE', '/instances/0d6f…').allowed, false)`.
+ * none matches and it is refused. `sent`, for an allow with `body` to check: the request's JSON body as a value, which
+ * it checks written and read again, as the proxy does, and the place it comes from (`ops/prod`); none, and such an
+ * allow refuses. For a deployment's own tests of its rules, one request at a time:
+ * `assert.equal(decide(rules, 'DELETE', '/instances/0d6f…').allowed, false)`.
  */
-export function decide(rules: readonly Rule[], method: string, path: string, body?: unknown): { allowed: boolean; rule: string | null } {
+export function decide(rules: readonly Rule[], method: string, path: string, sent?: { body: unknown; place: string }): { allowed: boolean; rule: string | null } {
   const rule = deciding(rulesOf('rules', rules), method, path);
-  const read = body === undefined ? undefined : JSON.stringify(body);
-  const allowed = rule?.verdict === 'allow' && (rule.body === undefined || (read !== undefined && passes(rule.body, JSON.parse(read))));
+  const text = sent === undefined ? undefined : JSON.stringify(sent.body);
+  const allowed = rule?.verdict === 'allow' && (rule.body === undefined || (text !== undefined && passes(rule.body, text, placeOf(sent!.place))));
   return { allowed, rule: rule?.said ?? null };
 }
 
@@ -1167,8 +1189,9 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const carrying = early?.content ?? (await carried(request, credential, aimed.checks));
   if (carrying instanceof Response) return carrying;
   // A body a rule checks, before anything opens: what goes is the JSON it read.
-  const body = aimed.checks === null ? carrying.body : checkedBody(request, credential, relative, aimed.checks, carrying.body);
+  const body = aimed.checks === null ? carrying.body : checkedBody(request, credential, relative, aimed.checks, carrying.body, path);
   if (body instanceof Response) return body;
+  if (aimed.checks !== null) headers.set('content-type', JSON_TYPE);
   const content = { ...carrying, body };
   const opened = await valuesFor(coffre, proxy, handle, path, credential, target);
   // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
@@ -1277,9 +1300,6 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   if (queried !== null) return queried;
   const content = await carried(request, credential, checked.checks);
   if (content instanceof Response) return content;
-  // A body a rule checks, before the session is: what goes is the JSON it read, the proof binding the bytes the app sent.
-  const going = checked.checks === null ? content.body : checkedBody(request, credential, checked.relative, checked.checks, content.body);
-  if (going instanceof Response) return going;
   // The body's line in `req`, and the payload hash a sigv4 credential signs again: one value, so what goes out is what
   // the proof bound. A body of any bytes signs the SHA-256 its `Content-Digest` declares, which `carried` and `scanned`
   // hold the bytes to, streamed or not; through a sigv4 credential, the hash its `x-amz-content-sha256` declares, which
@@ -1308,11 +1328,16 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     if (bound instanceof Response) return bound;
     const aimed = bound === credential ? checked : aim(request, bound, rest, search);
     if (aimed instanceof Response) return aimed;
+    // A body a rule checks, once the place is known and before anything opens: what goes is the JSON it read, the proof
+    // binding the bytes the app sent.
+    const going = aimed.checks === null ? content.body : checkedBody(request, credential, aimed.relative, aimed.checks, content.body, caller.path);
+    if (going instanceof Response) return going;
     // A form or JSON rule's field, whatever the app put there, as a header rule's header: it holds no handle.
     const field = inBody(credential.inject) ? fieldIn(request, content.body, credential.name, credential.inject) : null;
     if (field instanceof Response) return field;
     // Only what the proof signs goes on, of what the app sent: a header added on the way, by a library or a proxy, is dropped.
     const headers = outbound(request, caller.hdr);
+    if (aimed.checks !== null) headers.set('content-type', JSON_TYPE);
     // A method override in what goes on, where the credential's methods are limited, before the values open.
     const override = overrideRefused(methodLimit(credential), credential.name, headers, aimed.target);
     if (override !== null) return override;

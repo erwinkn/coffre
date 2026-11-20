@@ -11,7 +11,7 @@ import { binding, credential, emptyDatabase, environment, grant, instance, princ
 import { sql } from 'drizzle-orm';
 
 import { processGates } from '../src/gate.ts';
-import { allow, credentialProxy, decide, deny, header, json, sigv4, type Egress, type Rule } from '../src/plugins/credential-proxy.ts';
+import { allow, credentialProxy, decide, deny, header, json, sigv4, type Egress, type Place, type Rule } from '../src/plugins/credential-proxy.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { openApp, PUBLIC_URL } from './app-fixture.ts';
 
@@ -31,18 +31,25 @@ const egress: Egress = {
   },
 };
 
-/** The addresses a copy's endpoint may take: a body that names another, the live instance's, never goes. */
-const POOL = ['192.168.255.240', '192.168.255.241'];
+/** The addresses a copy's endpoint may take, by environment: a body that names another, the live instance's or another environment's, never goes. */
+const POOLS: Record<string, string[]> = { prod: ['192.168.255.240', '192.168.255.241'], dev: ['192.168.255.224'] };
 const NETWORK = '5b1c9e0a-3f2d-4c8b-9a7e-6d5c4b3a2f10';
-/** An endpoint on the private network, at one of the pool's addresses, and nothing else in the body. */
-const onPool = (body: unknown) => {
+/** An endpoint on the private network, at one of its environment's pool addresses, and nothing else in the body. */
+const onPool = (body: unknown, { environment }: Place) => {
   const spec = (body as { endpoint_spec?: { private_network?: Record<string, unknown> } }).endpoint_spec;
   const network = spec?.private_network;
   return Object.keys(body as object).length === 1 && Object.keys(spec!).length === 1 && network !== undefined
     && Object.keys(network).sort().join() === 'private_network_id,service_ip' && network.private_network_id === NETWORK
-    && typeof network.service_ip === 'string' && POOL.includes(network.service_ip.split('/')[0]!) && /^[0-9.]+\/\d{1,2}$/.test(network.service_ip);
+    && typeof network.service_ip === 'string' && (POOLS[environment] ?? []).includes(network.service_ip.split('/')[0]!) && /^[0-9.]+\/\d{1,2}$/.test(network.service_ip);
 };
 const endpoint = (ip: string) => ({ endpoint_spec: { private_network: { private_network_id: NETWORK, service_ip: ip } } });
+
+/** What `counted` was given, and its rule: a limit that is a number. */
+const given: { body: unknown; place: Place }[] = [];
+const counted = (body: unknown, place: Place) => {
+  given.push({ body, place });
+  return typeof (body as { limit?: unknown }).limit === 'number';
+};
 
 const rules: Rule[] = [
   allow('GET', '/instances'),
@@ -62,6 +69,8 @@ const proxy = credentialProxy({
     narrow: { upstream: UPSTREAM, inject: header('x-auth-token', '{RDB_KEY}'), methods: ['GET', 'POST'], paths: ['/instances'], rules: [deny('POST', '/instances'), allow('*', '/**')], egress },
     // A body rule: a copy's endpoint only at a pool address, and the rules after it never reached for that path.
     endpoints: { upstream: UPSTREAM, inject: header('x-auth-token', '{RDB_KEY}'), rules: [allow('POST', '/instances/{uuid}/endpoints', { body: onPool }), allow('*', '/**')], egress },
+    // A body rule that keeps what it was given, to show which value and place it checks.
+    limited: { upstream: UPSTREAM, inject: header('x-auth-token', '{RDB_KEY}'), rules: [allow('POST', '/limit', { body: counted })], egress },
     s3: {
       upstream: 'https://s3.example',
       inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }),
@@ -87,6 +96,7 @@ beforeEach(async () => {
   for (const kept of [world.memory.reads, world.memory.callers, world.memory.logged, world.memory.touched, world.refused]) kept.clear();
   held = processGates();
   sent.length = 0;
+  given.length = 0;
   handle = generateToken('handle');
   const bound = binding(DEPLOY, { policy: '{}', scope });
   const key = await generateProofKey();
@@ -260,12 +270,12 @@ test('an allow with body lets a body it passes go on, as the JSON it read, as a 
   const given = `{ "endpoint_spec": { "private_network": { "private_network_id": "${NETWORK}", "service\\u005fip": "192.168.255.240/22" } } }`;
   const handled = await postEndpoint(given, { 'content-type': 'application/json; charset=utf-8' });
   assert.equal(handled.status, 200, await handled.clone().text());
-  assert.deepEqual([sent.length, sent[0]!.body], [1, written]);
+  assert.deepEqual([sent.length, sent[0]!.body, sent[0]!.headers.get('content-type')], [1, written, 'application/json']);
   sent.length = 0;
   // A session's body declares its digest, so it would stream: one a rule checks is read whole, and its digest made again.
   const session = await asSession('POST', `/endpoints/instances/${COPY}/endpoints`, { body: given });
   assert.equal(session.status, 200, await session.clone().text());
-  assert.deepEqual([sent.length, sent[0]!.body], [1, written]);
+  assert.deepEqual([sent.length, sent[0]!.body, sent[0]!.headers.get('content-type')], [1, written, 'application/json']);
   assert.equal(sent[0]!.headers.get('content-digest'), `sha-256=:${Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(written))).toString('base64')}:`);
   // The rules after it are for other paths: a body is read for none of theirs.
   sent.length = 0;
@@ -302,13 +312,40 @@ test('an allow with body refuses, before anything opens, a body it does not pass
   await refused(await postEndpoint('{"endpoint_spec":'), json, 0);
   await refused(await postEndpoint(new Uint8Array([0x7b, 0x22, 0xff, 0x22, 0x3a, 0x31, 0x7d])), json, 0);
   const good = JSON.stringify(endpoint('192.168.255.240/22'));
-  const types: Record<string, string>[] = [{ 'content-type': 'text/plain' }, {}, { 'content-type': 'application/json; charset=latin1' }, { 'content-type': 'application/json', 'content-encoding': 'gzip' }, { 'content-type': 'application/x-www-form-urlencoded' }];
+  const types: Record<string, string>[] = [{ 'content-type': 'text/plain' }, {}, { 'content-type': 'application/json; charset=latin1' }, { 'content-type': 'application/json; charset = iso-8859-1' }, { 'content-type': 'application/json; charset=utf-8; charset=latin1' }, { 'content-type': 'application/json, text/plain' }, { 'content-type': 'application/json', 'content-encoding': 'gzip' }, { 'content-type': 'application/x-www-form-urlencoded' }];
   for (const headers of types) {
     await refused(await postEndpoint(good, headers), json, 0);
   }
+  // Another environment's address, from prod: each environment's pool is its own.
+  await refused(await postEndpoint(JSON.stringify(endpoint('192.168.255.224/22'))), none, 0);
   // As a session too, the proof valid: the body is what the rule holds, not who sent it.
   await refused(await asSession('POST', `/endpoints/instances/${COPY}/endpoints`, { body: JSON.stringify(endpoint('192.168.0.2/22')) }), none, 0);
+  await refused(await asSession('POST', `/endpoints/instances/${COPY}/endpoints`, { body: JSON.stringify(endpoint('192.168.255.224/22')) }), none, 0);
+  await refused(await asSession('POST', `/endpoints/instances/${COPY}/endpoints`, { body: good, type: 'application/json; charset = iso-8859-1' }), json, 0);
   await refused(await asSession('POST', `/endpoints/instances/${COPY}/endpoints`, { body: good, headers: { 'content-encoding': 'gzip' } }), json, 0);
+});
+
+test('a body is checked as it goes: written, read again, from its place, its type said again', async () => {
+  const limited = (body: string, headers: Record<string, string> = { 'content-type': 'application/json' }) =>
+    app.request('/use/limited/limit', { method: 'POST', headers: { ...headers, 'x-auth-token': handle }, body });
+  // 1e400 parses as Infinity and goes as null: the check is given null, and refuses it, as a handle and as a session.
+  await refused(await limited('{"limit":1e400}'), /^limited refuses POST \/limit: its body is none its allow takes$/, 0);
+  await refused(await asSession('POST', '/limited/limit', { body: '{"limit":1e400}' }), /^limited refuses POST \/limit: its body is none its allow takes$/, 0);
+  assert.deepEqual(given.map((one) => one.body), [{ limit: null }, { limit: null }]);
+  given.length = 0;
+  // -0 goes as 0, which is what the check is given; the type goes as application/json whatever its parameters said.
+  const answer = await limited('{"limit":-0}', { 'content-type': 'Application/JSON ; Charset = "UTF-8"' });
+  assert.equal(answer.status, 200, await answer.clone().text());
+  assert.deepEqual([sent[0]!.body, sent[0]!.headers.get('content-type')], ['{"limit":0}', 'application/json']);
+  assert.ok(Object.is((given[0]!.body as { limit: number }).limit, 0));
+  // The place is the handle's, and the session's.
+  sent.length = 0;
+  assert.equal((await asSession('POST', '/limited/limit', { body: '{"limit":2}' })).status, 200);
+  assert.deepEqual(given.map((one) => one.place), [{ project: 'ops', environment: 'prod' }, { project: 'ops', environment: 'prod' }]);
+  // decide gives its check the same value and place.
+  given.length = 0;
+  assert.equal(decide([allow('POST', '/limit', { body: counted })], 'POST', '/limit', { body: { limit: Infinity }, place: 'ops/dev@me' }).allowed, false);
+  assert.deepEqual(given, [{ body: { limit: null }, place: { project: 'ops', environment: 'dev' } }]);
 });
 
 test('a body a rule checks is read whole, 64 KiB at most, a session\'s too', async () => {
@@ -323,11 +360,15 @@ test('a body a rule checks is read whole, 64 KiB at most, a session\'s too', asy
 test('decide checks a body as the proxy does: the value written and read again, none refused', () => {
   const checked = [allow('POST', '/instances/{uuid}/endpoints', { body: onPool }), deny('*', '/**')];
   const at = `/instances/${COPY}/endpoints`;
-  assert.deepEqual(decide(checked, 'POST', at, endpoint('192.168.255.241/22')), { allowed: true, rule: 'allow(POST, /instances/{uuid}/endpoints, { body })' });
-  assert.deepEqual(decide(checked, 'POST', at, endpoint('192.168.0.2/22')), { allowed: false, rule: 'allow(POST, /instances/{uuid}/endpoints, { body })' });
+  const prod = (body: unknown) => ({ body, place: 'ops/prod' });
+  assert.deepEqual(decide(checked, 'POST', at, prod(endpoint('192.168.255.241/22'))), { allowed: true, rule: 'allow(POST, /instances/{uuid}/endpoints, { body })' });
+  assert.deepEqual(decide(checked, 'POST', at, prod(endpoint('192.168.0.2/22'))), { allowed: false, rule: 'allow(POST, /instances/{uuid}/endpoints, { body })' });
+  // Each environment's pool: dev's address from dev, and not from prod.
+  assert.equal(decide(checked, 'POST', at, { body: endpoint('192.168.255.224/22'), place: 'ops/dev' }).allowed, true);
+  assert.equal(decide(checked, 'POST', at, prod(endpoint('192.168.255.224/22'))).allowed, false);
   assert.equal(decide(checked, 'POST', at).allowed, false);
   // Written and read again: what JSON drops, the check never sees.
-  assert.equal(decide([allow('POST', '/a', { body: (body) => !('gone' in (body as object)) })], 'POST', '/a', { gone: undefined }).allowed, true);
+  assert.equal(decide([allow('POST', '/a', { body: (body) => !('gone' in (body as object)) })], 'POST', '/a', prod({ gone: undefined })).allowed, true);
   assert.equal(decide(checked, 'GET', at).allowed, false);
 });
 
