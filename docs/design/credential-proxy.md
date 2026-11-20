@@ -219,6 +219,21 @@ credentialProxy({
 - `upstream` is where its requests go: `/use/<name>/<path>`, and
   `/use/<project>/<env>/<name>/<path>`, go to `<upstream>/<path>` and
   nowhere else.
+- Where a provider's production has a host of its own, `upstream` is one
+  URL for each environment, by its name, all on one path:
+  `yousign: { upstream: { prod: 'https://api.yousign.app/v3', dev:
+  'https://api-sandbox.yousign.app/v3' }, inject: header('authorization',
+  'Bearer {YOUSIGN_API_KEY}') }`. prod's key and the sandbox's then go by
+  one name, and the app's config names one URL, `/use/yousign`, in every
+  environment. A request goes to its environment's upstream, a personal
+  config's (`dev@me`) to its environment's. One from an environment the
+  map does not name, a fork of prod or one added since, is refused, 403
+  `no_upstream`, before anything opens: there is no default, so prod's
+  key never reaches the sandbox's host. A presigned URL is for the
+  environment's host the same way, and a plan there opens nothing: a
+  JWT placeholder is the bare handle, its claims left unread. The key's own environment decides,
+  not where its value came from: a reference in dev to prod's key goes
+  to dev's host, as it would under any name.
 - A handle grants the use of every credential its environment holds, and
   each only to its own upstream.
 - A key the rule reads that is no secret, an account's id in its URLs, is

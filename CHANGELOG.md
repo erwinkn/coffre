@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **A credential's upstream can be one for each environment.** Where a
+  provider's production has a host of its own, `upstream: { prod:
+  'https://api.yousign.app/v3', dev: 'https://api-sandbox.yousign.app/v3' }`
+  sends each request to its environment's host (a personal config's,
+  `dev@me`, to its environment's), so prod's key and the sandbox's go by one
+  name and the app names one `/use/<credential>` URL everywhere, rather than
+  a credential and a key name of prod's own. An environment the map does not
+  name is refused, 403 `no_upstream`, before the vault opens anything (its
+  plan's JWT placeholder is the bare handle, no claim read): a fork of prod
+  reaches no host until the deployment names one. The upstreams share
+  one path, only the host differing, and each is checked as a single
+  upstream is. A credential with one upstream is unchanged.
+
 ## 0.16.5 (2026-11-18)
 
 - **A CI run's sign-in survives a moment when its issuer's keys cannot be
