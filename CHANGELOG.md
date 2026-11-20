@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.8 (2026-11-20)
+
 - **An allow can hold a request's JSON body too: `allow('POST',
   '/instances/{uuid}/endpoints', { body: (spec, place) => … })`.** Where
   what a request does is in its body, which address a database endpoint
