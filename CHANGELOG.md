@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.6 (2026-11-20)
+
 - **A credential's upstream can be one for each environment.** Where a
   provider's production has a host of its own, `upstream: { prod:
   'https://api.yousign.app/v3', dev: 'https://api-sandbox.yousign.app/v3' }`
