@@ -694,7 +694,10 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     // The environment's URL, which a run of several environments tells apart.
     credentials[credential.name] = `${coffre.publicUrl}/use/${path}/${credential.name}`;
     const placeholder = credential.placeholder === undefined ? handle : await shaped(coffre, credential, handle, read);
+    // A credential with no upstream for the environment never takes a key's placeholder from one that has: whatever their order.
+    const reaches = !(forEnvironment(credential, read) instanceof Response);
     for (const key of credential.keys) {
+      if (!reaches && placed.has(key)) continue;
       env[key] = placeholder;
       placed.add(key);
     }

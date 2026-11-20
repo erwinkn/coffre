@@ -37,7 +37,10 @@ const egress: Egress = {
 const proxy = credentialProxy({
   credentials: {
     yousign: { upstream: { prod: `https://${PROD}/v3`, staging: `https://${SANDBOX}/v3` }, inject: header('authorization', 'Bearer {YOUSIGN_API_KEY}'), egress },
+    // Two more credentials of dfns's key with an upstream for staging alone, one declared before it and one after: in prod, neither takes its placeholder.
+    'sandbox-dfns': { upstream: { staging: 'https://api.sandbox.dfns.example' }, inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'), placeholder: jwt({ claims: ['org'] }) },
     dfns: { upstream: { prod: 'https://api.dfns.example', staging: 'https://api.sandbox.dfns.example' }, inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'), placeholder: jwt({ claims: ['org'] }) },
+    'dfns-sandbox': { upstream: { staging: 'https://api.sandbox.dfns.example' }, inject: header('authorization', 'Bearer {DFNS_AUTH_TOKEN}'), placeholder: jwt({ claims: ['org'] }) },
     s3: { upstream: { prod: 'https://s3.prod.example', staging: 'https://s3.sandbox.example' }, inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
   },
 });
@@ -183,7 +186,7 @@ test("a presigned URL is for its environment's host, and none is made for an env
   assert.deepEqual(app.calls.slice(calls).filter((call) => call === 'use'), []);
 });
 
-test("a JWT placeholder copies its claims only for an environment the credential names an upstream for: elsewhere the plan opens nothing", async () => {
+test("a JWT placeholder copies its claims only for an environment a credential names an upstream for: elsewhere the plan opens nothing, nor overwrites one that does", async () => {
   const planned = async (name: Place) => {
     const calls = app.calls.length;
     const answer = await asHandle(name, `/use/market/${name}`);
