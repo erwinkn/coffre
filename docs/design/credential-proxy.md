@@ -236,6 +236,34 @@ credentialProxy({
   to dev's host, as it would under any name.
 - A handle grants the use of every credential its environment holds, and
   each only to its own upstream.
+- `methods` and `paths` narrow a credential by method, and by path
+  prefix, each alone. Where what it may do depends on both, `rules` says
+  it: a list of `allow(methods, pattern)` and `deny(methods, pattern)`,
+  the first that matches a request deciding, and a request none matches
+  refused, 403 `rule`, before anything opens. A database provider's key
+  that reaches every instance of a project, the live one included, may
+  then snapshot the live one and do anything to the others:
+
+  ```ts
+  rules: [
+    allow('GET', '/instances/**'),
+    allow('POST', `/instances/${LIVE}/snapshots`),
+    deny('*', `/instances/${LIVE}/**`),
+    allow('POST', '/instances'),
+    allow('*', '/instances/{uuid}/**'),
+  ]
+  ```
+
+  A pattern is the path under the upstream, a segment at a time, matched
+  on the path as the app sent it: a segment as written matches itself
+  exactly, `*` any one segment but an empty one, `{uuid}` one UUID as
+  servers write them, lowercase and dashed, and `**`, last, whatever
+  follows, nothing included. So where an id is denied by name, the allows
+  after it name ids with `{uuid}`, never `*`: a server that also takes
+  `0D6F…` or `{0d6f…}` as that id would otherwise let one of them past the
+  deny. The query is not read, and with `rules` a method override is
+  refused as with `methods` (below). `decide(rules, method, path)` answers
+  as the proxy does, for a deployment's own tests of its rules.
 - A key the rule reads that is no secret, an account's id in its URLs, is
   marked plain (below), and the app holds it as it is; the handle stands in
   for the rest. `identifiers: ['TWILIO_SID']`, which said the same in
@@ -625,7 +653,7 @@ them from the upstream's.
 
 **A method override where `methods` are limited.** Many upstreams act on a
 POST that says `X-HTTP-Method-Override: DELETE`, or `?_method=DELETE`, as
-on a DELETE. So where a credential's `methods` are set, a request that
+on a DELETE. So where a credential's `methods` or `rules` are set, a request that
 carries a method override is a 405, whatever method it names: the
 `X-HTTP-Method-Override` (Google, ASP.NET, Express's `method-override`),
 `X-HTTP-Method` (OData), `X-Method-Override` or

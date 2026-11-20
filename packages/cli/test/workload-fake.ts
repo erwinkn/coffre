@@ -45,6 +45,8 @@ export type FakeOptions = {
   /** A logout that never answers; one that asks for a fresh nonce every time. */
   stallLogout?: boolean;
   nonceLogout?: boolean;
+  /** Whether a session may write these keys in this place (`PATCH /api/secrets/<place>`); any, unless set. */
+  writes?: (place: string, keys: Record<string, string | null>) => boolean;
   /** Cloudflare Access in front of these paths: its redirect to the team's login page, before coffre sees the request. */
   access?: (path: string) => boolean;
 };
@@ -57,6 +59,8 @@ export async function fakeCoffre(options: FakeOptions = {}) {
   const notAfterMs = options.notAfterMs ?? 24 * 3_600_000;
   const sessions = new Map<string, Session>();
   const forwarded: Forwarded[] = [];
+  /** What sessions wrote, by place: each PATCH's keys, a value or null to archive. */
+  const written: { place: string; keys: Record<string, string | null> }[] = [];
   /** Every request, as `METHOD path outcome`: what the SDK asked, in order. */
   const log: string[] = [];
   let exchanges = 0;
@@ -177,6 +181,17 @@ export async function fakeCoffre(options: FakeOptions = {}) {
       session.expiresAt = Math.min(Date.now() + lifetimeMs, session.notAfter);
       return record('200'), answer(res, { status: 200, body: { expiresAt: new Date(session.expiresAt).toISOString() } });
     }
+    if (req.method === 'PATCH' && url.pathname.startsWith('/api/secrets/')) {
+      // As the server holds an API call's proof (`provenSession`): to its method and URL, and refused if it signs content.
+      const session = await authenticate(req, res);
+      if (session === 'use_dpop_nonce') return record('use_dpop_nonce');
+      if (typeof session === 'string') return record(session), refuse(res, session);
+      const place = url.pathname.split('/').slice(3).map(decodeURIComponent).join('/');
+      const keys = JSON.parse(body.toString()) as Record<string, string | null>;
+      if (options.writes?.(place, keys) === false) return record('403'), answer(res, { status: 403, body: { error: 'forbidden', message: `this session writes nothing in ${place}` } });
+      written.push({ place, keys });
+      return record('200'), answer(res, { status: 200, body: { keys: Object.fromEntries(Object.entries(keys).map(([key, value]) => [key, value === null ? { archived: true } : { version: 1, sensitivity: 'secret' }])) } });
+    }
     if (url.pathname.startsWith('/use/')) {
       const segments = url.pathname.split('/').slice(2).map(decodeURIComponent);
       const credential = places.includes(segments.slice(0, 2).join('/')) ? segments[2] : segments[0];
@@ -253,6 +268,7 @@ export async function fakeCoffre(options: FakeOptions = {}) {
     url: publicUrl,
     sessions,
     forwarded,
+    written,
     get received() {
       return received;
     },

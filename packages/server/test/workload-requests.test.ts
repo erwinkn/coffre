@@ -308,3 +308,33 @@ test("a session's dry run never tells it whether its guess at a value it only us
   assert.equal(answer.status, 200, JSON.stringify(answer.body));
   assert.deepEqual(answer.body, { dryRun: true, keys: { STRIPE_KEY: 'changed', WEBHOOK: 'unchanged', FLAG: 'unchanged' } });
 });
+
+test("a session whose role writes and archives, and reads nothing, sets a key and archives it, and reads neither it nor any other", async () => {
+  // The ops rehearser's grant on rehearsals/<env>, a role of the deployment's own: it stores a copy's access there and
+  // archives it at teardown, and people read it. A session's scope lists a custom role's permissions, as issued.
+  const rehearsals = project('rehearsals');
+  const there = environment(rehearsals, 'prod');
+  const keeps = ['secret.write', 'secret.archive'];
+  const scope = JSON.stringify([{ projectId: rehearsals.id, environmentId: there.id, role: 'keeper', permissions: { normal: keeps, protected: keeps } }]);
+  const bound = binding('token:rehearser', { policy: '{}', scope });
+  const key = await generateProofKey();
+  const token = generateToken('workload');
+  const row = session(token, bound, { jkt: await thumbprint(key.jwk), scope, places: JSON.stringify([{ environmentId: there.id }]), expiresAt: new Date(Date.now() + 3_600_000) });
+  await write(world,
+    ...rows('roles', role(false, 'keeper', keeps)),
+    ...rows('projects', rehearsals), ...rows('environments', there), ...rows('principals', principal('token:rehearser')),
+    ...rows('grants', grant('token:rehearser', 'keeper', { environment: there })),
+    ...rows('bindings', bound), ...rows('credentials', row));
+  const keeper: Held = { service: 'token:rehearser', token, key, id: row.id };
+  const access = JSON.stringify({ password: 'p-0123', cert: '-----BEGIN CERTIFICATE-----' });
+  const set = await sent(keeper, 'PATCH', '/api/secrets/rehearsals/prod', { COPY_7F3K: access });
+  assert.deepEqual([set.status, (set.body as { keys?: unknown }).keys], [200, { COPY_7F3K: { version: 1, sensitivity: 'secret' } }], JSON.stringify(set.body));
+  // What it wrote it cannot read back, and the plan of the place gives it no value.
+  const reveal = await sent(keeper, 'POST', '/api/reveals', { path: 'rehearsals/prod' });
+  assert.equal(reveal.status, 403, JSON.stringify(reveal.body));
+  assert.doesNotMatch(JSON.stringify(reveal.body), /p-0123/);
+  const archived = await sent(keeper, 'PATCH', '/api/secrets/rehearsals/prod', { COPY_7F3K: null });
+  assert.deepEqual([archived.status, (archived.body as { keys?: unknown }).keys], [200, { COPY_7F3K: { archived: true } }], JSON.stringify(archived.body));
+  // And it writes nowhere else: market/prod is no place of its session's.
+  assert.equal((await sent(keeper, 'PATCH', '/api/secrets/market/prod', { KEY: 'v' })).status, 403);
+});
