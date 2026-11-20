@@ -9,8 +9,9 @@
   `dev@me`, to its environment's), so prod's key and the sandbox's go by one
   name and the app names one `/use/<credential>` URL everywhere, rather than
   a credential and a key name of prod's own. An environment the map does not
-  name is refused, 403 `no_upstream`, before the vault opens anything: a fork
-  of prod reaches no host until the deployment names one. The upstreams share
+  name is refused, 403 `no_upstream`, before the vault opens anything (its
+  plan's JWT placeholder is the bare handle, no claim read): a fork of prod
+  reaches no host until the deployment names one. The upstreams share
   one path, only the host differing, and each is checked as a single
   upstream is. A credential with one upstream is unchanged.
 

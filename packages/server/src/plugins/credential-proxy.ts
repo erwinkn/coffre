@@ -788,6 +788,8 @@ async function workloadPlan(coffre: PluginContext, proxy: Proxy, caller: Workloa
 async function shaped(coffre: PluginContext, credential: Resolved, handle: string, path: string): Promise<string> {
   const placeholder = credential.placeholder!;
   if (placeholder.kind === 'prefix') return `${placeholder.prefix}${handle}`;
+  // An environment the credential names no upstream for opens nothing, a JWT's claims included: the bare handle, which reaches nowhere.
+  if (forEnvironment(credential, path) instanceof Response) return handle;
   const key = credential.keys[0]!;
   const used = await coffre.use(handle, { path, keys: [key], purpose: 'use', upstream: { credential: credential.name } });
   const real = claimsOf(used.values[key]);

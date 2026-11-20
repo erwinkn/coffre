@@ -230,7 +230,8 @@ credentialProxy({
   map does not name, a fork of prod or one added since, is refused, 403
   `no_upstream`, before anything opens: there is no default, so prod's
   key never reaches the sandbox's host. A presigned URL is for the
-  environment's host the same way. The key's own environment decides,
+  environment's host the same way, and a plan there opens nothing: a
+  JWT placeholder is the bare handle, its claims left unread. The key's own environment decides,
   not where its value came from: a reference in dev to prod's key goes
   to dev's host, as it would under any name.
 - A handle grants the use of every credential its environment holds, and
