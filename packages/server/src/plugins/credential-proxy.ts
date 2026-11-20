@@ -30,7 +30,9 @@
  * handle was made for, and is the stable URL of credential `<a>` otherwise.
  *
  * Each credential names the keys its rule reads, from the environment the
- * request names, and one upstream: the request goes there or nowhere, over
+ * request names, and one upstream, or one for each environment that uses it
+ * where a provider's production has a host of its own: the request goes to
+ * its environment's or nowhere, over
  * HTTPS, through the global `fetch` or the credential's `egress` (a VPC
  * Service binding, for an upstream that allowlists the addresses it lets
  * in), its redirects never followed, and a value the upstream echoes is
@@ -179,8 +181,15 @@ export type Egress = { fetch(input: URL, init: RequestInit): Promise<Response> }
 
 /** One credential: its upstream, how its keys reach it, and what of it a caller may ask. */
 export type Credential = {
-  /** Where its requests go, `https://api.schumann.example/v1`: `/use/<name>/<path>` goes to `<upstream>/<path>`, and nowhere else. */
-  upstream: string;
+  /**
+   * Where its requests go, `https://api.schumann.example/v1`: `/use/<name>/<path>` goes to `<upstream>/<path>`, and nowhere else.
+   * Or one for each environment, by its name, where a provider's production has a host of its own:
+   * `{ prod: 'https://api.yousign.app/v3', dev: 'https://api-sandbox.yousign.app/v3' }`, prod's key and the sandbox's under
+   * one name. A request goes to its environment's, `prod`'s for `market/prod` (and a personal config's, `dev@me`, to
+   * `dev`'s); one from an environment the map does not name, a fork's included, is refused before anything opens, so a
+   * key never reaches another environment's host. Each on the same path: only the host differs.
+   */
+  upstream: string | Readonly<Record<string, string>>;
   inject: Inject;
   /**
    * @deprecated Gone in 0.9, and refused: `coffre run` sets no base URL.
@@ -429,8 +438,10 @@ const DROPPED_ANSWER = new Set(['connection', 'keep-alive', 'transfer-encoding',
 /**
  * `shape`: what a shaped placeholder's slot must be, the handle its one group; a path rule's is always one, the bare
  * handle in the key's place without a placeholder. `framed`: a path rule's template, the text around its key.
+ * `upstreams`: a per-environment credential's, by environment, until `forEnvironment` picks the request's; its `base` meanwhile a
+ * stand-in on the reserved `.invalid` domain, on their path, which a path is checked against and nothing is sent to.
  */
-type Resolved = Credential & { name: string; base: URL; keys: string[]; shape?: RegExp; framed?: { before: string; after: string } };
+type Resolved = Credential & { name: string; base: URL; upstreams?: ReadonlyMap<string, URL>; keys: string[]; shape?: RegExp; framed?: { before: string; after: string } };
 
 /**
  * A `path()` rule's template: one segment, its key once, `bot{TELEGRAM_BOT_TOKEN}`. The text around the key goes out as
@@ -860,6 +871,23 @@ function within(credential: Resolved, rest: readonly string[], search: string): 
 }
 
 /**
+ * The credential as a request from the environment at `path` sends it: as it is, or a per-environment one with that
+ * environment's upstream, a personal config's (`market/dev@me`) its environment's. Refused where the map names none,
+ * before anything opens: a fork of prod, or an environment added since, reaches no host until the deployment names one.
+ */
+function forEnvironment(credential: Resolved, path: string): Resolved | Response {
+  if (credential.upstreams === undefined) return credential;
+  const environment = path.slice(path.indexOf('/') + 1).replace(/@me$/, '');
+  const base = credential.upstreams.get(environment);
+  if (base === undefined) return failure(403, `${credential.name} has no upstream for ${environment}, only for ${[...credential.upstreams.keys()].join(', ')}: the deployment's credentialProxy names each environment's`, 'no_upstream');
+  const { upstreams: _, ...one } = credential;
+  return { ...one, base };
+}
+
+/** Where a credential reaches, for a refusal to say: its upstream, or a per-environment one's path, its environment not yet known. */
+const reach = (credential: Resolved) => (credential.upstreams === undefined ? credential.base.href : `${credential.base.pathname} on its environment's upstream`);
+
+/**
  * The upstream URL a request through `credential` goes to, or the refusal:
  * nothing the app writes leaves the credential's upstream, and its methods
  * and paths hold. Whoever sends it, a handle's holder or a workload.
@@ -867,7 +895,7 @@ function within(credential: Resolved, rest: readonly string[], search: string): 
 function aim(request: Request, credential: Resolved, rest: string[], search: string): Aim | Response {
   if (rest.some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   const at = within(credential, rest, search);
-  if (at === null) return failure(400, `${credential.name} reaches ${credential.base.href} only`);
+  if (at === null) return failure(400, `${credential.name} reaches ${reach(credential)} only`);
   const { target, under, relative } = at;
   if (credential.methods !== undefined && !credential.methods.includes(request.method)) return failure(405, `${credential.name} takes ${credential.methods.join(', ')}`);
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
@@ -931,7 +959,10 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
  * values opened (or remembered), the request sent on with them. `peeked`,
  * a form or JSON rule's body as the stable URL already read it.
  */
-async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, credential: Resolved, rest: string[], search: string, peeked?: Fillable): Promise<Response> {
+async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string, named: Resolved, rest: string[], search: string, peeked?: Fillable): Promise<Response> {
+  // The environment's upstream, of a per-environment credential, or the refusal, before anything is read or opened.
+  const credential = forEnvironment(named, path);
+  if (credential instanceof Response) return credential;
   const aimed = aim(request, credential, rest, search);
   if (aimed instanceof Response) return aimed;
   // A method override where the credential's methods are limited, before the body is read, or anything opened.
@@ -1053,11 +1084,12 @@ async function refused<T>(asking: Promise<T>): Promise<T | Response> {
  */
 async function workloadForward(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null, credential: Resolved, rest: string[], search: string): Promise<Response | null> {
   if (sessionToken(request) === null) return null;
-  const aimed = aim(request, credential, rest, search);
-  if (aimed instanceof Response) return aimed;
+  // Checked before the body is read, on the credential's path; a per-environment one's host waits for the session's place.
+  const checked = aim(request, credential, rest, search);
+  if (checked instanceof Response) return checked;
   // A method override in the query where the credential's methods are limited, before the body is read; one in a header
   // waits for the proof, which says which headers go on.
-  const queried = overrideRefused(credential.methods, credential.name, new Headers(), aimed.target);
+  const queried = overrideRefused(credential.methods, credential.name, new Headers(), checked.target);
   if (queried !== null) return queried;
   const content = await carried(request, credential);
   if (content instanceof Response) return content;
@@ -1084,6 +1116,11 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
       return failure(400, `${declaring} says what binds the body, so the proof signs it: name it in hdr`);
     }
     if (caller.path === null) return failure(409, `name the environment, ${coffre.publicUrl}/use/<project>/<environment>/${credential.name}: this session was made for none, several, or one since deleted`);
+    // The place's upstream, of a per-environment credential, or the refusal, before anything opens.
+    const bound = forEnvironment(credential, caller.path);
+    if (bound instanceof Response) return bound;
+    const aimed = bound === credential ? checked : aim(request, bound, rest, search);
+    if (aimed instanceof Response) return aimed;
     // A form or JSON rule's field, whatever the app put there, as a header rule's header: it holds no handle.
     const field = inBody(credential.inject) ? fieldIn(request, content.body, credential.name, credential.inject) : null;
     if (field instanceof Response) return field;
@@ -1092,7 +1129,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     // A method override in what goes on, where the credential's methods are limited, before the values open.
     const override = overrideRefused(credential.methods, credential.name, headers, aimed.target);
     if (override !== null) return override;
-    const used = await coffre.use(caller, { path: caller.path, keys: credential.keys, purpose: 'use', upstream: sentTo(credential, aimed.target) });
+    const used = await coffre.use(caller, { path: caller.path, keys: credential.keys, purpose: 'use', upstream: sentTo(bound, aimed.target) });
     const constraints = used.workload?.constraints ?? null;
     if (!constraintsAllow(constraints, { place: caller.path, credential: credential.name, request: { method: request.method, url: aimed.target } })) {
       return failure(403, `this narrowed session may not ${request.method} ${aimed.relative} through ${credential.name}`, 'narrowed');
@@ -1106,7 +1143,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     const proxied = `${coffre.publicUrl}/use/${path === null ? '' : `${path}/`}${credential.name}`;
     const token = sessionToken(request)!;
     const secret = { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
-    return send(request, credential, { ...aimed, ...content, opened: { values: used.values, plain: used.plain }, headers, proxied, back: null, field, secret, payload });
+    return send(request, bound, { ...aimed, ...content, opened: { values: used.values, plain: used.plain }, headers, proxied, back: null, field, secret, payload });
   });
 }
 
@@ -1415,7 +1452,10 @@ async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who
  * key's id and a signature, never the secret. A narrowed session's methods
  * and paths are held to the presigned request's.
  */
-async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: User, credential: Resolved, asked: { path?: unknown; method?: unknown; query?: unknown; expiresIn?: unknown }): Promise<Response> {
+async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: User, named: Resolved, asked: { path?: unknown; method?: unknown; query?: unknown; expiresIn?: unknown }): Promise<Response> {
+  // The URL is for the environment's upstream, of a per-environment credential, or none.
+  const credential = forEnvironment(named, path);
+  if (credential instanceof Response) return credential;
   const inject = credential.inject as { kind: 'sigv4' } & SigV4;
   const method = asked.method ?? 'GET';
   if (method !== 'GET' && method !== 'HEAD') return failure(400, 'a presigned URL is for GET or HEAD: an upload goes through the proxy');
@@ -1434,7 +1474,7 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
     target.searchParams.set(name, value);
   }
   const under = credential.base.pathname.replace(/\/$/, '');
-  if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) return failure(400, `${credential.name} reaches ${credential.base.href} only`);
+  if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) return failure(400, `${credential.name} reaches ${reach(credential)} only`);
   if (target.pathname.split('/').some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   const relative = target.pathname.slice(under.length) || '/';
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
@@ -2132,16 +2172,20 @@ function redacted(upstream: Response, { scrub, whole, any }: Redactor, location:
 function resolve(name: string, credential: Credential, insecure: boolean): Resolved {
   if (!NAME.test(name)) throw new Error(`credentialProxy: a credential's name is lowercase letters, digits and dashes; got ${JSON.stringify(name)}`);
   let base: URL;
-  try {
-    base = new URL(credential.upstream);
-  } catch {
-    throw new Error(`credentialProxy: ${name}'s upstream is a URL, https://api.example.com/v1; got ${JSON.stringify(credential.upstream)}`);
+  let upstreams: Map<string, URL> | undefined;
+  if (typeof credential.upstream === 'string') base = upstreamOf(`${name}'s`, credential.upstream, insecure);
+  else {
+    const listed = typeof credential.upstream === 'object' && credential.upstream !== null ? Object.entries(credential.upstream) : [];
+    if (listed.length === 0) throw new Error(`credentialProxy: ${name}'s upstream is a URL, or one for each environment, { prod: 'https://api.example.com/v1', dev: 'https://sandbox.example.com/v1' }`);
+    upstreams = new Map(listed.map(([environment, url]) => {
+      if (!ENVIRONMENT.test(environment)) throw new Error(`credentialProxy: ${name}'s upstreams are each for an environment by its name, prod or dev; got ${JSON.stringify(environment)}`);
+      return [environment, upstreamOf(`${name}'s ${environment}`, url, insecure)];
+    }));
+    // A path is checked against the upstream before the request's environment is known: one path for all of them.
+    const paths = new Set([...upstreams.values()].map((url) => url.pathname));
+    if (paths.size > 1) throw new Error(`credentialProxy: ${name}'s upstreams are on one path, only the host differing by environment; got ${[...paths].join(' and ')}`);
+    base = new URL(`https://${name}.upstream.invalid${[...paths][0]!}`);
   }
-  if (base.search !== '' || base.hash !== '' || base.username !== '' || base.password !== '') throw new Error(`credentialProxy: ${name}'s upstream is an origin and a path, with no query, fragment or user`);
-  if (base.protocol !== 'https:' && !(insecure && base.protocol === 'http:')) {
-    throw new Error(`credentialProxy: ${name}'s upstream is HTTPS${insecure ? ' or HTTP' : ': plain HTTP only with insecureUpstreams, for a local fake'}`);
-  }
-  if (!insecure && privateHost(base.hostname)) throw new Error(`credentialProxy: ${name}'s upstream ${base.hostname} is a private address, which only insecureUpstreams, for a local fake, reaches`);
   const inject = credential.inject;
   const templates = inject.kind === 'basic' ? [inject.user, inject.password]
     : inject.kind === 'sigv4' ? [inject.accessKeyId, inject.secretAccessKey, ...(inject.sessionToken === undefined ? [] : [inject.sessionToken])]
@@ -2172,7 +2216,27 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
   if (credential.paths !== undefined && credential.paths.some((path) => !path.startsWith('/'))) throw new Error(`credentialProxy: ${name}'s paths start with /`);
   const shape = credential.placeholder === undefined && framed === undefined ? undefined : placeholderShape(name, credential.placeholder, inject);
   limited(name, credential.limit);
-  return { ...credential, ...(methods === undefined ? {} : { methods }), ...(shape === undefined ? {} : { shape }), ...(framed === undefined ? {} : { framed: { before: framed[1]!, after: framed[3]! } }), name, base, keys };
+  return { ...credential, ...(methods === undefined ? {} : { methods }), ...(shape === undefined ? {} : { shape }), ...(framed === undefined ? {} : { framed: { before: framed[1]!, after: framed[3]! } }), name, base, ...(upstreams === undefined ? {} : { upstreams }), keys };
+}
+
+/** An environment's name, as a per-environment upstream is listed by: `prod`, `dev`, never a personal config's `@me`. */
+const ENVIRONMENT = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/** One upstream's URL, `what` upstream's, checked: an origin and a path, over HTTPS, at a public address, unless `insecure`. */
+function upstreamOf(what: string, upstream: unknown, insecure: boolean): URL {
+  let base: URL;
+  try {
+    if (typeof upstream !== 'string') throw new TypeError('no string');
+    base = new URL(upstream);
+  } catch {
+    throw new Error(`credentialProxy: ${what} upstream is a URL, https://api.example.com/v1; got ${JSON.stringify(upstream)}`);
+  }
+  if (base.search !== '' || base.hash !== '' || base.username !== '' || base.password !== '') throw new Error(`credentialProxy: ${what} upstream is an origin and a path, with no query, fragment or user`);
+  if (base.protocol !== 'https:' && !(insecure && base.protocol === 'http:')) {
+    throw new Error(`credentialProxy: ${what} upstream is HTTPS${insecure ? ' or HTTP' : ': plain HTTP only with insecureUpstreams, for a local fake'}`);
+  }
+  if (!insecure && privateHost(base.hostname)) throw new Error(`credentialProxy: ${what} upstream ${base.hostname} is a private address, which only insecureUpstreams, for a local fake, reaches`);
+  return base;
 }
 
 /**
