@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **The Projects list hides environments with no secret.** A project's row
+  lists the environments that hold secrets; a project whose environments are
+  all empty says `2 empty environments`. The project's own page still lists
+  every one.
+
 ## 0.16.6 (2026-11-20)
 
 - **A credential's upstream can be one for each environment.** Where a

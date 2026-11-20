@@ -9,7 +9,7 @@ import { queries } from '../lib/queries';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { useShell } from '../lib/use-shell';
 import type { ProjectSummary } from '../shared/models';
-import { isActiveAccessibleEnvironment } from '../lib/project-environments';
+import { isActiveAccessibleEnvironment, listedEnvironments } from '../lib/project-environments';
 import { slugProblem } from '../lib/validation';
 import { RowFailure, RowPending, rowClass } from '../components/row-state';
 import { EmptyState, ErrorLine, Modal } from '../components/ui';
@@ -196,10 +196,8 @@ function ProjectRow({
   // A project on its way has no page yet.
   const pending = status.state === 'pending';
   const isArchived = project.archivedAt !== null;
-  const listedEnvironments = project.environments.filter(
-    (environment) =>
-      environment.details === null || environment.details.archivedAt === null,
-  );
+  const { listed, empty } = listedEnvironments(project.environments);
+  const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
 
   return (
     <>
@@ -222,15 +220,17 @@ function ProjectRow({
           </span>
         </td>
         <td className="col-envs" data-label="Environments">
-          {isArchived || listedEnvironments.length === 0 ? (
+          {isArchived || listed.length === 0 ? (
             <span className="cell-muted">
-              {listedEnvironments.length === 0
+              {listed.length + empty === 0
                 ? 'No environments yet'
-                : `${listedEnvironments.length} environment${listedEnvironments.length === 1 ? '' : 's'}`}
+                : isArchived
+                  ? plural(listed.length + empty, 'environment')
+                  : plural(empty, 'empty environment')}
             </span>
           ) : (
             <span className="env-links" aria-label={`Environments in ${project.slug}`}>
-              {listedEnvironments.map((environment) =>
+              {listed.map((environment) =>
                 isActiveAccessibleEnvironment(environment) ? (
                   <Link
                     key={environment.slug}
