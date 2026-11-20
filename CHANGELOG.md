@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **A credential's `rules` say which requests it may be used for, by
+  method and path together.** `rules: [allow('POST',
+  '/instances/<live>/snapshots'), deny('*', '/instances/<live>/**'),
+  allow('*', '/instances/{uuid}/**')]`: the first rule that matches a
+  request decides, and one none matches is refused, 403 `rule`, before the
+  vault opens anything, for a key whose provider cannot scope it finer, a
+  database key that reaches the live instance too. A pattern's segments
+  match as sent, `*` any one, `{uuid}` a lowercase UUID, and a last `**`
+  whatever follows. A presigned URL is held to them, and with rules a
+  method override is refused as with `methods`. `decide(rules, method,
+  path)` answers as the proxy does, for a deployment's tests.
+- **A workload writes and archives keys: `coffre.write(path, value)`**,
+  `null` to archive, where its grant lets it, signed by its session's key
+  as its other calls to coffre are. A workload that makes something people
+  need, a database copy's password, keeps it in coffre for them.
+
 ## 0.16.6 (2026-11-20)
 
 - **A credential's upstream can be one for each environment.** Where a

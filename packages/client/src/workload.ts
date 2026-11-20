@@ -83,6 +83,14 @@ export interface Workload {
   /** The escape hatch: a plain value, or one the binding lists in `reads`. Anything else rejects with `use_only`. */
   read(key: string): Promise<string>;
   /**
+   * Writes a key's value as this session, where its grant lets it write:
+   * `write('rehearsals/prod/COPY_7F3K', value)`, or a bare key in the
+   * session's place; `null` archives the key, its versions kept. What it
+   * writes it may still be unable to read: a session reads only what
+   * `read` does.
+   */
+  write(key: string, value: string | null): Promise<void>;
+  /**
    * A session with less authority (section 8.4), for a part of the app that
    * needs less: in this process, a `Workload` of its own key; for another
    * process, which made the key and sends only its public half, the child's
@@ -565,6 +573,15 @@ function surface(core: Core): Workload {
       if (typeof value === 'string') return value;
       throw new CoffreError(403, 'forbidden', `${core.service} reads no ${name} in ${placeOf()}: it reads plain values and those its binding lists in reads, and uses every other through coffre`, 'use_only');
     },
+    write: async (path, value) => {
+      const parts = path.split('/');
+      if ((parts.length !== 1 && parts.length !== 3) || parts.includes('')) throw new TypeError(`write a key as KEY, in the session's place, or as <project>/<environment>/KEY; got ${JSON.stringify(path)}`);
+      const key = parts.at(-1)!;
+      const place = parts.length === 3 ? `${parts[0]}/${parts[1]}` : placeOf();
+      const { token } = await core.current();
+      const { response, body } = await core.api(`/api/secrets/${place.split('/').map(encodeURIComponent).join('/')}`, token, { [key]: value }, undefined, 'PATCH');
+      if (!response.ok) throw refusal(response.status, body, `coffre wrote no ${key} in ${place}`);
+    },
     narrow: (async (options: NarrowOptions & { key?: PublicJwk }) => {
       const own = options.key === undefined ? await generateProofKey() : null;
       const { token } = await core.current();
@@ -666,26 +683,28 @@ function note(nonces: Nonces, response: { headers: { get(name: string): string |
   }
 }
 
-/** A POST to coffre's own API with a session (renew, narrow, logout), signed by its key. */
-type Api = (path: string, token: string, body?: unknown, signal?: AbortSignal) => Promise<{ response: Response; body: Record<string, unknown> | null }>;
+/** A request to coffre's own API with a session, signed by its key: a POST (renew, narrow, logout), or a key's PATCH (write). */
+type Api = (path: string, token: string, body?: unknown, signal?: AbortSignal, method?: 'POST' | 'PATCH') => Promise<{ response: Response; body: Record<string, unknown> | null }>;
 
 /**
- * Its proof signs the token and the newest nonce, and a body where there is
- * one (`hdr` and `req`: narrow's, the key and the limits it gives a child),
- * so no one who sees the request can make it say anything else; sent again
- * once if the gate asks for a fresh nonce.
+ * Its proof signs the token and the newest nonce, and a POST's body where
+ * there is one (`hdr` and `req`: narrow's, the key and the limits it gives a
+ * child), so no one who sees the request can make it say anything else; sent
+ * again once if the gate asks for a fresh nonce. A PATCH's body goes
+ * unsigned: coffre holds an API call's proof to its method and URL alone
+ * (`provenSession`), and refuses one that signs content it does not expect.
  */
 function apiOf({ origin, base, key, nonces }: { origin: string; base: Fetch; key: ProofKey; nonces: Nonces }): Api {
-  return async (path, token, body, signal) => {
+  return async (path, token, body, signal, method = 'POST') => {
     const url = `${origin}${path}`;
     const json = body === undefined ? undefined : JSON.stringify(body);
     const headers = { accept: 'application/json', ...(json === undefined ? {} : { 'content-type': 'application/json' }) };
-    const content = json === undefined ? undefined : { headers, body: await bodyDigest(json) };
+    const content = json === undefined || method === 'PATCH' ? undefined : { headers, body: await bodyDigest(json) };
     const send = async () => {
       const sent = dispatch(nonces);
       const response = await base(url, {
-        method: 'POST',
-        headers: { ...headers, authorization: `DPoP ${token}`, dpop: await createProof(key, { method: 'POST', url, token, nonce: nonces.value, content }) },
+        method,
+        headers: { ...headers, authorization: `DPoP ${token}`, dpop: await createProof(key, { method, url, token, nonce: nonces.value, content }) },
         body: json,
         signal,
         redirect: 'error',

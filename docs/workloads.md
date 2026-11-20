@@ -197,6 +197,23 @@ binding that gives `viewer` on `market/prod`:
 Cloudflare and hold one webhook secret on Railway. Most reads have a
 use-only replacement: `verify`, `sign`, or the tunnel.
 
+### `write`: a key the workload keeps
+
+```ts
+await coffre.write('rehearsals/prod/COPY_7F3K', JSON.stringify({ password, cert }));
+await coffre.write('rehearsals/prod/COPY_7F3K', null); // archives it, its versions kept
+```
+
+A workload writes a key where its grant holds `secret.write`, and archives
+one, `null`, where it holds `secret.archive`: a bare `KEY` is in the
+session's place, `<project>/<environment>/KEY` in another its scope
+reaches. What it writes, it reads back only as `read` does. A role that
+writes and archives and reads nothing (`coffre roles set keeper
+--permissions write,archive --protected write,archive`) lets a workload
+hand people what it made, a database copy's password, that it never reads
+again. Its proof signs the request's method and URL, as every call to
+coffre's API is held.
+
 ### The AWS SDK
 
 ```ts

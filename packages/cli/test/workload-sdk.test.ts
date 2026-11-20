@@ -411,6 +411,22 @@ test('sign, verify, presign and mint go to the environment, and read returns onl
   assert.deepEqual([raw.path, raw.query, raw.headers['content-type'], raw.headers['content-digest'], raw.length, raw.sha256], ['/use/market/prod', 'sign=sumsub-key', 'application/octet-stream', `sha-256=:${sha256.toString('base64')}:`, String(message.length), sha256.toString('hex')]);
 });
 
+test("write sets a key as the session, in its place or one it names; null archives it; its proof signs method and URL, as coffre's API holds it", async (t) => {
+  const { coffre, session } = await signedIn(t, { writes: (place) => place !== 'market/staging' });
+  await session.write('COPY_7F3K', '{"password":"p","cert":"c"}');
+  await session.write('rehearsals/prod/COPY_7F3K', '{"password":"q","cert":"c"}');
+  await session.write('rehearsals/prod/COPY_7F3K', null);
+  assert.deepEqual(coffre.written, [
+    { place: 'market/prod', keys: { COPY_7F3K: '{"password":"p","cert":"c"}' } },
+    { place: 'rehearsals/prod', keys: { COPY_7F3K: '{"password":"q","cert":"c"}' } },
+    { place: 'rehearsals/prod', keys: { COPY_7F3K: null } },
+  ]);
+  // A refusal is coffre's, its status and message; a path neither a key nor <project>/<environment>/KEY is the app's mistake.
+  await assert.rejects(session.write('market/staging/KEY', 'v'), (error) => error instanceof CoffreError && error.status === 403 && /writes nothing in market\/staging/.test(error.message));
+  for (const path of ['market/KEY', 'a/b/c/KEY', '']) await assert.rejects(session.write(path, 'v'), TypeError);
+  assert.equal(coffre.written.length, 3);
+});
+
 test('with several environments, URLs name the one chosen', async (t) => {
   const coffre = await fakeCoffre({ places: ['market/prod', 'market/staging'] });
   t.after(() => coffre.close());

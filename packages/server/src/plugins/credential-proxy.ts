@@ -171,6 +171,38 @@ export function prefix(prefix: string): Placeholder {
 }
 
 /**
+ * One of a credential's `rules`: whether a request of these methods to a
+ * path of this pattern goes on, `allow(…)`, or is refused, `deny(…)`.
+ */
+export type Rule = { verdict: 'allow' | 'deny'; methods: '*' | readonly string[]; path: string };
+
+/**
+ * A rule that lets requests of `methods` (`'GET'`, `['PATCH', 'DELETE']`, or
+ * `'*'` for any) to paths of `pattern` go on: `allow('POST',
+ * '/instances/{uuid}/snapshots')`. The pattern is the path under the
+ * upstream, a segment at a time: a segment as written matches itself
+ * exactly, as the app sent it, percent-encoding, case and all; `*` matches
+ * any one segment but an empty one; `{uuid}` matches one UUID, written as
+ * servers write them, lowercase and dashed (`8-4-4-4-12`); and `**`, last,
+ * matches whatever follows, nothing included: `/instances/{uuid}/**` is the
+ * instance and everything under it.
+ */
+export function allow(methods: '*' | string | readonly string[], pattern: string): Rule {
+  return { verdict: 'allow', methods: methods === '*' ? '*' : typeof methods === 'string' ? [methods] : methods, path: pattern };
+}
+
+/**
+ * A rule that refuses requests of `methods` to paths of `pattern`, as
+ * `allow` reads them: `deny('*', '/instances/0d6f…/**')`. Where an id is
+ * denied by name, the allows after it match ids with `{uuid}`, never `*`: a
+ * server that also reads `0D6F…`, `{0d6f…}`, `urn:uuid:0d6f…` or the 32
+ * digits alone as that id would otherwise let one of them past the deny.
+ */
+export function deny(methods: '*' | string | readonly string[], pattern: string): Rule {
+  return { ...allow(methods, pattern), verdict: 'deny' };
+}
+
+/**
  * What a credential's requests leave through, in place of the global
  * `fetch`: a Workers VPC Service binding (`env.SCHUMAN_EGRESS`), a service
  * binding, or the deployment's own `{ fetch }`. It is given the request as
@@ -211,6 +243,16 @@ export type Credential = {
   methods?: readonly string[];
   /** The paths under `upstream` it may be used on, by prefix, `['/companies']`; any, unless set. */
   paths?: readonly string[];
+  /**
+   * Which requests it may be used for, by method and path, `[allow('GET',
+   * '/instances/**'), deny('*', '/instances/<id>/**'), allow('*',
+   * '/instances/{uuid}/**')]`: the first rule that matches decides, and a
+   * request none matches is refused, so it is used for nothing the rules do
+   * not name. Read with `methods` and `paths`, before anything opens, on
+   * the path as the app sent it; its query is not read. With rules, a method
+   * override is refused, as with `methods`. Any request, unless set.
+   */
+  rules?: readonly Rule[];
   /**
    * What its requests leave through, for an upstream that lets in only
    * known addresses: `env.SCHUMAN_EGRESS`, a VPC Service binding whose
@@ -441,7 +483,7 @@ const DROPPED_ANSWER = new Set(['connection', 'keep-alive', 'transfer-encoding',
  * `upstreams`: a per-environment credential's, by environment, until `forEnvironment` picks the request's; its `base` meanwhile a
  * stand-in on the reserved `.invalid` domain, on their path, which a path is checked against and nothing is sent to.
  */
-type Resolved = Credential & { name: string; base: URL; upstreams?: ReadonlyMap<string, URL>; keys: string[]; shape?: RegExp; framed?: { before: string; after: string } };
+type Resolved = Credential & { name: string; base: URL; upstreams?: ReadonlyMap<string, URL>; keys: string[]; shape?: RegExp; framed?: { before: string; after: string }; ruled?: readonly Ruled[] };
 
 /**
  * A `path()` rule's template: one segment, its key once, `bot{TELEGRAM_BOT_TOKEN}`. The text around the key goes out as
@@ -892,6 +934,75 @@ function forEnvironment(credential: Resolved, path: string): Resolved | Response
 /** Where a credential reaches, for a refusal to say: its upstream, or a per-environment one's path, its environment not yet known. */
 const reach = (credential: Resolved) => (credential.upstreams === undefined ? credential.base.href : `${credential.base.pathname} on its environment's upstream`);
 
+/** One of a credential's rules, compiled: its methods (null for any), its pattern's segments, whether a last `**` ends it, and the rule as written, for a refusal to quote. */
+type Ruled = { verdict: 'allow' | 'deny'; methods: ReadonlySet<string> | null; segments: readonly string[]; rest: boolean; said: string };
+
+/** A UUID as servers write one: lowercase, dashed. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Whether a rule's segment matches the path's: `*` any but an empty one, `{uuid}` a UUID, any other itself exactly. */
+const segmentMatches = (pattern: string, segment: string) => (pattern === '*' ? segment !== '' : pattern === '{uuid}' ? UUID.test(segment) : pattern === segment);
+
+/**
+ * The refusal of a request its credential's rules do not let go on, or null: the first rule that matches its method
+ * and path decides, and a request none matches is refused. The method is read in capitals, as a server reads `patch`
+ * (fetch leaves it as written), so a rule for PATCH holds it.
+ */
+function ruledOut(credential: Resolved, method: string, relative: string): Response | null {
+  if (credential.ruled === undefined) return null;
+  const rule = deciding(credential.ruled, method, relative);
+  if (rule?.verdict === 'allow') return null;
+  const asked = `${method.toUpperCase()} ${relative}`;
+  return failure(403, rule === undefined ? `${credential.name} has no rule that allows ${asked}` : `${credential.name} refuses ${asked}: ${rule.said}`, 'rule');
+}
+
+/** The first of `ruled` that matches a request's method, in capitals, and its path under the upstream; undefined for none. */
+function deciding(ruled: readonly Ruled[], method: string, relative: string): Ruled | undefined {
+  const asked = method.toUpperCase();
+  const segments = relative.split('/').slice(1);
+  return ruled.find((each) => (each.methods === null || each.methods.has(asked))
+    && (each.rest ? segments.length >= each.segments.length : segments.length === each.segments.length)
+    && each.segments.every((pattern, at) => segmentMatches(pattern, segments[at]!)));
+}
+
+/**
+ * What `rules` decide for a request of `method` to `path`, the path under the upstream as the app sends it, as the
+ * proxy decides: whether it goes on, and the rule that said so, as written (`deny(*, /instances/…/**)`), or null where
+ * none matches and it is refused. For a deployment's own tests of its rules, one request at a time:
+ * `assert.equal(decide(rules, 'DELETE', '/instances/0d6f…').allowed, false)`.
+ */
+export function decide(rules: readonly Rule[], method: string, path: string): { allowed: boolean; rule: string | null } {
+  const rule = deciding(rulesOf('rules', rules), method, path);
+  return { allowed: rule?.verdict === 'allow', rule: rule?.said ?? null };
+}
+
+/** A credential's rules, checked and compiled; a configuration error names the first that is none. */
+function rulesOf(name: string, rules: unknown): Ruled[] {
+  if (!Array.isArray(rules) || rules.length === 0) throw new Error(`credentialProxy: ${name}'s rules are a list of allow(…) and deny(…), at least one: with none it would be used for nothing`);
+  return rules.map((rule: unknown) => {
+    const { verdict, methods, path } = (typeof rule === 'object' && rule !== null ? rule : {}) as Partial<Rule>;
+    const listed = methods === '*' ? null
+      : Array.isArray(methods) && methods.length > 0 && methods.every((method) => typeof method === 'string' && /^[A-Za-z]+$/.test(method)) ? new Set(methods.map((method: string) => method.toUpperCase()))
+      : undefined;
+    if ((verdict !== 'allow' && verdict !== 'deny') || listed === undefined || typeof path !== 'string') {
+      throw new Error(`credentialProxy: ${name}'s rules are each allow(methods, pattern) or deny(methods, pattern), methods 'GET', ['PATCH', 'DELETE'] or '*'; got ${JSON.stringify(rule)}`);
+    }
+    const said = `${verdict}(${listed === null ? '*' : [...listed].join(', ')}, ${path})`;
+    if (!path.startsWith('/')) throw new Error(`credentialProxy: ${name}'s ${said} is for a path under the upstream: it starts with /`);
+    const segments = path.split('/').slice(1);
+    const rest = segments.at(-1) === '**';
+    if (rest) segments.pop();
+    for (const segment of segments) {
+      // A segment as the app sends it (RFC 3986's pchar), but `*`, `{` and `}`, which say a wildcard: `{id}` is no wildcard, and matching itself would match nothing.
+      if (segment === '*' || segment === '{uuid}') continue;
+      if (!/^[A-Za-z0-9._~!$&'()+,;=:@%-]*$/.test(segment) || /^\.{1,2}$/.test(segment)) {
+        throw new Error(`credentialProxy: ${name}'s ${said}: a segment is one as the app sends it, *, {uuid}, or ** last; got ${JSON.stringify(segment)}`);
+      }
+    }
+    return { verdict, methods: listed, segments, rest, said };
+  });
+}
+
 /**
  * The upstream URL a request through `credential` goes to, or the refusal:
  * nothing the app writes leaves the credential's upstream, and its methods
@@ -906,6 +1017,8 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
     return failure(403, `${credential.name} is not for ${relative}`);
   }
+  const ruled = ruledOut(credential, request.method, relative);
+  if (ruled !== null) return ruled;
   // A path rule's segment, found in the path as the app sent it, before anything is opened: the value never decides it.
   const slot = credential.framed === undefined ? -1 : pathSlot(credential.framed, relative);
   if (credential.framed !== undefined && slot === -1) return failure(400, `${credential.name} takes its key in a segment of the path, ${(credential.inject as { template: string }).template}, and this path has none`);
@@ -972,7 +1085,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (aimed instanceof Response) return aimed;
   // A method override where the credential's methods are limited, before the body is read, or anything opened.
   const headers = outbound(request, null);
-  const override = overrideRefused(credential.methods, credential.name, headers, aimed.target);
+  const override = overrideRefused(methodLimit(credential), credential.name, headers, aimed.target);
   if (override !== null) return override;
   const { target, relative } = aimed;
   const inject = credential.inject;
@@ -1032,13 +1145,19 @@ const overrideIn = (names: Iterable<string>, overrides: ReadonlySet<string>) => 
  * key of the query, decoded once as a form's, its pairs split at `&` and at `;`, as Rack before 3.0 splits them. Null
  * for none, or no limit. A body is not read for one (D179).
  */
-function overrideRefused(methods: readonly string[] | undefined, who: string, headers: Headers, target: URL, narrowed = false): Response | null {
-  if (methods === undefined) return null;
+function overrideRefused(limit: string | undefined, who: string, headers: Headers, target: URL, narrowed = false): Response | null {
+  if (limit === undefined) return null;
   const named = overrideIn(headers.keys(), OVERRIDE_HEADERS) ?? overrideIn([...target.search.slice(1).matchAll(/[^&;]+/g)].map(([pair]) => bytesOf(pair.split('=', 1)[0]!.replace(/\+/g, ' '))), OVERRIDE_KEYS);
   if (named === undefined) return null;
-  const said = `${who} takes ${methods.join(', ')} alone, and this request names a method in \`${named}\`, which an upstream may act on instead of its own`;
+  const said = `${who} ${limit}, and this request names a method in \`${named}\`, which an upstream may act on instead of its own`;
   return narrowed ? failure(403, said, 'narrowed') : failure(405, said);
 }
+
+/** What `methods` limit, for a refusal to say: `takes GET, POST alone`; undefined for no limit. */
+const takes = (methods: readonly string[] | undefined) => (methods === undefined ? undefined : `takes ${methods.join(', ')} alone`);
+
+/** What holds a credential's requests to their methods, which a method override would get past: its `methods`, or its `rules`. */
+const methodLimit = (credential: Resolved) => takes(credential.methods) ?? (credential.ruled === undefined ? undefined : 'holds each method to its rules');
 
 /** The session token a workload's request carries (`Authorization: DPoP coffre_wl_…`), which goes no further than coffre; null for none, a Cloudflare call's. */
 function sessionToken(request: Request): string | null {
@@ -1094,7 +1213,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   if (checked instanceof Response) return checked;
   // A method override in the query where the credential's methods are limited, before the body is read; one in a header
   // waits for the proof, which says which headers go on.
-  const queried = overrideRefused(credential.methods, credential.name, new Headers(), checked.target);
+  const queried = overrideRefused(methodLimit(credential), credential.name, new Headers(), checked.target);
   if (queried !== null) return queried;
   const content = await carried(request, credential);
   if (content instanceof Response) return content;
@@ -1132,7 +1251,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     // Only what the proof signs goes on, of what the app sent: a header added on the way, by a library or a proxy, is dropped.
     const headers = outbound(request, caller.hdr);
     // A method override in what goes on, where the credential's methods are limited, before the values open.
-    const override = overrideRefused(credential.methods, credential.name, headers, aimed.target);
+    const override = overrideRefused(methodLimit(credential), credential.name, headers, aimed.target);
     if (override !== null) return override;
     const used = await coffre.use(caller, { path: caller.path, keys: credential.keys, purpose: 'use', upstream: sentTo(bound, aimed.target) });
     const constraints = used.workload?.constraints ?? null;
@@ -1140,7 +1259,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
       return failure(403, `this narrowed session may not ${request.method} ${aimed.relative} through ${credential.name}`, 'narrowed');
     }
     // And where the narrowed session's are, where the request's own method is held to them.
-    const narrowed = overrideRefused(constraints?.methods, 'this narrowed session', headers, aimed.target, true);
+    const narrowed = overrideRefused(takes(constraints?.methods), 'this narrowed session', headers, aimed.target, true);
     if (narrowed !== null) return narrowed;
     if (body === UNSIGNED_BODY && used.workload?.policy.unsignedUploads !== true) {
       return failure(403, "an unsigned upload (UNSIGNED-PAYLOAD) binds no body to its proof, and this workload's binding does not say unsignedUploads: send x-amz-content-sha256 as the body's SHA-256", 'unsigned_upload');
@@ -1485,13 +1604,15 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
     return failure(403, `${credential.name} is not for ${relative}`);
   }
+  const ruled = ruledOut(credential, method, relative);
+  if (ruled !== null) return ruled;
   // A URL is for sharing: the handle goes in none, its path or its query, encoded or not.
   if (HANDLE.test(bytesOf(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
   // A method override in the URL's query, as in a request's through the credential: its methods first, before anything opens.
-  const override = overrideRefused(credential.methods, credential.name, new Headers(), target);
+  const override = overrideRefused(methodLimit(credential), credential.name, new Headers(), target);
   if (override !== null) return override;
   const { values, expiresAt, workload } = await used(coffre, proxy, path, who, credential.name, credential.keys, { method, url: target });
-  const narrowed = overrideRefused(workload?.constraints?.methods, 'this narrowed session', new Headers(), target, true);
+  const narrowed = overrideRefused(takes(workload?.constraints?.methods), 'this narrowed session', new Headers(), target, true);
   if (narrowed !== null) return narrowed;
   // Never past the handle's or the session's end, the vault's word: a revoke or a freeze since stops none already made.
   // One moment counts its life, and its second, the URL's X-Amz-Date, signs it and says when it ends, however long signing takes.
@@ -2219,9 +2340,10 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
   }
   const methods = credential.methods?.map((method) => method.toUpperCase());
   if (credential.paths !== undefined && credential.paths.some((path) => !path.startsWith('/'))) throw new Error(`credentialProxy: ${name}'s paths start with /`);
+  const ruled = credential.rules === undefined ? undefined : rulesOf(name, credential.rules);
   const shape = credential.placeholder === undefined && framed === undefined ? undefined : placeholderShape(name, credential.placeholder, inject);
   limited(name, credential.limit);
-  return { ...credential, ...(methods === undefined ? {} : { methods }), ...(shape === undefined ? {} : { shape }), ...(framed === undefined ? {} : { framed: { before: framed[1]!, after: framed[3]! } }), name, base, ...(upstreams === undefined ? {} : { upstreams }), keys };
+  return { ...credential, ...(methods === undefined ? {} : { methods }), ...(ruled === undefined ? {} : { ruled }), ...(shape === undefined ? {} : { shape }), ...(framed === undefined ? {} : { framed: { before: framed[1]!, after: framed[3]! } }), name, base, ...(upstreams === undefined ? {} : { upstreams }), keys };
 }
 
 /** An environment's name, as a per-environment upstream is listed by: `prod`, `dev`, never a personal config's `@me`. */
