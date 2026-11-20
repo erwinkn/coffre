@@ -172,9 +172,29 @@ export function prefix(prefix: string): Placeholder {
 
 /**
  * One of a credential's `rules`: whether a request of these methods to a
- * path of this pattern goes on, `allow(…)`, or is refused, `deny(…)`.
+ * path of this pattern goes on, `allow(…)`, or is refused, `deny(…)`; and,
+ * of an allow, the JSON bodies it lets go on, `body`.
  */
-export type Rule = { verdict: 'allow' | 'deny'; methods: '*' | readonly string[]; path: string };
+export type Rule = { verdict: 'allow' | 'deny'; methods: '*' | readonly string[]; path: string; body?: BodyCheck };
+
+/**
+ * Whether an allow lets a request's JSON body go on: given the body and the
+ * place the request comes from (`{ project: 'ops', environment: 'prod' }`,
+ * a personal config's its environment's), `true` lets it, anything else (a
+ * throw included) refuses it. The body it is given is what goes upstream:
+ * the app's JSON parsed, written again (`JSON.stringify`) and read again,
+ * so `1e400`, which goes as `null`, is checked as `null`.
+ */
+export type BodyCheck = (body: unknown, place: Place) => boolean;
+
+/** A request's place, as a body check reads it. */
+export type Place = { project: string; environment: string };
+
+/** The place at `path` (`market/dev`), a personal config's (`market/dev@me`) its environment's. */
+function placeOf(path: string): Place {
+  const at = path.indexOf('/');
+  return { project: path.slice(0, at), environment: path.slice(at + 1).replace(/@me$/, '') };
+}
 
 /**
  * A rule that lets requests of `methods` (`'GET'`, `['PATCH', 'DELETE']`, or
@@ -186,9 +206,21 @@ export type Rule = { verdict: 'allow' | 'deny'; methods: '*' | readonly string[]
  * servers write them, lowercase and dashed (`8-4-4-4-12`); and `**`, last,
  * matches whatever follows, nothing included: `/instances/{uuid}/**` is the
  * instance and everything under it.
+ *
+ * With `body`, it lets only the JSON bodies `body` passes go on:
+ * `allow('POST', '/instances/{uuid}/endpoints', { body: (spec) => … })`,
+ * where which address an endpoint takes is in the body, and `body` is also
+ * given the request's place, so each environment's may differ. Matched, it
+ * decides as any rule does: a body it refuses is refused, never left to the
+ * rules after it. The body is read whole, 64 KiB at most, `application/json`,
+ * UTF-8 and not compressed, and parsed; what goes upstream is that value
+ * written again (`JSON.stringify`), as `Content-Type: application/json`, and
+ * `body` checks those bytes, read again: a key the body gives twice, an
+ * escape or a number JSON cannot hold reads upstream as `body` read it. A
+ * credential whose key goes in the body, or signs it (`sigv4`), checks none.
  */
-export function allow(methods: '*' | string | readonly string[], pattern: string): Rule {
-  return { verdict: 'allow', methods: methods === '*' ? '*' : typeof methods === 'string' ? [methods] : methods, path: pattern };
+export function allow(methods: '*' | string | readonly string[], pattern: string, options: { body?: BodyCheck } = {}): Rule {
+  return { verdict: 'allow', methods: methods === '*' ? '*' : typeof methods === 'string' ? [methods] : methods, path: pattern, ...(options.body === undefined ? {} : { body: options.body }) };
 }
 
 /**
@@ -250,7 +282,8 @@ export type Credential = {
    * request none matches is refused, so it is used for nothing the rules do
    * not name. Read with `methods` and `paths`, before anything opens, on
    * the path as the app sent it; its query is not read. With rules, a method
-   * override is refused, as with `methods`. Any request, unless set.
+   * override is refused, as with `methods`. An allow with `body` holds the
+   * JSON body too. Any request, unless set.
    */
   rules?: readonly Rule[];
   /**
@@ -891,7 +924,8 @@ const sized = (bytes: number) => (bytes % 1024 ** 2 === 0 ? `${bytes / 1024 ** 2
  * Where a request through a credential goes, under its upstream, once its path is checked: the URL, the upstream's own
  * path, the request's within it as the app sent it, and, through a `path()` rule, the index of its segment there (`pathSlot`).
  */
-type Aim = { target: URL; under: string; relative: string; slot: number };
+/** `checks`: the body check of the allow that let the request in, which its body is held to before anything opens; null for none. */
+type Aim = { target: URL; under: string; relative: string; slot: number; checks: BodyCheck | null };
 
 /**
  * Nothing the app writes leaves the credential's upstream: no slash or backslash smuggled in a segment, and no dot
@@ -910,7 +944,7 @@ function climbs(segment: string): boolean {
  * itself, `…/schumann/` the upstream and a slash; with the upstream's own path, and the request's under it. Null for a
  * URL that leaves the upstream.
  */
-function within(credential: Resolved, rest: readonly string[], search: string): Omit<Aim, 'slot'> | null {
+function within(credential: Resolved, rest: readonly string[], search: string): Omit<Aim, 'slot' | 'checks'> | null {
   const target = new URL(`${rest.length === 0 ? credential.base.href : `${credential.base.href.replace(/\/$/, '')}/${rest.join('/')}`}${search}`);
   const under = credential.base.pathname.replace(/\/$/, '');
   if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) return null;
@@ -924,7 +958,7 @@ function within(credential: Resolved, rest: readonly string[], search: string): 
  */
 function forEnvironment(credential: Resolved, path: string): Resolved | Response {
   if (credential.upstreams === undefined) return credential;
-  const environment = path.slice(path.indexOf('/') + 1).replace(/@me$/, '');
+  const { environment } = placeOf(path);
   const base = credential.upstreams.get(environment);
   if (base === undefined) return failure(403, `${credential.name} has no upstream for ${environment}, only for ${[...credential.upstreams.keys()].join(', ')}: the deployment's credentialProxy names each environment's`, 'no_upstream');
   const { upstreams: _, ...one } = credential;
@@ -935,7 +969,7 @@ function forEnvironment(credential: Resolved, path: string): Resolved | Response
 const reach = (credential: Resolved) => (credential.upstreams === undefined ? credential.base.href : `${credential.base.pathname} on its environment's upstream`);
 
 /** One of a credential's rules, compiled: its methods (null for any), its pattern's segments, whether a last `**` ends it, and the rule as written, for a refusal to quote. */
-type Ruled = { verdict: 'allow' | 'deny'; methods: ReadonlySet<string> | null; segments: readonly string[]; rest: boolean; said: string };
+type Ruled = { verdict: 'allow' | 'deny'; methods: ReadonlySet<string> | null; segments: readonly string[]; rest: boolean; said: string; body?: BodyCheck };
 
 /** A UUID as servers write one: lowercase, dashed. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -944,16 +978,55 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const segmentMatches = (pattern: string, segment: string) => (pattern === '*' ? segment !== '' : pattern === '{uuid}' ? UUID.test(segment) : pattern === segment);
 
 /**
- * The refusal of a request its credential's rules do not let go on, or null: the first rule that matches its method
- * and path decides, and a request none matches is refused. The method is read in capitals, as a server reads `patch`
- * (fetch leaves it as written), so a rule for PATCH holds it.
+ * The refusal of a request its credential's rules do not let go on, or the allow that lets it (null where it has
+ * none): the first rule that matches its method and path decides, and a request none matches is refused. The method
+ * is read in capitals, as a server reads `patch` (fetch leaves it as written), so a rule for PATCH holds it.
  */
-function ruledOut(credential: Resolved, method: string, relative: string): Response | null {
+function ruledOut(credential: Resolved, method: string, relative: string): Response | Ruled | null {
   if (credential.ruled === undefined) return null;
   const rule = deciding(credential.ruled, method, relative);
-  if (rule?.verdict === 'allow') return null;
+  if (rule?.verdict === 'allow') return rule;
   const asked = `${method.toUpperCase()} ${relative}`;
   return failure(403, rule === undefined ? `${credential.name} has no rule that allows ${asked}` : `${credential.name} refuses ${asked}: ${rule.said}`, 'rule');
+}
+
+/**
+ * The body that goes upstream of a request from `path` an allow with `body` let in: the app's JSON, parsed and written
+ * again, once `checks` passes it as read again; or the refusal, 403 `rule`, before anything opens. It goes as
+ * `Content-Type: application/json` (`JSON_TYPE`), whatever parameter the app's had. Nothing of the body is quoted: a
+ * secret may be in it.
+ */
+function checkedBody(request: Request, credential: Resolved, relative: string, checks: BodyCheck, body: Uint8Array | undefined, path: string): Uint8Array<ArrayBuffer> | Response {
+  const asked = `${request.method.toUpperCase()} ${relative}`;
+  const [media, ...parameters] = (request.headers.get('content-type') ?? '').split(';');
+  // Each charset the type names, spaced or quoted as it may be (`charset = "UTF-8"`): any but UTF-8 is refused.
+  const charsets = parameters.map((parameter) => [parameter.slice(0, Math.max(parameter.indexOf('='), 0)), parameter.slice(parameter.indexOf('=') + 1)] as const)
+    .filter(([name]) => name.trim().toLowerCase() === 'charset').map(([, value]) => value.trim().replace(/^"(.*)"$/, '$1').toLowerCase());
+  if (body === undefined || body.length === 0 || media!.trim().toLowerCase() !== 'application/json' || charsets.some((charset) => charset !== 'utf-8') || !/^(identity)?$/i.test(request.headers.get('content-encoding') ?? '')) {
+    return failure(403, `${credential.name} allows ${asked} with a JSON body it checks: application/json, UTF-8 and not compressed`, 'rule');
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(body));
+  } catch {
+    return failure(403, `${credential.name} allows ${asked} with a JSON body it checks, and this one is no JSON`, 'rule');
+  }
+  // Written before the check, and the check given what was written, read again: what goes is what it passed, whatever
+  // JSON could not write as the app sent it (`1e400` goes as `null`, `-0` as `0`), and whatever it does with its value.
+  const text = JSON.stringify(value);
+  return passes(checks, text, placeOf(path)) ? new TextEncoder().encode(text) : failure(403, `${credential.name} refuses ${asked}: its body is none its allow takes`, 'rule');
+}
+
+/** The type a body a rule checked goes upstream as: JSON is UTF-8, and no parameter can say otherwise. */
+const JSON_TYPE = 'application/json';
+
+/** Whether `checks` lets the JSON `text` go on from `place`: `true`, and nothing else, a throw included. */
+function passes(checks: BodyCheck, text: string, place: Place): boolean {
+  try {
+    return checks(JSON.parse(text), place) === true;
+  } catch {
+    return false;
+  }
 }
 
 /** The first of `ruled` that matches a request's method, in capitals, and its path under the upstream; undefined for none. */
@@ -968,26 +1041,31 @@ function deciding(ruled: readonly Ruled[], method: string, relative: string): Ru
 /**
  * What `rules` decide for a request of `method` to `path`, the path under the upstream as the app sends it, as the
  * proxy decides: whether it goes on, and the rule that said so, as written (`deny(*, /instances/…/**)`), or null where
- * none matches and it is refused. For a deployment's own tests of its rules, one request at a time:
+ * none matches and it is refused. `sent`, for an allow with `body` to check: the request's JSON body as a value, which
+ * it checks written and read again, as the proxy does, and the place it comes from (`ops/prod`); none, and such an
+ * allow refuses. For a deployment's own tests of its rules, one request at a time:
  * `assert.equal(decide(rules, 'DELETE', '/instances/0d6f…').allowed, false)`.
  */
-export function decide(rules: readonly Rule[], method: string, path: string): { allowed: boolean; rule: string | null } {
+export function decide(rules: readonly Rule[], method: string, path: string, sent?: { body: unknown; place: string }): { allowed: boolean; rule: string | null } {
   const rule = deciding(rulesOf('rules', rules), method, path);
-  return { allowed: rule?.verdict === 'allow', rule: rule?.said ?? null };
+  const text = sent === undefined ? undefined : JSON.stringify(sent.body);
+  const allowed = rule?.verdict === 'allow' && (rule.body === undefined || (text !== undefined && passes(rule.body, text, placeOf(sent!.place))));
+  return { allowed, rule: rule?.said ?? null };
 }
 
 /** A credential's rules, checked and compiled; a configuration error names the first that is none. */
 function rulesOf(name: string, rules: unknown): Ruled[] {
   if (!Array.isArray(rules) || rules.length === 0) throw new Error(`credentialProxy: ${name}'s rules are a list of allow(…) and deny(…), at least one: with none it would be used for nothing`);
   return rules.map((rule: unknown) => {
-    const { verdict, methods, path } = (typeof rule === 'object' && rule !== null ? rule : {}) as Partial<Rule>;
+    const { verdict, methods, path, body } = (typeof rule === 'object' && rule !== null ? rule : {}) as Partial<Rule>;
     const listed = methods === '*' ? null
       : Array.isArray(methods) && methods.length > 0 && methods.every((method) => typeof method === 'string' && /^[A-Za-z]+$/.test(method)) ? new Set(methods.map((method: string) => method.toUpperCase()))
       : undefined;
     if ((verdict !== 'allow' && verdict !== 'deny') || listed === undefined || typeof path !== 'string') {
       throw new Error(`credentialProxy: ${name}'s rules are each allow(methods, pattern) or deny(methods, pattern), methods 'GET', ['PATCH', 'DELETE'] or '*'; got ${JSON.stringify(rule)}`);
     }
-    const said = `${verdict}(${listed === null ? '*' : [...listed].join(', ')}, ${path})`;
+    const said = `${verdict}(${listed === null ? '*' : [...listed].join(', ')}, ${path}${body === undefined ? '' : ', { body }'})`;
+    if (body !== undefined && (verdict !== 'allow' || typeof body !== 'function')) throw new Error(`credentialProxy: ${name}'s ${said}: body is an allow's, a function of the parsed JSON body that answers true to let it go`);
     if (!path.startsWith('/')) throw new Error(`credentialProxy: ${name}'s ${said} is for a path under the upstream: it starts with /`);
     const segments = path.split('/').slice(1);
     const rest = segments.at(-1) === '**';
@@ -999,7 +1077,7 @@ function rulesOf(name: string, rules: unknown): Ruled[] {
         throw new Error(`credentialProxy: ${name}'s ${said}: a segment is one as the app sends it, *, {uuid}, or ** last; got ${JSON.stringify(segment)}`);
       }
     }
-    return { verdict, methods: listed, segments, rest, said };
+    return { verdict, methods: listed, segments, rest, said, ...(body === undefined ? {} : { body }) };
   });
 }
 
@@ -1018,7 +1096,7 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
     return failure(403, `${credential.name} is not for ${relative}`);
   }
   const ruled = ruledOut(credential, request.method, relative);
-  if (ruled !== null) return ruled;
+  if (ruled instanceof Response) return ruled;
   // A path rule's segment, found in the path as the app sent it, before anything is opened: the value never decides it.
   const slot = credential.framed === undefined ? -1 : pathSlot(credential.framed, relative);
   if (credential.framed !== undefined && slot === -1) return failure(400, `${credential.name} takes its key in a segment of the path, ${(credential.inject as { template: string }).template}, and this path has none`);
@@ -1030,7 +1108,7 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
     }
     if (hash !== '' && hash !== 'UNSIGNED-PAYLOAD' && !/^[0-9a-f]{64}$/.test(hash)) return failure(400, 'x-amz-content-sha256 is a SHA-256, hex, or UNSIGNED-PAYLOAD');
   }
-  return { target, under, relative, slot };
+  return { target, under, relative, slot, checks: ruled?.body ?? null };
 }
 
 /**
@@ -1045,10 +1123,10 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
  */
 type Carried = { body: Uint8Array<ArrayBuffer> | undefined; streamed: boolean; declared: string; digest: string | null };
 
-async function carried(request: Request, credential: Resolved): Promise<Carried | Response> {
+async function carried(request: Request, credential: Resolved, checks: BodyCheck | null): Promise<Carried | Response> {
   const declared = request.headers.get('content-length') ?? '';
-  // A body whose field coffre fills is read whole, and small: it is parsed, and changed.
-  const field = inBody(credential.inject);
+  // A body whose field coffre fills, or a rule checks, is read whole, and small: it is parsed, and changed.
+  const field = inBody(credential.inject) || checks !== null;
   const amz = credential.inject.kind === 'sigv4' && request.headers.has('x-amz-content-sha256');
   let digest: string | null = null;
   try {
@@ -1063,7 +1141,7 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
     return failure(413, `a body that declares its digest streams through the proxy up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB, under the 100 MB a Cloudflare zone takes: send a larger one in parts`);
   }
   const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request, field ? MAX_FIELD_BODY : MAX_BODY_BYTES);
-  if (body === null && field) return failure(413, `${credential.name} fills a field of a body read whole, ${MAX_FIELD_BODY / 1024} KiB at most`);
+  if (body === null && field) return failure(413, `${credential.name} ${checks === null ? 'fills a field of' : 'checks'} a body read whole, ${MAX_FIELD_BODY / 1024} KiB at most`);
   if (body === null) {
     return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB read whole; one that says its length and declares its SHA-256 streams, up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB: Content-Digest: sha-256=:<base64>:, as coffre serve and @coffre/client/workload send it, or x-amz-content-sha256 through an AWS-signed credential`);
   }
@@ -1108,8 +1186,13 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const back = inject.kind !== 'query' ? null : given !== null && handleOf(credential, given) === handle ? given
     : credential.placeholder === undefined ? handle : render(inject.template, { [credential.keys[0]!]: credential.placeholder.kind === 'prefix' ? `${credential.placeholder.prefix}${handle}` : `${UNSIGNED}.e30.${handle}` });
   // Read whole first, however long it takes to come, so the handle is checked, and the values opened, as the request goes out.
-  const content = early?.content ?? (await carried(request, credential));
-  if (content instanceof Response) return content;
+  const carrying = early?.content ?? (await carried(request, credential, aimed.checks));
+  if (carrying instanceof Response) return carrying;
+  // A body a rule checks, before anything opens: what goes is the JSON it read.
+  const body = aimed.checks === null ? carrying.body : checkedBody(request, credential, relative, aimed.checks, carrying.body, path);
+  if (body instanceof Response) return body;
+  if (aimed.checks !== null) headers.set('content-type', JSON_TYPE);
+  const content = { ...carrying, body };
   const opened = await valuesFor(coffre, proxy, handle, path, credential, target);
   // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
   // with an environment of the handle's would name that environment, and another credential (`/use/schumann/dev/maps/…`).
@@ -1215,7 +1298,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   // waits for the proof, which says which headers go on.
   const queried = overrideRefused(methodLimit(credential), credential.name, new Headers(), checked.target);
   if (queried !== null) return queried;
-  const content = await carried(request, credential);
+  const content = await carried(request, credential, checked.checks);
   if (content instanceof Response) return content;
   // The body's line in `req`, and the payload hash a sigv4 credential signs again: one value, so what goes out is what
   // the proof bound. A body of any bytes signs the SHA-256 its `Content-Digest` declares, which `carried` and `scanned`
@@ -1245,11 +1328,16 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     if (bound instanceof Response) return bound;
     const aimed = bound === credential ? checked : aim(request, bound, rest, search);
     if (aimed instanceof Response) return aimed;
+    // A body a rule checks, once the place is known and before anything opens: what goes is the JSON it read, the proof
+    // binding the bytes the app sent.
+    const going = aimed.checks === null ? content.body : checkedBody(request, credential, aimed.relative, aimed.checks, content.body, caller.path);
+    if (going instanceof Response) return going;
     // A form or JSON rule's field, whatever the app put there, as a header rule's header: it holds no handle.
     const field = inBody(credential.inject) ? fieldIn(request, content.body, credential.name, credential.inject) : null;
     if (field instanceof Response) return field;
     // Only what the proof signs goes on, of what the app sent: a header added on the way, by a library or a proxy, is dropped.
     const headers = outbound(request, caller.hdr);
+    if (aimed.checks !== null) headers.set('content-type', JSON_TYPE);
     // A method override in what goes on, where the credential's methods are limited, before the values open.
     const override = overrideRefused(methodLimit(credential), credential.name, headers, aimed.target);
     if (override !== null) return override;
@@ -1267,7 +1355,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     const proxied = `${coffre.publicUrl}/use/${path === null ? '' : `${path}/`}${credential.name}`;
     const token = sessionToken(request)!;
     const secret = { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
-    return send(request, bound, { ...aimed, ...content, opened: { values: used.values, plain: used.plain }, headers, proxied, back: null, field, secret, payload });
+    return send(request, bound, { ...aimed, ...content, body: going, opened: { values: used.values, plain: used.plain }, headers, proxied, back: null, field, secret, payload });
   });
 }
 
@@ -1604,8 +1692,9 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   if (credential.paths !== undefined && !credential.paths.some((prefix) => relative === prefix || relative.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`))) {
     return failure(403, `${credential.name} is not for ${relative}`);
   }
+  // A sigv4 credential's rules check no body (`resolve`), so none of its allows waits for one.
   const ruled = ruledOut(credential, method, relative);
-  if (ruled !== null) return ruled;
+  if (ruled instanceof Response) return ruled;
   // A URL is for sharing: the handle goes in none, its path or its query, encoded or not.
   if (HANDLE.test(bytesOf(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
   // A method override in the URL's query, as in a request's through the credential: its methods first, before anything opens.
@@ -1711,8 +1800,9 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     // The platform's error quotes the value it refused: neither it nor its message goes anywhere, a log included.
     return failure(409, `${credential.name}'s value is no valid ${inject.kind === 'query' ? 'query parameter' : 'header value'}: a line break in it, say`);
   }
-  // The body changed: a digest of it is made again, of what goes out, and Content-Length is fetch's.
-  if (out.field !== null) {
+  // The body changed, a field filled or a checked body written again: a digest of it is made again, of what goes out, and
+  // Content-Length is fetch's.
+  if (out.field !== null || out.checks !== null) {
     for (const name of ['repr-digest', 'digest', 'content-md5']) headers.delete(name);
     if (headers.has('content-digest')) headers.set('content-digest', contentDigest(await bodyDigest(body!)));
   }
@@ -2156,7 +2246,7 @@ function jsonField(bytes: Uint8Array, name: string): Field | string {
 type Fillable = { content: Carried; field: Field };
 
 async function fillable(request: Request, credential: Resolved, inject: BodyRule): Promise<Fillable | Response> {
-  const content = await carried(request, credential);
+  const content = await carried(request, credential, null);
   if (content instanceof Response) return content;
   const field = fieldIn(request, content.body, credential.name, inject);
   return field instanceof Response ? field : { content, field };
@@ -2341,6 +2431,10 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
   const methods = credential.methods?.map((method) => method.toUpperCase());
   if (credential.paths !== undefined && credential.paths.some((path) => !path.startsWith('/'))) throw new Error(`credentialProxy: ${name}'s paths start with /`);
   const ruled = credential.rules === undefined ? undefined : rulesOf(name, credential.rules);
+  // A checked body goes out as checked: a body rule's field would change it after, and SigV4 signs the bytes the app hashed.
+  if (ruled?.some((rule) => rule.body !== undefined) && (inBody(inject) || inject.kind === 'sigv4')) {
+    throw new Error(`credentialProxy: ${name}'s rules check a body, which a ${inject.kind} rule's key would change or sign as the app sent it: check bodies on a credential whose key goes in a header, the query, the path or Basic`);
+  }
   const shape = credential.placeholder === undefined && framed === undefined ? undefined : placeholderShape(name, credential.placeholder, inject);
   limited(name, credential.limit);
   return { ...credential, ...(methods === undefined ? {} : { methods }), ...(ruled === undefined ? {} : { ruled }), ...(shape === undefined ? {} : { shape }), ...(framed === undefined ? {} : { framed: { before: framed[1]!, after: framed[3]! } }), name, base, ...(upstreams === undefined ? {} : { upstreams }), keys };

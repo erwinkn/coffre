@@ -262,8 +262,22 @@ credentialProxy({
   after it name ids with `{uuid}`, never `*`: a server that also takes
   `0D6F…` or `{0d6f…}` as that id would otherwise let one of them past the
   deny. The query is not read, and with `rules` a method override is
-  refused as with `methods` (below). `decide(rules, method, path)` answers
-  as the proxy does, for a deployment's own tests of its rules.
+  refused as with `methods` (below). Where what a request does is in its
+  body, an allow holds that too: `allow('POST',
+  '/instances/{uuid}/endpoints', { body: (spec, place) => … })` lets only
+  the JSON bodies its function answers `true` to go on, and refuses the
+  rest, 403 `rule`, never leaving them to the rules after it. The function
+  is given the request's place too, `{ project, environment }`, a personal
+  config's its environment's, so prod's addresses need not be dev's. Such
+  a body is read whole, 64 KiB at most, `application/json`, UTF-8 (a
+  charset parameter naming any other is refused) and not compressed. What
+  goes upstream is the value parsed, written again (`JSON.stringify`), as
+  `Content-Type: application/json` whatever the app's said, and the
+  function is given those bytes read again: a key given twice, an escape,
+  `1e400` (which goes as `null`) or `-0` (as `0`) reads upstream as the
+  check read it. A credential whose key goes in the body, or signs it
+  (`sigv4`), checks none. `decide(rules, method, path, { body, place })`
+  answers as the proxy does, for a deployment's own tests of its rules.
 - A key the rule reads that is no secret, an account's id in its URLs, is
   marked plain (below), and the app holds it as it is; the handle stands in
   for the rest. `identifiers: ['TWILIO_SID']`, which said the same in

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **An allow can hold a request's JSON body too: `allow('POST',
+  '/instances/{uuid}/endpoints', { body: (spec, place) => … })`.** Where
+  what a request does is in its body, which address a database endpoint
+  takes, say, only the bodies the function answers `true` to go on; the
+  rest are refused, 403 `rule`, before anything opens. The function is
+  given the request's place too, `{ project, environment }`, so each
+  environment's addresses may differ. The body is read whole, 64 KiB at
+  most, `application/json`, UTF-8 and not compressed; what goes upstream
+  is the value parsed and written again, as `application/json`, and the
+  function checks those bytes read again, so a key given twice, an escape
+  or `1e400` (which goes as `null`) reads upstream as the check read it.
+  `decide(rules, method, path, { body, place })` checks one as the proxy
+  does.
+
 ## 0.16.7 (2026-11-20)
 
 - **A credential's `rules` say which requests it may be used for, by
