@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.7 (2026-11-20)
+
 - **A credential's `rules` say which requests it may be used for, by
   method and path together.** `rules: [allow('POST',
   '/instances/<live>/snapshots'), deny('*', '/instances/<live>/**'),
