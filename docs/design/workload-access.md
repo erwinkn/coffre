@@ -1976,7 +1976,7 @@ line of registration after the owner has merged:
   `coffre run --service` knows which variable gets its listener's URL), and
   `useOnly` lists every key held and not read.
 
-**As PR 6 built it** (0.16.9, `fetch` alone), where the design left a
+**As PR 6 built it** (0.16.10, `fetch` alone), where the design left a
 choice or 0.16 changed the ground under it:
 
 - **The vault decides, by the service's name.** 0.16 has no

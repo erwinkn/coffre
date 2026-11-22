@@ -28,7 +28,7 @@ The design, its threat model and every rule behind this guide are in
 The server side lands in its own changes: the exchange and sessions, the new
 `coffre trust` flags, enrollment codes (no release has `coffre enroll` yet:
 the examples below show it as designed), `narrow` and minting. The Workers
-binding's `fetch` is built (0.16.9); its RPC methods are not. `coffre
+binding's `fetch` is built (0.16.10); its RPC methods are not. `coffre
 freeze` is built (0.16), and `verify` (0.14.3,
 [below](#inbound-webhooks-verify)). Until an instance
 answers the workload exchange, `coffre --service … run` falls back to the

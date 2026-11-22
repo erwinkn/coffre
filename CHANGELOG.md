@@ -2,21 +2,6 @@
 
 ## Unreleased
 
-## 0.16.9 (2026-11-22)
-
-- **A key renames onto a reference to itself in one step: `coffre rename
-  backend/prod/OLD PLAIN`, where `PLAIN` is a reference to `OLD`.** The
-  reference gives way to the key in the same change, so whoever reads
-  `PLAIN` reads the same value throughout and nothing is left under `OLD`.
-  This ends a key's move to a new name: make the new name a reference,
-  move the readers over, then rename. Before, the rename was refused,
-  `duplicate_key`, and breaking the reference first left its readers with
-  nothing to read until the rename. Only a live reference to that very key,
-  which never held a value of its own, gives way; any other row under the
-  name still refuses, `duplicate_key`, archived or not. Nothing below
-  changes: every fork reads the name as it did, and one that holds a row
-  of the old name of its own refuses the rename, `duplicate_key_below`.
-  The audit log names the reference the key replaced.
 - **A Cloudflare Worker binds coffre and uses a credential, never holding
   it.** Another Worker of the account binds the app Worker's new
   entrypoint, `export const CoffreWorkload = coffre.Workload` (`coffre
@@ -36,6 +21,22 @@
   `presign` are, through `POST /use/<project>/<env>`. The vault's contract
   gains `Bound` (`{ bound: 'token:<name>' }` in place of a token) for
   `use` and `peek`. No migration.
+
+## 0.16.9 (2026-11-22)
+
+- **A key renames onto a reference to itself in one step: `coffre rename
+  backend/prod/OLD PLAIN`, where `PLAIN` is a reference to `OLD`.** The
+  reference gives way to the key in the same change, so whoever reads
+  `PLAIN` reads the same value throughout and nothing is left under `OLD`.
+  This ends a key's move to a new name: make the new name a reference,
+  move the readers over, then rename. Before, the rename was refused,
+  `duplicate_key`, and breaking the reference first left its readers with
+  nothing to read until the rename. Only a live reference to that very key,
+  which never held a value of its own, gives way; any other row under the
+  name still refuses, `duplicate_key`, archived or not. Nothing below
+  changes: every fork reads the name as it did, and one that holds a row
+  of the old name of its own refuses the rename, `duplicate_key_below`.
+  The audit log names the reference the key replaced.
 
 ## 0.16.8 (2026-11-20)
 

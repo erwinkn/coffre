@@ -209,7 +209,7 @@ else is needed.
   service (`bound`), which decides on the service's `cloudflare` bindings.
   It takes no handle, token or session: `api`, `exchange`, `signOut`,
   `handle` and a `use` of a handle are refused, 403 `bound`. No plugin can
-  name a principal. Built in 0.16.9, for `fetch` alone.
+  name a principal. Built in 0.16.10, for `fetch` alone.
 
 **Added in 0.16, for `coffre run`'s plan** (`packages/server/src/plugins.ts`,
 [0.16.md](0.16.md), "The proxy"):
