@@ -740,6 +740,8 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   // A workload's proof signs the request's content as every request under /use does: here, no body.
   const caller = await workloadOf(request, coffre, { place: path, body: await bodyDigest(new Uint8Array(0)) });
   if (caller instanceof Response) return caller;
+  // A Worker over a service binding uses credentials through coffre, and is handed no value, a plain one included.
+  if (caller !== null && coffre.bound) return failure(403, 'a call over a service binding uses credentials through coffre and is handed no values: it has no plan', 'bound');
   if (caller !== null) return answering(caller, () => workloadPlan(coffre, proxy, caller, caller.path ?? path));
   const handle = bearer(request);
   if (handle === null || !WHOLE_HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
@@ -1287,10 +1289,16 @@ async function refused<T>(asking: Promise<T>): Promise<T | Response> {
  * about the session what only the app can hold the request to: a narrowed
  * session's methods and paths, on the URL about to be sent, and an
  * unsigned upload, which only a binding that says `unsignedUploads` takes.
- * (A Cloudflare service binding's call is not served on 0.16 yet.)
+ *
+ * A call another Worker made over a Cloudflare service binding
+ * (`PluginContext.bound`) comes the same way with no session and no proof:
+ * the platform carried the request as the Worker built it, with nobody in
+ * between, so its headers go on as a handle's do, and no body line binds
+ * anything. The credential's rules, a body rule's included, its limit and
+ * the vault's one use hold it as they hold a session.
  */
 async function workloadForward(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null, credential: Resolved, rest: string[], search: string): Promise<Response | null> {
-  if (sessionToken(request) === null) return null;
+  if (!coffre.bound && sessionToken(request) === null) return null;
   // Checked before the body is read, on the credential's path; a per-environment one's host waits for the session's place.
   const checked = aim(request, credential, rest, search);
   if (checked instanceof Response) return checked;
@@ -1349,12 +1357,14 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     // And where the narrowed session's are, where the request's own method is held to them.
     const narrowed = overrideRefused(takes(constraints?.methods), 'this narrowed session', headers, aimed.target, true);
     if (narrowed !== null) return narrowed;
-    if (body === UNSIGNED_BODY && used.workload?.policy.unsignedUploads !== true) {
+    // A call over a service binding has no proof for a body to be bound to: what the Worker sent is what goes.
+    if (!coffre.bound && body === UNSIGNED_BODY && used.workload?.policy.unsignedUploads !== true) {
       return failure(403, "an unsigned upload (UNSIGNED-PAYLOAD) binds no body to its proof, and this workload's binding does not say unsignedUploads: send x-amz-content-sha256 as the body's SHA-256", 'unsigned_upload');
     }
     const proxied = `${coffre.publicUrl}/use/${path === null ? '' : `${path}/`}${credential.name}`;
-    const token = sessionToken(request)!;
-    const secret = { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
+    // A session's token goes no further than coffre; a call over a service binding carries none.
+    const token = coffre.bound ? null : sessionToken(request)!;
+    const secret = token === null ? null : { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
     return send(request, bound, { ...aimed, ...content, body: going, opened: { values: used.values, plain: used.plain }, headers, proxied, back: null, field, secret, payload });
   });
 }

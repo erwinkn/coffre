@@ -17,7 +17,7 @@
 // no vault call; a proof replayed is refused before it can make a change
 // twice. A row edited behind the vault can send a proof to the wrong gate,
 // which never issued its nonce, or name a key the vault's row does not.
-import { hashToken, parseProof, tokenKind, verifyProof, type GateCount, type ParsedProof } from '@coffre/core/identity';
+import { hashToken, parseProof, tokenKind, verifyProof, type GateAdmission, type GateCount, type ParsedProof } from '@coffre/core/identity';
 
 import { limitAlert, sendAlert } from './alerts.ts';
 import { ApiError } from './api/errors.ts';
@@ -152,18 +152,57 @@ export async function gated(
       case 'replayed':
         throw proofRefused('replayed', 'this proof was used already: each is taken once');
       case 'overloaded':
-        throw refused(new ApiError('too_many_requests', 'this workload sends more requests than its gate takes: try again shortly', 'overloaded'), { 'retry-after': '1' });
+        throw await countRefused(runtime, { ok: false, reason: 'overloaded' }, { principal: row.principal, session: row.id, sourceIp: more.sourceIp ?? null }, more);
       case 'limit':
-        if (more.counts === undefined || more.counts.length === 0) throw new Error(`the workload gate refused a count it was not asked for: ${admitted.key}`);
-        if (admitted.first && runtime.auth.mode === 'signin' && runtime.auth.signin.workloads !== null) {
-          await sendAlert(runtime.auth.signin.workloads, limitAlert({ principal: row.principal, session: row.id, sourceIp: more.sourceIp ?? null }, admitted), more.track ?? (() => {}));
-        }
-        throw refused(new ApiError('too_many_requests', `past this workload's limit for ${admitted.key}`, 'limit'), { 'retry-after': String(Math.ceil(admitted.retryAfterMs / 1000)) });
+        throw await countRefused(runtime, admitted, { principal: row.principal, session: row.id, sourceIp: more.sourceIp ?? null }, more);
     }
   } catch (error) {
     if (error instanceof SessionRefused) throw error;
     console.error('the workload gate failed', logged(error));
     throw refused(new ApiError('unavailable', 'coffre cannot check this proof right now'));
+  }
+}
+
+/** A count the gate refused, as the workload's answer: 429, and its window's first refusal the deployment's alert. */
+async function countRefused(
+  runtime: Pick<CoffreRuntime, 'auth'>,
+  admitted: { ok: false; reason: 'overloaded' } | Extract<GateAdmission, { reason: 'limit' }>,
+  caller: { principal: string; session: string | null; sourceIp: string | null },
+  more: { counts?: readonly GateCount[]; track?: (work: Promise<unknown>) => void },
+): Promise<SessionRefused> {
+  if (admitted.reason === 'overloaded') return refused(new ApiError('too_many_requests', 'this workload sends more requests than its gate takes: try again shortly', 'overloaded'), { 'retry-after': '1' });
+  if (more.counts === undefined || more.counts.length === 0) throw new Error(`the workload gate refused a count it was not asked for: ${admitted.key}`);
+  if (admitted.first && runtime.auth.mode === 'signin' && runtime.auth.signin.workloads !== null) {
+    await sendAlert(runtime.auth.signin.workloads, limitAlert(caller, admitted), more.track ?? (() => {}));
+  }
+  return refused(new ApiError('too_many_requests', `past this workload's limit for ${admitted.key}`, 'limit'), { 'retry-after': String(Math.ceil(admitted.retryAfterMs / 1000)) });
+}
+
+/**
+ * A call over a Cloudflare service binding, as the service its `props`
+ * name, counted by that service's gate: no proof, so nothing to replay,
+ * and the gate is asked only for the counts the credential's `limit`
+ * makes. A deployment that runs no gate takes the call only where the
+ * credential has none. Throws `SessionRefused`, as `gated` does; a limit's
+ * alert names the service, and no session.
+ */
+export async function boundGated(
+  runtime: Pick<CoffreRuntime, 'gates' | 'auth'>,
+  principal: string,
+  more: { counts?: readonly GateCount[]; track?: (work: Promise<unknown>) => void },
+): Promise<void> {
+  if (more.counts === undefined || more.counts.length === 0) return;
+  if (runtime.gates === null) throw refused(new ApiError('unavailable', "this deployment runs no workload gate, so it holds no workload to this credential's limit", 'no_gate'));
+  try {
+    const admitted = await runtime.gates(principal).admit({ counts: more.counts });
+    if (admitted.ok) return;
+    if (admitted.reason === 'overloaded') throw await countRefused(runtime, { ok: false, reason: 'overloaded' }, { principal, session: null, sourceIp: null }, more);
+    if (admitted.reason === 'limit') throw await countRefused(runtime, admitted, { principal, session: null, sourceIp: null }, more);
+    throw new Error(`the workload gate asked a call with no proof for one: ${admitted.reason}`);
+  } catch (error) {
+    if (error instanceof SessionRefused) throw error;
+    console.error('the workload gate failed', logged(error));
+    throw refused(new ApiError('unavailable', 'coffre cannot count this call right now'));
   }
 }
 

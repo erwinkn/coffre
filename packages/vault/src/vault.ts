@@ -7,7 +7,7 @@ import type { ResolvedVaultConfig } from './config.ts';
 import { caller } from './caller.ts';
 import { change, weigh, type Operation, type Parts } from './change.ts';
 import { OPERATIONS } from './ops/index.ts';
-import { presented, text } from './ops/input.ts';
+import { bound, presented, text } from './ops/input.ts';
 import { through } from './ops/via.ts';
 import { keyOf } from './rows.ts';
 import { memoryOf, peek, use, type Ask, type Serving } from './use.ts';
@@ -54,7 +54,9 @@ function asked(input: UseInput): Ask {
   if (!text(project) || !text(environment) || typeof mine !== 'boolean' || !named || !PURPOSES.includes(purpose) || to === undefined || typeof fresh !== 'boolean') {
     throw new TypeError('a use names a place by its slugs, 1,000 keys at most, a purpose the contract has, and its upstream as { credential, host?, egress?: true }');
   }
-  return { ...presented(input), project, environment, mine, keys: keys as string[] | null, purpose, upstream: to, fresh };
+  // A call over a service binding names its service in place of a token; never both.
+  const who = 'bound' in input ? { token: null, proof: null, ...bound(input) } : { ...presented(input), bound: null };
+  return { ...who, project, environment, mine, keys: keys as string[] | null, purpose, upstream: to, fresh };
 }
 
 /** A host exactly as a URL's `hostname` spells it, 253 characters at most: no port, lower case, IPv6 bracketed, a name in punycode. */

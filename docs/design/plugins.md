@@ -200,11 +200,16 @@ else is needed.
   plain keys and those its binding lists. A caller a plugin built itself
   is refused: only those coffre made are kept beside it.
 - `bindingRoute(request, runtime, principal)`, exported, not on the
-  context: coffre's own Cloudflare entrypoint routes a call another Worker
-  made through a service binding to the plugin, as the service its
-  `props` name. That context's `workload` answers from the service's
-  `cloudflare` binding (`workloadFromBinding`), and it takes no handle,
-  token or session. No plugin can name a principal.
+  context: coffre's own Cloudflare entrypoint (`CoffreWorkload`) routes a
+  call another Worker made through a service binding to the plugin, as the
+  service its `props` name. That context's `bound` is true, and its
+  `workload` answers for the service whatever the request carries, with no
+  proof and no session (`hdr` and `nonce` null), after the service's gate
+  takes the counts its limit asks, if any; its `use` asks the vault as that
+  service (`bound`), which decides on the service's `cloudflare` bindings.
+  It takes no handle, token or session: `api`, `exchange`, `signOut`,
+  `handle` and a `use` of a handle are refused, 403 `bound`. No plugin can
+  name a principal. Built in 0.16.9, for `fetch` alone.
 
 **Added in 0.16, for `coffre run`'s plan** (`packages/server/src/plugins.ts`,
 [0.16.md](0.16.md), "The proxy"):

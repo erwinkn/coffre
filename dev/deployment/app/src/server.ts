@@ -13,3 +13,12 @@ export default {
 /** The Durable Objects `SOCKETS` and `GATES` bind (wrangler.jsonc). */
 export const CoffreSockets = coffre.Sockets;
 export const CoffreGates = coffre.Gates;
+
+/**
+ * What another Worker of the account binds to use the credential proxy as
+ * the service its props name, with nothing to prove (docs/workloads.md,
+ * "Cloudflare Workers"): `"services": [{ "binding": "COFFRE", "service":
+ * "<this Worker>", "entrypoint": "CoffreWorkload", "props": { "service":
+ * "edge-api" } }]` in that Worker's wrangler.jsonc.
+ */
+export const CoffreWorkload = coffre.Workload;

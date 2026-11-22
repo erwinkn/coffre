@@ -7,7 +7,7 @@ import type { BindingPolicy, Constraints } from '@coffre/core/identity';
 import { bindings, credentials, dismissedKeys, environments, grants, identities, policy, principals, projects, roles, secrets, secretVersions } from '@coffre/db/schema';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { callerOf, endOf, ID, live, touch, touched, touching, type Caller, type CallerRead, type Workloads } from './caller.ts';
+import { boundCallerOf, callerOf, endOf, ID, live, touch, touched, touching, type BoundCaller, type Caller, type CallerRead, type Workloads } from './caller.ts';
 import { bounded, keep, MOST, type Refusal, type Running } from './change.ts';
 import { pending } from './entry.ts';
 import { fromWire, sealedBy, type Row, type Sealed, type Wire } from './rows.ts';
@@ -41,8 +41,10 @@ import { contextOf, natureOf } from './value.ts';
  */
 
 export type Ask = {
-  /** The SHA-256 of the token the caller presented. */
-  token: Buffer;
+  /** The SHA-256 of the token the caller presented; null for a call over a service binding, which presents none. */
+  token: Buffer | null;
+  /** For a call over a Cloudflare service binding, the service its `props` name, `token:<name>` (`Bound` in `@coffre/core/vault`); null for any other. */
+  bound: string | null;
   /** The place, by its slugs. */
   project: string;
   environment: string;
@@ -136,7 +138,14 @@ const LOGGED_MS = 60_000;
 const DOWN_MS = 2000;
 /** Parents an environment may have above it, as in 0.14. */
 const MAX_PARENTS = 3;
-const shapeOfAsk = (ask: Ask) => JSON.stringify([ask.token.toString('hex'), ask.project, ask.environment, ask.mine, ask.keys]);
+const shapeOfAsk = (ask: Ask) => JSON.stringify([ask.token?.toString('hex') ?? `bound:${ask.bound}`, ask.project, ask.environment, ask.mine, ask.keys]);
+
+/**
+ * What a call over a service binding says it lasts, which no row ends: an
+ * hour, as long as a presigned URL may last (`Used.expiresAt`). Each call
+ * is decided on its own; nothing keeps it.
+ */
+const BOUND_MS = 3_600_000;
 
 /** Whether `now` is within `ms` of a read, from it on: a clock set back makes nothing fresher. */
 const within = (read: Read, now: number, ms: number) => now >= read.at && now < read.at + ms;
@@ -212,16 +221,20 @@ function refused(memory: Memory, ask: Ask, at: number): void {
 
 /** A use's one read. */
 export async function read(vault: Serving, ask: Ask): Promise<Read> {
-  if (ask.token.length !== 32 || (ask.keys?.length ?? 0) > 1000) throw new Error('a use names a token by its SHA-256, and 1,000 keys at most');
+  if ((ask.token === null) === (ask.bound === null) || (ask.token !== null && ask.token.length !== 32) || (ask.keys?.length ?? 0) > 1000) throw new Error('a use names a token by its SHA-256, or the service a binding names, and 1,000 keys at most');
   const at = vault.now();
   const keyed = (key: SQL) => (ask.keys === null ? sql`true` : sql`${key} = ANY(${sql.param(ask.keys)}::text[])`);
   // The database's clock is read with the rows so that no pooler answers from a cache: Hyperdrive caches no
   // statement that reads it. Its caching is off in every deployment besides (docs/deploy.md); this holds if one forgets.
   // Prepared, as the read every use makes: Postgres planned it at each use, unnamed, in several times what it took to
-  // run. Its text is one of two, by whether the ask names keys; every other value is a parameter.
+  // run. Its text is one of two, by whether the ask names keys, or four with a call over a service binding, which has no
+  // credential: its service's rows by its name, its `cloudflare` bindings and the instance's policy, and nothing that
+  // hangs off a credential. Every other value is a parameter.
+  const service = ask.bound;
+  const of = (table: string, column: string) => (service === null ? sql`${sql.raw(table)} t, c WHERE t.${sql.raw(column)} = c.principal` : sql`${sql.raw(table)} t WHERE t.${sql.raw(column)} = ${service}`);
   const found = await rowsOf<{ part: keyof Seen; row: Wire }>(vault.db, sql`
     WITH RECURSIVE
-      c AS (SELECT * FROM credentials WHERE token_hash = decode(${ask.token.toString('hex')}, 'hex')),
+      c AS (SELECT * FROM credentials WHERE ${ask.token === null ? sql`false` : sql`token_hash = decode(${ask.token.toString('hex')}, 'hex')`}),
       p AS (SELECT * FROM projects WHERE slug = ${ask.project}),
       base AS (SELECT e.* FROM environments e, p WHERE e.project_id = p.id AND e.slug = ${ask.environment}),
       mine AS (SELECT e.* FROM environments e, base, c WHERE ${ask.mine} AND e.parent_id = base.id AND e.owner = c.principal AND strpos(e.slug, '~') = 0),
@@ -235,14 +248,14 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
       lineage AS (SELECT t.* FROM credentials t WHERE t.id = ANY(ARRAY(SELECT above.id::uuid FROM c, jsonb_array_elements_text(CASE WHEN c.kind IN ('workload', 'mcp', 'handle') AND c.ancestors ~ '^[[]("${ID}"(,"${ID}")*)?[]]$' THEN c.ancestors::jsonb END) AS above(id))))
     SELECT part, row, clock_timestamp() AS read_at FROM (
     SELECT 'credential' AS part, to_jsonb(c) AS row FROM c
-    UNION ALL SELECT 'principal', to_jsonb(t) FROM principals t, c WHERE t.id = c.principal
+    UNION ALL SELECT 'principal', to_jsonb(t) FROM ${of('principals', 'id')}
     UNION ALL SELECT 'identity', to_jsonb(t) FROM identities t WHERE t.id IN (SELECT identity_id FROM c UNION ALL SELECT identity_id FROM lineage)
-    UNION ALL SELECT 'grant', to_jsonb(t) FROM grants t, c WHERE t.principal = c.principal
+    UNION ALL SELECT 'grant', to_jsonb(t) FROM ${of('grants', 'principal')}
     UNION ALL SELECT 'role', to_jsonb(t) FROM roles t
     -- What a trust binding issued names it, by its id, and only for a row that has one: cast only when shaped like one, as above.
-    UNION ALL SELECT 'binding', to_jsonb(t) FROM bindings t, c WHERE t.id = CASE WHEN c.created_by ~ '^binding:${ID}$' THEN substr(c.created_by, 9)::uuid END
+    UNION ALL SELECT 'binding', to_jsonb(t) FROM ${service === null ? sql`bindings t, c WHERE t.id = CASE WHEN c.created_by ~ '^binding:${ID}$' THEN substr(c.created_by, 9)::uuid END` : sql`bindings t WHERE t.principal = ${service} AND t.profile = 'cloudflare' AND t.revoked_at IS NULL`}
     UNION ALL SELECT 'ancestor', to_jsonb(t) FROM lineage t
-    UNION ALL SELECT 'policy', to_jsonb(t) FROM policy t, c WHERE c.kind = 'workload'
+    UNION ALL SELECT 'policy', to_jsonb(t) FROM ${service === null ? sql`policy t, c WHERE c.kind = 'workload'` : sql`policy t`}
     UNION ALL SELECT 'project', to_jsonb(t) FROM projects t WHERE t.id IN (SELECT project_id FROM held UNION ALL SELECT id FROM p)
     UNION ALL SELECT 'environment', to_jsonb(t) FROM environments t WHERE t.id IN (SELECT environment_id FROM held UNION ALL SELECT id FROM chain)
     UNION ALL SELECT 'secret', to_jsonb(t) FROM held t
@@ -260,7 +273,7 @@ export async function read(vault: Serving, ask: Ask): Promise<Read> {
 
 /** A key the caller is given: the secret that holds its value, the one asked for when that is a reference to it, and the version. */
 type Given = { key: string; held: Row<typeof secrets>; asked: Row<typeof secrets>; version: Row<typeof secretVersions>; owner: string | null };
-type Decided = { caller: Caller; project: Row<typeof projects>; environment: Row<typeof environments>; items: (Given | { key: string; refused: string })[] };
+type Decided = { caller: Caller | BoundCaller; project: Row<typeof projects>; environment: Row<typeof environments>; items: (Given | { key: string; refused: string })[] };
 
 /**
  * The same answer whether the place does not exist, is archived, or is one
@@ -274,8 +287,13 @@ const NO_ACCESS: Refusal = { refused: 'no_access' };
  * a `coffre run` is told which keys it is not given, and why.
  */
 export function decide(seen: Seen, ask: Ask, workloads: Workloads, at: number): Decided | Refusal {
-  const caller = callerOf({ credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: seen.environment, binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy }, ask, workloads, at);
+  const rows = { credential: seen.credential, principal: seen.principal, identity: seen.identity, grants: seen.grant, roles: seen.role, environments: seen.environment, binding: seen.binding, ancestors: seen.ancestor, policy: seen.policy };
+  const caller = ask.bound === null ? callerOf(rows, ask, workloads, at) : boundCallerOf(rows, ask.bound, workloads, at);
   if (caller === null) return { refused: 'unauthenticated' };
+  // A call over a service binding is stopped as a session is, and uses values, never handed one, nor in a personal config: a service has none.
+  if ('refused' in caller) return caller;
+  if (caller.credential === null && ask.purpose !== 'use') return { refused: 'use_only' };
+  if (caller.credential === null && ask.mine) return NO_ACCESS;
   // An MCP client is handed values only if its person let it, at consent: reading names and history is all `read` holds.
   if (caller.mcp !== null && !caller.mcp.scopes.includes('reveal')) return { refused: 'mcp_no_reveal' };
   const handed = ask.purpose !== 'use';
@@ -411,35 +429,39 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
   }
 
   // What this credential has not been logged reading in the last minute, for this upstream credential, host and egress: an entry stands for every use it marks.
-  const mark = ({ held, version }: Given) => JSON.stringify([caller.credential.id, ask.purpose, held.id, version.version, ask.upstream?.credential ?? null, ask.upstream?.host ?? null, ask.upstream?.egress === true]);
+  // What names the caller: its credential, or for a call over a service binding the binding it stands on.
+  const as = caller.credential === null ? `binding:${caller.workload.binding.id}` : caller.credential.id;
+  const mark = ({ held, version }: Given) => JSON.stringify([as, ask.purpose, held.id, version.version, ask.upstream?.credential ?? null, ask.upstream?.host ?? null, ask.upstream?.egress === true]);
   const fresh = read.filter((item) => (memory.logged.get(mark(item))?.at ?? -Infinity) + LOGGED_MS <= at);
   const { workload } = caller;
-  // An access token's use is its connection's, which Connected apps lists: the token is gone within the hour.
+  // An access token's use is its connection's, which Connected apps lists: the token is gone within the hour. A call over a
+  // service binding has no credential's last use to move on.
   const used = caller.mcp?.connection ?? caller.credential;
-  const answered: Answer = { principal: caller.principal, credential: caller.credential.id, expiresAt: new Date(endOf(caller.credential, found.seen.ancestor)).toISOString(), values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
+  const ends = caller.credential === null ? at + BOUND_MS : endOf(caller.credential, found.seen.ancestor);
+  const answered: Answer = { principal: caller.principal, credential: as, expiresAt: new Date(ends).toISOString(), values, workload: workload && { binding: workload.binding.id, profile: workload.binding.profile, policy: workload.policy, constraints: workload.constraints } };
   if (down) {
     // Nowhere to write it: counted from the first one, for the entry this credential's next proxied use writes.
-    const missed = memory.unlogged.get(caller.credential.id);
-    if (fresh.length > 0) keep(memory.unlogged, caller.credential.id, { at: missed?.at ?? at, uses: (missed?.uses ?? 0) + 1 }, -Infinity);
+    const missed = memory.unlogged.get(as);
+    if (fresh.length > 0) keep(memory.unlogged, as, { at: missed?.at ?? at, uses: (missed?.uses ?? 0) + 1 }, -Infinity);
     return answered;
   }
   if (fresh.length > 0) {
     const ids = [...new Set(fresh.map((item) => item.held.id))];
     // Dated now, as its write is sent, not when the use was decided: opening its values, through a key service, takes as long as it takes.
     const written = vault.now();
-    const unlogged = ask.purpose === 'use' ? memory.unlogged.get(caller.credential.id) : undefined;
+    const unlogged = ask.purpose === 'use' ? memory.unlogged.get(as) : undefined;
     // Each key as the entry's place calls it: the holder's by the reference's key, a source's by its own.
     const said = (objects: string[], items: readonly Given[], name: (item: Given) => string, more: Record<string, unknown> = {}) => pending(vault.keys[0]!, {
       kept: false,
       action: 'secret.read',
       actor: caller.principal,
-      credential: caller.credential.id,
+      credential: caller.credential?.id ?? null,
       request: ask.request,
       ip: ask.ip,
       objects: [...new Set(objects)],
       detail: { purpose: ask.purpose, ...more, keys: items.map((item) => ({ key: name(item), secret: item.held.id, version: item.version.version, ...(item.asked === item.held ? {} : { through: item.asked.id }) })) },
     }, written, []);
-    const who = [`principal:${caller.principal}`, `credential:${caller.credential.id}`];
+    const who = [`principal:${caller.principal}`, ...(caller.credential === null ? caller.bindings.map((row) => `binding:${row.id}`) : [`credential:${caller.credential.id}`])];
     const entry = said([`project:${project.id}`, `environment:${environment.id}`, ...who, ...fresh.flatMap((item) => [`secret:${item.held.id}`, `secret:${item.asked.id}`])], fresh, (item) => item.key,
       // The upstream it was used for, the holder's alone to know of; after an outage, this credential's proxied uses
       // that no entry says: since when, and how many (`use`).
@@ -456,7 +478,7 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
     // round trip of its own. It waits on nothing, a row a change holds being skipped. Written ahead of the other writes,
     // which Postgres runs the last-written first, it runs after them, and holds its row until the commit alone; in any
     // order, a change would wait on it no longer than this write's own waits, and it on no change.
-    const moved = touching(memory, used, ask.ip, at, sql`(SELECT ok FROM cap)`);
+    const moved = used === null ? undefined : touching(memory, used, ask.ip, at, sql`(SELECT ok FROM cap)`);
     // The cap counts the keys this principal was given in the window, these among them. Uses side by side each count
     // without the other's, so it can be overshot by what is in flight (D217). The rows are written in one order,
     // `ORDER BY id`, by every use: two that write the same ones wait in line, never on each other.
@@ -474,12 +496,12 @@ export async function answer(vault: Serving, ask: Ask, found: Read, down = false
     }
     for (const each of entries) vault.wake(each.hash);
     // Said, unless more were counted while it was being written, by a use that found no database: the next entry says them all.
-    if (unlogged !== undefined && memory.unlogged.get(caller.credential.id) === unlogged) memory.unlogged.delete(caller.credential.id);
+    if (unlogged !== undefined && memory.unlogged.get(as) === unlogged) memory.unlogged.delete(as);
     // Remembered by the entry's own date: the minute a use is logged once in starts there.
     for (const item of fresh) memory.logged.set(mark(item), { at: written });
     keep(memory.logged, mark(fresh[0]!), { at: written }, at - LOGGED_MS);
-    if (moved !== undefined) touched(memory, used, at);
-  } else await touch(vault, used, ask.ip, at);
+    if (moved !== undefined) touched(memory, used!, at);
+  } else if (used !== null) await touch(vault, used, ask.ip, at);
   // Answered and logged as a proxied use: what an outage may be answered from.
   if (ask.purpose === 'use') found.used = true;
   remember(memory, ask, found, at);
@@ -509,7 +531,8 @@ export async function peek(vault: Serving, ask: Ask): Promise<Peeked | Refusal> 
     // A reference's own row has no recipe: its source's is no value written here.
     versionId: item.version.id, recipe: item.asked.recipe, own: item.owner !== null,
   }));
-  return { principal: decided.caller.principal, credential: decided.caller.credential.id, personal: decided.environment.owner !== null, items };
+  const { caller } = decided;
+  return { principal: caller.principal, credential: caller.credential === null ? `binding:${caller.workload.binding.id}` : caller.credential.id, personal: decided.environment.owner !== null, items };
 }
 
 /**

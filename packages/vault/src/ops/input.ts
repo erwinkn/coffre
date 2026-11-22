@@ -1,4 +1,4 @@
-import type { Presented, Trace } from '@coffre/core/vault';
+import type { Bound, Presented, Trace } from '@coffre/core/vault';
 
 /**
  * What crosses the contract, checked before any read. The app is the
@@ -31,6 +31,19 @@ export function presented(input: Presented): Trace & { token: Buffer; proof: str
   const { token, proof } = input;
   if (!text(token) || !HASH.test(token) || !(proof === null || text(proof))) throw new TypeError('a call names a token by its SHA-256 in lowercase hex, and its proof as text');
   return { ...traced(input), token: Buffer.from(token, 'hex'), proof };
+}
+
+/**
+ * A call over a Cloudflare service binding, as the engine takes it: the
+ * service its `props` name, `token:<name>`, and no token. One that names a
+ * token too is no such call.
+ */
+export function bound(input: Bound): Trace & { bound: string } {
+  const { bound: service } = input;
+  if (Object.hasOwn(input, 'token') || Object.hasOwn(input, 'proof') || !text(service) || !/^token:[^\s\p{Cc}]{1,249}$/u.test(service)) {
+    throw new TypeError("a call over a service binding names the service its props name, token:<name>, and no token");
+  }
+  return { ...traced(input), bound: service };
 }
 
 /** A key's name, as the table's own check has it (`secrets_key_check`): told before anything is read or sealed. */

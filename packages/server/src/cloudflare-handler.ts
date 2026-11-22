@@ -10,6 +10,7 @@ import { takesSocket } from './plugins.ts';
 import { createRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
 import { admitSocket } from './socket-admission.ts';
+import { workloadEntrypoint } from './cloudflare-workload.ts';
 import { fetchTransport } from './workloads/transport.ts';
 
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
@@ -69,6 +70,16 @@ export type CoffreWorker<Env> = {
   Anchor: typeof CoffreAnchor;
   /** The workload gates' Durable Object, which the deployment exports as bound: `export const CoffreGates = coffre.Gates`. */
   Gates: typeof CoffreGates;
+  /**
+   * The entrypoint another Worker of the account binds to use the
+   * credential proxy as the service its `props` name, with nothing to prove
+   * (cloudflare-workload.ts): `export const CoffreWorkload = coffre.Workload`,
+   * and in that Worker's wrangler.jsonc, `"services": [{ "binding": "COFFRE",
+   * "service": "<coffre's app Worker>", "entrypoint": "CoffreWorkload",
+   * "props": { "service": "edge-api" } }]`. The service needs a binding of
+   * profile `cloudflare` (`coffre trust edge-api --cloudflare`) and grants.
+   */
+  Workload: ReturnType<typeof workloadEntrypoint<Env>>;
 };
 
 /**
@@ -130,5 +141,11 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     }),
     Anchor: CoffreAnchor,
     Gates: CoffreGates,
+    // Each call's database client, as a request's, closed once its answer and the work it left are done.
+    Workload: workloadEntrypoint<Env>((env) => {
+      const { config, resolved, gates } = configured(env);
+      const pool = new HyperdrivePool(config.database.hyperdrive.connectionString);
+      return { runtime: createRuntime(resolved, createDatabase(pool), config.vault, { transport: fetchTransport(), gates }), end: () => pool.end().then(() => {}) };
+    }),
   };
 }

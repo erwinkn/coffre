@@ -27,8 +27,9 @@ The design, its threat model and every rule behind this guide are in
 **What is built.** The SDK, `coffre serve` and key-bound `coffre run` are.
 The server side lands in its own changes: the exchange and sessions, the new
 `coffre trust` flags, enrollment codes (no release has `coffre enroll` yet:
-the examples below show it as designed), `narrow`, the Workers binding and
-minting. `coffre freeze` is built (0.16), and `verify` (0.14.3,
+the examples below show it as designed), `narrow` and minting. The Workers
+binding's `fetch` is built (0.16.9); its RPC methods are not. `coffre
+freeze` is built (0.16), and `verify` (0.14.3,
 [below](#inbound-webhooks-verify)). Until an instance
 answers the workload exchange, `coffre --service … run` falls back to the
 bearer exchange [ci.md](ci.md) describes.
@@ -369,8 +370,8 @@ job mints and promotes a new one too.
 
 A Worker in the same account binds coffre's entrypoint, and its deploy
 configuration names the service. There is nothing to prove and nothing to
-store. This binding is built by a separate change (PR 6 in the design);
-until it lands, the entrypoint answers 501.
+store: the Worker never holds the credential's value, only what the
+upstream answers.
 
 ```jsonc
 // the app's wrangler.jsonc
@@ -383,13 +384,42 @@ const openai = new OpenAI({ apiKey: 'coffre', baseURL: 'https://coffre/use/opena
 ```
 
 ```sh
-coffre trust edge-api --cloudflare
+coffre trust edge-api --cloudflare --scope market/prod=viewer
 ```
 
 coffre's deployment exports the entrypoint,
-`export const CoffreWorkload = coffre.Workload`, and the host in `baseURL`
-is ignored. Whoever can deploy Workers to the account can set any `props`,
-so keep coffre in an account of its own if those people should not reach its
+`export const CoffreWorkload = coffre.Workload` (`coffre init` writes it),
+and the host in the URL is ignored: the binding is the route. Only
+`/use/<credential>/<path>` and `/use/<project>/<env>/<credential>/<path>`
+answer, and `POST /use/<project>/<env>` for `sign`, `verify` and `presign`;
+the API, a plan and a tunnel do not.
+
+What a call reaches:
+
+- **The service its `props` name**, `edge-api` or `token:edge-api`,
+  whatever the request carries: a handle or a session token sent along is
+  ignored. A binding with no `props.service` is refused, 403 `props`.
+- **Where its `cloudflare` bindings' scopes reach, within its grants.** The
+  service needs a live binding of profile `cloudflare`; with several, a call
+  reaches what any of them does. `/use/<credential>` works when they name
+  exactly one environment; otherwise the URL names it. Its other bindings
+  (GitHub, Kubernetes) give a call over the binding nothing.
+- **Use, never a value.** Each call is one `use` of the vault, purpose
+  `use`. A plan (`GET /use/<project>/<env>`) is 403 `bound`, `reads` are
+  never handed back, and a value the upstream echoes is redacted as for
+  any caller.
+- **The credential's rules and limit**, as for a session: an unmatched
+  method or path is 403 `rule` before anything opens, and a `limit` is
+  counted by the service's gate (`GATES`; a credential with a limit is
+  refused, 503 `no_gate`, without one).
+- **Freezes and revocations** at the next call, within the vault's memory:
+  the instance's workloads, the service, or its binding.
+
+The vault logs each use as the service's, naming the bindings it stood on
+(`binding:<id>`) and no credential; the request has no address of its own.
+
+Whoever can deploy Workers to the account can set any `props`, so keep
+coffre in an account of its own if those people should not reach its
 services. Preview builds keep the Worker's bindings: turn off
 non-production branch builds, or bind previews to a service of their own.
 Deploy with wrangler, since Cloudflare's API and Terraform may not carry
@@ -778,4 +808,6 @@ an earlier exposure still works. By kind of credential:
   If either does, the fallback is `?jkt=`, which the exchange accepts the
   same way, and `gcp()` or `fly()` changes to send it. Vercel's token
   exchange has not been run against a real project yet. Whether a Workers
-  preview version keeps `props` is checked when the binding lands.
+  preview version keeps `props` has not been checked on Cloudflare: the
+  binding is tested in local workerd (wrangler), so take it that a preview
+  does.

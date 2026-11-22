@@ -392,7 +392,7 @@ test("a person's own read is never remembered, on any credential of theirs: they
   const twice = async (asked: Ask) => {
     const first = await use(counted, asked);
     assert.ok(!('refused' in first), JSON.stringify(first));
-    await rewrite(vault, w.database, `postgres://${asked.token.toString('hex').slice(0, 8)}`);
+    await rewrite(vault, w.database, `postgres://${asked.token!.toString('hex').slice(0, 8)}`);
     statements = 0;
     const again = await use(counted, asked);
     assert.ok(!('refused' in again));

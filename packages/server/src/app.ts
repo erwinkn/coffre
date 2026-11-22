@@ -196,7 +196,7 @@ export async function schemaReady(runtime: CoffreRuntime): Promise<boolean> {
 const MIGRATING = "coffre's database lacks this version's migrations: an owner runs `coffre migrate`, as every deploy does first";
 
 /** The answer below the migrations: the API's error, or for a browser's page, a page that says it in words. */
-function migrating(request: Request): Response {
+export function migrating(request: Request): Response {
   if (!(request.headers.get('accept') ?? '').includes('text/html')) return errorResponse(new ApiError('migrating', MIGRATING), { 'retry-after': '30' });
   const page =
     '<!doctype html><html lang="en"><meta charset="utf-8"><title>coffre is migrating</title>' +

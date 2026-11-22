@@ -9,7 +9,10 @@
 // Worker (its `egress`): it answers what it was sent, the key reversed so
 // that the proxy's redaction leaves it, so a request through the proxy goes
 // all the way but for the network; and one tunnel, `db`, to the suite's
-// database, whose WebSockets go to their Durable Object, `SOCKETS`. The
+// database, whose WebSockets go to their Durable Object, `SOCKETS`. Its
+// `CoffreWorkload` entrypoint is what another Worker binds with `props`: the
+// Worker binds it itself, under several props (`COFFRE_*`), and `/as/<binding>/…`
+// asks through one, as a bound Worker's fetch would. The
 // vault's key is a key service's stand-in, which `/key-service` makes give
 // out partway through a call.
 import { github, signin } from '@coffre/core/identity';
@@ -17,7 +20,7 @@ import { derivedSigningKey, KekUnavailableError, LocalKekProvider, type KekProvi
 import { postgres as vaultDatabase, vault } from '@coffre/vault/cloudflare';
 
 import { createCoffre, postgres, type GatesNamespace, type SocketsNamespace, type Vault as VaultBinding, type WaitUntil } from '../../src/cloudflare.ts';
-import { credentialProxy, header, postgres as tunnel } from '../../src/plugins/credential-proxy.ts';
+import { allow, credentialProxy, header, postgres as tunnel } from '../../src/plugins/credential-proxy.ts';
 import { processLimits } from '../../src/workloads/limits.ts';
 
 export { CoffreSigner } from '@coffre/vault/cloudflare';
@@ -30,7 +33,17 @@ type Env = {
   VAULT: VaultBinding;
   GATES: GatesNamespace;
   SOCKETS: SocketsNamespace;
+  /** `CoffreWorkload`, bound with props naming `edge`, `token:edge`, `ghost` (a service with no binding), and none. */
+  COFFRE_EDGE: Fetcher;
+  COFFRE_TOKEN_EDGE: Fetcher;
+  COFFRE_GHOST: Fetcher;
+  COFFRE_NO_PROPS: Fetcher;
 };
+
+type Fetcher = { fetch(request: Request): Promise<Response> };
+
+/** The upstream `echo` and its kin answer from: what it was sent, the key reversed so that the proxy's redaction leaves it. */
+const echoed = { fetch: async (url: URL, init: RequestInit) => Response.json({ path: url.pathname, reversed: [...(new Headers(init.headers).get('authorization') ?? '')].reverse().join('') }) };
 
 /**
  * How many more calls the key service answers before one fails, and how many
@@ -78,8 +91,11 @@ const coffre = createCoffre((env: Env) => ({
         echo: {
           upstream: 'https://api.echo.example/v1',
           inject: header('authorization', 'Bearer {API_KEY}'),
-          egress: { fetch: async (url, init) => Response.json({ path: url.pathname, reversed: [...(new Headers(init.headers).get('authorization') ?? '')].reverse().join('') }) },
+          egress: echoed,
         },
+        // The same key, held to one path by its rules, and to one request a minute by its limit.
+        ruled: { upstream: 'https://api.echo.example/v1', inject: header('authorization', 'Bearer {API_KEY}'), egress: echoed, rules: [allow('GET', '/ping')] },
+        once: { upstream: 'https://api.echo.example/v1', inject: header('authorization', 'Bearer {API_KEY}'), egress: echoed, limit: { perMinute: 1 } },
       },
       // The suite's database is on loopback, which only insecureUpstreams dials; its checks every second.
       tunnels: { db: tunnel('TUNNEL_URL') },
@@ -91,6 +107,7 @@ const coffre = createCoffre((env: Env) => ({
 
 export const CoffreGates = coffre.Gates;
 export const CoffreSockets = coffre.Sockets;
+export const CoffreWorkload = coffre.Workload;
 
 export default {
   async fetch(request: Request, env: Env, ctx: WaitUntil): Promise<Response> {
@@ -98,6 +115,12 @@ export default {
       // POST: how many calls it answers before it gives out; GET: how many it was asked since.
       if (request.method === 'POST') Object.assign(outage, { answers: Number(await request.text()), calls: 0 });
       return Response.json({ calls: outage.calls });
+    }
+    // As a Worker that binds coffre: its request, sent over the binding the path names, to a host the binding ignores.
+    const through = /^\/as\/([A-Z_]+)(\/.*)$/.exec(new URL(request.url).pathname);
+    if (through !== null) {
+      const binding = env[through[1] as keyof Env] as Fetcher;
+      return binding.fetch(new Request(`https://coffre${through[2]}${new URL(request.url).search}`, request));
     }
     const socket = coffre.upgrade(request, env);
     if (socket !== null) return socket;

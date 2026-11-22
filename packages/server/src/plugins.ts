@@ -7,16 +7,16 @@
 // and decides nothing on"), and the vault decides on its own rows.
 import { CoffreError, type CoffreClient } from '@coffre/client';
 import { hashToken, type BindingPolicy, type Constraints, type GateCount } from '@coffre/core/identity';
-import type { Peeked, Presented, Upstream, Used as VaultUsed } from '@coffre/core/vault';
+import type { Bound, Peeked, Presented, Upstream, Used as VaultUsed } from '@coffre/core/vault';
 import { isUnreachable } from '@coffre/db/dialect';
 
 import { ApiError, refusal, toErrorBody } from './api/errors.ts';
 import { stopOf } from './api/routes/secrets.ts';
-import { routedCredential, type RoutedCredential } from './db/queries/sessions.ts';
+import { routedBinding, routedCredential, type RoutedCredential } from './db/queries/sessions.ts';
 import { exchangeToken } from './exchange.ts';
 import { tokenClient } from './fetch-api.ts';
 import type { CoffreRuntime } from './runtime.ts';
-import { dpopToken, gated, SessionRefused, sessionProof, sessionStopped, unknown } from './sessions.ts';
+import { boundGated, dpopToken, gated, SessionRefused, sessionProof, sessionStopped, unknown } from './sessions.ts';
 import { logout } from './signin.ts';
 
 /** One plugin, as its constructor returns it: `credentialProxy({ … })`. */
@@ -58,6 +58,13 @@ export type Connect = (host: string, port: number, signal?: AbortSignal) => Prom
 /** What a plugin's route answers with: where coffre is, the values a request's credential may use, and the API as a token's holder. */
 export type PluginContext = {
   publicUrl: string;
+  /**
+   * The request came over a Cloudflare service binding, from another
+   * Worker, as the service its `props` name (`bindingRoute`): `workload`
+   * answers for that service whatever the request carries, and nothing
+   * here takes a handle or a token. False for any other request.
+   */
+  bound: boolean;
   /**
    * The API as whoever `token` names, which the plugin read from its
    * request: a service, personal or CLI token, sent as a bearer token,
@@ -164,7 +171,7 @@ export type WorkloadAt = {
  * (`DPoP-Nonce`), and the environment this request uses, by path, null when
  * the session reaches none or several and the URL named none.
  */
-export type WorkloadUse = { readonly principal: string; readonly hdr: readonly string[] | null; readonly nonce: string; readonly path: string | null };
+export type WorkloadUse = { readonly principal: string; readonly hdr: readonly string[] | null; readonly nonce: string | null; readonly path: string | null };
 
 /** A workload's request refused: `response` is its answer, the headers RFC 9449 asks for included. */
 export class WorkloadRefused extends CoffreError {
@@ -328,27 +335,71 @@ function placeOf(path: string): { project: string; environment: string; mine: bo
   return match === null ? null : { project: match[1]!, environment: match[2]!, mine: match[3] !== undefined };
 }
 
-/** What a workload caller stands on, kept by the context of the request it was made for: `use` takes back only those. */
-type Standing = { token: string; proof: string; sourceIp: string | null };
+/**
+ * A call another Worker made over a Cloudflare service binding
+ * (docs/design/workload-access.md, section 9.2), routed to the plugin whose
+ * prefix takes its path as `principal`, the service its binding's `props`
+ * name: coffre's own entrypoint calls it (cloudflare-workload.ts), and no
+ * plugin can. Its context's `workload` answers for that service, from its
+ * `cloudflare` bindings, which the vault reads and decides on; it takes no
+ * handle, token or session, and no WebSocket. Null when no plugin takes
+ * the path.
+ */
+export function bindingRoute(request: Request, runtime: CoffreRuntime, principal: string, track: (work: Promise<unknown>) => void = () => {}): Promise<Response> | null {
+  const { pathname } = new URL(request.url);
+  const routes = runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
+  return routes === undefined ? null : routes.fetch(request, pluginContext(request, runtime, null, track, principal));
+}
 
-/** `track`: work the response must not cut short, a limit's alert (`gated`). */
-function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}): PluginContext {
+/** What a workload caller stands on, kept by the context of the request it was made for: `use` takes back only those. */
+type Standing = { token: string; proof: string; sourceIp: string | null } | { bound: string };
+
+/**
+ * `track`: work the response must not cut short, a limit's alert (`gated`). `bound`: the service a call over a service
+ * binding is, which `bindingRoute` alone passes; null for any other request.
+ */
+function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: string | null, track: (work: Promise<unknown>) => void = () => {}, bound: string | null = null): PluginContext {
   // The workload callers this request's context made: the only ones its `use` takes.
   const standings = new WeakMap<WorkloadUse, Standing>();
+  // What takes a handle or a token, which a call over a service binding never names: it is the service its binding says.
+  const unbound = <A extends unknown[], R>(run: (...args: A) => Promise<R>) => (bound === null ? run : async (..._: A): Promise<R> => {
+    throw thrown(new ApiError('forbidden', 'a call over a service binding is the service its props name, and takes no handle or token', 'bound'));
+  });
   return {
     publicUrl: runtime.publicUrl,
-    api: (token) => tokenClient(token, runtime, sourceIp),
-    exchange: async (asked) => (await answered(await exchangeToken(request, runtime, sourceIp, track, asked))) as { token: string; expiresAt: string },
-    signOut: async (token) => {
+    bound: bound !== null,
+    api: (token) => {
+      if (bound !== null) throw thrown(new ApiError('forbidden', 'a call over a service binding is the service its props name, and takes no handle or token', 'bound'));
+      return tokenClient(token, runtime, sourceIp);
+    },
+    exchange: unbound(async (asked: Parameters<PluginContext['exchange']>[0]) => (await answered(await exchangeToken(request, runtime, sourceIp, track, asked))) as { token: string; expiresAt: string }),
+    signOut: unbound(async (token: string) => {
       const ending = new Request(`${runtime.publicUrl}/api/auth/logout`, { method: 'POST', headers: { authorization: `Bearer ${token}` } });
       await answered(await logout(ending, runtime, sourceIp, track, undefined));
-    },
-    handle: async (handle) => {
+    }),
+    handle: unbound(async (handle: string) => {
       const row = await routed(runtime, hashToken(handle));
       if (row === null || row.kind !== 'handle') throw thrown(new ApiError('unauthenticated', 'that handle is unknown, expired or revoked'));
       return { expiresAt: row.expiresAt.toISOString(), paths: (row.places ?? []).map((place) => (place === null ? null : `${place.path}${place.personal ? '@me' : ''}`)) };
-    },
+    }),
     workload: async (asked, at) => {
+      if (bound !== null) {
+        // The service its binding names, whatever the request carries: a header that says DPoP, a handle, or nothing.
+        // A deployment that takes no workloads takes none of these either; the vault decides the rest on its own rows.
+        if (runtime.auth.mode !== 'signin' || runtime.auth.signin.workloads === null) throw await workloadRefused(unknown().response);
+        try {
+          await boundGated(runtime, bound, { ...(at.counts === undefined ? {} : { counts: typeof at.counts === 'function' ? at.counts(bound) : at.counts }), track });
+        } catch (error) {
+          if (error instanceof SessionRefused) throw await workloadRefused(error.response);
+          throw error;
+        }
+        // Its environment, where the URL names none: the one its bindings name. A service with none is nobody, as the vault would say.
+        const path = at.place ?? (await routedBinding(runtime.db, bound));
+        if (path === undefined) throw await workloadRefused(unknown().response);
+        const caller: WorkloadUse = { principal: bound, hdr: null, nonce: null, path };
+        standings.set(caller, { bound });
+        return caller;
+      }
       const token = dpopToken(asked);
       if (token === null) return null;
       try {
@@ -409,13 +460,15 @@ function pluginContext(request: Request, runtime: CoffreRuntime, sourceIp: strin
   };
 
   /** Where `path` names and what the request shows the vault: a handle's hash, or a workload caller's this context made, and no other. */
-  function askedAs(caller: string | WorkloadUse, path: string): [NonNullable<ReturnType<typeof placeOf>>, Presented] {
+  function askedAs(caller: string | WorkloadUse, path: string): [NonNullable<ReturnType<typeof placeOf>>, Presented | Bound] {
     const place = placeOf(path);
     if (place === null) throw thrown(new ApiError('bad_request', 'an environment is named by its path, project/environment'));
+    if (typeof caller === 'string' && bound !== null) throw thrown(new ApiError('forbidden', 'a call over a service binding is the service its props name, and takes no handle or token', 'bound'));
     if (typeof caller === 'string') return [place, { token: hashToken(caller).toString('hex'), proof: null, request: crypto.randomUUID(), ip: sourceIp }];
     // A workload caller `workload` made for this request, and no other: one a plugin built itself is no one.
     const standing = standings.get(caller);
     if (standing === undefined) throw thrown(new ApiError('unauthenticated', 'that workload is no caller coffre authenticated'));
+    if ('bound' in standing) return [place, { bound: standing.bound, request: crypto.randomUUID(), ip: null }];
     return [place, { token: hashToken(standing.token).toString('hex'), proof: standing.proof, request: crypto.randomUUID(), ip: standing.sourceIp }];
   }
 
