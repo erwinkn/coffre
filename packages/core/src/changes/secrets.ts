@@ -154,6 +154,12 @@ export type SecretWrite = {
  * live key, named as `SecretWrite`'s: an archived one is brought back
  * first (`archived`), and a name the environment holds already, archived
  * or not, is `duplicate_key`. Its references read it still, by its id.
+ * But for one: a live reference to this very key, which never held a
+ * value of its own, gives way to it, in the same change, so whoever reads
+ * that name reads the same value throughout and nothing is left behind.
+ * Then nothing below changes, every fork reading the name as it did, and a
+ * fork with a row of the old name of its own refuses it,
+ * `duplicate_key_below`.
  *
  * The name carries down to every environment that inherits from it, forks
  * of forks, archived ones and personal configs included: each one's own

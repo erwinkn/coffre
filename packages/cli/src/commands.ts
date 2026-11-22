@@ -217,7 +217,7 @@ export const SECTIONS = [
       { command: 'history', usage: [`history   ${P}/<KEY> [--json]`] },
       { command: 'rollback', usage: [`rollback  ${P}/<KEY> <version>`] },
       { command: 'import', usage: [`import    ${P} [--file .env] [--apply]`] },
-      { command: 'rename', usage: [`rename    ${P}/<KEY> <NEW_KEY>`], about: ['the key, with its versions'] },
+      { command: 'rename', usage: [`rename    ${P}/<KEY> <NEW_KEY>`], about: ['the key, with its versions; onto a reference to it, in its place'] },
       { command: 'archive', usage: [`archive   ${P}/<KEY>`], about: ['out of reads, runs and exports; its versions kept'] },
       { command: 'unarchive', usage: [`unarchive ${P}/<KEY>`] },
       {

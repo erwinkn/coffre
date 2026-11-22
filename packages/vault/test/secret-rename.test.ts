@@ -21,6 +21,7 @@ const [ada, bo, cy] = [user('ada'), user('bo'), user('cy')];
 const archivedAt = new Date(Date.UTC(2026, 10, 1));
 const places: Record<string, ReturnType<typeof environment>> = {};
 let market: ReturnType<typeof project>;
+let billingProd: ReturnType<typeof environment>;
 beforeEach(async () => {
   await emptyDatabase(world.owner);
   world.memory.reads.clear();
@@ -38,6 +39,7 @@ beforeEach(async () => {
   const cys = environment(market, 'prod-p-0e0f0a0b', { parentId: prod.id, owner: cy });
   const there = environment(billing, 'prod');
   Object.assign(places, { prod, staging, eu, old, adas, cys });
+  billingProd = there;
   const stripe = value(world, secret(prod, 'STRIPE_KEY'), 'stripe-prod');
   await write(world, ...rows('projects', market, billing), ...rows('environments', prod, staging, eu, old, adas, cys, there),
     ...rows('secrets', stripe, value(world, secret(prod, 'DATABASE_URL'), 'database-prod'), value(world, secret(prod, 'EXTRA'), 'extra-prod'),
@@ -213,4 +215,46 @@ test('a row the cascade decides on that was edited behind the vault refuses the 
   // Put back, each refusal above refused only what it says: the rename goes through.
   await world.owner.execute(sql`UPDATE secrets SET folder = NULL WHERE environment_id = ${places.prod!.id}`);
   assert.ok('answer' in (await rename('ada-cli', 'STRIPE_KEY', 'STRIPE_SECRET_KEY')));
+});
+
+test('a reference to the key under the name it takes gives way to it: its readers, here and in the forks, read the same value, and nothing is left', async () => {
+  const { prod, staging } = places as Record<string, ReturnType<typeof environment>>;
+  const old = value(world, secret(prod!, 'OLD_TOKEN'), 'token-prod');
+  const reference = secret(prod!, 'TOKEN', { sourceId: old.id });
+  // Staging does without the old name alone; billing reads the key by its id.
+  await write(world, ...rows('secrets', old, reference, secret(billingProd, 'TOKEN_REF', { sourceId: old.id })), ...rows('dismissedKeys', dismissed(staging!, 'OLD_TOKEN')));
+  const reads = async () => [await given('prod', ['TOKEN']), await given('staging', ['TOKEN']), await given('eu', ['TOKEN']), await given('staging', ['TOKEN'], { mine: true }),
+    await vault.use({ ...shown('ada-cli'), project: 'billing', environment: 'prod', mine: false, keys: ['TOKEN_REF'], purpose: 'reveal', upstream: null }).then((answer) => ('values' in answer ? answer.values.map((item) => ('value' in item ? item.value : item.refused)) : answer))];
+  const before = await reads();
+  assert.deepEqual(before, [['token-prod'], ['token-prod'], ['token-prod'], ['token-prod'], ['token-prod']]);
+  const dismissedBefore = await dismissals();
+
+  assert.deepEqual(await rename('ada-cli', 'OLD_TOKEN', 'TOKEN'), { answer: { id: old.id } });
+  assert.deepEqual(await reads(), before);
+  assert.deepEqual(await given('prod', ['OLD_TOKEN']), ['unknown_key']);
+  // One row of the name, the key's own, and none of the reference's left.
+  assert.deepEqual((await keys()).filter((key) => key.includes('TOKEN') && !key.includes('STRIPE')), ['prod/TOKEN']);
+  assert.deepEqual(await rowsOf(world.owner, sql`SELECT id FROM secrets WHERE id = ${reference.id} OR id = ${old.id}`), [{ id: old.id }]);
+  // No fork changes: staging's dismissal of the old name stands, and so does every other.
+  assert.deepEqual(await dismissals(), dismissedBefore);
+  assert.deepEqual(await entry(), {
+    action: 'secret.rename', key: 'OLD_TOKEN', to: 'TOKEN', changes: [{ in: 'prod', key: 'TOKEN', replaced: true }, { in: 'prod', key: 'OLD_TOKEN', to: 'TOKEN' }],
+  });
+});
+
+test('any other row under the name refuses the rename as before, and nothing is written', async () => {
+  const { prod, staging } = places as Record<string, ReturnType<typeof environment>>;
+  const old = value(world, secret(prod!, 'OLD_TOKEN'), 'token-prod');
+  const stripe = (await rowsOf<{ id: string }>(world.owner, sql`SELECT id FROM secrets WHERE environment_id = ${prod!.id} AND key = 'STRIPE_KEY'`))[0]!;
+  await write(world, ...rows('secrets', old,
+    // A reference to another key; one to this key, archived; one that held a value of its own before.
+    secret(prod!, 'ELSEWHERE', { sourceId: stripe.id }), secret(prod!, 'ARCHIVED', { sourceId: old.id, archivedAt }), secret(prod!, 'HELD', { sourceId: old.id, versions: 1 }),
+    secret(prod!, 'FORKED', { sourceId: old.id }), secret(staging!, 'OLD_TOKEN')));
+  const before = [await keys(), await dismissals(), await count()];
+  assert.deepEqual(await rename('ada-cli', 'OLD_TOKEN', 'ELSEWHERE'), { refused: 'duplicate_key' });
+  assert.deepEqual(await rename('ada-cli', 'OLD_TOKEN', 'ARCHIVED'), { refused: 'duplicate_key' }, 'an archived key keeps its name');
+  assert.deepEqual(await rename('ada-cli', 'OLD_TOKEN', 'HELD'), { refused: 'duplicate_key' }, 'a reference with a history of its own');
+  // Staging holds a row of the old name of its own, which its readers of the new name would read instead.
+  assert.deepEqual(await rename('ada-cli', 'OLD_TOKEN', 'FORKED'), { refused: 'duplicate_key_below' });
+  assert.deepEqual([await keys(), await dismissals(), await count()], before);
 });

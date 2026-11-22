@@ -7,7 +7,7 @@ import { dismissedKeys, environments, projects, secrets, secretVersions } from '
 import { sql } from 'drizzle-orm';
 
 import { callerFrom, callerParts, live, refusedTo, type Asking } from '../caller.ts';
-import { amended, aside, copying, overweight, part, put, type Operation, type Parts, type Refusal, type Seen, type Value, type Write } from '../change.ts';
+import { amended, aside, copying, drop, overweight, part, put, type Operation, type Parts, type Refusal, type Seen, type Value, type Write } from '../change.ts';
 import type { Said } from '../entry.ts';
 import type { Fresh, Row } from '../rows.ts';
 import { natureOf } from '../value.ts';
@@ -658,6 +658,15 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
  * by whoever writes keys there, as filing one takes: no value moves. A
  * live key only, and onto a name its environment holds nowhere, archived
  * or not (`duplicate_key`). Its references read it by its id, as before.
+ * One row of the new name gives way: a live reference to this very key,
+ * which never held a value of its own. The rename drops it and the key
+ * takes its name in the same statement, so whoever reads the new name
+ * reads the same value before, during and after, and nothing is left
+ * under the old one: `PLAIN`, a reference to `OLD` made so that its
+ * readers could move over first, gives way to `OLD` renamed. Nothing below
+ * changes, since every fork reads the new name as it did; a fork that
+ * holds a row of the old name of its own, whose readers of the new one
+ * would read that row instead, refuses it, `duplicate_key_below`.
  *
  * The name carries down (docs/design/forking.md, "A key is renamed in the
  * parent"): a fork's override and dismissal are kept by name, so left
@@ -773,8 +782,6 @@ function secretRename(input: Presented & SecretRename, vault: Deciding): Operati
       });
       // Renamed onto its own name, nothing changes: the entry says it was asked.
       if (to === key) return { writes: [], entry: entry([], []), answer: { id: row.id } };
-      if (seen.secret.some((found) => found.environmentId === environment.id && found.key === to)) return { refused: 'duplicate_key' };
-
       const now = new Date(at);
       const by = caller.principal;
       const tree = seen.environments.filter((layer) => layer.projectId === place.id);
@@ -785,6 +792,18 @@ function secretRename(input: Presented & SecretRename, vault: Deciding): Operati
         for (const layer of tree) if (layer.parentId !== null && under.has(layer.parentId)) under.add(layer.id);
       }
       const forks = tree.filter((layer) => layer.id !== environment.id && under.has(layer.id)).sort((a, b) => (a.slug < b.slug ? -1 : 1));
+
+      const taken = seen.secret.find((found) => found.environmentId === environment.id && found.key === to);
+      if (taken !== undefined) {
+        // Only a live reference to this very key, which never held a value of its own, gives way to it: anything else keeps its name.
+        if (taken.sourceId !== row.id || taken.archivedAt !== null || taken.versions > 0 || row.sourceId !== null) return { refused: 'duplicate_key' };
+        // A fork's own row of the key would take the new name, and its readers of it would read that row instead of the key.
+        if (seen.secret.some((found) => found.environmentId !== environment.id && under.has(found.environmentId) && found.key === key)) return { refused: 'duplicate_key_below' };
+        // The reference dropped before the key takes its name, in one statement: its readers read the same value throughout.
+        // Every fork, and its dismissals, reads the new name as it did, so nothing below changes.
+        const lines = [{ secret: taken.id, environment: environment.id, key: to, replaced: true }, { secret: row.id, environment: environment.id, key, to }];
+        return { writes: [{ ...drop(secrets, taken), first: true }, amended(secrets, row, { key: to, updatedAt: now })], entry: entry(lines, []), answer: { id: row.id } };
+      }
       const layers = new Map([environment, ...forks].map((layer) => [layer.id, layer]));
       const writes: Write[] = [amended(secrets, row, { key: to, updatedAt: now })];
       const lines: Record<string, unknown>[] = [{ secret: row.id, environment: environment.id, key, to }];
