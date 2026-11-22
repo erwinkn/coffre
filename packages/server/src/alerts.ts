@@ -40,7 +40,7 @@ export async function sendAlert(workloads: WorkloadsConfig, alert: WorkloadAlert
  * `api-prod is past its limit for stripe per minute, from 203.0.113.9:
  * refused for 42 s`. The app's row of a session names no binding.
  */
-export function limitAlert(caller: { principal: string; session: string; sourceIp: string | null }, count: { key: string; retryAfterMs: number }): WorkloadAlert {
+export function limitAlert(caller: { principal: string; session: string | null; sourceIp: string | null }, count: { key: string; retryAfterMs: number }): WorkloadAlert {
   const from = caller.sourceIp === null ? '' : `, from ${caller.sourceIp}`;
   return {
     kind: 'limit',

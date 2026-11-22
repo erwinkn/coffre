@@ -111,7 +111,7 @@ test('a fresh database is adopted with its Owners, then served by the new engine
   const market = project('market');
   const prod = environment(market, 'prod');
   await write(vault, ...rows('projects', market), ...rows('environments', prod), ...rows('secrets', await value(vault, secret(prod, 'API_KEY'), 'k')), ...rows('credentials', credential('root', root)));
-  assert.deepEqual(await reveal(vault, ask('root', 'market/prod', null).token, 'market/prod', ['API_KEY']), { API_KEY: 'k' });
+  assert.deepEqual(await reveal(vault, ask('root', 'market/prod', null).token!, 'market/prod', ['API_KEY']), { API_KEY: 'k' });
   assert.deepEqual(await runOf(signer, vault), []);
   assert.deepEqual(await runOf(signer, vault, true), []);
 });

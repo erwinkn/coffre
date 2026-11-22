@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **A Cloudflare Worker binds coffre and uses a credential, never holding
+  it.** Another Worker of the account binds the app Worker's new
+  entrypoint, `export const CoffreWorkload = coffre.Workload` (`coffre
+  init` writes it), with `props` naming its service: `"services": [{
+  "binding": "COFFRE", "service": "coffre", "entrypoint": "CoffreWorkload",
+  "props": { "service": "edge-api" } }]`. Its `env.COFFRE.fetch(…)` to
+  `/use/<credential>/<path>` goes through the credential proxy as
+  `token:edge-api`, with nothing to prove and nothing stored: the Worker
+  gets the upstream's answer, a value it echoes redacted, and never the
+  credential's value. The service needs a binding of profile `cloudflare`
+  (`coffre trust edge-api --cloudflare --scope market/prod=viewer`): the
+  vault reaches only where such a binding's scope does, within the
+  service's grants, for a use and nothing handed back, and a freeze or a
+  revocation of the binding or the service stops the next call. The
+  credential's rules and limit hold it as they hold a session. A plan, the
+  API and tunnels are not reachable over the binding; `sign`, `verify` and
+  `presign` are, through `POST /use/<project>/<env>`. The vault's contract
+  gains `Bound` (`{ bound: 'token:<name>' }` in place of a token) for
+  `use` and `peek`. No migration.
+
 ## 0.16.9 (2026-11-22)
 
 - **A key renames onto a reference to itself in one step: `coffre rename

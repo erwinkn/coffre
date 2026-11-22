@@ -59,3 +59,27 @@ export async function routedCredential(db: Queryable, tokenHash: Buffer): Promis
   `);
   return row === undefined ? null : { ...row, expiresAt: new Date(row.expiresAt) };
 }
+
+/**
+ * Where a call over a Cloudflare service binding goes when its URL names no
+ * environment (`/use/<credential>`): the environment the service's live
+ * `cloudflare` bindings' scopes name, by path, when they name exactly one,
+ * and null otherwise, for a scope of a whole project, of several
+ * environments, of none, or of one since deleted. Undefined for a service
+ * with no such binding, which the app answers as an unknown credential.
+ * Unchecked, as `routedCredential` is: the vault decides on its own rows
+ * whether the service reaches it. A scope that is no JSON array names
+ * nothing.
+ */
+export async function routedBinding(db: Queryable, principal: string): Promise<string | null | undefined> {
+  const found = await rowsOf<{ path: string | null }>(db, sql`
+    SELECT DISTINCT CASE WHEN p.id IS NULL THEN NULL ELSE p.slug || '/' || e.slug END AS path
+    FROM bindings b
+    LEFT JOIN LATERAL jsonb_array_elements(CASE WHEN b.scope IS JSON ARRAY THEN b.scope::jsonb ELSE '[]'::jsonb END) AS g(grant_) ON true
+    LEFT JOIN environments e ON e.id = CASE WHEN jsonb_typeof(g.grant_) = 'object' AND g.grant_ ->> 'environmentId' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (g.grant_ ->> 'environmentId')::uuid END
+      AND e.slug NOT LIKE '%~%'
+    LEFT JOIN projects p ON p.id = e.project_id AND p.slug NOT LIKE '%~%'
+    WHERE b.principal = ${principal} AND b.profile = 'cloudflare' AND b.revoked_at IS NULL
+  `);
+  return found.length === 0 ? undefined : found.length === 1 ? found[0]!.path : null;
+}

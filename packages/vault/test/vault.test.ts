@@ -69,7 +69,7 @@ test('a refusal is an answer, which wrote nothing and woke nobody', async () => 
 test('a use that is not what the contract says is a fault, before any read', async () => {
   const sparse = ['A'];
   sparse[2] = 'C';
-  const bad: Partial<Record<keyof UseInput, unknown>>[] = [
+  const bad: Partial<Record<'token' | 'proof' | keyof UseInput, unknown>>[] = [
     { token: 'ada-cli' }, { token: tokenOf('ada-cli').toString('hex').toUpperCase() }, { project: 7 }, { environment: 'x'.repeat(257) }, { mine: 'yes' },
     { keys: ['A', 7] }, { keys: sparse }, { keys: 'A' }, { keys: Array.from({ length: 1001 }, (_, i) => `K${i}`) }, { keys: ['A\0'] },
     { purpose: 'copy' }, { purpose: 7 }, { ip: 7 }, { request: {} }, { proof: 7 }, { upstream: 'stripe' }, { upstream: { credential: 'x'.repeat(257) } },

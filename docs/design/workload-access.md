@@ -1976,6 +1976,47 @@ line of registration after the owner has merged:
   `coffre run --service` knows which variable gets its listener's URL), and
   `useOnly` lists every key held and not read.
 
+**As PR 6 built it** (0.16.10, `fetch` alone), where the design left a
+choice or 0.16 changed the ground under it:
+
+- **The vault decides, by the service's name.** 0.16 has no
+  `workloadFromBinding` in the app: the vault takes `{ bound: 'token:<name>' }`
+  in place of a token (`Bound`, in `@coffre/core/vault`), on the app's word,
+  as it takes a proof's key, and reads the service's principal, grants and
+  live `cloudflare` bindings in its one statement. Only coffre's entrypoint
+  passes one, through `bindingRoute`.
+- **Several bindings: the union.** A call reaches what any of the service's
+  live, unfrozen `cloudflare` bindings' scopes reaches, within its grants.
+  A binding hidden behind the vault then takes its scope with it and never
+  widens another's, as "a decision takes nothing from a missing row" asks
+  ([0.16.md](0.16.md), "What it promises"). A freeze of one binding stops
+  its scope; of every one, of the service or of the instance's workloads,
+  the call, `frozen`.
+- **A use and nothing else.** The vault refuses a bound call any purpose
+  but `use` (`use_only`) and any personal config. The proxy refuses it a
+  plan (403 `bound`), the plugin context refuses it a handle, a token, the
+  API and an exchange, and the entrypoint refuses a WebSocket and any path
+  no plugin takes. So `reads` on a `cloudflare` binding are never handed
+  back by this build.
+- **No session, so no nonce, no `hdr` and no body line.** The request's
+  headers go on as a handle's do. The service's gate is asked only for the
+  counts a credential's `limit` makes; a credential with a limit is refused
+  `no_gate` on a deployment without one.
+- **The entrypoint is an object with a `fetch`**, which workerd takes as a
+  named entrypoint, and reads `ctx.props`: a `WorkerEntrypoint` class
+  needs `cloudflare:workers`, which the server's modules, loaded on Node in
+  its tests, cannot import. The RPC methods (`sign`, `verify`, `presign`,
+  later `mint`) need that class and are not built; `POST
+  /use/<project>/<env>` reaches the same operations through `fetch`.
+- **The log names the bindings, not a credential:** `credential: null`,
+  and `binding:<id>` among the objects of each serving binding. No last
+  use is moved on: a binding's is a date only changes write.
+- **The stable URL** resolves by one app statement: the environment the
+  service's live `cloudflare` bindings' scopes name, when exactly one. A
+  service with no such binding is 401 there, before the vault.
+- **Not checked live yet:** whether a preview version keeps `props`. The
+  tests run both Workers in local workerd through wrangler.
+
 ### 12.1 Verification
 
 **Model checking**, `formal/Workload.tla`, TLC as `pnpm formal` runs it. The

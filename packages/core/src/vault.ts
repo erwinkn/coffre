@@ -123,7 +123,21 @@ export type ForConnection = {
   via?: { connection: string; approval: string; digest: string };
 };
 
-export type UseInput = Presented & {
+/**
+ * A call another Worker made over a Cloudflare service binding
+ * (docs/design/workload-access.md, section 9.2), which carries no token:
+ * `bound` is the service its binding's `props` name, `token:<name>`. The
+ * platform sets `props` from the calling Worker's deploy configuration,
+ * and only coffre's own entrypoint passes it on, so the vault takes it on
+ * the app's word, as it takes a proof's key (`Presented.proof`). It finds
+ * the service's live `cloudflare` bindings by it, and decides on them: a
+ * use, purpose `use`, and nothing handed back.
+ */
+export type Bound = Trace & {
+  bound: string;
+};
+
+export type UseInput = (Presented | Bound) & {
   /** The place, by its slugs. */
   project: string;
   environment: string;
@@ -176,7 +190,7 @@ export type UsedValue = { key: string; secret: string; version: number; nature: 
 
 export type Used = {
   principal: string;
-  /** The credential's id. */
+  /** The credential's id; for a call over a service binding (`Bound`), `binding:<id>` of the binding it stands on. */
   credential: string;
   /**
    * The credential's effective end, ISO 8601: the instant the vault starts
@@ -207,7 +221,7 @@ export type Used = {
  */
 export type Peeked = {
   principal: string;
-  /** The credential's id. */
+  /** The credential's id, or `binding:<id>` (`Used.credential`). */
   credential: string;
   personal: boolean;
   items: ({ key: string; secret: string; version: number; nature: Nature; versionId: string; recipe: string | null; own: boolean } | { key: string; refused: string })[];

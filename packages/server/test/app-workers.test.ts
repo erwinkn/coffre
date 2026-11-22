@@ -41,6 +41,9 @@ const ECHOED = { path: '/v1/ping', reversed: [...`Bearer ${API_KEY}`].reverse().
 /** A handle of ada's, for market/data, whose `TUNNEL_URL` is the suite's database, as the app's login: the tunnel `db` reaches it. */
 const TUNNEL_HANDLE = generateToken('handle');
 let tunnelHandleId: string;
+/** `token:edge`, a Worker's service: a viewer of market, its `cloudflare` binding scoped to market/apis. */
+const EDGE = 'token:edge';
+let edgeBindingId: string;
 
 let worker: Unstable_DevWorker;
 let dir: string;
@@ -66,6 +69,8 @@ before(async () => {
   const used = { lastUsedAt: new Date() };
   const github = identity(bo);
   const deploy = binding(DEPLOY, { policy: '{}', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) });
+  const edge = binding(EDGE, { profile: 'cloudflare', issuer: 'urn:coffre:cloudflare', jwksUri: 'urn:coffre:cloudflare', policy: '{}', scope: JSON.stringify([{ projectId: market.id, environmentId: apis.id, role: 'viewer' }]) });
+  edgeBindingId = edge.id;
   await write(
     world,
     ...rows('projects', market, lab),
@@ -73,10 +78,10 @@ before(async () => {
     ...rows('secrets', url, apiKey, region, tunnelUrl, ...marked),
     ...rows('roles', role(false, 'viewer', ['secret.read', 'secret.use'], []), role(false, 'developer', ['secret.read', 'secret.write']), role(true, 'member', [])),
     ...rows('policy', instance()),
-    ...rows('principals', principal(ada), principal(bo), principal(DEPLOY)),
+    ...rows('principals', principal(ada), principal(bo), principal(DEPLOY), principal(EDGE), principal('token:ghost')),
     ...rows('identities', github),
-    ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market }), grant(bo, 'developer', { project: lab }), grant(DEPLOY, 'viewer', { project: market })),
-    ...rows('bindings', deploy),
+    ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market }), grant(bo, 'developer', { project: lab }), grant(DEPLOY, 'viewer', { project: market }), grant(EDGE, 'viewer', { project: market }), grant('token:ghost', 'viewer', { project: market })),
+    ...rows('bindings', deploy, edge),
     ...rows('credentials', credential('ada-cli', ada, used), credential('bo-cli', bo, used), credential(BROWSER, bo, { ...used, kind: 'browser', identityId: github.id }), session(WORKLOAD, deploy, { jkt: await thumbprint(KEY.jwk), places: JSON.stringify([{ environmentId: apis.id }]) }),
       credential(HANDLE, ada, { kind: 'handle', scope: JSON.stringify([{ projectId: market.id, environmentId: apis.id, role: 'viewer' }]), places: JSON.stringify([{ environmentId: apis.id, personal: false }]) }), tunnelHandle),
   );
@@ -96,7 +101,14 @@ before(async () => {
         { binding: 'VAULT_HYPERDRIVE', id: 'app-workers-test-vault', localConnectionString: vault.url },
       ],
       // As a deployment's two Workers: the app binds the vault's entrypoint, and the vault its signer.
-      services: [{ binding: 'VAULT', service: name, entrypoint: 'Vault' }],
+      services: [
+        { binding: 'VAULT', service: name, entrypoint: 'Vault' },
+        // As another Worker of the account binds coffre: the entrypoint, with props naming its service.
+        { binding: 'COFFRE_EDGE', service: name, entrypoint: 'CoffreWorkload', props: { service: 'edge' } },
+        { binding: 'COFFRE_TOKEN_EDGE', service: name, entrypoint: 'CoffreWorkload', props: { service: 'token:edge' } },
+        { binding: 'COFFRE_GHOST', service: name, entrypoint: 'CoffreWorkload', props: { service: 'ghost' } },
+        { binding: 'COFFRE_NO_PROPS', service: name, entrypoint: 'CoffreWorkload' },
+      ],
       durable_objects: { bindings: [{ name: 'SIGNER', class_name: 'CoffreSigner' }, { name: 'GATES', class_name: 'CoffreGates' }, { name: 'SOCKETS', class_name: 'CoffreSockets' }] },
       migrations: [{ tag: 'signer', new_sqlite_classes: ['CoffreSigner'] }, { tag: 'gates', new_sqlite_classes: ['CoffreGates'] }, { tag: 'sockets', new_sqlite_classes: ['CoffreSockets'] }],
     }),
@@ -241,8 +253,70 @@ test('a request through the credential proxy on Workers: one use of the vault, b
   // is handed, each its own connection; none of the app's.
   const [plan, planApp, planVault] = await opened(() => ask('/use/market/apis', bearer(HANDLE)));
   assert.equal(plan.status, 200, JSON.stringify(plan.body));
-  assert.deepEqual(plan.body, { environment: 'market/apis', env: { API_KEY: HANDLE, REGION: 'eu-west-3' }, credentials: { echo: 'https://secrets.acme.example/use/market/apis/echo' }, tunnels: {}, left: [] });
+  assert.deepEqual(plan.body, { environment: 'market/apis', env: { API_KEY: HANDLE, REGION: 'eu-west-3' }, credentials: { echo: 'https://secrets.acme.example/use/market/apis/echo', ruled: 'https://secrets.acme.example/use/market/apis/ruled', once: 'https://secrets.acme.example/use/market/apis/once' }, tunnels: {}, left: [] });
   assert.deepEqual([planApp, planVault], [0, 2]);
+});
+
+test("a Worker bound to coffre: its props name its service, which uses a credential within its binding's scope and rules, never handed its value nor another's", { timeout: 120_000 }, async () => {
+  // The stable URL, the binding naming one environment; and that environment by name. The Worker sends no token.
+  for (const via of ['COFFRE_EDGE', 'COFFRE_TOKEN_EDGE']) {
+    const used = await ask(`/as/${via}/use/echo/ping`);
+    assert.equal(used.status, 200, JSON.stringify(used.body));
+    assert.deepEqual(used.body, ECHOED);
+  }
+  const [named, , vaultAsked] = await opened(() => ask('/as/COFFRE_EDGE/use/market/apis/echo/ping', { headers: { 'x-request': 'one' } }));
+  assert.equal(named.status, 200, JSON.stringify(named.body));
+  assert.deepEqual(named.body, ECHOED);
+  assert.ok(vaultAsked <= 1);
+
+  // Where its grants reach and its binding does not: market/prod. A handle of ada's for market/apis, sent along, changes
+  // nothing: the call is edge's whatever it carries.
+  for (const init of [{}, bearer(HANDLE), { headers: { authorization: `DPoP ${WORKLOAD}` } }]) {
+    const outside = await ask('/as/COFFRE_EDGE/use/market/prod/echo/ping', init);
+    assert.equal(outside.status, 403, JSON.stringify(outside.body));
+  }
+  // A service with grants and no `cloudflare` binding, and a binding with no props: nobody.
+  assert.equal((await ask('/as/COFFRE_GHOST/use/echo/ping')).status, 401);
+  const none = await ask('/as/COFFRE_NO_PROPS/use/echo/ping');
+  assert.deepEqual([none.status, none.body.reason], [403, 'props']);
+
+  // Its credential's rules, default deny: `ruled` takes GET /ping alone.
+  assert.equal((await ask('/as/COFFRE_EDGE/use/ruled/ping')).status, 200);
+  assert.equal((await ask('/as/COFFRE_EDGE/use/ruled/pong')).status, 403);
+  assert.equal((await ask('/as/COFFRE_EDGE/use/ruled/ping', { method: 'POST', body: '{}' })).status, 403);
+  // Its limit, by its service's gate: one a minute.
+  assert.equal((await ask('/as/COFFRE_EDGE/use/once/ping')).status, 200);
+  const past = await ask('/as/COFFRE_EDGE/use/once/ping');
+  assert.deepEqual([past.status, past.body.reason], [429, 'limit']);
+
+  // Never a value: no plan, nothing but coffre's plugins, and the API refused.
+  const plan = await ask('/as/COFFRE_EDGE/use/market/apis');
+  assert.deepEqual([plan.status, plan.body.reason], [403, 'bound']);
+  assert.equal((await ask('/as/COFFRE_EDGE/api/me')).status, 404);
+  // A plugin that takes a token, vault-kv's, refuses a bound call as such: 403, not a fault.
+  const kv = await ask('/as/COFFRE_EDGE/v1/secret/data/market/apis', { headers: { 'x-vault-token': HANDLE } });
+  assert.deepEqual([kv.status, kv.body.reason], [403, 'bound']);
+  // A coffre token the Worker sends along goes no further than coffre, wherever it is: a header, the URL or the body.
+  for (const init of [{ headers: { 'x-forwarded': HANDLE } }, { headers: { 'x-forwarded': `DPoP ${WORKLOAD}` } }, { method: 'POST', body: `token=${HANDLE}` }]) {
+    const sent = await ask('/as/COFFRE_EDGE/use/echo/ping', init);
+    assert.equal(sent.status, 400, JSON.stringify(sent.body));
+  }
+  assert.equal((await ask(`/as/COFFRE_EDGE/use/echo/ping?token=${HANDLE}`)).status, 400);
+
+  // A use logged as the service's, naming its binding and no credential.
+  const entries = await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending UNION ALL SELECT body FROM log`);
+  const mine = entries.map((row) => JSON.parse(row.body) as { action: string; actor: string; credential: string | null; objects: string[] }).filter((entry) => entry.actor === EDGE);
+  assert.ok(mine.length > 0);
+  for (const entry of mine) assert.deepEqual([entry.action, entry.credential, entry.objects.includes(`binding:${edgeBindingId}`)], ['secret.read', null, true]);
+
+  // Frozen, then revoked: the next call is refused, once the vault's memory is past.
+  await amend(world, 'bindings', sql`id = ${edgeBindingId}`, { frozenAt: new Date() });
+  await sleep(2100);
+  const frozen = await ask('/as/COFFRE_EDGE/use/echo/ping');
+  assert.deepEqual([frozen.status, frozen.body.reason], [403, 'frozen']);
+  await amend(world, 'bindings', sql`id = ${edgeBindingId}`, { frozenAt: null, revokedAt: new Date(), revokedBy: 'root@acme.example' });
+  await sleep(2100);
+  assert.equal((await ask('/as/COFFRE_EDGE/use/echo/ping')).status, 401);
 });
 
 test("a tunnel on Workers: `coffre.upgrade` sends the WebSocket to its object, which the vault admits with one use, and a revocation ends at its next check", { timeout: 120_000 }, async () => {

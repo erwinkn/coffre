@@ -284,6 +284,76 @@ export function callerOf(rows: CallerRows, shown: Shown, workloads: Workloads, a
   };
 }
 
+/**
+ * A call another Worker made over a Cloudflare service binding
+ * (docs/design/workload-access.md, section 9.2): no credential, the service
+ * its `props` name, on the app's word, and the bindings it stands on. Only a
+ * use, purpose `use`, takes one (use.ts).
+ */
+export type BoundCaller = Omit<Caller, 'credential' | 'mcp' | 'workload'> & {
+  credential: null;
+  mcp: null;
+  /** The first of `bindings`, by id: what the answer names (`binding:<id>`). */
+  workload: Workload;
+  /** Each live, unfrozen `cloudflare` binding of the service: its scope is all of theirs. */
+  bindings: readonly Row<typeof bindings>[];
+};
+
+/**
+ * The service a service binding's `props` name, as its rows say it stands:
+ * an active service account, in a deployment that takes workloads, with a
+ * live binding of profile `cloudflare` in its generation. It reaches what
+ * those bindings' scopes reach, all of them, within its grants: a binding
+ * hidden behind the vault takes its scope with it, and none adds to
+ * another's, so fewer rows reach less (docs/design/0.16.md, "What it
+ * promises"). Null for none; a stop for one whose every such binding is
+ * stopped, frozen first, as a session's is, so that lifting it restores
+ * service.
+ */
+export function boundCallerOf(rows: Pick<CallerRows, 'principal' | 'grants' | 'roles' | 'environments' | 'binding' | 'policy'>, service: string, workloads: Workloads, at: number): BoundCaller | { refused: Stop } | null {
+  const [principal] = rows.principal;
+  if (workloads === null || principal === undefined || principal.id !== service || !service.startsWith('token:') || principal.status !== 'active') return null;
+  const scope = principal.scope === null ? EVERYWHERE : parsed(principal.scope);
+  if (!isScope(scope)) return null;
+  const live = rows.binding
+    .filter((row) => row.profile === 'cloudflare' && row.revokedAt === null && row.principal === principal.id && row.generation === principal.generation)
+    .flatMap((row) => {
+      const policy = parsed(row.policy);
+      return typeof policy === 'object' && policy !== null && !Array.isArray(policy) ? [{ row, policy: policy as BindingPolicy }] : [];
+    })
+    .sort((a, b) => (a.row.id < b.row.id ? -1 : 1));
+  if (live.length === 0) return null;
+  // Each freeze is a field of the row it stops. An instance whose policy row is gone cannot say it is not frozen.
+  const [instance] = rows.policy;
+  if (instance?.workloadsFrozenAt !== null || principal.frozenAt !== null) return { refused: 'frozen' };
+  const serving = live.filter(({ row, policy }) => row.frozenAt === null && !(workloads.noReads && policy.reads !== undefined));
+  if (serving.length === 0) return { refused: live.some(({ row }) => row.frozenAt !== null) ? 'frozen' : 'no_reads' };
+  const [first] = serving;
+  const projectOf = new Map(rows.environments.map((environment) => [environment.id, environment.projectId]));
+  const definitions = (instance: boolean) =>
+    Object.fromEntries(rows.roles.filter((role) => role.instance === instance).map((role): [string, RoleDefinition] => [role.id, { name: role.name, description: role.description, permissions: role.permissions as Permission[], protected: role.protected as Permission[] }]));
+  return {
+    principal: principal.id,
+    credential: null,
+    mcp: null,
+    workload: { binding: first!.row, policy: first!.policy, narrowed: false, constraints: null, stop: null },
+    bindings: serving.map(({ row }) => row),
+    holds: {
+      role: 'member',
+      scope,
+      // As `callerOf` reads them: a grant of the member's generation, unexpired, on a place this request is about.
+      grants: rows.grants
+        .filter((grant) => grant.principal === principal.id && grant.generation === principal.generation && (grant.expiresAt === null || grant.expiresAt.getTime() > at))
+        .map((grant) => ({ projectId: grant.projectId ?? projectOf.get(grant.environmentId!) ?? null, environmentId: grant.environmentId, role: grant.role })),
+      // Every serving binding's scope: a grant of any of them covers. Nothing is handed back to this caller, so no `reads` either.
+      credentialScope: serving.flatMap(({ row }) => capOf(row.scope)),
+      policy: { roles: definitions(false), instanceRoles: definitions(true) as Policy['instanceRoles'], protected: rows.environments.filter((environment) => environment.protected).map((environment) => environment.id), protectedIn: {} },
+      service: true,
+      kind: 'workload',
+    },
+  };
+}
+
 /** A UUID as the vault writes one, for a statement to tell before it casts: a row is read before its MAC is checked. */
 export const ID = sql.raw('[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}');
 
