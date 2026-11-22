@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.10 (2026-11-22)
+
 - **A Cloudflare Worker binds coffre and uses a credential, never holding
   it.** Another Worker of the account binds the app Worker's new
   entrypoint, `export const CoffreWorkload = coffre.Workload` (`coffre
