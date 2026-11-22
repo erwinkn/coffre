@@ -258,3 +258,14 @@ test('any other row under the name refuses the rename as before, and nothing is 
   assert.deepEqual(await rename('ada-cli', 'OLD_TOKEN', 'FORKED'), { refused: 'duplicate_key_below' });
   assert.deepEqual([await keys(), await dismissals(), await count()], before);
 });
+
+test('a reference another row refers to, archived or not, keeps its name: dropped, it would leave that row reading nothing', async () => {
+  const { prod } = places as Record<string, ReturnType<typeof environment>>;
+  const old = value(world, secret(prod!, 'OLD_TOKEN'), 'token-prod');
+  // Billing's reader was made while TOKEN was a key of its own, then archived; TOKEN refers to the old key again since.
+  const reference = secret(prod!, 'TOKEN', { sourceId: old.id });
+  await write(world, ...rows('secrets', old, reference, secret(billingProd, 'TOKEN_REF', { sourceId: reference.id, archivedAt })));
+  const before = [await keys(), await dismissals(), await count()];
+  assert.deepEqual(await rename('ada-cli', 'OLD_TOKEN', 'TOKEN'), { refused: 'duplicate_key' });
+  assert.deepEqual([await keys(), await dismissals(), await count()], before);
+});

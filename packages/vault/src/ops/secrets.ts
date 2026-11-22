@@ -659,7 +659,7 @@ function secretWrite(input: Presented & SecretWrite, vault: Deciding): Operation
  * live key only, and onto a name its environment holds nowhere, archived
  * or not (`duplicate_key`). Its references read it by its id, as before.
  * One row of the new name gives way: a live reference to this very key,
- * which never held a value of its own. The rename drops it and the key
+ * which never held a value of its own and no other row refers to. The rename drops it and the key
  * takes its name in the same statement, so whoever reads the new name
  * reads the same value before, during and after, and nothing is left
  * under the old one: `PLAIN`, a reference to `OLD` made so that its
@@ -728,6 +728,8 @@ function secretRename(input: Presented & SecretRename, vault: Deciding): Operati
     secret: part(secrets, sql`${secrets.projectId} = ${project} AND (${secrets.environmentId} = ${here} OR ${secrets.environmentId} IN ${below}) AND ${named(secrets.key)}`),
     inherited: part(secrets, sql`${secrets.projectId} = ${project} AND ${secrets.environmentId} IN ${above} AND ${secrets.environmentId} IS DISTINCT FROM ${here} AND starts_with(${secrets.key}, ${stem})`),
     dismissed: part(dismissedKeys, sql`(${dismissedKeys.environmentId} = ${here} OR ${dismissedKeys.environmentId} IN ${below}) AND ${named(dismissedKeys.key)}`),
+    // Every row that refers to the one under the new name, from wherever it is held, archived or not: a reference that gives way holds none.
+    reader: part(secrets, sql`${secrets.sourceId} IN (SELECT s.id FROM secrets s WHERE s.project_id = ${project} AND s.environment_id = ${here} AND s.key = ${to})`),
     // The version it replaces, by its id, as a write's.
     replaced: part(secretVersions, sql`${secretVersions.id} = ANY(${sql.param(typeof replaces === 'string' ? [replaces] : [])}::uuid[])`),
   };
@@ -797,6 +799,8 @@ function secretRename(input: Presented & SecretRename, vault: Deciding): Operati
       if (taken !== undefined) {
         // Only a live reference to this very key, which never held a value of its own, gives way to it: anything else keeps its name.
         if (taken.sourceId !== row.id || taken.archivedAt !== null || taken.versions > 0 || row.sourceId !== null) return { refused: 'duplicate_key' };
+        // Nor one another row refers to, even archived: it would read nothing once dropped, and Postgres keeps the row it names.
+        if (seen.reader.length > 0 || unsealed.reader > 0) return { refused: 'duplicate_key' };
         // A fork's own row of the key would take the new name, and its readers of it would read that row instead of the key.
         if (seen.secret.some((found) => found.environmentId !== environment.id && under.has(found.environmentId) && found.key === key)) return { refused: 'duplicate_key_below' };
         // The reference dropped before the key takes its name, in one statement: its readers read the same value throughout.
