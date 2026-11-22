@@ -361,8 +361,9 @@ const TEMPLATES: Record<LogAction, Template> = {
       const [here, mine] = asPersonal(entry);
       return [...place({ ...here, key: text(entry.metadata.key) ?? entry.key }), ...(text(entry.metadata.to) === null ? [] : [` to ${text(entry.metadata.to)}`]), ...mine];
     },
-    // Carried down to the forks that inherit it.
+    // In place of a reference to it under that name, or carried down to the forks that inherit it.
     then: ({ entry }) => {
+      if (changesOf(entry).some((line) => line.replaced === true)) return [', in place of its reference'];
       // Each line is a row renamed, moved aside or a dismissal moved or ended, by its environment's id: the first, the key's own.
       const [own, ...rest] = changesOf(entry).map((line) => text(line.environment));
       const forks = new Set(rest.filter((environment) => environment !== null && environment !== own)).size;

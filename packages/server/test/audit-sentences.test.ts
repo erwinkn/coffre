@@ -147,6 +147,9 @@ test('every action the vault writes reads as a sentence, with no fallback, and s
     ['PATCH', '/secrets/market/dev/API_KEY', { folder: 'kept' }],
     ['PATCH', '/folders/market/dev/kept', { name: 'filed' }],
     ['PATCH', '/secrets/market/dev/API_KEY', { key: 'RENAMED' }],
+    // A key renamed onto its own reference, which gives way to it.
+    ['PATCH', '/secrets/market/dev', { SESSION_TOKEN: { ref: 'market/dev/TOKEN' } }],
+    ['PATCH', '/secrets/market/dev/TOKEN', { key: 'SESSION_TOKEN' }],
     ['PATCH', '/projects/market/prod/dismissals', { Z: true }],
     // Places.
     ['PUT', '/projects/shop', { name: 'Shop' }],
@@ -263,6 +266,8 @@ test('every action the vault writes reads as a sentence, with no fallback, and s
     'secret.write: moved market/dev/API_KEY to the folder kept',
     'secret.refile: moved API_KEY in market/dev to the folder filed',
     'secret.rename: renamed market/dev/API_KEY to RENAMED',
+    'secret.write: made market/dev/SESSION_TOKEN a reference',
+    'secret.rename: renamed market/dev/TOKEN to SESSION_TOKEN, in place of its reference',
     'missing.dismiss: dismissed Z in market/prod as not needed',
     'project.create: created project store~deleted-<date>',
     'project.move: moved project store~deleted-<date> to the folder apps',
