@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.9 (2026-11-22)
+
 - **A key renames onto a reference to itself in one step: `coffre rename
   backend/prod/OLD PLAIN`, where `PLAIN` is a reference to `OLD`.** The
   reference gives way to the key in the same change, so whoever reads
