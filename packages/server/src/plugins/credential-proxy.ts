@@ -1251,6 +1251,9 @@ function sessionToken(request: Request): string | null {
 
 const SESSION = /^DPoP\s+(coffre_wl_\S+)$/i;
 
+/** Any coffre token, a handle or a session's say, anywhere: what a call over a service binding sends no further than coffre (`tokens.ts`). */
+const COFFRE_TOKEN = /coffre_(?:web|cli|svc|pat|use|wl|enr|mcp|mcr)_[A-Za-z0-9_-]{43}/;
+
 /** The request's workload (`PluginContext.workload`), its refusal as the answer, or null for no workload. */
 async function workloadOf(request: Request, coffre: PluginContext, at: WorkloadAt): Promise<WorkloadUse | Response | null> {
   return refused(coffre.workload(request, at));
@@ -1362,9 +1365,12 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
       return failure(403, "an unsigned upload (UNSIGNED-PAYLOAD) binds no body to its proof, and this workload's binding does not say unsignedUploads: send x-amz-content-sha256 as the body's SHA-256", 'unsigned_upload');
     }
     const proxied = `${coffre.publicUrl}/use/${path === null ? '' : `${path}/`}${credential.name}`;
-    // A session's token goes no further than coffre; a call over a service binding carries none.
+    // A session's token goes no further than coffre. A call over a service binding carries none of its own, but a
+    // coffre token the Worker sent along, a handle or a session's, stops there too: each is a bearer of someone's access.
     const token = coffre.bound ? null : sessionToken(request)!;
-    const secret = token === null ? null : { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
+    const secret = token === null
+      ? { pattern: COFFRE_TOKEN, length: HANDLE_LENGTH, what: 'a coffre token' }
+      : { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
     return send(request, bound, { ...aimed, ...content, body: going, opened: { values: used.values, plain: used.plain }, headers, proxied, back: null, field, secret, payload });
   });
 }

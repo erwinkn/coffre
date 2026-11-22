@@ -293,6 +293,15 @@ test("a Worker bound to coffre: its props name its service, which uses a credent
   const plan = await ask('/as/COFFRE_EDGE/use/market/apis');
   assert.deepEqual([plan.status, plan.body.reason], [403, 'bound']);
   assert.equal((await ask('/as/COFFRE_EDGE/api/me')).status, 404);
+  // A plugin that takes a token, vault-kv's, refuses a bound call as such: 403, not a fault.
+  const kv = await ask('/as/COFFRE_EDGE/v1/secret/data/market/apis', { headers: { 'x-vault-token': HANDLE } });
+  assert.deepEqual([kv.status, kv.body.reason], [403, 'bound']);
+  // A coffre token the Worker sends along goes no further than coffre, wherever it is: a header, the URL or the body.
+  for (const init of [{ headers: { 'x-forwarded': HANDLE } }, { headers: { 'x-forwarded': `DPoP ${WORKLOAD}` } }, { method: 'POST', body: `token=${HANDLE}` }]) {
+    const sent = await ask('/as/COFFRE_EDGE/use/echo/ping', init);
+    assert.equal(sent.status, 400, JSON.stringify(sent.body));
+  }
+  assert.equal((await ask(`/as/COFFRE_EDGE/use/echo/ping?token=${HANDLE}`)).status, 400);
 
   // A use logged as the service's, naming its binding and no credential.
   const entries = await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending UNION ALL SELECT body FROM log`);

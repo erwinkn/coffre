@@ -21,6 +21,7 @@ import { postgres as vaultDatabase, vault } from '@coffre/vault/cloudflare';
 
 import { createCoffre, postgres, type GatesNamespace, type SocketsNamespace, type Vault as VaultBinding, type WaitUntil } from '../../src/cloudflare.ts';
 import { allow, credentialProxy, header, postgres as tunnel } from '../../src/plugins/credential-proxy.ts';
+import { vaultKv } from '../../src/plugins/vault-kv.ts';
 import { processLimits } from '../../src/workloads/limits.ts';
 
 export { CoffreSigner } from '@coffre/vault/cloudflare';
@@ -102,6 +103,7 @@ const coffre = createCoffre((env: Env) => ({
       insecureUpstreams: true,
       recheckSeconds: 1,
     }),
+    vaultKv(),
   ],
 }));
 

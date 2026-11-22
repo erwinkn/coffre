@@ -397,12 +397,16 @@ the API, a plan and a tunnel do not.
 What a call reaches:
 
 - **The service its `props` name**, `edge-api` or `token:edge-api`,
-  whatever the request carries: a handle or a session token sent along is
-  ignored. A binding with no `props.service` is refused, 403 `props`.
+  whatever the request carries: a handle or a session token sent along
+  changes nothing, and goes no further than coffre (any coffre token in a
+  header, the URL or the body is refused, 400). A binding with no `props.service` is refused, 403 `props`.
 - **Where its `cloudflare` bindings' scopes reach, within its grants.** The
   service needs a live binding of profile `cloudflare`; with several, a call
   reaches what any of them does. `/use/<credential>` works when they name
-  exactly one environment; otherwise the URL names it. Its other bindings
+  exactly one environment; otherwise the URL names it. That route is read
+  from the database on each call, so during an outage only the named URL,
+  `/use/<project>/<env>/<credential>`, rides on the vault's memory: a
+  Worker that must keep working through one names its environment. Its other bindings
   (GitHub, Kubernetes) give a call over the binding nothing.
 - **Use, never a value.** Each call is one `use` of the vault, purpose
   `use`. A plan (`GET /use/<project>/<env>`) is 403 `bound`, `reads` are

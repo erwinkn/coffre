@@ -19,6 +19,7 @@
 // as well deploy coffre itself. `sign`, `verify` and `presign` over RPC
 // come later; `POST /use/<project>/<env>` with `{ sign: … }` reaches them
 // through `fetch` meanwhile.
+import { CoffreError } from '@coffre/client';
 import { migrating, schemaReady } from './app.ts';
 import { errorResponse } from './http.ts';
 import { bindingRoute } from './plugins.ts';
@@ -65,6 +66,8 @@ export function workloadEntrypoint<Env>(open: (env: Env) => { runtime: CoffreRun
         if (answer === null) return refusal(404, 'a Worker bound to coffre reaches its plugins alone: /use/<credential>/<path>', 'not_found');
         return await answer;
       } catch (error) {
+        // A plugin's refusal, a `CoffreError` by contract (`PluginContext`), is the refusal it says, not a fault.
+        if (error instanceof CoffreError) return Response.json({ error: error.code, reason: error.reason ?? error.code, message: error.message }, { status: error.status, headers: { 'coffre-proxy': 'refused' } });
         return errorResponse(error);
       } finally {
         // The upstream's body streams after this; nothing of it reads the database, which goes once the work left is done.
