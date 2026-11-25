@@ -1,11 +1,13 @@
 // What a request is told of a key service that failed: an outage, 503
 // `unavailable`, which the same request may get past; or a refusal of
 // coffre's own, a 500 whose details only the log has. Read by the errors'
-// names, as a Worker's RPC hands them back.
+// names, as a Worker's RPC hands them back. And a request that does not
+// parse: a 400, led by where.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { KekCancelledError, KekRefusedError, KekUnavailableError } from '@coffre/core/kek';
+import { z } from 'zod';
 
 import { toErrorBody } from '../src/api/errors.ts';
 import { errorResponse } from '../src/http.ts';
@@ -37,4 +39,19 @@ test('a key service that does not answer is 503 unavailable, by its name across 
   assert.deepEqual(logged.map(([label, line]) => [label, (line as { name: string }).name]), [['unhandled API error', 'KekRefusedError'], ['unhandled API error', 'KekRefusedError'], ['unhandled API error', 'Error']]);
   // Only its names: a message that says "Kek" is not one.
   assert.equal(toErrorBody(new Error('KekUnavailableError')).status, 500);
+});
+
+test('a request that does not parse is 400 bad_request, led by where it failed, whatever that path is named', () => {
+  const said = (schema: z.ZodType, input: unknown) => {
+    const parsed = schema.safeParse(input);
+    assert.ok(!parsed.success);
+    const { status, body } = toErrorBody(parsed.error);
+    return [status, body.error, body.message];
+  };
+  // A path leads, and a key named nothing is shown as `""`, never as a message that opens with `: `.
+  assert.deepEqual(said(z.record(z.string(), z.string()), { A: 1 }), [400, 'bad_request', 'A: Invalid input: expected string, received number']);
+  assert.deepEqual(said(z.record(z.string(), z.object({ n: z.number() })), { '': { n: 'x' } }), [400, 'bad_request', '"".n: Invalid input: expected number, received string']);
+  assert.deepEqual(said(z.object({ '': z.number() }), { '': 'x' })[2], '"": Invalid input: expected number, received string');
+  // No path, no prefix.
+  assert.deepEqual(said(z.string(), 1), [400, 'bad_request', 'Invalid input: expected string, received number']);
 });
