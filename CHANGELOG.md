@@ -4,8 +4,8 @@
 
 - **A 0.14 CLI's `--plain` is told why it was refused.** `coffre set --plain`
   from a CLI older than 0.16 sends `{ "value", "plain": true }`, which 0.16
-  does not take (it says `"sensitivity": "plain"`); the 400 was `: Invalid
-  input`. It now says `API_KEY: this CLI is older than coffre 0.16, which
+  does not take (it says `"sensitivity": "plain"`); the 400 was `API_KEY:
+  Invalid input`. It now says `API_KEY: this CLI is older than coffre 0.16, which
   says "sensitivity": "plain" instead of "plain": true; update it (coffre
   update, or npm install -g @coffre/cli)`. The old shape is still refused.
   And a request naming a key `""` is no longer answered with a message that

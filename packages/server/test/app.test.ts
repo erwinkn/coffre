@@ -253,6 +253,9 @@ test("a write answers each key's version, and what it refuses", async () => {
   // 0.14's CLI says a plain value `{ "plain": true }`, which 0.16 refuses (#813): the 400 names the key, the cause and the fix.
   const [oldStatus, oldSaid] = await patch('bo-cli', 'market/prod', { A_OK: 'x', API_KEY: { value: 'x', plain: true } });
   assert.deepEqual([oldStatus, oldSaid], [400, { error: 'bad_request', message: 'API_KEY: this CLI is older than coffre 0.16, which says "sensitivity": "plain" instead of "plain": true; update it (coffre update, or npm install -g @coffre/cli)' }]);
+  // The key is checked first: a bad key with the old shape is a bad key.
+  const [badKeyStatus, badKeySaid] = await patch('bo-cli', 'market/prod', { 'not a key': { value: 'x', plain: true } });
+  assert.deepEqual([badKeyStatus, badKeySaid.message?.includes('older than coffre')], [400, false]);
   // A write that matches none of the shapes is told by its key, never by an empty prefix.
   const [noneStatus, noneSaid] = await patch('bo-cli', 'market/prod', { API_KEY: { value: 'x', plane: true } });
   assert.deepEqual([noneStatus, noneSaid.error, noneSaid.message], [400, 'bad_request', 'API_KEY: Invalid input']);
