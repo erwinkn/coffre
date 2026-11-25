@@ -230,7 +230,8 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
   }
   if (error instanceof z.ZodError) {
     const issue = error.issues[0];
-    const where = issue && issue.path.length > 0 ? `${issue.path.join('.')}: ` : '';
+    // An empty segment, a key named "", is shown as `""`: a path never reads as nothing, so no message opens with `: `.
+    const where = issue && issue.path.length > 0 ? `${issue.path.map((segment) => (segment === '' ? '""' : String(segment))).join('.')}: ` : '';
     return {
       status: 400,
       body: { error: 'bad_request', message: `${where}${issue?.message ?? 'invalid input'}` },

@@ -20,6 +20,15 @@ const VALUE_LENGTH = 64 * 1024;
 /** A value as text Postgres stores and a reader gets back as written: no NUL, no half of a surrogate pair. The vault's own rule, told here as a 400. */
 export const secretValue = z.string().max(VALUE_LENGTH).refine((value) => !value.includes('\0') && Buffer.from(value).toString() === value, 'a value is well-formed text, with no NUL');
 
+/**
+ * 0.14's CLI says a plain value `{ "value", "plain": true }`, which 0.16
+ * does not take (it says `"sensitivity": "plain"`, #813). Refused still,
+ * but by its key and its cause, which a union that matched no shape would
+ * only call invalid.
+ */
+const OLD_PLAIN = 'this CLI is older than coffre 0.16, which says "sensitivity": "plain" instead of "plain": true; update it (coffre update, or npm install -g @coffre/cli)';
+const oldPlain = (issue: { input?: unknown }): string | undefined => (typeof issue.input === 'object' && issue.input !== null && (issue.input as { plain?: unknown }).plain === true ? OLD_PLAIN : undefined);
+
 /** An environment as a path names it: its slug, and whether it is the caller's personal config of it (`dev@me`). */
 export function environmentOf(named: string): { environment: string; mine: boolean } {
   const of = personalOf(named);
@@ -262,7 +271,7 @@ export const secretRoutes = {
       z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']), replaces: rowId.optional() }).strict(),
       z.object({ ref: sourcePath }).strict(),
       z.object({ sensitivity: z.enum(['plain', 'secret', 'sensitive']) }).strict(),
-    ]).nullable())
+    ], { error: oldPlain }).nullable())
       .refine((patch) => Object.keys(patch).length > 0, 'name at least one key'),
     // `?dryRun=1` weighs the write and makes none. Any other query is refused, not ignored: a mistyped flag must not write.
     query: z.object({ dryRun: z.enum(['1', 'true']).optional() }).strict(),
