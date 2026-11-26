@@ -30,17 +30,43 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Hold the version to semver
+      - name: Hold the version to semver, and the run to main
         env:
           VERSION: ${{ inputs.version }}
-        run: '[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "$VERSION is not a version"; exit 1; }'
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "$VERSION is not a version"; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "A release is made from main, not $GITHUB_REF"; exit 1; }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: terraform-provider/go.mod
           cache-dependency-path: terraform-provider/go.sum
+      # Before anything reaches the mirror: a missing or wrong key stops the run with nothing pushed.
+      - name: Import the signing key
+        id: key
+        env:
+          KEY: ${{ secrets.TERRAFORM_PROVIDER_GPG_KEY }}
+          PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
+        run: |
+          [[ -n "$KEY" ]] || { echo "TERRAFORM_PROVIDER_GPG_KEY is not set"; exit 1; }
+          gpg --batch --import <<< "$KEY"
+          fingerprint="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')"
+          [[ -n "$fingerprint" ]] || { echo "TERRAFORM_PROVIDER_GPG_KEY holds no secret key"; exit 1; }
+          if [[ -n "$PASSPHRASE" ]]; then
+            echo "allow-preset-passphrase" >> ~/.gnupg/gpg-agent.conf
+            gpg-connect-agent reloadagent /bye
+            # The passphrase goes over stdin, never in a command line.
+            for grip in $(gpg --list-secret-keys --with-colons --with-keygrip | awk -F: '/^grp:/ { print $10 }'); do
+              /usr/lib/gnupg/gpg-preset-passphrase --preset "$grip" <<< "$PASSPHRASE"
+            done
+          fi
+          # Signed once here, so that a key that cannot sign stops the run now, not after the push.
+          echo probe | gpg --batch --pinentry-mode loopback --local-user "$fingerprint" --detach-sign --output /dev/null
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+      # The token goes to git in its environment, as a header: never in a URL, a command line or a .git/config.
       - name: Copy terraform-provider/ to the mirror, and tag it
         env:
           VERSION: ${{ inputs.version }}
@@ -48,23 +74,12 @@ jobs:
         run: |
           git subtree split --prefix terraform-provider -b mirror
           git tag "v$VERSION" mirror
-          mirror="https://x-access-token:${TOKEN}@github.com/erwinkn/terraform-provider-coffre.git"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          export GIT_CONFIG_VALUE_0
+          mirror=https://github.com/erwinkn/terraform-provider-coffre.git
           git push "$mirror" mirror:main "refs/tags/v$VERSION"
           git clone --branch "v$VERSION" "$mirror" "$RUNNER_TEMP/mirror"
-      - name: Import the signing key
-        id: key
-        env:
-          KEY: ${{ secrets.TERRAFORM_PROVIDER_GPG_KEY }}
-          PASSPHRASE: ${{ secrets.TERRAFORM_PROVIDER_GPG_PASSPHRASE }}
-        run: |
-          echo "$KEY" | gpg --batch --import
-          fingerprint="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')"
-          echo "allow-preset-passphrase" >> ~/.gnupg/gpg-agent.conf
-          gpg-connect-agent reloadagent /bye
-          for grip in $(gpg --list-secret-keys --with-colons --with-keygrip | awk -F: '/^grp:/ { print $10 }'); do
-            /usr/lib/gnupg/gpg-preset-passphrase --preset --passphrase "$PASSPHRASE" "$grip"
-          done
-          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
       - name: Build, sign and publish the release
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:

@@ -272,3 +272,33 @@ func TestReferenceIsNotWrittenOver(t *testing.T) {
 		expect(t, holds(t, "tf/prod", name, before), "the emptied key was not written again")
 	})
 }
+
+// A key renamed in the configuration is another key: the plan replaces the resource, the apply archives the old key and makes
+// the new one. Plain, so every listing the provider reads carries the value, which it still keeps nowhere.
+func TestReplaced(t *testing.T) {
+	each(t, func(t *testing.T, w *work, suffix string) {
+		before, after := "PLAIN"+suffix, "RENAMED"+suffix
+		shown := canary(t, "plain"+suffix)
+		w.value("k", shown)
+		w.write("", secret("k", "tf/prod", before, 1, "plain"))
+		w.must("apply", "-auto-approve")
+		listed := key(t, "tf/prod", before)
+		expect(t, listed != nil && *listed.Sensitivity == "plain" && holds(t, "tf/prod", before, shown), "the plain key was not made: %+v", listed)
+		changes, out := w.planned()
+		expect(t, !changes, "a plan with nothing changed plans changes:\n%s", out)
+
+		w.write("", secret("k", "tf/prod", after, 1, "plain"))
+		changes, out = w.planned()
+		expect(t, changes && strings.Contains(out, "must be replaced"), "renamed, the key is not planned for replacement:\n%s", out)
+		expect(t, !strings.Contains(out, "was written outside Terraform"), "a replacement warns of drift:\n%s", out)
+		w.must("apply", "-auto-approve")
+		state := w.state("coffre_secret.k")
+		expect(t, state["id"] == "tf/prod/"+after && number(state, "version") == 1 && state["updated_by"] == deployment.Service, "replaced, the state is %v", state)
+		listed = key(t, "tf/prod", before)
+		expect(t, listed != nil && listed.Archived, "replaced, the old key is not archived: %+v", listed)
+		expect(t, holds(t, "tf/prod", after, shown), "the new key does not hold the value")
+		changes, out = w.planned()
+		expect(t, !changes, "after the replacement, the plan still plans changes:\n%s", out)
+		w.must("destroy", "-auto-approve")
+	})
+}

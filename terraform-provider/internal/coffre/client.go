@@ -41,10 +41,14 @@ type Client struct {
 // path, a query or credentials in it are refused rather than dropped.
 func Origin(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
+	// A URL with credentials in it is not repeated: they may be a password.
+	if strings.Contains(raw, "@") && (err != nil || parsed.User != nil) {
+		return "", errors.New("the URL holds credentials: give only the instance's scheme and host, such as https://secrets.acme.example, and sign in with token or oidc")
+	}
 	if err != nil || parsed.Host == "" {
 		return "", fmt.Errorf("%q is not a URL: give the instance's, such as https://secrets.acme.example", raw)
 	}
-	if parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", fmt.Errorf("%q is more than an instance's URL: give only its scheme and host, such as https://secrets.acme.example", raw)
 	}
 	switch parsed.Scheme {
@@ -133,7 +137,7 @@ func (c *Client) call(ctx context.Context, method, path string, body any, out an
 	}
 	read := method == http.MethodGet
 	renewed := false
-	waited := time.Duration(0)
+	waited, waits := time.Duration(0), 0
 	for attempt := 0; ; attempt++ {
 		bearer, err := c.signer.Bearer(ctx, c)
 		if err != nil {
@@ -164,8 +168,9 @@ func (c *Client) call(ctx context.Context, method, path string, body any, out an
 			renewed = true
 			continue
 		}
-		if wait, ok := retryAfter(header); ok && (status == http.StatusTooManyRequests || (status == http.StatusServiceUnavailable && read)) && waited+wait <= mostWaited {
+		if wait, ok := retryAfter(header); ok && (status == http.StatusTooManyRequests || (status == http.StatusServiceUnavailable && read)) && waited+wait <= mostWaited && waits < mostWaits {
 			waited += wait
+			waits++
 			if err := c.Sleep(ctx, wait); err != nil {
 				return err
 			}
@@ -231,11 +236,15 @@ func refusalOf(status int, answer []byte) *Error {
 	return &Error{Status: status, Code: body.Error, Reason: body.Reason, Message: body.Message}
 }
 
-// retryAfter reads a Retry-After in seconds, as coffre sends it.
+// mostWaits is how many times a call waits when told to: a few, as well as within mostWaited.
+const mostWaits = 5
+
+// retryAfter reads a Retry-After in seconds, as coffre sends it: a wait of at least a second, and
+// none at all (ok false) past mostWaited, which no retry within it could honour.
 func retryAfter(header http.Header) (time.Duration, bool) {
 	seconds, err := strconv.Atoi(strings.TrimSpace(header.Get("retry-after")))
-	if err != nil || seconds < 0 {
+	if err != nil || seconds < 0 || seconds > int(mostWaited/time.Second) {
 		return 0, false
 	}
-	return time.Duration(seconds) * time.Second, true
+	return time.Duration(max(seconds, 1)) * time.Second, true
 }

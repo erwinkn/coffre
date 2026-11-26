@@ -247,8 +247,9 @@ in this provider yet.
 
 The URL must be `https`, or `http` on loopback for a local instance. The
 client follows no redirect, so a credential never leaves for another host.
-It asks again, a few times and within a minute, when coffre answers 429 or
-503 with `Retry-After`; it never retries a write that got no answer.
+It asks again, at most five times and within a minute, when coffre answers
+429, or 503 to a read, with `Retry-After`; it never retries a write that got
+no answer, nor one answered 503, which may come after the write was made.
 
 ## 7. Nothing of a value leaves the write
 

@@ -2,9 +2,13 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -76,11 +80,75 @@ func TestValueRefusalSaysNothingOfIt(t *testing.T) {
 }
 
 func TestSlug(t *testing.T) {
-	for at, ok := range map[string]bool{"prod": true, "my-env_2": true, "": false, "a/b": false, "dev@me": false} {
+	for at, ok := range map[string]bool{"prod": true, "my-env-2": true, "0": true, "": false, "a/b": false, "dev@me": false, "..": false, "Prod": false, "my_env": false, "-prod": false, strings.Repeat("a", 64): false} {
 		var resp validator.StringResponse
 		slug{}.ValidateString(context.Background(), validator.StringRequest{Path: path.Root("environment"), ConfigValue: types.StringValue(at)}, &resp)
 		if resp.Diagnostics.HasError() == ok {
 			t.Errorf("%q: refused %v", at, !ok)
 		}
+	}
+}
+
+// recorded keeps what settle sets, of the state and the private state.
+type recorded struct {
+	model   *secretModel
+	written []byte
+}
+
+func (r *recorded) Set(_ context.Context, m any) diag.Diagnostics {
+	r.model = m.(*secretModel)
+	return nil
+}
+
+func (r *recorded) SetKey(_ context.Context, _ string, raw []byte) diag.Diagnostics {
+	r.written = raw
+	return nil
+}
+
+// settle records version 7, as the write answered it, and whatever the key lists after.
+func TestSettle(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		status    int
+		listing   string
+		version   int64
+		versionID string
+		written   written
+		warned    bool
+	}{
+		{"listed as written", 200, `{"keys":[{"key":"K","version":7,"versionId":"v7","secret":"row-1","updatedBy":"token:terraform","sensitivity":"secret"}]}`,
+			7, "v7", written{Version: 7, Secret: "row-1"}, false},
+		{"written again in between", 200, `{"keys":[{"key":"K","version":8,"versionId":"v8","secret":"row-1","updatedBy":"user:ada@acme.example","sensitivity":"secret"}]}`,
+			8, "v8", written{Version: 7, Secret: "row-1", Drift: true}, false},
+		{"archived in between", 200, `{"keys":[{"key":"K","archived":true,"version":7,"versionId":"v7","secret":"row-1","sensitivity":"secret"}]}`,
+			7, "", written{Version: 7, Drift: true}, false},
+		{"not listed after", 403, `{"error":"no_access","message":"no access"}`,
+			7, "", written{Version: 7}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("content-type", "application/json")
+				w.WriteHeader(test.status)
+				w.Write([]byte(test.listing))
+			}))
+			t.Cleanup(server.Close)
+			r := &secretResource{client: coffre.New(server.URL, coffre.Token("coffre_svc_test"), "test")}
+			m := &secretModel{Project: types.StringValue("tf"), Environment: types.StringValue("prod"), Key: types.StringValue("K"),
+				ValueWO: types.StringValue("the value"), Sensitivity: types.StringValue("secret")}
+			var got recorded
+			var diags diag.Diagnostics
+			r.settle(context.Background(), m, coffre.Written{Version: 7, Sensitivity: "secret"}, &got, &got, &diags)
+			if diags.HasError() || (diags.WarningsCount() > 0) != test.warned {
+				t.Fatalf("diagnostics: %v", diags)
+			}
+			var w written
+			if err := json.Unmarshal(got.written, &w); err != nil || w != test.written {
+				t.Errorf("private state %s, not %+v", got.written, test.written)
+			}
+			if got.model.Version.ValueInt64() != test.version || got.model.VersionID.ValueString() != test.versionID ||
+				!got.model.ValueWO.IsNull() || got.model.Sensitivity.ValueString() != "secret" || got.model.ID.ValueString() != "tf/prod/K" {
+				t.Errorf("state %+v", got.model)
+			}
+		})
 	}
 }

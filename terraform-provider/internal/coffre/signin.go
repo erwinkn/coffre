@@ -109,7 +109,13 @@ func (o *OIDC) Bearer(ctx context.Context, c *Client) (string, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	now := o.now()
-	if o.current != "" && now.Add(renewBefore).Before(o.expires) {
+	// A credential is renewed a minute early only where a fresh ID token can renew it; one from a
+	// given ID token, which cannot be, serves to its last second.
+	early := time.Duration(0)
+	if o.IDTokens.Fresh() {
+		early = renewBefore
+	}
+	if o.current != "" && now.Add(early).Before(o.expires) {
 		return o.current, nil
 	}
 	issued, err := o.exchange(ctx, c)
@@ -146,7 +152,7 @@ type issued struct {
 // mostWaited, while coffre says to wait (429, 503), with a fresh ID token
 // where the run can have one: an exchange that failed may still have spent it.
 func (o *OIDC) exchange(ctx context.Context, c *Client) (issued, error) {
-	waited := time.Duration(0)
+	waited, waits := time.Duration(0), 0
 	for {
 		if o.traded > 0 && !o.IDTokens.Fresh() {
 			return issued{}, fmt.Errorf("the credential %s signed in with has expired, and the ID token given in oidc.id_token served its one exchange: an ID token signs in one run. In GitHub Actions, leave id_token out: the provider asks the runner for a fresh one", o.Service)
@@ -169,8 +175,9 @@ func (o *OIDC) exchange(ctx context.Context, c *Client) (issued, error) {
 			return got, nil
 		}
 		refusal := refusalOf(status, answer)
-		if wait, ok := retryAfter(header); ok && (status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable) && waited+wait <= mostWaited {
+		if wait, ok := retryAfter(header); ok && (status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable) && waited+wait <= mostWaited && waits < mostWaits {
 			waited += wait
+			waits++
 			if err := c.Sleep(ctx, wait); err != nil {
 				return issued{}, err
 			}

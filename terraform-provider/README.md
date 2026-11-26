@@ -72,6 +72,7 @@ Not done yet: publishing 0.1.0 is a decision of its own. When it is made:
    `TERRAFORM_PROVIDER_MIRROR_TOKEN`, a token that writes the mirror's
    contents.
 3. Run the workflow `Release the Terraform provider`
-   (`.github/workflows/terraform-provider-release.yml`) with the version. It
-   copies this folder to the mirror with its history, tags it `v<version>`,
-   and GoReleaser builds, signs and publishes the release there.
+   (`.github/workflows/terraform-provider-release.yml`) from `main`, with the
+   version. It checks the signing key signs, then copies this folder to the
+   mirror with its history, tags it `v<version>`, and GoReleaser builds,
+   signs and publishes the release there.

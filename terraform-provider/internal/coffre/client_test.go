@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -81,6 +82,12 @@ func TestOrigin(t *testing.T) {
 	for _, raw := range []string{"http://secrets.acme.example", "ftp://secrets.acme.example", "https://secrets.acme.example/api", "https://user:pass@secrets.acme.example", "https://secrets.acme.example?x=1", "secrets.acme.example", ""} {
 		if got, err := Origin(raw); err == nil {
 			t.Errorf("Origin(%q) = %q, and should be refused", raw, got)
+		}
+	}
+	// Refused, credentials in a URL are not repeated.
+	for _, raw := range []string{"https://user:pass@secrets.acme.example", "https://user:pa ss@secrets.acme.example", "https://:pass@secrets.acme.example/x"} {
+		if _, err := Origin(raw); err == nil || strings.Contains(err.Error(), "pass") {
+			t.Errorf("Origin(%q) says %v", raw, err)
 		}
 	}
 }
@@ -188,6 +195,26 @@ func TestWaitsWhenTold(t *testing.T) {
 			t.Errorf("waited %v, then %v", *slept, err)
 		}
 	})
+	// Told to wait no time, a call still waits a second, and only a few times; told to wait past
+	// a minute, or for longer than a Duration holds, it does not wait at all.
+	for _, told := range []struct {
+		after string
+		waits []time.Duration
+	}{
+		{"0", []time.Duration{time.Second, time.Second, time.Second, time.Second, time.Second}},
+		{"61", nil},
+		{"9223372037", nil},
+	} {
+		t.Run("Retry-After: "+told.after, func(t *testing.T) {
+			f := newFake(t, func(int, *http.Request, []byte) (int, http.Header, string) {
+				return 429, http.Header{"Retry-After": {told.after}}, `{"error":"too_many_requests"}`
+			})
+			c, slept := client(f, Token(token))
+			if _, err := c.Key(context.Background(), "tf", "prod", "K", false); !Is(err, 429, "") || !slices.Equal(*slept, told.waits) {
+				t.Errorf("waited %v, then %v", *slept, err)
+			}
+		})
+	}
 }
 
 func TestListingKeepsNoValue(t *testing.T) {
@@ -343,6 +370,11 @@ func TestGivenIDTokenServesOneExchange(t *testing.T) {
 	ctx := context.Background()
 	if _, err := c.Key(ctx, "tf", "prod", "K", true); err != nil {
 		t.Fatal(err)
+	}
+	// It cannot be renewed, so it serves its last minute too.
+	now = now.Add(4*time.Minute + 30*time.Second)
+	if _, err := c.Key(ctx, "tf", "prod", "K", true); err != nil {
+		t.Fatalf("in its last minute, a given ID token's credential says %v", err)
 	}
 	now = now.Add(10 * time.Minute)
 	_, err := c.Key(ctx, "tf", "prod", "K", true)

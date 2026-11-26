@@ -27,6 +27,9 @@ import (
 // A key as coffre names one (@coffre/core's secretKey).
 var keyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
+// A project's or an environment's slug, as coffre names one (@coffre/core's slug).
+var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
 // The longest value coffre takes, in UTF-16 code units, as its route counts them.
 const valueLength = 64 * 1024
 
@@ -80,9 +83,8 @@ func (r *secretResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 		Description: "One key of a coffre environment, and its value, which Terraform sends and keeps nowhere. Destroyed, the key is archived: coffre keeps its history.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
-				Computed:      true,
-				Description:   "`project/environment/key`, which `terraform import` takes too.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				Computed:    true,
+				Description: "`project/environment/key`, which `terraform import` takes too.",
 			},
 			"project": schema.StringAttribute{
 				Required: true, PlanModifiers: replace, Validators: []validator.String{slug{}},
@@ -191,6 +193,8 @@ func (r *secretResource) ModifyPlan(ctx context.Context, req resource.ModifyPlan
 	}
 	if !plan.Project.IsUnknown() && !plan.Environment.IsUnknown() && !plan.Key.IsUnknown() {
 		plan.ID = types.StringValue(plan.at())
+	} else {
+		plan.ID = types.StringUnknown()
 	}
 	if req.State.Raw.IsNull() {
 		resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
@@ -201,6 +205,12 @@ func (r *secretResource) ModifyPlan(ctx context.Context, req resource.ModifyPlan
 	w, diags := writtenOf(ctx, req.Private)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	// Another key: the plan replaces this one, archived, by a key the apply makes, whose version nobody knows yet.
+	if !plan.Project.Equal(state.Project) || !plan.Environment.Equal(state.Environment) || !plan.Key.Equal(state.Key) {
+		plan.Version, plan.VersionID, plan.UpdatedBy = types.Int64Unknown(), types.StringUnknown(), types.StringUnknown()
+		resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
 		return
 	}
 	asked := !plan.ValueWOVersion.Equal(state.ValueWOVersion) || !plan.Sensitivity.Equal(state.Sensitivity)
@@ -383,7 +393,7 @@ func (r *secretResource) Delete(ctx context.Context, req resource.DeleteRequest,
 
 func (r *secretResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	parts := strings.Split(req.ID, "/")
-	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || !keyPattern.MatchString(parts[2]) {
+	if len(parts) != 3 || !slugPattern.MatchString(parts[0]) || !slugPattern.MatchString(parts[1]) || !keyPattern.MatchString(parts[2]) {
 		resp.Diagnostics.AddError("Not a key's ID", fmt.Sprintf("%q is not project/environment/KEY, such as billing/prod/STRIPE_KEY.", req.ID))
 		return
 	}
@@ -396,7 +406,9 @@ func (r *secretResource) ImportState(ctx context.Context, req resource.ImportSta
 // slug holds a project or environment to one path segment, and no personal config (`dev@me`): a service account has none.
 type slug struct{}
 
-func (slug) Description(context.Context) string               { return "a slug: no / and no @" }
+func (slug) Description(context.Context) string {
+	return "a slug: a lowercase letter or digit, then up to 62 more or -"
+}
 func (s slug) MarkdownDescription(ctx context.Context) string { return s.Description(ctx) }
 func (slug) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
 	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
@@ -408,6 +420,8 @@ func (slug) ValidateString(_ context.Context, req validator.StringRequest, resp 
 		resp.Diagnostics.AddAttributeError(req.Path, "Not a slug", fmt.Sprintf("%q is not one slug, such as prod.", at))
 	case strings.Contains(at, "@"):
 		resp.Diagnostics.AddAttributeError(req.Path, "A personal config", fmt.Sprintf("%q names someone's personal config, which is theirs: a service account has none.", at))
+	case !slugPattern.MatchString(at):
+		resp.Diagnostics.AddAttributeError(req.Path, "Not a slug", fmt.Sprintf("%q is not a slug: a lowercase letter or digit, then up to 62 more or -, such as prod.", at))
 	}
 }
 

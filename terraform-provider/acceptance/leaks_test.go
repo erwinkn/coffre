@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -36,9 +37,13 @@ func (w *work) leaks() []string {
 				found = append(found, where+" holds "+what)
 			}
 		}
+		// A credential no test handed over: the one an OIDC sign-in is issued, say.
+		if credential.Match(content) {
+			found = append(found, where+" holds a coffre credential")
+		}
 	}
 	look("the commands' output", w.said.Bytes())
-	filepath.WalkDir(w.dir, func(path string, entry fs.DirEntry, err error) error {
+	err := filepath.WalkDir(w.dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
 			return err
 		}
@@ -65,8 +70,14 @@ func (w *work) leaks() []string {
 		}
 		return nil
 	})
+	if err != nil {
+		found = append(found, "the working directory could not be read through: "+err.Error())
+	}
 	return found
 }
+
+// credential is any coffre token: its kind's prefix and 32 random bytes, in base64url (@coffre/core's identity/tokens.ts).
+var credential = regexp.MustCompile(`coffre_(web|cli|svc|pat|use|wl|enr|mcp)_[A-Za-z0-9_-]{43}`)
 
 // The check finds a secret where Terraform keeps one: a variable that is not ephemeral is kept in a
 // saved plan, sensitive or not, which is why the docs declare every secret's variable ephemeral.

@@ -152,7 +152,11 @@ func boot() (func(), error) {
 					stop()
 					return nil, fmt.Errorf("the fixture's line did not parse: %w", err)
 				}
-				go io.Copy(io.Discard, stdout)
+				// The scanner goes on reading what the fixture says; nothing else reads its stdout.
+				go func() {
+					for range lines {
+					}
+				}()
 				return stop, nil
 			}
 		case <-timeout:
