@@ -247,8 +247,9 @@ in this provider yet.
 
 The URL must be `https`, or `http` on loopback for a local instance. The
 client follows no redirect, so a credential never leaves for another host.
-It asks again, a few times and within a minute, when coffre answers 429 or
-503 with `Retry-After`; it never retries a write that got no answer.
+It asks again, at most five times and within a minute, when coffre answers
+429, or 503 to a read, with `Retry-After`; it never retries a write that got
+no answer, nor one answered 503, which may come after the write was made.
 
 ## 7. Nothing of a value leaves the write
 
@@ -315,8 +316,10 @@ sign-in: `coffre_environment`, `coffre_service_account`, `coffre_trust`,
   plan, import, a fork's override and destroy, through both sign-ins, and
   the leak check (section 7), once per binary: Terraform and OpenTofu,
   each at 1.11 and at the newest release.
-- **CI**: a `Terraform provider` job in Validate runs both, on a change
-  under `terraform-provider/` or to the API it calls.
+- **CI**: a workflow of its own, `Terraform provider`
+  (`.github/workflows/terraform-provider.yml`), runs both, on a change
+  under `terraform-provider/` or to the API, sign-in or vault write it
+  calls.
 - **Release** (built, not run): GoReleaser builds the provider for each
   platform with its checksums and signature, as the Terraform and OpenTofu
   registries read them. Publishing 0.1.0 is a decision of its own.
