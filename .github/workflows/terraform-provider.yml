@@ -41,12 +41,12 @@ jobs:
           go mod verify
           go vet ./...
           go test -race ./internal/...
-      - name: Hold the release's configuration to GoReleaser, and build it once
+      - name: Hold the release's configuration to GoReleaser, and build every platform it ships
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           version: v2.20.3
           workdir: terraform-provider
-          args: build --snapshot --clean --single-target
+          args: build --snapshot --clean
 
   acceptance:
     name: Provider acceptance (Terraform and OpenTofu)

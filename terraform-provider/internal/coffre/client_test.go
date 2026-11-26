@@ -249,6 +249,7 @@ func TestListingKeepsNoValue(t *testing.T) {
 }
 
 func TestListedStanding(t *testing.T) {
+	id := "9726e640-0a12-4df1-b3f9-f6e7c76110e3"
 	parent := func(state string) *struct {
 		From  string `json:"from"`
 		State string `json:"state"`
@@ -259,21 +260,24 @@ func TestListedStanding(t *testing.T) {
 		}{"prod", state}
 	}
 	for _, test := range []struct {
-		name           string
-		listed         Listed
-		own, inherited bool
+		name                  string
+		listed                Listed
+		own, inherited, empty bool
 	}{
-		{"its own", Listed{}, true, false},
-		{"an override", Listed{Parent: parent("overridden")}, true, false},
-		{"passed down", Listed{Parent: parent("inherited")}, false, true},
-		{"removed", Listed{Parent: parent("removed")}, false, false},
-		{"archived", Listed{Archived: true}, false, false},
-		{"a reference", Listed{Reference: &struct {
+		{"its own", Listed{VersionID: &id}, true, false, false},
+		{"its own, with no value", Listed{}, true, false, true},
+		{"an override", Listed{Parent: parent("overridden"), VersionID: &id}, true, false, false},
+		{"passed down", Listed{Parent: parent("inherited"), VersionID: &id}, false, true, false},
+		{"passed down, its version hidden", Listed{Parent: parent("inherited")}, false, true, false},
+		{"removed", Listed{Parent: parent("removed")}, false, false, true},
+		{"archived", Listed{Archived: true, VersionID: &id}, false, false, true},
+		{"a reference", Listed{VersionID: &id, Reference: &struct {
 			Source string `json:"source"`
-		}{"tf/prod/A"}}, false, false},
+		}{"tf/prod/A"}}, false, false, false},
 	} {
-		if test.listed.Own() != test.own || test.listed.Inherited() != test.inherited {
-			t.Errorf("%s: own %v, inherited %v", test.name, test.listed.Own(), test.listed.Inherited())
+		listed := test.listed
+		if listed.Own() != test.own || listed.Inherited() != test.inherited || listed.Empty() != test.empty {
+			t.Errorf("%s: own %v, inherited %v, empty %v", test.name, listed.Own(), listed.Inherited(), listed.Empty())
 		}
 	}
 }

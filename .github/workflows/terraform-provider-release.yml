@@ -72,13 +72,13 @@ jobs:
           VERSION: ${{ inputs.version }}
           TOKEN: ${{ secrets.TERRAFORM_PROVIDER_MIRROR_TOKEN }}
         run: |
-          git subtree split --prefix terraform-provider -b mirror
-          git tag "v$VERSION" mirror
+          # Tagged on the mirror only: this checkout holds coffre's own v<version> tags.
+          split="$(git subtree split --prefix terraform-provider)"
           export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
           GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
           export GIT_CONFIG_VALUE_0
           mirror=https://github.com/erwinkn/terraform-provider-coffre.git
-          git push "$mirror" mirror:main "refs/tags/v$VERSION"
+          git push "$mirror" "$split:refs/heads/main" "$split:refs/tags/v$VERSION"
           git clone --branch "v$VERSION" "$mirror" "$RUNNER_TEMP/mirror"
       - name: Build, sign and publish the release
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0

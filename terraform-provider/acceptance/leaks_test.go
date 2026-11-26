@@ -77,7 +77,7 @@ func (w *work) leaks() []string {
 }
 
 // credential is any coffre token: its kind's prefix and 32 random bytes, in base64url (@coffre/core's identity/tokens.ts).
-var credential = regexp.MustCompile(`coffre_(web|cli|svc|pat|use|wl|enr|mcp)_[A-Za-z0-9_-]{43}`)
+var credential = regexp.MustCompile(`coffre_(web|cli|svc|pat|use|wl|enr|mcp|mcr)_[A-Za-z0-9_-]{43}`)
 
 // The check finds a secret where Terraform keeps one: a variable that is not ephemeral is kept in a
 // saved plan, sensitive or not, which is why the docs declare every secret's variable ephemeral.
