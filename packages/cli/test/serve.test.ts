@@ -178,6 +178,15 @@ test('--proof oidc:<file> sends the ID token the file holds, read at the sign-in
   const [failed] = await once(missing.child, 'exit');
   assert.equal(failed, 1);
   assert.match(missing.stderr(), /no ID token at .*none\.jwt \(ENOENT\)/);
+  writeFileSync(join(dir, 'empty.jwt'), '\n');
+  const empty = cli(t, ['--url', coffre.url, '--service', 'api-prod', 'run', '--proof', `oidc:${join(dir, 'empty.jwt')}`, 'market/prod', '--', process.execPath, '-e', ''], '');
+  assert.equal((await once(empty.child, 'exit'))[0], 1);
+  assert.match(empty.stderr(), /no ID token at .*empty\.jwt: the file is empty/);
+  // An unset variable leaves `oidc:` alone: a usage error, never a prompt for a token.
+  const unnamed = cli(t, ['--url', coffre.url, '--service', 'api-prod', 'run', '--proof', 'oidc:', 'market/prod', '--', process.execPath, '-e', ''], '');
+  assert.notEqual((await once(unnamed.child, 'exit'))[0], 0);
+  assert.match(unnamed.stderr(), /--proof oidc:<file> names the file holding the ID token/);
+  assert.equal(proofs.length, 1);
 });
 
 test("a service's run falls back to the bearer exchange where the instance has no key-bound sessions yet", async (t) => {

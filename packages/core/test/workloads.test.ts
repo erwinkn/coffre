@@ -253,6 +253,9 @@ test('a custom binding matches a claim by its prefix, whole segments each ended 
   // A row that holds a looser prefix than checkBinding stores matches nothing.
   assert.deepEqual(differingClaims('custom', { sub: { prefix: 'org/org_7Q/project/prj_42' } }, { sub: 'org/org_7Q/project/prj_42/thread/t_1' }), ['sub']);
   assert.deepEqual(differingClaims('custom', { sub: { other: 'x' } } as unknown as BindingClaims, { sub: 'x' }), ['sub']);
+  // Nor does a prefix on a platform's binding, which checkBinding never stores, or one with more beside it.
+  assert.deepEqual(differingClaims('kubernetes', { sub: { prefix: 'system/' } }, { sub: 'system/serviceaccount' }), ['sub']);
+  assert.deepEqual(differingClaims('custom', { sub: { prefix: 'org/', exact: 'x' } } as unknown as BindingClaims, { sub: 'org/1' }), ['sub']);
 });
 
 test('a URL coffre fetches is https on 443 at a public host name, with no credentials, and loopback only for a deployment that says so', () => {

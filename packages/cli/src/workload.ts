@@ -127,7 +127,9 @@ export async function proofOf(spec: string | undefined, runner: Runner): Promise
       return enrollment(await readSecret({ label: 'Enrollment code', hint: 'coffre_enr_…, which no release issues yet; piped in, as printf %s "$COFFRE_ENROLL" | coffre …' }));
     case 'oidc': {
       // A file its platform keeps fresh, as Capy's $CAPY_OIDC_TOKEN_FILE: read before each sign-in, so a re-proof sends its next token.
-      if (rest) return oidc(() => tokenIn(rest), 'oidc');
+      // `oidc:` with nothing after it, as an unset $CAPY_OIDC_TOKEN_FILE leaves it: never the prompt `oidc` alone means.
+      if (rest === '') throw new UsageError('--proof oidc:<file> names the file holding the ID token: oidc:$CAPY_OIDC_TOKEN_FILE, set');
+      if (rest !== undefined) return oidc(() => tokenIn(rest), 'oidc');
       const token = await readSecret({ label: 'ID token', hint: "the platform's ID token for this instance: GitLab's id_tokens entry, or a custom issuer's" });
       return oidc(token);
     }

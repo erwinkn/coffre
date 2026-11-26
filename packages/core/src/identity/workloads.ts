@@ -372,6 +372,15 @@ function checkedPrefix(profile: WorkloadProfile, name: string, value: object): C
   const { prefix, ...rest } = value as { prefix?: unknown };
   if (typeof prefix !== 'string' || Object.keys(rest).length > 0) throw new BindingInvalid(`claim ${name} is a string, or a prefix: { "prefix": "<segment>/<segment>/" }`);
   if (profile !== 'custom') throw new BindingInvalid(`only a custom binding matches a claim by its prefix: a ${profile} binding pins IDs its platform never reuses`);
+  return claimPrefix(name, prefix);
+}
+
+/**
+ * A prefix for claim `name`, as `checkBinding` takes one: whole segments,
+ * each ended by `/`, none empty. One that stops in the middle of a segment
+ * is told the spelling that works; the CLI checks its flags with it.
+ */
+export function claimPrefix(name: string, prefix: string): ClaimPrefix {
   if (new TextEncoder().encode(prefix).length > MAX_CLAIM_BYTES) throw new BindingInvalid(`claim ${name}'s prefix is longer than ${MAX_CLAIM_BYTES} bytes`);
   if (CLAIM_PREFIX.test(prefix)) return { prefix };
   const ended = `${prefix}/`;
@@ -499,7 +508,10 @@ export function differingClaims(profile: WorkloadProfile, expected: BindingClaim
       const actual = claimAt(claims, name);
       if (typeof actual !== 'string') return true;
       // A prefix as `checkBinding` stores one, and nothing looser: a row that says another never matches.
-      if (isClaimPrefix(value)) return !(CLAIM_PREFIX.test(value.prefix) && actual.length > value.prefix.length && actual.startsWith(value.prefix));
+      if (isClaimPrefix(value)) {
+        const stored = profile === 'custom' && Object.keys(value).length === 1 && CLAIM_PREFIX.test(value.prefix);
+        return !(stored && actual.length > value.prefix.length && actual.startsWith(value.prefix));
+      }
       if (typeof value !== 'string' && !Array.isArray(value)) return true;
       if (github && name === 'environment') return actual.toLowerCase() !== (value as string).toLowerCase();
       return !claimValues(value).includes(actual);

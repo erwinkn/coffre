@@ -22,6 +22,7 @@ import { apiMember, CoffreError, shownMember, type BindingPlan, type BindingView
 import { credentialScopeInWords, ROLE_ID, type Role } from '@coffre/core/access';
 import {
   BindingInvalid,
+  claimPrefix,
   checkPolicy,
   claimValues,
   EVENT_EXPOSURE,
@@ -500,8 +501,9 @@ function checked(binding: BindingRequest, policy: PolicyRequest, service: string
 
 /**
  * The claims `--claim` adds, to narrow a binding, and those `--claim-prefix`
- * matches by their start. A prefix that stops in the middle of a segment is
- * refused here, before anything is asked, as the server refuses it.
+ * matches by their start. A prefix the server would refuse, such as one that
+ * stops in the middle of a segment, is refused here by the same rule
+ * (`claimPrefix`), before anything is asked.
  */
 function claimsFrom(flags: TrustFlags): BindingClaims {
   const claims: BindingClaims = {};
@@ -515,8 +517,12 @@ function claimsFrom(flags: TrustFlags): BindingClaims {
       claims[name] = value;
       continue;
     }
-    if (!value.endsWith('/')) throw new Error(`--claim-prefix ${name}=${value} would also take ${value}0/…: a prefix ends with "/", at a segment's end, as ${name}=${value}/`);
-    claims[name] = { prefix: value };
+    try {
+      claims[name] = claimPrefix(name, value);
+    } catch (error) {
+      if (error instanceof BindingInvalid) throw new Error(`--claim-prefix ${name}=${value}: ${error.message}`);
+      throw error;
+    }
   }
   return claims;
 }
