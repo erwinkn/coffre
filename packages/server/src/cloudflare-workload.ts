@@ -25,13 +25,14 @@
 // what the operation makes, never a value. A refusal is thrown as a
 // `CoffreError` with the status, code and reason the HTTP form answers.
 import { CoffreError } from '@coffre/client';
+import { slug } from '@coffre/core/schemas';
 import { JSON_MESSAGE_BYTES } from '@coffre/client/dpop';
 import type { CoffreBinding, PresignOptions } from '@coffre/client/workload';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 
 import { migrating, schemaReady } from './app.ts';
 import { errorResponse } from './http.ts';
-import { bindingRoute } from './plugins.ts';
+import { bindingRoute, operation } from './plugins.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
 /** The part of a call's `ExecutionContext` the entrypoint reads: its binding's `props`, and the work the call leaves to finish. */
@@ -92,7 +93,7 @@ export function workloadEntrypoint<Env>(open: Open<Env>): WorkloadEntrypoint<Env
     async presign(credential: string, path: string, options: PresignOptions & { place?: string } = {}): Promise<{ url: string; expiresAt: string }> {
       if (typeof path !== 'string') throw argument('presign takes the path under the credential as a string, /bucket/key');
       const { expiresIn, method, query } = plain(options, 'presign') as PresignOptions;
-      if (expiresIn !== undefined && typeof expiresIn !== 'number') throw argument('presign takes expiresIn as a number of seconds');
+      if (expiresIn !== undefined && !Number.isFinite(expiresIn)) throw argument('presign takes expiresIn as a number of seconds');
       if (method !== undefined && typeof method !== 'string') throw argument('presign takes method as a string, GET or HEAD');
       if (query !== undefined && Object.values(plain(query, 'presign\'s query')).some((value) => typeof value !== 'string')) throw argument('presign takes query as an object of strings');
       // The operation checks the rest, as over HTTP: the method, how long, the path under the credential.
@@ -108,7 +109,8 @@ export function workloadEntrypoint<Env>(open: Open<Env>): WorkloadEntrypoint<Env
      * thrown as the `CoffreError` its status and body say.
      */
     async #made(place: string, headers: Record<string, string>, body: string | Uint8Array<ArrayBuffer>, query = ''): Promise<Record<string, unknown>> {
-      const request = new Request(`https://coffre/use${place}${query}`, { method: 'POST', headers: { ...headers, accept: 'application/json' }, body });
+      // An operation's, whose path is a place even where its project shares a credential's name (`operation`).
+      const request = operation(new Request(`https://coffre/use${place}${query}`, { method: 'POST', headers: { ...headers, accept: 'application/json' }, body }));
       const response = await served(request, this.env, this.ctx, open);
       const answer = (await response.json().catch(() => null)) as Record<string, unknown> | null;
       if (response.ok && typeof answer === 'object' && answer !== null) return answer;
@@ -155,8 +157,10 @@ const argument = (message: string) => new CoffreError(400, 'bad_request', messag
 function placed(options: unknown): string {
   const { place } = plain(options, 'a call') as { place?: unknown };
   if (place === undefined) return '';
-  if (typeof place !== 'string' || !/^[^/]+\/[^/]+$/.test(place)) throw argument('place names an environment as project/environment, market/prod');
-  return `/${place.split('/').map(encodeURIComponent).join('/')}`;
+  // Two slugs, never `.` or `..`, which the URL would resolve out of the place it names.
+  const [project, environment, ...more] = typeof place === 'string' ? place.split('/') : [];
+  if (!slug.safeParse(project).success || !slug.safeParse(environment).success || more.length > 0) throw argument('place names an environment as project/environment, market/prod');
+  return `/${project}/${environment}`;
 }
 
 /** The signer, verifier or credential a call names, as a string. */

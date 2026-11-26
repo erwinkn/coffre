@@ -132,14 +132,18 @@ export default {
       return binding.fetch(new Request(`https://coffre${through[2]}${new URL(request.url).search}`, request));
     }
     // As a Worker that calls coffre's methods over the binding: `{ method, args }`, each `{ bytes }` among them a
-    // Uint8Array of its base64. What it threw, as the caller sees it: RPC carries an error's fields, not its class.
+    // Uint8Array of its base64, and each `{ number }` the number JSON cannot say, `NaN` or `Infinity`. What it threw,
+    // as the caller sees it: RPC carries an error's fields, not its class.
     const rpc = /^\/rpc\/([A-Z_]+)$/.exec(new URL(request.url).pathname);
     if (rpc !== null) {
-      const { method, args } = (await request.json()) as { method: 'sign' | 'verify' | 'presign'; args: unknown[] };
+      const { method, args } = JSON.parse(await request.text(), (_, value: unknown) => {
+        if (typeof value !== 'object' || value === null) return value;
+        if ('bytes' in value) return new Uint8Array(Buffer.from(value.bytes as string, 'base64'));
+        return 'number' in value ? Number(value.number) : value;
+      }) as { method: 'sign' | 'verify' | 'presign'; args: unknown[] };
       const binding = env[rpc[1] as keyof Env] as CoffreBinding;
-      const given = args.map((arg) => (typeof arg === 'object' && arg !== null && 'bytes' in arg ? new Uint8Array(Buffer.from(arg.bytes as string, 'base64')) : arg));
       try {
-        return Response.json({ value: await (binding[method] as (...args: unknown[]) => Promise<unknown>)(...given) });
+        return Response.json({ value: await (binding[method] as (...args: unknown[]) => Promise<unknown>)(...args) });
       } catch (error) {
         const { name, message, status, code, reason } = error as Error & { status?: number; code?: string; reason?: string };
         return Response.json({ thrown: { name, message, status, code, reason } });

@@ -450,9 +450,12 @@ route, so each call is one use of the vault, held to everything a `fetch`
 is above, and logged as one. What comes back is what the operation makes,
 never a value. A refusal rejects with the status, code and reason the
 HTTP form answers: RPC carries an error's fields, not its class, so test
-`error.name === 'CoffreError'`, then `error.status` and `error.reason`
-(`404` for a signer the deployment does not name, `403` `frozen`, `429`
-`limit`). An argument of the wrong type is `400` `bad_request`. `mint`
+`error.name === 'CoffreError'`, then `error.status`, `error.code` and
+`error.reason` (`404` for a signer the deployment does not name, `403`
+with reason `frozen`, `429` with reason `limit`). An argument of the wrong
+type, or a `place` that is not two slugs, is `400` with code
+`bad_request`. Unlike a URL, `place` is always a place, even one whose
+project shares a credential's name. `mint`
 comes with minting.
 
 Whoever can deploy Workers to the account can set any `props`, so keep

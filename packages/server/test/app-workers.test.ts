@@ -396,10 +396,19 @@ test("a Worker bound to coffre calls sign, verify and presign over RPC: each the
   await refused('COFFRE_KEYS', 'presign', ['s3', '/../other/a'], 400);
   await refused('COFFRE_KEYS', 'verify', ['hook', bytes(randomBytes(64 * 1024 + 1)), header], 413);
   // What RPC carries that the operation could not read.
-  for (const [method, args] of [['sign', [42, 'm']], ['sign', ['mac', 42]], ['sign', ['mac', 'm', { place: 'market' }]], ['sign', ['mac', 'm', 'market/keys']], ['verify', ['hook', body, 42]], ['presign', ['s3', 42]], ['presign', ['s3', '/a', { query: { a: 1 } }]], ['presign', ['s3', '/a', { expiresIn: '600' }]]] as const) {
+  for (const [method, args] of [['sign', [42, 'm']], ['sign', ['mac', 42]], ['sign', ['mac', 'm', { place: 'market' }]], ['sign', ['mac', 'm', 'market/keys']], ['verify', ['hook', body, 42]], ['presign', ['s3', 42]], ['presign', ['s3', '/a', { query: { a: 1 } }]], ['presign', ['s3', '/a', { expiresIn: '600' }]], ['presign', ['s3', '/a', { expiresIn: { number: 'NaN' } }]], ['presign', ['s3', '/a', { expiresIn: { number: 'Infinity' } }]]] as const) {
     const thrown = await refused('COFFRE_KEYS', method, [...args], 400);
     assert.equal(thrown.code, 'bad_request');
   }
+  // A place of dot segments, which the URL would resolve to the default environment, out of /use or to a credential;
+  // one not a slug.
+  for (const place of ['market/..', './.', '../v1', './echo', 'Market/keys', 'market/keys/x']) {
+    const thrown = await refused('COFFRE_KEYS', 'verify', ['hook', body, header, { place }], 400);
+    assert.equal(thrown.code, 'bad_request');
+  }
+  // A place whose project is a credential's name is still a place, never that credential's upstream: here none the
+  // service reaches.
+  await refused('COFFRE_KEYS', 'verify', ['hook', body, header, { place: 'echo/prod' }], 403);
   // Where its grants reach and its binding does not; a service with no `cloudflare` binding; a binding with no props.
   await refused('COFFRE_KEYS', 'sign', ['mac', 'm', { place: 'market/prod' }], 403);
   await refused('COFFRE_GHOST', 'sign', ['mac', 'm'], 401);

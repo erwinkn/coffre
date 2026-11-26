@@ -335,6 +335,23 @@ function placeOf(path: string): { project: string; environment: string; mine: bo
   return match === null ? null : { project: match[1]!, environment: match[2]!, mine: match[3] !== undefined };
 }
 
+/** The requests `operation` marked: only this process's code adds one, so no caller's own request is among them. */
+const operations = new WeakSet<Request>();
+
+/**
+ * `request`, marked as an RPC method's operation, which coffre's binding
+ * entrypoint makes (cloudflare-workload.ts): `POST /use[/<project>/<env>]`,
+ * whose path names a place, never a credential, so the proxy computes it
+ * even where a credential shares the project's name. `isOperation` tells.
+ */
+export function operation(request: Request): Request {
+  operations.add(request);
+  return request;
+}
+
+/** Whether `operation` marked `request`. */
+export const isOperation = (request: Request): boolean => operations.has(request);
+
 /**
  * A call another Worker made over a Cloudflare service binding
  * (docs/design/workload-access.md, section 9.2), routed to the plugin whose
