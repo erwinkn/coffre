@@ -97,18 +97,32 @@ pages, making version 8:
   ~ resource "coffre_secret" "stripe" {
       ~ version    = 8 -> (known after apply)
       ~ version_id = "4f1e…" -> (known after apply)
-      ~ updated_by = "ada@acme.example" -> (known after apply)
+      ~ updated_by = "user:ada@acme.example" -> (known after apply)
     }
 Warning: billing/prod/STRIPE_KEY was written outside Terraform
-  It is at version 8, written by ada@acme.example. Applying writes the configured value over it.
+  It is at version 8, written by user:ada@acme.example. Applying writes the configured value over it.
 ```
 
 The same holds when the key was reset to what a parent passes down, or
 renamed away and another renamed onto its name: whatever it reads is not
 what Terraform wrote. A key made a reference is drift too, but one the
-provider does not write over (section 8). A key deleted with its
-environment, or archived, leaves the state, and the next plan creates it
-(creating over an archived key is refused; section 8).
+provider does not write over (section 8).
+
+A key that holds nothing leaves the state, and the next plan creates it,
+with `replaces: null`: one the listing does not have (renamed away with
+nothing renamed onto its name), one listed `archived` (creating over it is
+refused; section 8), a fork's key dismissed from what its parent passes
+down (`parent.state` is `removed`), and an own key with no version, which a
+reference broken in coffre leaves. An inherited key whose version this
+account cannot see is not one of them: it holds the parent's value, so it
+stays, and an apply over it refuses (section 4).
+
+A deleted or archived environment is different: its listing answers 403
+`no_access`, the same refusal a revoked grant or a narrowed role gets, and
+coffre means them to look alike. Dropping the state on that refusal would
+let a token's lost access empty the state silently, so the refresh fails
+instead, saying what coffre answered; who deleted the environment removes
+its keys from the configuration, or `terraform state rm`s them.
 
 So the configuration wins, as everywhere in Terraform. A value someone
 rotates by hand comes back on the next apply; who wants to rotate by hand
