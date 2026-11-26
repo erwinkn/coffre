@@ -436,6 +436,9 @@ test('malformed asks throw before anything is read', () => {
     { binding: asked({ label: ' padded ' }) }, { binding: asked({ replaces: ['nope'] }) }, { binding: asked({ only: 'yes' as never }) }, { binding: asked({ replaces: Array.from({ length: MAX_BINDINGS + 1 }, () => '00000000-0000-4000-8000-000000000000') }) },
     { binding: asked({ policy: { reads: { 'market/dev': ['A'], market: ['B'] } } }) }, { binding: asked({ policy: { nope: true } }) }, { binding: asked({ policy: [] as never }) },
     { binding: asked({ profile: 'aws', issuer: null, claims: { account: '123456789012' }, keys: { uri: 'https://x.example/jwks' } }) },
+    // A prefix that stops mid-segment, or empty, whoever asks: the vault holds it to checkBinding, as the API does.
+    { binding: asked({ claims: { sub: { prefix: 'system:serviceaccount:ci' } } }) }, { binding: asked({ claims: { sub: { prefix: '/' } } }) },
+    { binding: asked({ policy: { repeats: true, keyAudience: true } }) },
   ];
   for (const more of wrong) assert.throws(() => OPERATIONS['token.bind']({ ...ok, ...more } as never, deciding), TypeError, JSON.stringify(more).slice(0, 80));
   assert.throws(() => OPERATIONS['token.bind']({ ...shown('root-cli'), op: 'token.bind', member: ci, keys: { issuer: 7, jwks: {} } } as never, deciding), TypeError);

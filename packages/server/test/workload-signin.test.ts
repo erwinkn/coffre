@@ -10,8 +10,10 @@ import { after, beforeEach, test } from 'node:test';
 
 import { createProof, generateProofKey, thumbprint, type ProofKey } from '@coffre/client/dpop';
 import { canonicalClaims, generateToken, github, signin, type WorkloadAlert } from '@coffre/core/identity';
+import { rowsOf } from '@coffre/db/dialect';
 import { binding, emptyDatabase, environment, grant, instance, principal, project, role, rows, session, write } from '@coffre/vault/testing';
 import { SignatureV4 } from '@smithy/signature-v4';
+import { sql } from 'drizzle-orm';
 
 import { processGates } from '../src/gate.ts';
 import { GET_CALLER_IDENTITY, stsFetch, type AwsProofInput } from '../src/workloads/aws.ts';
@@ -92,7 +94,8 @@ const transport: WorkloadTransport = {
 
 let gates = processGates();
 const alerts: WorkloadAlert[] = [];
-const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits(), alert: (alert) => void alerts.push(alert) } });
+// Every sign-in of this file comes from one address, within a minute: more than the default 30 allow.
+const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })], workloads: { limits: processLimits({ perSource: 120 }), alert: (alert) => void alerts.push(alert) } });
 const app = await openApp({ auth, transport, workloads: {}, gates: (service) => gates(service) });
 const ungated = await openApp({ auth, transport, workloads: {} });
 const { world } = app;
@@ -277,6 +280,60 @@ test('the alert shows the key a token names only as a kid is written, at most 64
   const numbered = idToken({ iss: KUBE, sub: 'system:serviceaccount:ci:runner' }, { key: kube2.privateKey, kid: 42 as unknown as string });
   assert.deepEqual(reason(await signIn({ oidc: numbered }, { service: 'numbered' })), [401, 'malformed']);
   assert.equal(alerts.some((said) => said.service === 'token:numbered'), false);
+});
+
+/** Capy's: an issuer per organization, one key set for all, and a token per sandbox thread, its sub naming the thread. */
+const CAPY = 'https://api.capy.ai/oidc/orgs/org_7Q';
+const CAPY_KEYS = 'https://api.capy.ai/oidc/jwks.json';
+const capy1 = pair();
+const PROJECT = { sub: { prefix: 'org/org_7Q/project/prj_42/' }, project: 'prj_42' };
+/** A Capy token for a thread of prj_42, an hour long, issued 40 minutes ago, as the sandbox's file holds it before its refresh. */
+const capyToken = (claims: Record<string, unknown> = {}) =>
+  idToken({ iss: CAPY, sub: 'org/org_7Q/project/prj_42/thread/t_1', org: 'org_7Q', project: 'prj_42', thread: 't_1', iat: now() - 40 * 60, exp: now() + 20 * 60, ...claims }, { key: capy1.privateKey, kid: 'capy-1' });
+
+test('a custom binding takes a sub by its prefix, segment by segment, beside an exact claim; a token its issuer repeats signs in again, for any key, until its exp', async () => {
+  published.set(CAPY_KEYS, { keys: [jwk(capy1.publicKey, 'capy-1')] });
+  const repeating = binding(DEPLOY, { profile: 'custom', issuer: CAPY, jwksUri: CAPY_KEYS, claims: canonicalClaims(PROJECT), scope: VIEWER, policy: '{"repeats":true}', label: 'capy' });
+  await write(world, ...rows('bindings', repeating));
+  const token = capyToken();
+  const first = await signIn({ oidc: token });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  // The session ends with the token, twenty minutes on, not a day after.
+  const exp = JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString()).exp as number;
+  assert.equal(Date.parse(first.body.notAfter!), exp * 1000);
+  assert.deepEqual([(await asSession('/api/me', first.body.token!, { method: 'GET' })).body.principal?.id], ['deploy']);
+  // The second `coffre run` in the sandbox: the same token, another key. And the first key again.
+  const second = await signIn({ oidc: token }, { key: await generateProofKey() });
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal((await signIn({ oidc: token })).status, 200);
+  // Nothing is spent, but each sign-in's entry names the token by its hash, so an audit lists the sessions one token made.
+  const hash = createHash('sha256').update(token.split('.').slice(0, 2).join('.'), 'ascii').digest('hex');
+  const exchanges = (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`)).map((row) => JSON.parse(row.body) as { action: string; detail: { proof: string | null } }).filter((body) => body.action === 'token.exchange');
+  assert.deepEqual(exchanges.map((body) => body.detail.proof), [hash, hash, hash]);
+
+  // Another project's thread, whose ID only starts like this one's, or the project's own sub with nothing after it.
+  assert.deepEqual(reason(await signIn({ oidc: capyToken({ sub: 'org/org_7Q/project/prj_423/thread/t_1' }) })), [401, 'no_match']);
+  assert.deepEqual(reason(await signIn({ oidc: capyToken({ sub: 'org/org_7Q/project/prj_42/' }) })), [401, 'no_match']);
+  // The exact claim beside the prefix holds too.
+  assert.deepEqual(reason(await signIn({ oidc: capyToken({ project: 'prj_423' }) })), [401, 'no_match']);
+  // Past its exp, for another audience, or longer-lived than an hour: refused, whoever presents it.
+  assert.deepEqual(reason(await signIn({ oidc: capyToken({ iat: now() - 3600, exp: now() - 60 }) })), [401, 'expired']);
+  assert.deepEqual(reason(await signIn({ oidc: capyToken({ aud: 'https://other.acme.example' }) })), [401, 'audience']);
+  assert.deepEqual(reason(await signIn({ oidc: capyToken({ iat: now() - 10, exp: now() + 2 * 3600 }) })), [401, 'too_old']);
+  // Another organization's issuer, which no binding names, even with the same keys and sub.
+  const elsewhere = await signIn({ oidc: capyToken({ iss: 'https://api.capy.ai/oidc/orgs/org_8R' }) });
+  assert.deepEqual(reason(elsewhere), [401, 'no_match']);
+  // A CI run's exchange takes no binding with a policy, so it never reads with a repeating token.
+  const bearer = await read(await app.request('/api/auth/oidc', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: DEPLOY, token }) }));
+  assert.deepEqual(reason(bearer), [401, 'no_match']);
+});
+
+test('without repeats, a prefix binding spends its token: the second sign-in with it is replayed', async () => {
+  published.set(CAPY_KEYS, { keys: [jwk(capy1.publicKey, 'capy-1')] });
+  await write(world, ...rows('bindings', binding(DEPLOY, { profile: 'custom', issuer: CAPY, jwksUri: CAPY_KEYS, claims: canonicalClaims(PROJECT), scope: VIEWER, policy: '{}' })));
+  const token = capyToken();
+  assert.equal((await signIn({ oidc: token })).status, 200);
+  assert.deepEqual(reason(await signIn({ oidc: token }, { key: await generateProofKey() })), [401, 'replayed']);
 });
 
 test("a role's signed GetCallerIdentity, naming this instance and the key, buys a session: STS asked once, the request as signed", async () => {

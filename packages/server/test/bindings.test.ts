@@ -192,6 +192,27 @@ test('a binding is checked before anything is asked: its profile\'s rules, its k
   assert.deepEqual(refused(await call('ada-cli', 'POST', `/members/${ada}/bindings`, { profile: 'custom', issuer: KUBE, claims: POD })), [400, 'bad_request', undefined]);
 });
 
+test('a binding matches a sub by its prefix only at a segment\'s end, said before anything is asked; one that does is kept and listed as made, its tokens repeating where its policy says', async () => {
+  const loose = [
+    ['a prefix that stops mid-segment', { claims: { sub: { prefix: 'org/acme/project/ci' } } }, /ends at a "\/": "org\/acme\/project\/ci" would also take/],
+    ['an empty segment', { claims: { sub: { prefix: 'org//project/' } } }, /whole segments/],
+    ['a prefix and something else', { claims: { sub: { prefix: 'org/', exact: 'x' } } }, /a string, or a prefix/],
+    ['a prefix on a platform\'s profile', { profile: 'gcp', issuer: null, claims: { sub: { prefix: 'org/' } } }, /only a custom binding/],
+    ['repeats beside a key-naming audience', { claims: POD, policy: { repeats: true, keyAudience: true } }, /never spent already/],
+  ] as const;
+  for (const [what, body, said] of loose) {
+    const [[status, answer], calls, statements] = await bind('ada-cli', body);
+    assert.deepEqual([status, answer.error, calls, statements], [400, 'bad_request', [], 0], what);
+    assert.match(String(answer.message), said, what);
+  }
+  const claims = { sub: { prefix: 'org/acme/project/ci/' }, project: 'prj_42' };
+  const [[status, body]] = await bind('ada-cli', { claims, policy: { repeats: true }, scope: { 'market/dev': 'developer' } });
+  assert.equal(status, 200, JSON.stringify(body));
+  const [[, shown]] = await list('ada-cli');
+  const [only] = (shown as { bindings: View[] }).bindings;
+  assert.deepEqual([only!.claims, only!.policy], [claims, { repeats: true }]);
+});
+
 test("a preview (`?dryRun=1`) is the binding weighed and not made, as it would be made: whoever may bind, then its issuer asked, then one weigh; nothing written", async () => {
   const [[status, body], calls, statements] = await bind('ada-cli', { label: 'pods', scope: { 'market/dev': 'developer' } }, '?dryRun=1');
   assert.equal(status, 200, JSON.stringify(body));

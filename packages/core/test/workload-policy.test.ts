@@ -79,6 +79,14 @@ test('a policy holds only what its profile allows, and is canonical: one policy,
   assert.equal(policyText(checkPolicy('custom', {}, { service: SERVICE })), '{}');
   assert.equal(policyText(checkPolicy('custom', { keyAudience: false }, { service: SERVICE })), '{}');
   assert.equal(policyText(checkPolicy('custom', { keyAudience: true }, { service: SERVICE })), '{"keyAudience":true}');
+  // An issuer that hands out the same token again, opted into on a custom binding alone, and never beside a key-naming audience.
+  assert.equal(policyText(checkPolicy('custom', { repeats: true }, { service: SERVICE })), '{"repeats":true}');
+  assert.equal(policyText(checkPolicy('custom', { repeats: false }, { service: SERVICE })), '{}');
+  assert.throws(() => checkPolicy('custom', { repeats: true, keyAudience: true }, { service: SERVICE }), /never spent already/);
+  assert.throws(() => checkPolicy('custom', { repeats: 'yes' }, { service: SERVICE }), /repeats is true or false/);
+  for (const profile of ['github', 'gitlab', 'kubernetes', 'gcp', 'fly', 'vercel', 'aws', 'enrollment', 'cloudflare'] as const) {
+    assert.throws(() => checkPolicy(profile, { repeats: true, ...(profile === 'enrollment' ? { replicas: 1 } : {}) }, { service: SERVICE }), /not repeats/, profile);
+  }
   assert.equal(policyText(checkPolicy('azure', { audience: 'api://coffre-acme', reads: { [ENV]: { keys: '*' } } }, { service: SERVICE })), `{"audience":"api://coffre-acme","reads":{"${ENV}":{"keys":"*"}}}`);
   // A place listing nothing reads nothing, and is left out.
   assert.equal(policyText(checkPolicy('aws', { reads: { [ENV]: { keys: [] } }, sources: [] }, { service: SERVICE })), '{}');

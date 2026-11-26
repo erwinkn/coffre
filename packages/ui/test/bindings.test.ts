@@ -184,6 +184,10 @@ test('a binding reads in a line: what it trusts, and at which ref', () => {
   assert.deepEqual(summary({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: '104' } }), { title: 'idp.acme.example', detail: 'sub 104' });
   // A binding that carries its keys may name any issuer, a URL or not.
   assert.deepEqual(summary({ profile: 'custom', issuer: 'kapsule:fr-par', claims: { sub: 'x' } }), { title: 'kapsule:fr-par', detail: 'sub x' });
+  assert.deepEqual(summary({ profile: 'custom', issuer: 'https://api.capy.ai/oidc/orgs/org_7Q', claims: { sub: { prefix: 'org/org_7Q/project/prj_42/' } } }), {
+    title: 'api.capy.ai',
+    detail: 'sub starts with org/org_7Q/project/prj_42/',
+  });
   assert.equal(keysOf({ jwksUri: 'https://idp.acme.example/keys', keys: null }), 'https://idp.acme.example/keys');
   assert.equal(keysOf({ jwksUri: 'sha256:00', keys: [{ kid: 'k8s', alg: 'RS256', thumbprint: 't1' }, { kid: null, alg: 'ES256', thumbprint: 't2' }] }), 'Uploaded: k8s (RS256), t2 (ES256)');
 });

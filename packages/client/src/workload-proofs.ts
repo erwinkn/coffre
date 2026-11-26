@@ -362,7 +362,10 @@ export function github(): Proof {
 /**
  * Any other ID token, as given, or asked for at each exchange: GitLab's
  * `id_tokens` entry, whose `aud` is coffre's URL, or a custom issuer's. A
- * token is spent once used, so a given string proves one session.
+ * token is spent once used, so a given string proves one session, unless
+ * its binding says its issuer hands it out again (`repeats`). A function
+ * is asked at each exchange: one that reads the file its platform keeps
+ * fresh sends the next token at a re-proof.
  */
 export function oidc(token: string | (() => string | Promise<string>), name = 'oidc'): Proof {
   return { name, kind: 'oidc', prove: async () => ({ oidc: typeof token === 'function' ? await token() : token }) };

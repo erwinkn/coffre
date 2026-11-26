@@ -1,6 +1,6 @@
 import { CoffreError, type BindingPlan, type BindingView } from '@coffre/client';
 import { credentialScopeInWords } from '@coffre/core/access';
-import { claimValues, fullRef, githubReusable, githubWorkflow, gitlabProject, type BearerProfile, type BindingClaims } from '@coffre/core/workloads';
+import { claimValues, fullRef, githubReusable, githubWorkflow, gitlabProject, shownClaim, type BearerProfile, type BindingClaims } from '@coffre/core/workloads';
 
 /**
  * Trust bindings as the pages show and make them. A binding is its claims;
@@ -28,7 +28,9 @@ export function summary(binding: Pick<BindingView, 'profile' | 'issuer' | 'claim
   if (binding.profile === 'gitlab') {
     return { title: `GitLab project ${claims.project_id}`, detail: `${claimValues(binding.claims.pipeline_source).join(', ')} at ${claims.ref_type} ${claims.ref}` };
   }
-  return { title: issuerName(binding.issuer), detail: `sub ${claims.sub}` };
+  // A custom binding's sub, exact or by its prefix: `sub starts with org/1/project/2/`.
+  const sub = binding.claims.sub;
+  return { title: issuerName(binding.issuer), detail: sub === undefined ? '' : `sub ${shownClaim(sub)}` };
 }
 
 /** What a binding's credentials reach, in words; a null scope, one 0.4 made and never sealed, reaches nothing. */

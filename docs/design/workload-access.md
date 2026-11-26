@@ -254,6 +254,7 @@ Cache-Control: no-store
   |---|---|---|
   | Names the key: an ID token whose audience names it, or a signed `GetCallerIdentity` | never | Only that key can use it. The same key presenting a platform's cached token again, to re-prove, is harmless. |
   | `azure` | never | A managed identity hands the same cached token to every replica and restart. Spending it would refuse them. It is a bearer until it expires (4.2). |
+  | `custom` whose policy says `repeats` | never | Its issuer hands the same token out again until it expires, as Capy does. It lives an hour at most, `iat` to `exp`, and the sessions it makes end at its `exp` ([workloads.md](../workloads.md#capy-and-any-issuer-whose-sub-names-each-run)). |
   | Any other ID token (`kubernetes`, `gitlab`, `custom`) | once, as today, in `consumed_tokens` | It is a bearer, and single use is what bounds a copy. |
 - **`places`** are the environments of the binding's scope, as a handle's
   `places`. With exactly one, the stable URL `/use/<credential>` works. With

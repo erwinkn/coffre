@@ -242,3 +242,42 @@ test('a token that is no compact JWS, or whose claims are not of their types, is
     assert.deepEqual(readIdToken(wrong), { refused: 'malformed' });
   }
 });
+
+test('a custom binding whose tokens repeat spends none: each lives an hour at most, is an hour old at most, and ends its session at its exp', () => {
+  const CAPY: VerifiedUnder = { issuer: 'https://api.capy.ai/oidc/orgs/org_7Q', jwksUri: 'https://api.capy.ai/oidc/jwks.json' };
+  const claimed = { sub: { prefix: 'org/org_7Q/project/prj_42/' }, project: 'prj_42' } as unknown as Record<string, string>;
+  const repeats = binding({ profile: 'custom', ...CAPY, claimed, rules: { repeats: true } });
+  const once = binding({ profile: 'custom', ...CAPY, claimed, rules: {} });
+  const thread = { iss: CAPY.issuer, sub: 'org/org_7Q/project/prj_42/thread/t_1', project: 'prj_42', aud: ORIGIN, iat: at(-40 * 60), exp: at(20 * 60) };
+  const found = match(thread, [repeats], SESSION, CAPY);
+  assert.ok(typeof found !== 'string');
+  assert.deepEqual([found.binding, found.spends, found.policy], [repeats, null, { repeats: true }]);
+  assert.equal(hardEnd(repeats, found.policy!, NOW, thread.exp), thread.exp * 1000);
+  // Without repeats, the same token is spent, by what was signed.
+  assert.deepEqual((match(thread, [once], SESSION, CAPY) as { spends: Buffer }).spends, token(thread).signingInputHash);
+  // An hour from iat to exp at most, as Capy's are, and an hour old at most: never Azure's day.
+  assert.equal(typeof match({ ...thread, iat: at(-60 * 60 + 5), exp: at(5) }, [repeats], SESSION, CAPY), 'object');
+  assert.equal(match({ ...thread, iat: at(-10), exp: at(3600) }, [repeats], SESSION, CAPY), 'too_old');
+  assert.equal(match({ ...thread, iat: at(-2 * 3600), exp: at(60) }, [repeats], SESSION, CAPY), 'too_old');
+  assert.equal(match({ ...thread, iat: at(-3600), exp: at(-60) }, [repeats], SESSION, CAPY), 'expired');
+  // Its audience is the instance's, its issuer the binding's; a CI run's exchange takes no binding with a policy.
+  assert.equal(match({ ...thread, aud: 'https://other.example' }, [repeats], SESSION, CAPY), 'audience');
+  assert.equal(match({ ...thread, iss: 'https://api.capy.ai/oidc/orgs/org_8R' }, [repeats], SESSION, CAPY), 'no_match');
+  assert.equal(match(thread, [repeats], RUN, CAPY), 'no_match');
+  // The prefix's boundary, and the exact claim beside it.
+  assert.equal(match({ ...thread, sub: 'org/org_7Q/project/prj_423/thread/t_1' }, [repeats], SESSION, CAPY), 'no_match');
+  assert.equal(match({ ...thread, project: 'prj_423' }, [repeats], SESSION, CAPY), 'no_match');
+  // Beside an older single-use binding on the same sub, the oldest answers: the token is still spent, so a repeating one never un-spends another's.
+  const older = binding({ profile: 'custom', ...CAPY, claimed, rules: {}, createdAt: new Date(NOW - 3_600_000) });
+  const newer = binding({ profile: 'custom', ...CAPY, claimed, rules: { repeats: true }, createdAt: new Date(NOW) });
+  const oldest = match(thread, [newer, older], SESSION, CAPY) as { binding: ProofBinding; spends: Buffer };
+  assert.deepEqual([oldest.binding, oldest.spends], [older, token(thread).signingInputHash]);
+  // Inside the clock's tolerance past its exp, the token still matches, but its session would end before it began.
+  const late = { ...thread, iat: at(-3600 + 10), exp: at(-10) };
+  const lateFound = match(late, [repeats], SESSION, CAPY);
+  assert.ok(typeof lateFound !== 'string');
+  assert.ok(hardEnd(repeats, lateFound.policy!, NOW, late.exp) <= NOW);
+  // A prefix binding with no policy, a CI run's at /api/auth/oidc, matches by its prefix and spends the token.
+  const bearer = binding({ profile: 'custom', ...CAPY, claimed });
+  assert.deepEqual((match(thread, [bearer], RUN, CAPY) as { spends: Buffer }).spends, token(thread).signingInputHash);
+});

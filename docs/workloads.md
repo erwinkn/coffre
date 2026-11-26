@@ -625,6 +625,72 @@ makes one session per job, ending at the token's own expiry. On an instance
 without the workload exchange, keep the `coffre login --id-token` recipe in
 [ci.md](ci.md).
 
+### Capy, and any issuer whose `sub` names each run
+
+Some issuers put the run's own ID in `sub`, so no exact `sub` names every
+run of a project. Capy signs a token for each sandbox thread: its issuer is
+`https://api.capy.ai/oidc/orgs/<org>`, its `sub`
+`org/<org>/project/<project>/thread/<thread>`, beside `org`, `project`,
+`thread`, `machine` and `user` claims. It writes the token to
+`$CAPY_OIDC_TOKEN_FILE`, an hour-long token it serves for about 45 minutes
+and replaces before it expires. Set the project's audience, in Capy's
+Generic OIDC settings, to the instance's URL, then:
+
+```sh
+coffre trust capy-agent --issuer https://api.capy.ai/oidc/orgs/org_7Q --workload \
+  --claim-prefix sub=org/org_7Q/project/prj_42/ --claim project=prj_42 --repeats \
+  --scope market/dev=viewer --apply
+```
+
+```sh
+# in the sandbox
+coffre --url https://secrets.acme.example --service capy-agent run --proof "oidc:$CAPY_OIDC_TOKEN_FILE" -- ./task.sh
+```
+
+- **`--claim-prefix <name>=<prefix>`** takes a claim that starts with the
+  prefix and goes on after it: `org/org_7Q/project/prj_42/` takes
+  `org/org_7Q/project/prj_42/thread/t_1`, and never
+  `org/org_7Q/project/prj_423/thread/t_1`. A prefix is one or more whole
+  segments, each ended by `/`, so it cannot stop in the middle of an ID:
+  `org/org_7Q/project/prj_42` is refused by `coffre trust`, the API and
+  the vault, which say the spelling that works. A token whose claim is the
+  prefix alone, or no string, does not match. Only a `custom` binding
+  (`--issuer`) takes a prefix: the platforms' profiles pin IDs their
+  platform never reuses. Every other claim still matches exactly
+  (`--claim project=prj_42`), and the token must match them all.
+- **`--repeats`** says the issuer hands out the same token again until it
+  expires. Coffre then never spends it, as it never spends Azure's, so a
+  second `coffre run` in the sandbox signs in with the token the first one
+  used. Without it, that second run is refused `replayed`. In exchange,
+  the binding takes such a token only on these terms:
+  - it lives an hour at most, from its `iat` to its `exp`, and is taken
+    at most an hour after its `iat`;
+  - each session it makes ends at its `exp`;
+  - its audience is the instance's URL and its issuer the binding's,
+    signed by that issuer's keys, as for every token;
+  - only a key-bound session's binding (`--workload`) repeats:
+    `/api/auth/oidc`'s bearer credential, which reads values, still spends
+    every token.
+- **`--proof oidc:<file>`** reads the token from the file before each
+  sign-in, so a session's next proof sends the issuer's next token.
+  `--proof oidc` still reads one token from standard input.
+
+**What a copy of a repeating token does.** Without `--repeats`, a copy of
+a token signs in only if it reaches coffre before the sandbox's own
+sign-in, and once. With it, a copy, taken from the sandbox's disk or its
+logs, signs in for any key until the token's `exp`, an hour after its
+issuer signed it at most, as many times as it is sent. Its sessions are
+the binding's: use-only, within its scope, reading only its `reads`, and
+each ends at that `exp`. `--source` narrows where a copy works from, where
+the sandboxes' egress addresses are yours, and freezing the binding stops
+its sessions at once (`coffre freeze`). Nor is a copy's use seen: where
+a spent token's second use is refused `replayed`, a repeating one's signs
+in, with no refusal and no alert. The log names the token by its hash in
+each sign-in's `token.exchange` entry, beside the address it came from, so
+an audit lists the sessions one token made. Nothing else changes: a prefix
+admits only the `sub`s under it, an exact claim only its value, and no
+binding takes a token of another issuer or audience.
+
 ### Any language
 
 Run the sidecar beside the app, or wrap the app's command:
@@ -645,7 +711,7 @@ coffre serve --url https://secrets.acme.example --service api-prod \
 |---|---|
 | `--url` | The instance. |
 | `--service` | The service account. |
-| `--proof` | `kubernetes[:<file>]`, `aws`, `gcp`, `azure:<audience>`, `fly`, `vercel`, `github`, `enrollment` or `oidc`. The last two read their secret from standard input, never an argument or a variable. |
+| `--proof` | `kubernetes[:<file>]`, `aws`, `gcp`, `azure:<audience>`, `fly`, `vercel`, `github`, `enrollment`, `oidc` or `oidc:<file>`. `enrollment` and `oidc` read their secret from standard input, never an argument or a variable; `oidc:<file>` reads the file before each sign-in. |
 | `--listen` | Where the app reaches it: `127.0.0.1:7300` unless given, `[::1]:7300`, or `unix:<path>`. |
 | `--tunnel` | `<name>=<host>:<port>`, a Postgres listener for the database tunnel `name`. Repeat it for each. |
 | `--place` | Which environment the tunnels are in, `market/prod`, when the session reaches several. |
@@ -839,7 +905,9 @@ an earlier exposure still works. By kind of credential:
 - **Azure's tokens repeat.** A managed identity hands the same cached token
   to every replica and restart for up to 24 hours, so coffre cannot spend it
   once. A leaked one works with any key until it expires. A NAT gateway's
-  dedicated addresses in `sources` close that. Vercel's function token
+  dedicated addresses in `sources` close that. A `custom` binding with
+  `--repeats` takes its issuer's tokens the same way, for an hour at most
+  ([above](#capy-and-any-issuer-whose-sub-names-each-run)). Vercel's function token
   repeats too. `vercel()` exchanges it for one that names the key, so a
   token copied on its way to coffre is useless to another key, but a leaked
   function token can still be exchanged, for any key, until it expires.

@@ -123,6 +123,47 @@ test('any other issuer, by its claims', async () => {
   await assert.rejects(bindingFrom({ issuer: 'https://idp.acme.example', claim: ['sub'] }, lookup), /--claim takes <name>=<value>/);
 });
 
+test('a custom binding takes a claim by its prefix, whole segments ended by "/", beside exact claims; and, for a key-bound session, tokens its issuer repeats', async () => {
+  const CAPY = 'https://api.capy.ai/oidc/orgs/org_7Q';
+  const flags: TrustFlags = { issuer: CAPY, 'claim-prefix': ['sub=org/org_7Q/project/prj_42/'], claim: ['project=prj_42'], workload: true, repeats: true };
+  const made = await bindingFrom(flags, lookup, { service: 'token:capy' });
+  assert.deepEqual(made, { profile: 'custom', issuer: CAPY, claims: { project: 'prj_42', sub: { prefix: 'org/org_7Q/project/prj_42/' } }, policy: { repeats: true } });
+  // As the server stores it, which checks it again.
+  assert.deepEqual(checkBinding({ profile: made.profile, issuer: made.issuer, claims: made.claims }).claims, { project: 'prj_42', sub: { prefix: 'org/org_7Q/project/prj_42/' } });
+  // One that stops mid-segment would take prj_423 too: refused here, before anything is asked.
+  await assert.rejects(bindingFrom({ ...flags, 'claim-prefix': ['sub=org/org_7Q/project/prj_42'] }, lookup), /--claim-prefix sub=org\/org_7Q\/project\/prj_42: .*would also take org\/org_7Q\/project\/prj_420\/…; "org\/org_7Q\/project\/prj_42\/" takes only what is under it/);
+  // An empty segment, or none at all, is no prefix the server takes, and none is suggested.
+  for (const loose of ['sub=', 'sub=/', 'sub=/org', 'sub=org//project/']) {
+    await assert.rejects(bindingFrom({ ...flags, 'claim-prefix': [loose] }, lookup), (error: Error) => {
+      assert.match(error.message, /is whole segments, each ended by "\/", none empty/);
+      assert.doesNotMatch(error.message, /takes only what is under it/);
+      return true;
+    });
+  }
+  await assert.rejects(bindingFrom({ ...flags, claim: ['sub=x'] }, lookup), /name sub once/);
+  await assert.rejects(bindingFrom({ ...flags, 'claim-prefix': ['sub'] }, lookup), /--claim-prefix takes <name>=<value>/);
+  await assert.rejects(bindingFrom({ gcp: '104729384756102938475', 'claim-prefix': ['sub=a/'] }, lookup, { platforms }), /--claim-prefix is a custom binding's/);
+  await assert.rejects(bindingFrom({ github: 'acme/api', workflow: 'deploy.yml', branch: 'main', 'claim-prefix': ['ref=refs/'] }, lookup), /--claim-prefix is a custom binding's/);
+  // Repeating tokens are a key-bound session's alone, never a bearer credential's, and never beside a key-naming audience.
+  await assert.rejects(bindingFrom({ ...flags, workload: undefined }, lookup), /--repeats is a key-bound session's: add --workload/);
+  await assert.rejects(bindingFrom({ aws: `arn:aws:iam::${ACCOUNT}:role/ingest`, 'role-id': ROLE_ID, repeats: true }, lookup), /an aws binding takes .*, not --repeats/);
+  // What the plan says of it.
+  const plan = { ...made, issuer: CAPY, jwksUri: 'https://api.capy.ai/oidc/jwks.json', keys: null, scope: { 'market/dev': 'viewer' as const }, withheld: [] as string[], replaces: [], policy: { repeats: true as const } };
+  assert.equal(describePlan('token:capy', plan, null), [
+    `Would trust runs whose ID token, from ${CAPY}, says project=prj_42, sub starts with org/org_7Q/project/prj_42/ to sign in as service:capy, for key-bound sessions:`,
+    '  profile  custom',
+    `  issuer   ${CAPY}`,
+    '  keys     https://api.capy.ai/oidc/jwks.json',
+    '  claims   project  prj_42',
+    '           sub      starts with org/org_7Q/project/prj_42/',
+    '  reaches  viewer on market/dev',
+    '  sessions key-bound, at most 24 h from each proof',
+    '  reads    nothing: every secret value is used through coffre, never read',
+    '  tokens   never spent: one signs in again, for any key, until its exp, an hour at most',
+    '',
+  ].join('\n'));
+});
+
 test('the flags name one platform, and one of a branch or a tag', async () => {
   await assert.rejects(bindingFrom({}, lookup), /name one of --github, --gitlab or --issuer, or a workload's platform: --aws, --kubernetes/);
   await assert.rejects(bindingFrom({ github: 'acme/api', gitlab: 'acme/api' }, lookup), /name one platform, not --github and --gitlab/);

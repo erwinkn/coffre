@@ -331,7 +331,9 @@ export type Api = {
           thumbprint: string;
         }[];
         claims: {
-          [key: string]: string | string[];
+          [key: string]: string | string[] | {
+            prefix: string;
+          };
         };
         scope: null | {
           [key: string]: string;
@@ -348,6 +350,7 @@ export type Api = {
           approve?: true;
           onContention?: "alert";
           unsignedUploads?: true;
+          repeats?: true;
           reads?: {
             [key: string]: "*" | string[];
           };
@@ -399,7 +402,9 @@ export type Api = {
         thumbprint: string;
       }[];
       claims: {
-        [key: string]: string | string[];
+        [key: string]: string | string[] | {
+          prefix: string;
+        };
       };
       scope: {
         [key: string]: string;
@@ -416,6 +421,7 @@ export type Api = {
         approve?: true;
         onContention?: "alert";
         unsignedUploads?: true;
+        repeats?: true;
         reads?: {
           [key: string]: "*" | string[];
         };
@@ -1776,7 +1782,9 @@ export type BindingPlan = {
     thumbprint: string;
   }[];
   claims: {
-    [key: string]: string | string[];
+    [key: string]: string | string[] | {
+      prefix: string;
+    };
   };
   scope: {
     [key: string]: string;
@@ -1793,6 +1801,7 @@ export type BindingPlan = {
     approve?: true;
     onContention?: "alert";
     unsignedUploads?: true;
+    repeats?: true;
     reads?: {
       [key: string]: "*" | string[];
     };
@@ -1815,7 +1824,9 @@ export type BindingView = {
     thumbprint: string;
   }[];
   claims: {
-    [key: string]: string | string[];
+    [key: string]: string | string[] | {
+      prefix: string;
+    };
   };
   scope: null | {
     [key: string]: string;
@@ -1832,6 +1843,7 @@ export type BindingView = {
     approve?: true;
     onContention?: "alert";
     unsignedUploads?: true;
+    repeats?: true;
     reads?: {
       [key: string]: "*" | string[];
     };
