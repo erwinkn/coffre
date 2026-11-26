@@ -72,6 +72,7 @@ jobs:
           VERSION: ${{ inputs.version }}
           TOKEN: ${{ secrets.TERRAFORM_PROVIDER_MIRROR_TOKEN }}
         run: |
+          [[ -n "$TOKEN" ]] || { echo "TERRAFORM_PROVIDER_MIRROR_TOKEN is not set"; exit 1; }
           # Tagged on the mirror only: this checkout holds coffre's own v<version> tags.
           split="$(git subtree split --prefix terraform-provider)"
           export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader

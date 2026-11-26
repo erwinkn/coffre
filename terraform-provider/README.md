@@ -3,7 +3,8 @@
 The coffre provider for Terraform and OpenTofu: it writes coffre secrets, and
 keeps no value anywhere, not in state, a plan, a log or an error. Its design,
 and why each choice, is
-[docs/design/terraform-provider.md](../docs/design/terraform-provider.md);
+coffre's
+[docs/design/terraform-provider.md](https://github.com/erwinkn/coffre/blob/main/docs/design/terraform-provider.md);
 what a user reads is [docs/](docs/index.md), as the registries show it.
 
 ```hcl
