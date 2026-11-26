@@ -1,0 +1,70 @@
+name: Terraform provider
+
+# The provider (terraform-provider/, docs/design/terraform-provider.md), on a
+# change to it or to what it calls: the secrets API, the sign-in, the vault's
+# write, and the deployment its acceptance tests boot.
+on:
+  pull_request:
+    paths:
+      - 'terraform-provider/**'
+      - '.github/workflows/terraform-provider.yml'
+      - '.github/workflows/terraform-provider-release.yml'
+      - '.github/actions/prepare/**'
+      - 'packages/server/src/api/**'
+      - 'packages/server/src/exchange.ts'
+      - 'packages/core/src/changes/secrets.ts'
+      - 'packages/vault/src/ops/secrets.ts'
+      - 'packages/conformance/**'
+      - 'examples/workers/**'
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Provider unit tests and release config
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: terraform-provider
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: terraform-provider/go.mod
+          cache-dependency-path: terraform-provider/go.sum
+      - name: Format, vet and unit tests
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then echo "gofmt would change: $unformatted"; exit 1; fi
+          go mod verify
+          go vet ./...
+          go test -race ./internal/...
+      - name: Hold the release's configuration to GoReleaser, and build it once
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          version: v2.20.3
+          workdir: terraform-provider
+          args: build --snapshot --clean --single-target
+
+  acceptance:
+    name: Provider acceptance (Terraform and OpenTofu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: terraform-provider/go.mod
+          cache-dependency-path: terraform-provider/go.sum
+      - name: Start Postgres, the deployment's database
+        run: |
+          ./scripts/ensure-postgres.sh
+          node --conditions=coffre:source scripts/ensure-database.mjs coffre
+      - name: Acceptance tests, each on Terraform 1.11 and newest, OpenTofu 1.11 and newest
+        working-directory: terraform-provider
+        run: |
+          export COFFRE_ACC_BINARIES="$(scripts/binaries.sh "$RUNNER_TEMP/terraform-binaries")"
+          TF_ACC=1 go test ./acceptance/ -count=1 -v -timeout 20m
