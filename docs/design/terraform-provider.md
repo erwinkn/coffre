@@ -68,11 +68,12 @@ Every call is one the CLI and the pages already make, on `/api`:
 | destroy | `PATCH /secrets/billing/prod/STRIPE_KEY` `{"archived": true}`: coffre deletes no key, it keeps its history, and an archived key can be brought back |
 | import | `terraform import coffre_secret.stripe billing/prod/STRIPE_KEY`, then a refresh |
 
-The service account lists the environment (`secret.read` or `secret.use`),
-writes it (`secret.write`) and archives in it (`secret.archive`). No
-built-in role holds exactly those: `maintainer` holds them and
-`environment.manage`, and a custom role with the four `secret.*`
-permissions holds no more than they need.
+The service account lists the environment (`secret.use`), writes it
+(`secret.write`) and archives in it (`secret.archive`), and never reads a
+value back. No built-in role holds exactly those: `maintainer` holds them,
+`secret.read` and `environment.manage`. A custom role with those three
+holds no more than the provider needs, and without `secret.read` the
+account cannot reveal a value at all.
 
 A change of `value_wo_version` or `sensitivity` is an update, and both
 write the configured value again: a sensitivity is changed by writing the
@@ -96,6 +97,7 @@ pages, making version 8:
   ~ resource "coffre_secret" "stripe" {
       ~ version    = 8 -> (known after apply)
       ~ version_id = "4f1e…" -> (known after apply)
+      ~ updated_by = "ada@acme.example" -> (known after apply)
     }
 Warning: billing/prod/STRIPE_KEY was written outside Terraform
   It is at version 8, written by ada@acme.example. Applying writes the configured value over it.
@@ -137,9 +139,12 @@ the provider reads the listing and writes once more, replacing the
 inherited version: the configuration asks for this environment's own
 value, whatever the parent holds, and the parent's is not changed. That
 takes the listing to show the inherited version, so a service account that
-lists the parent too (`secret.read` or `secret.use` there); when it shows
-none (the parent is not the account's to list, or its key is a
-reference), the provider says so and writes nothing.
+lists the parent too (`secret.use` there); when it shows none (the
+parent is not the account's to list, or its key is a reference), the
+provider says so and writes nothing. The same holds for an update or an
+import that finds the key inherited with no version listed, such as an
+override reset outside Terraform: the plan has nothing to replace, and the
+apply refuses.
 
 What is not guarded, on purpose:
 
@@ -151,12 +156,22 @@ What is not guarded, on purpose:
   `version_id` and `updated_by` are computed, so any value is consistent
   with the plan), keeps the configured `sensitivity`, and the next plan
   reports drift (section 3). It never takes their version for its own: it
-  checks the number its write was answered with. A key archived between
-  the two calls lists no version: the state keeps the number written, with
-  no id, and the next refresh finds the key archived. One race goes
-  unseen: the key renamed away and another made under its name, at the
-  same version number, between the two calls, milliseconds apart; the
-  provider then takes the new key for its own, and reports no drift on it.
+  takes a row as its own only when it is this environment's own live
+  value (not archived, not a reference, and not what a parent passes
+  down) at the number its write was answered with. Anything else is
+  drift. For example, a fork's override reset between the two calls lists
+  the parent's row, and the parent may well be at version 1 too: the
+  number matches, the row is not the write's, and the next plan reports
+  it. An archived key still lists its version, marked `archived`, and the
+  next refresh drops it from the state. If the listing fails (a given ID
+  token's five-minute session ended between the calls, say), the write
+  has landed all the same: the provider saves the state with the number
+  written and no id, warns, and the next refresh lists it again, so the
+  key is not left made and unrecorded, which the next create would
+  refuse as `stale`. One race goes unseen: the key renamed away and
+  another made under its name, at the same version number, between the
+  two calls, milliseconds apart; the provider then takes the new key for
+  its own, and reports no drift on it.
 
 ## 5. The one addition to coffre
 
@@ -182,8 +197,10 @@ Two more were weighed, and are not needed:
 
 - **The write's answer naming the new version's id.** The listing after a
   write gives it (section 4), at one call per write, and a write is rare.
-  It would also close the one race the listing leaves (section 4), which
-  takes two changes of the key's name within milliseconds and costs only
+  To drop that listing, the answer would have to name the row and its
+  author too (`secret`, `updatedBy`), not just the version's id. It would
+  close the one race the listing leaves (section 4), which takes a rename
+  and another key made under its name within milliseconds and costs only
   a drift unreported: not worth a second change to the API now.
 - **`replaces` on a mark**, a sensitivity changed in place. The provider
   never marks: it writes the value again (section 2), with `replaces`.
