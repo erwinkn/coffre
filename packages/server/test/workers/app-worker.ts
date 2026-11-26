@@ -12,15 +12,18 @@
 // database, whose WebSockets go to their Durable Object, `SOCKETS`. Its
 // `CoffreWorkload` entrypoint is what another Worker binds with `props`: the
 // Worker binds it itself, under several props (`COFFRE_*`), and `/as/<binding>/…`
-// asks through one, as a bound Worker's fetch would. The
+// asks through one, as a bound Worker's fetch would; `/rpc/<binding>` calls one of
+// its methods, as a bound Worker's `env.COFFRE.sign(…)` would, for the signers,
+// the verifier and the AWS-signed credential `keys`' environment holds. The
 // vault's key is a key service's stand-in, which `/key-service` makes give
 // out partway through a call.
+import type { CoffreBinding } from '@coffre/client/workload';
 import { github, signin } from '@coffre/core/identity';
 import { derivedSigningKey, KekUnavailableError, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
 import { postgres as vaultDatabase, vault } from '@coffre/vault/cloudflare';
 
 import { createCoffre, postgres, type GatesNamespace, type SocketsNamespace, type Vault as VaultBinding, type WaitUntil } from '../../src/cloudflare.ts';
-import { allow, credentialProxy, header, postgres as tunnel } from '../../src/plugins/credential-proxy.ts';
+import { allow, credentialProxy, header, hmac, postgres as tunnel, privateKey, sigv4 } from '../../src/plugins/credential-proxy.ts';
 import { vaultKv } from '../../src/plugins/vault-kv.ts';
 import { processLimits } from '../../src/workloads/limits.ts';
 
@@ -34,14 +37,13 @@ type Env = {
   VAULT: VaultBinding;
   GATES: GatesNamespace;
   SOCKETS: SocketsNamespace;
-  /** `CoffreWorkload`, bound with props naming `edge`, `token:edge`, `ghost` (a service with no binding), and none. */
-  COFFRE_EDGE: Fetcher;
-  COFFRE_TOKEN_EDGE: Fetcher;
-  COFFRE_GHOST: Fetcher;
-  COFFRE_NO_PROPS: Fetcher;
+  /** `CoffreWorkload`, bound with props naming `edge`, `token:edge`, `keys`, `ghost` (a service with no binding), and none. */
+  COFFRE_EDGE: CoffreBinding;
+  COFFRE_TOKEN_EDGE: CoffreBinding;
+  COFFRE_KEYS: CoffreBinding;
+  COFFRE_GHOST: CoffreBinding;
+  COFFRE_NO_PROPS: CoffreBinding;
 };
-
-type Fetcher = { fetch(request: Request): Promise<Response> };
 
 /** The upstream `echo` and its kin answer from: what it was sent, the key reversed so that the proxy's redaction leaves it. */
 const echoed = { fetch: async (url: URL, init: RequestInit) => Response.json({ path: url.pathname, reversed: [...(new Headers(init.headers).get('authorization') ?? '')].reverse().join('') }) };
@@ -97,7 +99,12 @@ const coffre = createCoffre((env: Env) => ({
         // The same key, held to one path by its rules, and to one request a minute by its limit.
         ruled: { upstream: 'https://api.echo.example/v1', inject: header('authorization', 'Bearer {API_KEY}'), egress: echoed, rules: [allow('GET', '/ping')] },
         once: { upstream: 'https://api.echo.example/v1', inject: header('authorization', 'Bearer {API_KEY}'), egress: echoed, limit: { perMinute: 1 } },
+        // What `presign` signs a URL with; nothing is ever sent to it here.
+        s3: { upstream: 'https://bucket.s3.eu-west-3.amazonaws.com', inject: sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' }) },
       },
+      // An HMAC secret that takes a raw message past JSON's 1 MiB, the same held to one signature a minute, and a private key.
+      signers: { mac: hmac('MAC_KEY', { encoding: 'hex', maxBytes: 2 * 1024 * 1024 }), 'mac-once': hmac('MAC_KEY', { encoding: 'hex', limit: { perMinute: 1 } }), ed25519: privateKey('SIGNING_KEY') },
+      verifiers: { hook: hmac('HOOK_SECRET', { encoding: 'hex', prefix: 'sha256=' }) },
       // The suite's database is on loopback, which only insecureUpstreams dials; its checks every second.
       tunnels: { db: tunnel('TUNNEL_URL') },
       insecureUpstreams: true,
@@ -121,8 +128,22 @@ export default {
     // As a Worker that binds coffre: its request, sent over the binding the path names, to a host the binding ignores.
     const through = /^\/as\/([A-Z_]+)(\/.*)$/.exec(new URL(request.url).pathname);
     if (through !== null) {
-      const binding = env[through[1] as keyof Env] as Fetcher;
+      const binding = env[through[1] as keyof Env] as CoffreBinding;
       return binding.fetch(new Request(`https://coffre${through[2]}${new URL(request.url).search}`, request));
+    }
+    // As a Worker that calls coffre's methods over the binding: `{ method, args }`, each `{ bytes }` among them a
+    // Uint8Array of its base64. What it threw, as the caller sees it: RPC carries an error's fields, not its class.
+    const rpc = /^\/rpc\/([A-Z_]+)$/.exec(new URL(request.url).pathname);
+    if (rpc !== null) {
+      const { method, args } = (await request.json()) as { method: 'sign' | 'verify' | 'presign'; args: unknown[] };
+      const binding = env[rpc[1] as keyof Env] as CoffreBinding;
+      const given = args.map((arg) => (typeof arg === 'object' && arg !== null && 'bytes' in arg ? new Uint8Array(Buffer.from(arg.bytes as string, 'base64')) : arg));
+      try {
+        return Response.json({ value: await (binding[method] as (...args: unknown[]) => Promise<unknown>)(...given) });
+      } catch (error) {
+        const { name, message, status, code, reason } = error as Error & { status?: number; code?: string; reason?: string };
+        return Response.json({ thrown: { name, message, status, code, reason } });
+      }
     }
     const socket = coffre.upgrade(request, env);
     if (socket !== null) return socket;

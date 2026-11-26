@@ -10,10 +10,13 @@ import { test } from 'node:test';
 import { github, signin } from '@coffre/core/identity';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 
-import { createCoffre, postgres, type CoffreContext, type SocketsNamespace, type WorkersConfig } from '../src/cloudflare.ts';
+import type { CoffreContext, SocketsNamespace, WorkersConfig } from '../src/cloudflare.ts';
 import { credentialProxy, postgres as tunnel } from '../src/plugins/credential-proxy.ts';
 import { api, auth, livez, readyz } from '../src/routes.ts';
 import { NO_COFFRE, NO_MIDDLEWARE } from '../src/wiring.ts';
+import './fixtures/workerd.ts';
+
+const { createCoffre, postgres } = await import('../src/cloudflare.ts');
 
 /** A deployment's configuration: a database no one listens at, which these never reach, and a vault never asked. */
 const config = (more: Partial<WorkersConfig> = {}) => (): WorkersConfig => ({

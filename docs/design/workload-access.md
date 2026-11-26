@@ -1529,7 +1529,7 @@ account binds it with `props` naming its service:
 ```ts
 // the app Worker: OpenAI's SDK through coffre, no key anywhere
 const openai = new OpenAI({ apiKey: 'coffre', baseURL: 'https://coffre/use/openai', fetch: (input, init) => env.COFFRE.fetch(new Request(input, init)) });
-const { signature } = await env.COFFRE.sign('dfns-key', challenge);   // RPC: sign, verify, presign, mint
+const signature = await env.COFFRE.sign('dfns-key', challenge);   // RPC: sign, verify, presign; mint after PR 7
 ```
 
 The host in `baseURL` is ignored, because the binding is the route. The
@@ -2002,12 +2002,15 @@ choice or 0.16 changed the ground under it:
   headers go on as a handle's do. The service's gate is asked only for the
   counts a credential's `limit` makes; a credential with a limit is refused
   `no_gate` on a deployment without one.
-- **The entrypoint is an object with a `fetch`**, which workerd takes as a
-  named entrypoint, and reads `ctx.props`: a `WorkerEntrypoint` class
-  needs `cloudflare:workers`, which the server's modules, loaded on Node in
-  its tests, cannot import. The RPC methods (`sign`, `verify`, `presign`,
-  later `mint`) need that class and are not built; `POST
-  /use/<project>/<env>` reaches the same operations through `fetch`.
+- **The entrypoint is a `WorkerEntrypoint`**, `this.ctx.props` its
+  caller's. Its RPC methods, `sign`, `verify` and `presign`, each build
+  `POST /use[/<project>/<env>]` with the HTTP form's body and send it
+  through `fetch`'s route, so the proxy decides, logs and refuses them as
+  over HTTP; a refusal is thrown as a `CoffreError` with the answer's
+  status, code and reason, which RPC carries as an error's own fields.
+  `mint` waits for PR 7. On Node, which has no `cloudflare:workers`, the
+  server's tests that load the Workers entry stand a class in for it
+  (`packages/server/test/fixtures/workerd.ts`).
 - **The log names the bindings, not a credential:** `credential: null`,
   and `binding:<id>` among the objects of each serving binding. No last
   use is moved on: a binding's is a date only changes write.

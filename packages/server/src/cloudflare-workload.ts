@@ -16,10 +16,19 @@
 // What vouches for the service is Cloudflare's: `props` comes from the
 // calling Worker's deploy configuration, which its code cannot change. So
 // whoever may deploy Workers to the account may name any service, and could
-// as well deploy coffre itself. `sign`, `verify` and `presign` over RPC
-// come later; `POST /use/<project>/<env>` with `{ sign: … }` reaches them
-// through `fetch` meanwhile.
+// as well deploy coffre itself.
+//
+// Its RPC methods, `env.COFFRE.sign(…)`, `verify(…)` and `presign(…)`, are
+// the same operations as `POST /use/<project>/<env>` with `{ sign: … }`:
+// each builds that request and sends it through `fetch`'s own route, so the
+// proxy decides, refuses and logs them as it does over HTTP, and answers
+// what the operation makes, never a value. A refusal is thrown as a
+// `CoffreError` with the status, code and reason the HTTP form answers.
 import { CoffreError } from '@coffre/client';
+import { JSON_MESSAGE_BYTES } from '@coffre/client/dpop';
+import type { CoffreBinding, PresignOptions } from '@coffre/client/workload';
+import { WorkerEntrypoint } from 'cloudflare:workers';
+
 import { migrating, schemaReady } from './app.ts';
 import { errorResponse } from './http.ts';
 import { bindingRoute } from './plugins.ts';
@@ -43,39 +52,130 @@ export function boundService(props: unknown): string | null {
 const refusal = (status: number, message: string, reason: string) =>
   Response.json({ error: status === 404 ? 'not_found' : 'forbidden', reason, message }, { status, headers: { 'coffre-proxy': 'refused' } });
 
+/** The entrypoint's class, as the deployment exports it: workerd makes one for each call over a binding, with its `ctx` and `env`. */
+export type WorkloadEntrypoint<Env> = new (ctx: BoundContext, env: Env) => Omit<CoffreBinding, 'fetch'> & { fetch(request: Request): Promise<Response> };
+
+/** What a call over the binding is given to run on: its runtime, and `end`, which closes its database client. */
+type Open<Env> = (env: Env) => { runtime: CoffreRuntime; end(): Promise<void> };
+
 /**
  * The entrypoint, over the runtime `open` makes for each call: its database
  * client, which `end` closes once the answer and the work it left are done.
- * An object with a `fetch`, as workerd takes a named entrypoint, so the
- * server's modules load on Node, which has no `cloudflare:workers`.
+ * Its public methods are what a bound Worker may call: every one on the
+ * prototype is callable over RPC, so what they share is private or the
+ * module's.
  */
-export function workloadEntrypoint<Env>(open: (env: Env) => { runtime: CoffreRuntime; end(): Promise<void> }) {
-  return {
-    async fetch(request: Request, env: Env, ctx: BoundContext): Promise<Response> {
-      const service = boundService(ctx.props);
-      if (service === null) return refusal(403, 'this binding names no service: its props say { "service": "<name>" }, the service account coffre holds it to', 'props');
-      // A WebSocket, a tunnel's, comes from `coffre run`'s listener with a handle or a session, never over a binding.
-      if (request.headers.get('upgrade') !== null) return refusal(403, 'a call over a service binding opens no WebSocket', 'bound');
-      const { runtime, end } = open(env);
-      const left: Promise<unknown>[] = [];
-      const track = (work: Promise<unknown>) => void left.push(work);
-      try {
-        // Below this version's migrations, the answer every request gets at coffre's one door (`respond`).
-        if (!(await schemaReady(runtime))) return migrating(request);
-        const answer = bindingRoute(request, runtime, service, track);
-        if (answer === null) return refusal(404, 'a Worker bound to coffre reaches its plugins alone: /use/<credential>/<path>', 'not_found');
-        return await answer;
-      } catch (error) {
-        // A plugin's refusal, a `CoffreError` by contract (`PluginContext`), is the refusal it says, not a fault.
-        if (error instanceof CoffreError) return Response.json({ error: error.code, reason: error.reason ?? error.code, message: error.message }, { status: error.status, headers: { 'coffre-proxy': 'refused' } });
-        return errorResponse(error);
-      } finally {
-        // The upstream's body streams after this; nothing of it reads the database, which goes once the work left is done.
-        ctx.waitUntil((async () => {
-          while (left.length > 0) await Promise.allSettled(left.splice(0));
-          await end();
-        })());
-      }
-    },
+export function workloadEntrypoint<Env>(open: Open<Env>): WorkloadEntrypoint<Env> {
+  return class CoffreWorkload extends WorkerEntrypoint<Env> implements Omit<CoffreBinding, 'fetch'> {
+    fetch(request: Request): Promise<Response> {
+      return served(request, this.env, this.ctx, open);
+    }
+
+    async sign(signer: string, message: string | Uint8Array, options: { place?: string } = {}): Promise<string> {
+      const bytes = bytesOf(message, 'sign');
+      // Past what JSON takes, raw, as the SDK sends it: an hmac() signer's whose maxBytes takes it, signed as it comes.
+      const made = bytes.byteLength > JSON_MESSAGE_BYTES
+        ? await this.#made(placed(options), { 'content-type': 'application/octet-stream', 'content-length': String(bytes.byteLength) }, bytes, `?sign=${encodeURIComponent(named(signer, 'sign'))}`)
+        : await this.#made(placed(options), JSON_HEADERS, JSON.stringify({ sign: { credential: named(signer, 'sign'), message: base64url(bytes) } }));
+      if (typeof made.signature !== 'string') throw new Error('coffre signed nothing');
+      return made.signature;
+    }
+
+    async verify(verifier: string, message: string | Uint8Array, signature: string, options: { place?: string } = {}): Promise<boolean> {
+      if (typeof signature !== 'string') throw argument('verify takes the signature as a string, as its header carried it');
+      const asked = { verify: { credential: named(verifier, 'verify'), message: base64url(bytesOf(message, 'verify')), signature } };
+      const made = await this.#made(placed(options), JSON_HEADERS, JSON.stringify(asked));
+      if (typeof made.valid !== 'boolean') throw new Error('coffre verified nothing');
+      return made.valid;
+    }
+
+    async presign(credential: string, path: string, options: PresignOptions & { place?: string } = {}): Promise<{ url: string; expiresAt: string }> {
+      if (typeof path !== 'string') throw argument('presign takes the path under the credential as a string, /bucket/key');
+      const { expiresIn, method, query } = plain(options, 'presign') as PresignOptions;
+      if (expiresIn !== undefined && typeof expiresIn !== 'number') throw argument('presign takes expiresIn as a number of seconds');
+      if (method !== undefined && typeof method !== 'string') throw argument('presign takes method as a string, GET or HEAD');
+      if (query !== undefined && Object.values(plain(query, 'presign\'s query')).some((value) => typeof value !== 'string')) throw argument('presign takes query as an object of strings');
+      // The operation checks the rest, as over HTTP: the method, how long, the path under the credential.
+      const asked = { presign: { credential: named(credential, 'presign'), path, ...(method === undefined ? {} : { method }), ...(expiresIn === undefined ? {} : { expiresIn }), ...(query === undefined ? {} : { query }) } };
+      const made = await this.#made(placed(options), JSON_HEADERS, JSON.stringify(asked));
+      if (typeof made.url !== 'string' || typeof made.expiresAt !== 'string') throw new Error('coffre presigned nothing');
+      return { url: made.url, expiresAt: made.expiresAt };
+    }
+
+    /**
+     * What the operation made, `POST /use[/<project>/<env>]<query>` with
+     * `body` through `fetch`'s route: its JSON answer, or its refusal
+     * thrown as the `CoffreError` its status and body say.
+     */
+    async #made(place: string, headers: Record<string, string>, body: string | Uint8Array<ArrayBuffer>, query = ''): Promise<Record<string, unknown>> {
+      const request = new Request(`https://coffre/use${place}${query}`, { method: 'POST', headers: { ...headers, accept: 'application/json' }, body });
+      const response = await served(request, this.env, this.ctx, open);
+      const answer = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      if (response.ok && typeof answer === 'object' && answer !== null) return answer;
+      const said = (key: string) => (typeof answer?.[key] === 'string' ? (answer[key] as string) : undefined);
+      throw new CoffreError(response.ok ? 502 : response.status, said('error') ?? 'refused', said('message') ?? `coffre answered ${response.status}`, said('reason'));
+    }
   };
 }
+
+/** A call over the binding, by `fetch` or by a method: the service its props name, then the plugin whose route takes the path. */
+async function served<Env>(request: Request, env: Env, ctx: BoundContext, open: Open<Env>): Promise<Response> {
+  const service = boundService(ctx.props);
+  if (service === null) return refusal(403, 'this binding names no service: its props say { "service": "<name>" }, the service account coffre holds it to', 'props');
+  // A WebSocket, a tunnel's, comes from `coffre run`'s listener with a handle or a session, never over a binding.
+  if (request.headers.get('upgrade') !== null) return refusal(403, 'a call over a service binding opens no WebSocket', 'bound');
+  const { runtime, end } = open(env);
+  const left: Promise<unknown>[] = [];
+  const track = (work: Promise<unknown>) => void left.push(work);
+  try {
+    // Below this version's migrations, the answer every request gets at coffre's one door (`respond`).
+    if (!(await schemaReady(runtime))) return migrating(request);
+    const answer = bindingRoute(request, runtime, service, track);
+    if (answer === null) return refusal(404, 'a Worker bound to coffre reaches its plugins alone: /use/<credential>/<path>', 'not_found');
+    return await answer;
+  } catch (error) {
+    // A plugin's refusal, a `CoffreError` by contract (`PluginContext`), is the refusal it says, not a fault.
+    if (error instanceof CoffreError) return Response.json({ error: error.code, reason: error.reason ?? error.code, message: error.message }, { status: error.status, headers: { 'coffre-proxy': 'refused' } });
+    return errorResponse(error);
+  } finally {
+    // The upstream's body streams after this; nothing of it reads the database, which goes once the work left is done.
+    ctx.waitUntil((async () => {
+      while (left.length > 0) await Promise.allSettled(left.splice(0));
+      await end();
+    })());
+  }
+}
+
+const JSON_HEADERS = { 'content-type': 'application/json' };
+
+/** A bound Worker's argument coffre cannot take: refused as the HTTP form refuses a body it cannot read. */
+const argument = (message: string) => new CoffreError(400, 'bad_request', message);
+
+/** The URL path a call's `place` names, `/<project>/<env>`, or none, for the one the service's bindings name. */
+function placed(options: unknown): string {
+  const { place } = plain(options, 'a call') as { place?: unknown };
+  if (place === undefined) return '';
+  if (typeof place !== 'string' || !/^[^/]+\/[^/]+$/.test(place)) throw argument('place names an environment as project/environment, market/prod');
+  return `/${place.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+/** The signer, verifier or credential a call names, as a string. */
+function named(name: unknown, what: string): string {
+  if (typeof name !== 'string') throw argument(`${what} names its ${what === 'presign' ? 'credential' : what === 'sign' ? 'signer' : 'verifier'} as a string`);
+  return name;
+}
+
+/** An options object as RPC carried it: a plain object, never a stub of the caller's that would answer each read. */
+function plain(value: unknown, what: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Object.getPrototypeOf(value) !== Object.prototype) throw argument(`${what} takes its options as a plain object`);
+  return value as Record<string, unknown>;
+}
+
+/** A message's bytes: a string's UTF-8, as the SDK sends it, or the bytes given. */
+function bytesOf(message: unknown, what: string): Uint8Array<ArrayBuffer> {
+  if (typeof message === 'string') return new TextEncoder().encode(message);
+  if (message instanceof Uint8Array) return new Uint8Array(message);
+  throw argument(`${what} takes the message as a string or a Uint8Array`);
+}
+
+const base64url = (bytes: Uint8Array) => Buffer.from(bytes).toString('base64url');

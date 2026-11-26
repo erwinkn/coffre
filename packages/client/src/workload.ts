@@ -117,9 +117,34 @@ export interface UsedCredential {
   /** The plaintext `sealed` holds under the cipher's key and `aad`, or null when it does not decrypt. */
   decrypt(sealed: Sealed, aad?: string | Uint8Array): Promise<Uint8Array | null>;
   /** A presigned GET or HEAD of `path` under an AWS-signed credential's upstream: the upstream's own URL, for anyone until `expiresAt`. */
-  presign(path: string, options?: { expiresIn?: number; method?: 'GET' | 'HEAD'; query?: Record<string, string> }): Promise<{ url: string; expiresAt: string }>;
+  presign(path: string, options?: PresignOptions): Promise<{ url: string; expiresAt: string }>;
   /** A short-lived child of a minter (an AWS session, a GitHub installation token), where the binding lists it. */
   mint<T = Record<string, string>>(): Promise<T & { expiresAt: string }>;
+}
+
+/** What a presigned URL is for: GET unless set, for 900 seconds unless set (an hour at most), with these query parameters signed in. */
+export type PresignOptions = { expiresIn?: number; method?: 'GET' | 'HEAD'; query?: Record<string, string> };
+
+/**
+ * coffre as a Cloudflare Worker of its account holds it, `env.COFFRE`, once
+ * it binds coffre's `CoffreWorkload` entrypoint with `props` naming its
+ * service (docs/workloads.md, "Cloudflare Workers"). Nothing to prove and
+ * nothing to store: each call is that service's, one use of the vault, and
+ * hands back what coffre makes with a value, never the value. `place`,
+ * `market/prod`, names the environment, unless the service's `cloudflare`
+ * bindings name exactly one. A refusal rejects as coffre words it over
+ * HTTP: an `Error` whose `name` is `CoffreError`, with its `status`,
+ * `code` and `reason` (RPC carries an error's fields, not its class).
+ */
+export interface CoffreBinding {
+  /** `https://coffre/use/<credential>/<path>`, any host: the credential proxy, which adds the key on the way out. */
+  fetch(input: Request | string | URL, init?: RequestInit): Promise<Response>;
+  /** A signature by a signer's key, as `credential(name).sign(message)` makes it: a private key's base64url, an HMAC secret's as its `hmac()` writes it. */
+  sign(signer: string, message: string | Uint8Array, options?: { place?: string }): Promise<string>;
+  /** Whether `signature`, as its header carried it, is a verifier's HMAC of `message`, the webhook's body as it came. */
+  verify(verifier: string, message: string | Uint8Array, signature: string, options?: { place?: string }): Promise<boolean>;
+  /** A presigned GET or HEAD of `path` under an AWS-signed credential's upstream: the upstream's own URL, for anyone until `expiresAt`. */
+  presign(credential: string, path: string, options?: PresignOptions & { place?: string }): Promise<{ url: string; expiresAt: string }>;
 }
 
 /** A session as the exchange answers it. */

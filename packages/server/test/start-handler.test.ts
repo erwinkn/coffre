@@ -11,7 +11,7 @@ import { signin, github } from '@coffre/core/identity';
 
 import type { Vault } from '@coffre/core/vault';
 
-import { createCoffre, postgres } from '../src/cloudflare.ts';
+import './fixtures/workerd.ts';
 
 const entries: Record<string, string> = {
   '#tanstack-router-entry': './fixtures/start/router.ts',
@@ -26,6 +26,7 @@ registerHooks({
 process.env.TSS_DEV_SERVER = 'true';
 process.env.TSS_SERVER_FN_BASE = '/_serverFn/';
 const { createStartHandler, defaultStreamHandler } = await import('@tanstack/react-start/server');
+const { createCoffre, postgres } = await import('../src/cloudflare.ts');
 
 // No request here reaches the vault, nor the database, which is not there: an
 // unreachable one lets the migration check through, as in an outage.

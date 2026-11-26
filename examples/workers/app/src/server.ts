@@ -19,6 +19,8 @@ export const CoffreGates = coffre.Gates;
  * the service its props name, with nothing to prove (docs/workloads.md,
  * "Cloudflare Workers"): `"services": [{ "binding": "COFFRE", "service":
  * "<this Worker>", "entrypoint": "CoffreWorkload", "props": { "service":
- * "edge-api" } }]` in that Worker's wrangler.jsonc.
+ * "edge-api" } }]` in that Worker's wrangler.jsonc. It calls
+ * `env.COFFRE.fetch(…)`, and `env.COFFRE.sign(…)`, `verify(…)` and
+ * `presign(…)` over RPC (`CoffreBinding`, from `@coffre/client/workload`).
  */
 export const CoffreWorkload = coffre.Workload;
