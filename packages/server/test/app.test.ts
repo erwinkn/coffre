@@ -333,6 +333,11 @@ test('a value that replaces nothing (`null`) is written only while the key holds
     const [status, said] = await patch('market/fork', { [key]: nothing('own') });
     assert.deepEqual([status, said.reason], [409, 'stale'], why);
   }
+  // Once the fork dismisses S_KEY, nothing is passed down: the write makes the fork's own, and ends the dismissal.
+  const [dismissed] = await answered(app.request('/api/projects/market/fork/dismissals', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ S_KEY: true }) })));
+  assert.equal(dismissed, 200);
+  const [own, owned] = await patch('market/fork', { S_KEY: nothing('own') });
+  assert.deepEqual([own, owned.keys], [200, { S_KEY: { version: 1, sensitivity: 'secret' } }], JSON.stringify(owned));
   // In a personal config, a key of the environment it is a config of is passed down; one of none is made, in a config made for it.
   const [personal, mine] = await patch('market/prod@me', { DATABASE_URL: nothing('mine') });
   assert.deepEqual([personal, mine.reason], [409, 'stale']);
