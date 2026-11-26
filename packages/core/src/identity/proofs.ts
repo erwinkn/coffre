@@ -165,11 +165,12 @@ export function profileRefusal(binding: Pick<ProofBinding, 'profile' | 'issuer' 
  * Whether a proof is spent once it is traded, by the SHA-256 of what was
  * signed: a CI run's token always; a session's token unless it names the
  * session's key, which works for no other, or its platform hands the same
- * one out again (`REPEATING_PROFILES`), which spending would refuse.
+ * one out again (`REPEATING_PROFILES`, or a binding whose policy says it
+ * `repeats`), which spending would refuse.
  */
 export function spends(binding: Pick<ProofBinding, 'profile'>, policy: BindingPolicy | null, wanted: ProofFor['kind']): boolean {
   if (wanted === 'run') return true;
-  return policy?.keyAudience !== true && !REPEATING_PROFILES.includes(binding.profile as WorkloadProfile);
+  return policy?.keyAudience !== true && policy?.repeats !== true && !REPEATING_PROFILES.includes(binding.profile as WorkloadProfile);
 }
 
 /**
@@ -216,7 +217,8 @@ export type IdTokenMatch<B extends ProofBinding> = { binding: B; policy: Binding
  * 4. that audience, the token's own, alone;
  * 5. the oldest whose claims match (`oldestMatching`);
  * 6. an hour's age after all, if the binding that matched is of a
- *    platform that hands out no token twice;
+ *    platform that hands out no token twice; and an hour's lifetime, `iat`
+ *    to `exp`, if its policy says its tokens repeat, since none is spent;
  * 7. its profile's own rule (`profileRefusal`).
  *
  * `bindings` are the sealed rows the read found: a decision that picks the
@@ -238,6 +240,8 @@ export function matchIdToken<B extends ProofBinding>(token: DecodedToken, bindin
   const policy = policyOf(binding)!;
   // A token its platform hands out again is as old as the platform's cache; one of another platform beside it is an hour old at most.
   if (repeats && !REPEATING_PROFILES.includes(binding.profile as WorkloadProfile) && issuedRefusal(claims.iat, now / 1000) !== null) return { refused: 'too_old' };
+  // A token no one spends is a bearer until its `exp`: an hour after its issuer signed it, at most.
+  if (policy?.repeats === true && claims.exp - claims.iat > MAX_TOKEN_AGE_SECONDS) return { refused: 'too_old' };
   if (policy !== null && profileRefusal(binding, policy, claims) !== null) return { refused: 'malformed' };
   return { binding, policy, claims, spends: spends(binding, policy, wanted.kind) ? token.signingInputHash : null };
 }

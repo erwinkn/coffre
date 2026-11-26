@@ -37,6 +37,7 @@ import {
   parseCidr,
   POLICY_FIELDS,
   PROFILE_URNS,
+  shownClaim,
   type BindingClaims,
   type ClaimValue,
   type WorkloadProfile,
@@ -55,6 +56,8 @@ export type TrustFlags = {
   source?: string[];
   issuer?: string;
   claim?: string[];
+  /** A custom binding's claims matched by their start: `sub=org/1/project/2/`. */
+  'claim-prefix'?: string[];
   branch?: string;
   tag?: string;
   /** Repeated, or a comma list. */
@@ -87,6 +90,7 @@ export type TrustFlags = {
   reads?: string[];
   'session-hours'?: string;
   'unsigned-uploads'?: boolean;
+  repeats?: boolean;
   replicas?: string;
   'minted-by'?: string;
   approve?: boolean;
@@ -108,6 +112,7 @@ export const TRUST_OPTIONS = {
   source: { type: 'string', multiple: true },
   issuer: { type: 'string' },
   claim: { type: 'string', multiple: true },
+  'claim-prefix': { type: 'string', multiple: true },
   branch: { type: 'string' },
   tag: { type: 'string' },
   event: { type: 'string', multiple: true },
@@ -135,6 +140,7 @@ export const TRUST_OPTIONS = {
   reads: { type: 'string', multiple: true },
   'session-hours': { type: 'string' },
   'unsigned-uploads': { type: 'boolean' },
+  repeats: { type: 'boolean' },
   replicas: { type: 'string' },
   'minted-by': { type: 'string' },
   approve: { type: 'boolean' },
@@ -165,6 +171,7 @@ export type PolicyRequest = {
   approve?: true;
   onContention?: 'freeze' | 'alert';
   unsignedUploads?: true;
+  repeats?: true;
 };
 
 /** A binding as the CLI asks for it: a bearer one, with no policy; a workload's, with one. */
@@ -198,6 +205,7 @@ export const TRUST_USAGE = `usage: coffre trust <service>                       
        coffre trust <service> --gitlab <group>/<project> (--branch <b> | --tag <t>)
                     [--source push,web,schedule] [--gitlab-url <url>]
        coffre trust <service> --issuer <url> --claim sub=<subject> [--claim <name>=<value> …]
+       coffre trust <service> --issuer <url> --claim-prefix sub=<segment>/<segment>/ [--claim …]
        coffre trust <service> --issuer <iss> --jwks-file <path> --claim sub=<subject> [--claim …]
        coffre trust <service> --issuer <iss> --replace-keys --jwks-file <path>
          IDs, when the lookup cannot see a private repository, owner or project:
@@ -210,6 +218,9 @@ export const TRUST_USAGE = `usage: coffre trust <service>                       
          --github-environment takes only the jobs that run in that GitHub environment, under its
          protection rules
          --claim names a nested claim by its path: kubernetes.io.serviceaccount.uid=<uid>
+         --claim-prefix takes, on an --issuer binding, a claim that starts with the prefix and goes on:
+         sub=org/7/project/42/ takes org/7/project/42/thread/9, never org/7/project/423/…; a
+         prefix is whole segments, each ended by /
          --jwks-file uploads the issuer's public keys, a JWKS, for an issuer coffre cannot fetch them
          from, such as a private Kubernetes cluster's (kubectl get --raw /openid/v1/jwks): then
          --issuer is any string its tokens name, and coffre asks it nothing
@@ -238,6 +249,8 @@ A workload signs in for a key-bound session, by its platform's proof:
          and, for any of them:
                     [--reads <project>/<env>=<KEY>,… | <project>/<env>=*] [--source <cidr> …]
                     [--session-hours 24] [--unsigned-uploads]
+         and, for --issuer … --workload, whose issuer hands out the same token until it expires:
+                    [--repeats]
          --aws, --kubernetes and --gcp look up the IDs they bind with the aws, kubectl and gcloud you
          are signed in to; --role-id, --uid and a unique ID skip the lookup
          --reads lists the values its sessions may read, which its platform then holds: every other
@@ -245,7 +258,9 @@ A workload signs in for a key-bound session, by its platform's proof:
          --source takes CIDRs its sessions must come from; with --gitlab, push, web and schedule
          remain pipeline sources
          --workload makes a CI run's binding one for a key-bound session; without it, --github,
-         --gitlab and --issuer make one for /api/auth/oidc's five-minute bearer credential`;
+         --gitlab and --issuer make one for /api/auth/oidc's five-minute bearer credential
+         --repeats never spends a token, so the same one signs in again, for any key, until its exp:
+         it must live an hour at most, and each session it makes ends at its exp`;
 
 /** A service account as the API names it, `token:api-deploy`, from `api-deploy`, `service:api-deploy` or `token:api-deploy`. */
 export function serviceMember(value: string): string {
@@ -335,6 +350,7 @@ const POLICY_FLAGS = {
   source: 'sources',
   'session-hours': 'sessionHours',
   'unsigned-uploads': 'unsignedUploads',
+  repeats: 'repeats',
   replicas: 'replicas',
   'minted-by': 'mintedBy',
   approve: 'approve',
@@ -363,6 +379,9 @@ export async function bindingFrom(
   const kind = named[0] ?? 'issuer';
   for (const [flag, kinds] of Object.entries(PLATFORM_ONLY)) {
     if (flags[flag as keyof TrustFlags] !== undefined && !kinds.includes(kind)) throw new Error(`--${flag} is ${kinds.map((name) => `--${name}`).join(' or ')}'s`);
+  }
+  if (flags['claim-prefix'] !== undefined && named.length > 0) {
+    throw new Error(`--claim-prefix is a custom binding's, --issuer's: --${kind} pins IDs its platform never reuses`);
   }
   if (flags.issuer !== undefined && named.length > 0 && !['kubernetes', 'azure', 'vercel'].includes(kind)) {
     throw new Error(`--issuer names a custom binding's issuer, or a cluster's, a tenant's or a team's: --${kind} names its own`);
@@ -426,6 +445,7 @@ function policyFrom(flags: TrustFlags, sources: string[] | undefined): PolicyReq
   if (flags['minted-by'] !== undefined) policy.mintedBy = serviceMember(flags['minted-by']);
   if (flags.approve === true) policy.approve = true;
   if (flags['unsigned-uploads'] === true) policy.unsignedUploads = true;
+  if (flags.repeats === true) policy.repeats = true;
   const contention = flags['on-contention'];
   if (contention !== undefined) {
     if (contention !== 'freeze' && contention !== 'alert') throw new Error(`--on-contention takes freeze or alert, not ${contention}`);
@@ -478,13 +498,25 @@ function checked(binding: BindingRequest, policy: PolicyRequest, service: string
   return { ...binding, policy };
 }
 
-/** The claims `--claim` adds, to narrow a binding. */
+/**
+ * The claims `--claim` adds, to narrow a binding, and those `--claim-prefix`
+ * matches by their start. A prefix that stops in the middle of a segment is
+ * refused here, before anything is asked, as the server refuses it.
+ */
 function claimsFrom(flags: TrustFlags): BindingClaims {
   const claims: BindingClaims = {};
-  for (const pair of flags.claim ?? []) {
+  const pairs = [...(flags.claim ?? []).map((pair) => ['claim', pair] as const), ...(flags['claim-prefix'] ?? []).map((pair) => ['claim-prefix', pair] as const)];
+  for (const [flag, pair] of pairs) {
     const at = pair.indexOf('=');
-    if (at <= 0) throw new Error(`--claim takes <name>=<value>, not "${pair}"`);
-    claims[pair.slice(0, at)] = pair.slice(at + 1);
+    if (at <= 0) throw new Error(`--${flag} takes <name>=<value>, not "${pair}"`);
+    const [name, value] = [pair.slice(0, at), pair.slice(at + 1)];
+    if (Object.hasOwn(claims, name)) throw new Error(`--claim and --claim-prefix name ${name} once: a claim matches exactly or by its prefix`);
+    if (flag === 'claim') {
+      claims[name] = value;
+      continue;
+    }
+    if (!value.endsWith('/')) throw new Error(`--claim-prefix ${name}=${value} would also take ${value}0/…: a prefix ends with "/", at a segment's end, as ${name}=${value}/`);
+    claims[name] = { prefix: value };
   }
   return claims;
 }
@@ -742,7 +774,7 @@ type Described = Pick<BindingPlan, 'profile' | 'issuer' | 'jwksUri' | 'keys' | '
 /** A binding, or a plan for one, as lines: what it trusts, every claim in full, and a workload's policy. */
 export function describeBinding(binding: Described): string[] {
   const width = Math.max(0, ...Object.keys(binding.claims).map((name) => name.length));
-  const claims = Object.entries(binding.claims).map(([name, value], i) => `  ${i === 0 ? 'claims ' : '       '}  ${name.padEnd(width)}  ${claimValues(value).join(', ')}`);
+  const claims = Object.entries(binding.claims).map(([name, value], i) => `  ${i === 0 ? 'claims ' : '       '}  ${name.padEnd(width)}  ${shownClaim(value)}`);
   // A proof that is no ID token has no issuer to ask, and no keys.
   const urn = (Object.values(PROFILE_URNS) as string[]).includes(binding.issuer);
   const signer = urn ? [] : [`  issuer   ${binding.issuer}`, `  keys     ${keysLine(binding)}`];
@@ -768,6 +800,7 @@ export function policyLines(profile: string, policy: PolicyView | null): string[
   for (const [i, [place, keys]] of reads.entries()) {
     lines.push(`  ${i === 0 ? 'reads   ' : '        '} ${place}: ${keys === '*' ? 'every key, those made later included' : keys.join(', ')}, exposed if ${profile} is breached`);
   }
+  if (policy.repeats === true) lines.push('  tokens   never spent: one signs in again, for any key, until its exp, an hour at most');
   if (policy.sources !== undefined) lines.push(`  from     ${policy.sources.join(', ')}`);
   if (profile === 'enrollment') {
     const minted = policy.mintedBy === undefined ? 'its managers' : `its managers and ${shownMember(policy.mintedBy)}`;
@@ -866,7 +899,7 @@ export function runsOf(binding: Pick<BindingView, 'profile' | 'issuer' | 'claims
       return `GitLab pipelines of project ${claims.project_id} (namespace ${claims.namespace_id})${where}, ${on(ref, binding.claims.pipeline_source)}`;
     }
     case 'custom':
-      return `runs whose ID token, from ${binding.issuer}, says ${Object.entries(claims).map(([name, value]) => `${name}=${value}`).join(', ')}`;
+      return `runs whose ID token, from ${binding.issuer}, says ${Object.entries(binding.claims).map(([name, value]) => (typeof value === 'string' ? `${name}=${value}` : `${name} ${shownClaim(value)}`)).join(', ')}`;
     // A workload's (docs/design/workload-access.md, section 4), by what its proof names.
     case 'aws':
       return `AWS workloads running as role ${claims.role_id} of account ${claims.account}`;

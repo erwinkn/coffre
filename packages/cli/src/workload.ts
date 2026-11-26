@@ -10,6 +10,7 @@
  */
 import { createHash } from 'node:crypto';
 import { chmodSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -93,8 +94,11 @@ export async function exchange(origin: string, service: string, token: string, f
  * signed, and its databases through tunnels that sign their upgrades.
  */
 
-/** The proofs `--proof` names. Each secret one (an enrollment code, an ID token) is read from stdin, never an argument. */
-export const PROOFS = 'kubernetes[:<file>], aws, gcp, azure:<audience>, fly, vercel, github, enrollment or oidc';
+/**
+ * The proofs `--proof` names. Each secret one (an enrollment code, an ID
+ * token) is read from stdin or a file, never an argument.
+ */
+export const PROOFS = 'kubernetes[:<file>], aws, gcp, azure:<audience>, fly, vercel, github, enrollment, oidc or oidc:<file>';
 
 /** A `--proof`, as `@coffre/client/workload` proves it; none, in a GitHub Actions job, is the job's ID token. */
 export async function proofOf(spec: string | undefined, runner: Runner): Promise<Proof> {
@@ -122,11 +126,22 @@ export async function proofOf(spec: string | undefined, runner: Runner): Promise
     case 'enrollment':
       return enrollment(await readSecret({ label: 'Enrollment code', hint: 'coffre_enr_…, which no release issues yet; piped in, as printf %s "$COFFRE_ENROLL" | coffre …' }));
     case 'oidc': {
+      // A file its platform keeps fresh, as Capy's $CAPY_OIDC_TOKEN_FILE: read before each sign-in, so a re-proof sends its next token.
+      if (rest) return oidc(() => tokenIn(rest), 'oidc');
       const token = await readSecret({ label: 'ID token', hint: "the platform's ID token for this instance: GitLab's id_tokens entry, or a custom issuer's" });
       return oidc(token);
     }
   }
   throw new UsageError(`--proof ${spec}: a proof is one of ${PROOFS}`);
+}
+
+/** The ID token a file holds, as its platform wrote it, or why there is none. */
+async function tokenIn(path: string): Promise<string> {
+  const token = (await readFile(path, 'utf8').catch((error: Error & { code?: string }) => {
+    throw new Error(`no ID token at ${path} (${error.code ?? error.message})`);
+  })).trim();
+  if (token === '') throw new Error(`no ID token at ${path}: the file is empty`);
+  return token;
 }
 
 /** Where a listener listens: `127.0.0.1:7300`, `[::1]:7300`, or a Unix socket, `unix:/run/coffre/api.sock`. */

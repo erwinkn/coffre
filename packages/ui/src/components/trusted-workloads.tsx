@@ -1,6 +1,6 @@
 import type { BindingPlan, BindingView, CoffreClient, KeysPlan } from '@coffre/client';
 import { credentialScopeInWords } from '@coffre/core/access';
-import { claimValues, EVENT_EXPOSURE, githubEventsAt, GITLAB_PIPELINE_SOURCES } from '@coffre/core/workloads';
+import { claimValues, EVENT_EXPOSURE, githubEventsAt, GITLAB_PIPELINE_SOURCES, shownClaim } from '@coffre/core/workloads';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment, useEffect, useState } from 'react';
 import {
@@ -157,7 +157,7 @@ function Claims({ binding }: { binding: Pick<BindingPlan, 'issuer' | 'jwksUri' |
         {Object.entries(binding.claims).map(([name, value]) => (
           <tr key={name}>
             <th className="mono">{name}</th>
-            <td className="mono">{claimValues(value).join(', ')}</td>
+            <td className="mono">{shownClaim(value)}</td>
           </tr>
         ))}
         <tr>

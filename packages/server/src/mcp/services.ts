@@ -7,7 +7,7 @@
 // person read or nothing.
 import { apiMember, shownMember } from '@coffre/client';
 import { credentialScopeInWords, MAX_SCOPE_PLACES } from '@coffre/core/access';
-import { BEARER_PROFILES, claimValues, defaultIssuer, EVENT_EXPOSURE, GITHUB_ISSUER, GITLAB_ISSUER, type BindingClaims, type WorkloadProfile } from '@coffre/core/identity';
+import { BEARER_PROFILES, claimValues, defaultIssuer, EVENT_EXPOSURE, GITHUB_ISSUER, GITLAB_ISSUER, shownClaim, type BindingClaims, type WorkloadProfile } from '@coffre/core/identity';
 import { roleId } from '@coffre/core/schemas';
 import { z } from 'zod';
 
@@ -81,7 +81,7 @@ async function bindingPlan(ctx: ApiContext, args: BindingArgs): Promise<Replaced
   const live = plan.replaces.length === 0 ? [] : (await runRoute('GET /members/:member/bindings', { member }, undefined, ctx)).bindings;
   for (const { id, why } of plan.replaces) {
     const ended = live.find((binding) => binding.id === id);
-    const claims = ended === undefined ? id : Object.entries(ended.claims).map(([claim, value]) => `${claim}: ${claimValues(value).join(', ')}`).join('; ');
+    const claims = ended === undefined ? id : Object.entries(ended.claims).map(([claim, value]) => `${claim}: ${shownClaim(value)}`).join('; ');
     details.push({
       label: 'Ends',
       value: `${ended?.label ?? 'unlabelled'} (${claims})`,
@@ -168,7 +168,7 @@ function claimLines(claims: BindingClaims, names: Record<string, string>): Detai
   return Object.entries(claims).map(([claim, value]) => {
     const exposed = claim === 'event_name' ? claimValues(value).flatMap((event) => (EVENT_EXPOSURE[event] === undefined ? [] : [EVENT_EXPOSURE[event]])) : [];
     const note = exposed.length > 0 ? exposed.join(' ') : names[claim];
-    return { label: claim, value: claimValues(value).join(', '), kind: 'mono' as const, ...(note === undefined ? {} : { note }), ...(exposed.length > 0 ? { warn: true as const } : {}) };
+    return { label: claim, value: shownClaim(value), kind: 'mono' as const, ...(note === undefined ? {} : { note }), ...(exposed.length > 0 ? { warn: true as const } : {}) };
   });
 }
 
@@ -309,7 +309,7 @@ const UNTRUST = changeTool({
         { label: 'Service account', value: shownService(service), kind: 'mono' },
         ...(binding === undefined
           ? [{ label: 'Binding', value: `${id}, which it does not hold` }]
-          : [{ label: 'Runs from', value: binding.issuer }, ...Object.entries(binding.claims).map(([claim, value]) => ({ label: claim, value: claimValues(value).join(', '), kind: 'mono' as const }))]),
+          : [{ label: 'Runs from', value: binding.issuer }, ...Object.entries(binding.claims).map(([claim, value]) => ({ label: claim, value: shownClaim(value), kind: 'mono' as const }))]),
       ];
     },
     apply: async (ctx, { service, id }) => {

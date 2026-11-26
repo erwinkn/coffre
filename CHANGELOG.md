@@ -27,6 +27,31 @@
   version only, and `null` was a 400. It is what the Terraform provider's
   create sends, so that it never writes over a key someone made meanwhile
   ([docs/design/terraform-provider.md](docs/design/terraform-provider.md)).
+
+- **A custom binding takes a claim by its prefix, and tokens its issuer
+  hands out again: Capy's sandboxes sign in.** Capy signs a token per
+  sandbox thread, `sub` = `org/<org>/project/<project>/thread/<thread>`, and
+  serves the same one for about 45 minutes. `coffre trust capy-agent
+  --issuer https://api.capy.ai/oidc/orgs/<org> --workload --claim-prefix
+  sub=org/<org>/project/<project>/ --claim project=<project> --repeats`
+  takes every thread of the project. A prefix is whole `/`-separated
+  segments and ends with `/`, so `org/1/project/2/` never takes
+  `org/1/project/23/…`: `coffre trust`, the API and the vault refuse one
+  that stops mid-segment (`org/1/project/2`), on a `custom` binding only.
+  Stored in the binding's sealed claims as `{ "prefix": "…" }`, beside its
+  exact claims, which still match exactly. `--repeats` (policy `repeats`,
+  a `custom` workload binding's alone) never spends a token, as Azure's
+  never are, so a second `coffre run` in a sandbox is no longer refused
+  `replayed`; such a token must live an hour at most, `iat` to `exp`, and
+  each session it makes ends at its `exp`. A copy of one therefore signs
+  in, for any key, until then: docs/workloads.md says what that allows.
+  `coffre run` and `coffre serve` take `--proof oidc:<file>`, which reads
+  the token from the file before each sign-in (`--proof
+  "oidc:$CAPY_OIDC_TOKEN_FILE"`). No migration. Earlier releases cannot
+  read a prefix: their server refuses to make one (400), their CLI fails
+  to list a service that holds one, and a rollback's exchange fails, as a
+  fault, on a token that reaches one before any binding that matches it.
+
 - **A 0.14 CLI's `--plain` is told why it was refused.** `coffre set --plain`
   from a CLI older than 0.16 sends `{ "value", "plain": true }`, which 0.16
   does not take (it says `"sensitivity": "plain"`); the 400 was `API_KEY:

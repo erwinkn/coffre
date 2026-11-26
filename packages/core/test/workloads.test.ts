@@ -14,6 +14,7 @@ import {
   GITHUB_ISSUER,
   GITLAB_ISSUER,
   MAX_CLAIMS,
+  shownClaim,
   type BindingClaims,
 } from '@coffre/core/identity';
 
@@ -219,6 +220,39 @@ test('claims are bounded strings with names a binding may match, and never the e
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: 'x', 'kubernetes.io serviceaccount': 'y' } }, /not a claim name/);
   // As a JSON body has it: an own `__proto__`, which the stored binding would otherwise drop, matching more than it says.
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: JSON.parse('{"sub":"x","__proto__":"y"}') as Record<string, unknown> }, /not a claim name/);
+});
+
+test('a custom binding matches a claim by its prefix, whole segments each ended by "/", so that no prefix stops in the middle of an ID', () => {
+  const CAPY = 'https://api.capy.ai/oidc/orgs/org_7Q';
+  const project = { prefix: 'org/org_7Q/project/prj_42/' };
+  const made = checkBinding({ profile: 'custom', issuer: CAPY, claims: { sub: { ...project }, project: 'prj_42' } });
+  assert.deepEqual(made.claims, { project: 'prj_42', sub: project });
+  assert.equal(canonicalClaims(made.claims), '{"project":"prj_42","sub":{"prefix":"org/org_7Q/project/prj_42/"}}');
+  assert.equal(shownClaim(made.claims.sub!), 'starts with org/org_7Q/project/prj_42/');
+  // Stopping mid-segment would take prj_423 too: refused, with the spelling that works.
+  refused({ profile: 'custom', issuer: CAPY, claims: { sub: { prefix: 'org/org_7Q/project/prj_42' } } }, /write "org\/org_7Q\/project\/prj_42\/"/);
+  for (const prefix of ['', '/', '/org/', 'org//project/', 'org/\nx/', 'x'.repeat(256) + '/']) {
+    refused({ profile: 'custom', issuer: CAPY, claims: { sub: { prefix } } }, /prefix/);
+  }
+  refused({ profile: 'custom', issuer: CAPY, claims: { sub: { prefix: 'org/', exact: 'x' } } }, /a string, or a prefix/);
+  refused({ profile: 'custom', issuer: CAPY, claims: { sub: { prefix: 7 } } }, /a string, or a prefix/);
+  // The platforms' profiles pin IDs they never reuse: none takes a prefix.
+  refused({ profile: 'kubernetes', issuer: 'https://kubernetes.acme.example', claims: { sub: { prefix: 'system/' }, 'kubernetes.io.serviceaccount.uid': 'x' } }, /only a custom binding/);
+  refused({ profile: 'github', issuer: null, claims: { ...GITHUB, workflow_ref: { prefix: 'acme/api/' } } }, /only a custom binding/);
+  refused({ profile: 'github', issuer: null, claims: { ...GITHUB, event_name: { prefix: 'push/' } } }, /event_name must be/);
+
+  const thread = (sub: unknown, more: Record<string, unknown> = {}) => differingClaims('custom', made.claims, { iss: CAPY, sub, project: 'prj_42', ...more });
+  assert.deepEqual(thread('org/org_7Q/project/prj_42/thread/t_1'), []);
+  assert.deepEqual(thread('org/org_7Q/project/prj_42/x'), []);
+  for (const sub of ['org/org_7Q/project/prj_423/thread/t_1', 'org/org_7Q/project/prj_42', 'org/org_7Q/project/prj_42/', 'org/org_7Q/project/prj_4/thread/t_1', 'ORG/org_7Q/project/prj_42/thread/t_1', 7, null]) {
+    assert.deepEqual(thread(sub), ['sub'], String(sub));
+  }
+  // Every exact claim beside the prefix still holds.
+  assert.deepEqual(thread('org/org_7Q/project/prj_42/thread/t_1', { project: 'prj_423' }), ['project']);
+  assert.deepEqual(differingClaims('custom', made.claims, { sub: 'org/org_7Q/project/prj_42/thread/t_1' }), ['project']);
+  // A row that holds a looser prefix than checkBinding stores matches nothing.
+  assert.deepEqual(differingClaims('custom', { sub: { prefix: 'org/org_7Q/project/prj_42' } }, { sub: 'org/org_7Q/project/prj_42/thread/t_1' }), ['sub']);
+  assert.deepEqual(differingClaims('custom', { sub: { other: 'x' } } as unknown as BindingClaims, { sub: 'x' }), ['sub']);
 });
 
 test('a URL coffre fetches is https on 443 at a public host name, with no credentials, and loopback only for a deployment that says so', () => {

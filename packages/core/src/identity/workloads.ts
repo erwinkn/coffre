@@ -201,8 +201,30 @@ const WORKFLOW = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/\.github\/workflows\/[^@\s]
  */
 const ENVIRONMENT = /^(?! )[^\p{Cc}]{1,255}(?<! )$/u;
 
-/** A claim a binding names: one value, or, for what started the run, any of several. */
-export type ClaimValue = string | string[];
+/**
+ * A claim a binding names: one value, or, for what started the run, any of
+ * several; or, on a `custom` binding, a prefix the token's value starts
+ * with and goes on after (`ClaimPrefix`).
+ */
+export type ClaimValue = string | string[] | ClaimPrefix;
+
+/**
+ * A claim matched by its start, for an issuer that puts each run's own ID
+ * in it: Capy's `sub`, `org/<org>/project/<project>/thread/<thread>`, by
+ * `{ prefix: 'org/<org>/project/<project>/' }`. The prefix is whole
+ * segments, each ended by `/` (`CLAIM_PREFIX`), so it cannot stop in the
+ * middle of an ID: `org/1/project/2` would take `org/1/project/23/…` too,
+ * and is refused.
+ */
+export type ClaimPrefix = { readonly prefix: string };
+
+/** One or more segments, none empty and none with a control character, each ended by `/`. */
+const CLAIM_PREFIX = /^(?:[^/\p{Cc}]+\/)+$/u;
+
+/** Whether a claim's value is a prefix: an object with a string `prefix`, as `checkBinding` stores one. */
+export function isClaimPrefix(value: unknown): value is ClaimPrefix {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) && typeof (value as { prefix?: unknown }).prefix === 'string';
+}
 export type BindingClaims = Record<string, ClaimValue>;
 
 /**
@@ -300,6 +322,10 @@ export function checkBinding(
       claims[name] = values.length === 1 ? values[0]! : values;
       continue;
     }
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      claims[name] = checkedPrefix(profile, name, value);
+      continue;
+    }
     if (typeof value !== 'string' || value.length === 0) {
       throw new BindingInvalid(`claim ${name} must be a nonempty string${Array.isArray(value) && event !== null ? `: only ${event.name} lists several` : ''}`);
     }
@@ -337,9 +363,32 @@ function checkIssuerName(issuer: string): void {
   if (issuer.startsWith('urn:coffre:')) throw new BindingInvalid(`${issuer} is coffre's own, for a binding that is no ID token's`);
 }
 
-/** A claim's values, one or several. */
+/**
+ * A claim's prefix as a binding stores it, `{ prefix }`, checked: a `custom`
+ * binding's alone, whole segments each ended by `/`. A prefix that stops in
+ * the middle of a segment is told the spelling that works.
+ */
+function checkedPrefix(profile: WorkloadProfile, name: string, value: object): ClaimPrefix {
+  const { prefix, ...rest } = value as { prefix?: unknown };
+  if (typeof prefix !== 'string' || Object.keys(rest).length > 0) throw new BindingInvalid(`claim ${name} is a string, or a prefix: { "prefix": "<segment>/<segment>/" }`);
+  if (profile !== 'custom') throw new BindingInvalid(`only a custom binding matches a claim by its prefix: a ${profile} binding pins IDs its platform never reuses`);
+  if (new TextEncoder().encode(prefix).length > MAX_CLAIM_BYTES) throw new BindingInvalid(`claim ${name}'s prefix is longer than ${MAX_CLAIM_BYTES} bytes`);
+  if (CLAIM_PREFIX.test(prefix)) return { prefix };
+  const ended = `${prefix}/`;
+  if (CLAIM_PREFIX.test(ended)) {
+    throw new BindingInvalid(`claim ${name}'s prefix ends with "/", at a segment's end: "${prefix}" would also take ${prefix}0/…, so write "${ended}"`);
+  }
+  throw new BindingInvalid(`claim ${name}'s prefix is whole segments, each ended by "/", none empty: "org/1/project/2/", not "${prefix}"`);
+}
+
+/** A claim's exact values, one or several; none for a prefix, which only `differingClaims` matches. */
 export function claimValues(value: ClaimValue | undefined): string[] {
-  return value === undefined ? [] : typeof value === 'string' ? [value] : value;
+  return value === undefined || isClaimPrefix(value) ? [] : typeof value === 'string' ? [value] : value;
+}
+
+/** A claim as a person reads it: `push, workflow_dispatch`, or `starts with org/1/project/2/`. */
+export function shownClaim(value: ClaimValue): string {
+  return isClaimPrefix(value) ? `starts with ${value.prefix}` : claimValues(value).join(', ');
 }
 
 /** What a ref must be for each event: the branch or tag it runs at, or for a pull request, the branch it merges into. */
@@ -429,7 +478,10 @@ export function claimAt(claims: Record<string, unknown>, name: string): unknown 
 /**
  * The claims of a verified token that differ from what a binding expects,
  * by name: none when it matches. A claim matches when the token carries its
- * value, or one of its values, where `claimAt` reads it. On GitHub's
+ * value, or one of its values, where `claimAt` reads it; a prefix
+ * (`ClaimPrefix`) when the token's value starts with it and goes on after
+ * it, so `org/1/project/2/` takes `org/1/project/2/thread/7` and neither
+ * `org/1/project/2/` itself nor `org/1/project/23/thread/7`. On GitHub's
  * profiles, two readings:
  *
  * - A `pull_request` run, at `refs/pull/<n>/merge`, counts as a run at the
@@ -446,6 +498,9 @@ export function differingClaims(profile: WorkloadProfile, expected: BindingClaim
     .filter(([name, value]) => {
       const actual = claimAt(claims, name);
       if (typeof actual !== 'string') return true;
+      // A prefix as `checkBinding` stores one, and nothing looser: a row that says another never matches.
+      if (isClaimPrefix(value)) return !(CLAIM_PREFIX.test(value.prefix) && actual.length > value.prefix.length && actual.startsWith(value.prefix));
+      if (typeof value !== 'string' && !Array.isArray(value)) return true;
       if (github && name === 'environment') return actual.toLowerCase() !== (value as string).toLowerCase();
       return !claimValues(value).includes(actual);
     })
@@ -657,6 +712,11 @@ export type BindingReads = Readonly<Record<string, { readonly keys?: readonly st
  *   that may mint them), `approve` and `onContention` (section 4.4).
  * - `unsignedUploads`: a streamed upload no digest binds may go through a
  *   credential that takes one (section 5.1), which leaves column B at use.
+ * - `repeats`: a `custom` binding's issuer hands out the same token again
+ *   until it expires, as Capy does: none is spent, so each lives an hour at
+ *   most, and the sessions it makes end at its `exp` (`spends`,
+ *   `matchIdToken`). Never beside `keyAudience`, whose tokens are never
+ *   spent already.
  */
 export type BindingPolicy = {
   readonly audience?: string;
@@ -671,6 +731,7 @@ export type BindingPolicy = {
   readonly approve?: true;
   readonly onContention?: 'alert';
   readonly unsignedUploads?: true;
+  readonly repeats?: true;
 };
 
 /** What a field left out of a policy means. */
@@ -682,6 +743,7 @@ export const POLICY_DEFAULTS = {
   approve: false,
   onContention: 'freeze',
   unsignedUploads: false,
+  repeats: false,
 } as const;
 
 /** The most environments, and keys in each, a binding's `reads` lists; the most `sources`. */
@@ -709,7 +771,7 @@ export const POLICY_FIELDS: Record<WorkloadProfile, readonly PolicyField[]> = {
   'github-reusable': KEY_AUDIENCE,
   'github-reusable-organization': KEY_AUDIENCE,
   gitlab: SESSION_FIELDS,
-  custom: KEY_AUDIENCE,
+  custom: [...KEY_AUDIENCE, 'repeats'],
   kubernetes: SESSION_FIELDS,
   gcp: KEY_AUDIENCE,
   azure: [...SESSION_FIELDS, 'audience'],
@@ -840,10 +902,13 @@ export function checkPolicy(profile: WorkloadProfile, input: unknown, options: {
     if (named === options.service) throw new BindingInvalid(`mintedBy names another service than ${shownMember(options.service)}: a session of its own would mint codes for itself`);
     policy.mintedBy = named;
   }
-  for (const flag of ['approve', 'unsignedUploads'] as const) {
+  for (const flag of ['approve', 'unsignedUploads', 'repeats'] as const) {
     if (given[flag] === undefined) continue;
     if (typeof given[flag] !== 'boolean') throw new BindingInvalid(`${flag} is true or false`);
     if (given[flag]) policy[flag] = true;
+  }
+  if (policy.repeats === true && policy.keyAudience === true) {
+    throw new BindingInvalid("repeats is for an issuer that fixes the audience and hands the same token out again: a token that names the session's key is never spent already");
   }
   if (given.onContention !== undefined) {
     if (given.onContention !== 'freeze' && given.onContention !== 'alert') throw new BindingInvalid('onContention is freeze or alert');
