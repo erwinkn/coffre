@@ -28,7 +28,8 @@ The design, its threat model and every rule behind this guide are in
 The server side lands in its own changes: the exchange and sessions, the new
 `coffre trust` flags, enrollment codes (no release has `coffre enroll` yet:
 the examples below show it as designed), `narrow` and minting. The Workers
-binding's `fetch` is built (0.16.10); its RPC methods are not. `coffre
+binding is: its `fetch` (0.16.10), and its RPC methods `sign`, `verify` and
+`presign` ([below](#over-rpc-sign-verify-presign)); `mint` comes with minting. `coffre
 freeze` is built (0.16), and `verify` (0.14.3,
 [below](#inbound-webhooks-verify)). Until an instance
 answers the workload exchange, `coffre --service … run` falls back to the
@@ -421,6 +422,41 @@ What a call reaches:
 
 The vault logs each use as the service's, naming the bindings it stood on
 (`binding:<id>`) and no credential; the request has no address of its own.
+
+#### Over RPC: `sign`, `verify`, `presign`
+
+The same binding carries coffre's operations as methods, typed by
+`CoffreBinding` (`import type { CoffreBinding } from
+'@coffre/client/workload'`, then `COFFRE: CoffreBinding` in the Worker's
+`Env`):
+
+```ts
+const signature = await env.COFFRE.sign('dfns-key', challenge);                     // base64url, or as an hmac() writes it
+const valid = await env.COFFRE.verify('stripe-webhook', rawBody, stripeSignature);   // true or false
+const { url, expiresAt } = await env.COFFRE.presign('s3', '/uploads/report.pdf', { expiresIn: 900 });
+```
+
+| Method | The operation it is | Answers |
+|---|---|---|
+| `sign(signer, message, { place? })` | `POST /use/<project>/<env>` with `{ sign }`; past 1 MiB, raw, `?sign=` | the signature, a string |
+| `verify(verifier, message, signature, { place? })` | the same with `{ verify }` | a boolean |
+| `presign(credential, path, { method?, expiresIn?, query?, place? })` | the same with `{ presign }` | `{ url, expiresAt }` |
+
+A message is a string, sent as its UTF-8, or a `Uint8Array`. `place`,
+`market/prod`, names the environment; without it, the one the service's
+`cloudflare` bindings name, as `/use/<credential>` finds it. Each method
+builds the HTTP form's request and sends it through the binding's own
+route, so each call is one use of the vault, held to everything a `fetch`
+is above, and logged as one. What comes back is what the operation makes,
+never a value. A refusal rejects with the status, code and reason the
+HTTP form answers: RPC carries an error's fields, not its class, so test
+`error.name === 'CoffreError'`, then `error.status`, `error.code` and
+`error.reason` (`404` for a signer the deployment does not name, `403`
+with reason `frozen`, `429` with reason `limit`). An argument of the wrong
+type, or a `place` that is not two slugs, is `400` with code
+`bad_request`. Unlike a URL, `place` is always a place, even one whose
+project shares a credential's name. `mint`
+comes with minting.
 
 Whoever can deploy Workers to the account can set any `props`, so keep
 coffre in an account of its own if those people should not reach its

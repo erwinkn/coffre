@@ -63,7 +63,7 @@ import { parseRecipe } from '@coffre/core/recipe';
 import type { Upstream } from '@coffre/core/vault';
 
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
-import { WorkloadRefused, type CoffrePlugin, type Connect, type Exposed, type PluginContext, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
+import { isOperation, WorkloadRefused, type CoffrePlugin, type Connect, type Exposed, type PluginContext, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { hmacParts, hmacSign, hmacVerify, keyBytes, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
@@ -645,6 +645,8 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   } catch {
     return failure(400, 'the path is not valid percent-encoding');
   }
+  // A bound Worker's RPC method (`operation`): its path names a place, whatever credential shares the project's name.
+  if (isOperation(request)) return raw.length === 2 ? compute(request, coffre, proxy, `${place[0]}/${place[1]}`) : failure(404, 'an operation names its place as /use/<project>/<environment>');
   const stable = proxy.credentials.get(place[0]!);
   // A raw sign, `POST /use/<a>/<b>` whose body is the message (octet-stream): no handle is ever looked for in that body,
   // and `signRaw` refuses before a byte of it is read.

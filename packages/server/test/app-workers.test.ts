@@ -5,7 +5,7 @@
 // holds what each route answers; this holds that a request goes all the
 // way, and what it costs in connections.
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHmac, generateKeyPairSync, randomBytes, verify as verifySignature } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,6 +44,13 @@ let tunnelHandleId: string;
 /** `token:edge`, a Worker's service: a viewer of market, its `cloudflare` binding scoped to market/apis. */
 const EDGE = 'token:edge';
 let edgeBindingId: string;
+/** `token:keys`, another Worker's service: a viewer of market, its `cloudflare` binding scoped to market/keys, which holds its signers' keys. */
+const KEYS = 'token:keys';
+let keysBindingId: string;
+const MAC_KEY = 'a mac secrét';
+const HOOK_SECRET = 'whsec_hook';
+const SIGNING = generateKeyPairSync('ed25519');
+const AWS_SECRET = 'aws/secret+0123456789';
 
 let worker: Unstable_DevWorker;
 let dir: string;
@@ -60,6 +67,11 @@ before(async () => {
   // A plain value no credential covers: what `coffre run`'s plan hands the app as it is.
   const region = await value(world, secret(apis, 'REGION'), 'eu-west-3', { plain: true });
   const tunnelUrl = await value(world, secret(data, 'TUNNEL_URL'), `${APP_URL}?sslmode=disable`, { sensitive: true });
+  // What `keys` signs, checks and presigns with, over RPC.
+  const keysEnv = environment(market, 'keys');
+  const keyed = await Promise.all(Object.entries({
+    MAC_KEY, HOOK_SECRET, SIGNING_KEY: SIGNING.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string, AWS_ACCESS_KEY_ID: 'AKIAKEYS', AWS_SECRET_ACCESS_KEY: AWS_SECRET,
+  }).map(([key, text]) => value(world, secret(keysEnv, key), text)));
   const tunnelHandle = credential(TUNNEL_HANDLE, ada, { kind: 'handle', scope: JSON.stringify([{ projectId: market.id, environmentId: data.id, role: 'viewer' }]), places: JSON.stringify([{ environmentId: data.id, personal: false }]) });
   tunnelHandleId = tunnelHandle.id;
   // Bo's alone: three values he marks, a key service giving out partway through.
@@ -71,17 +83,19 @@ before(async () => {
   const deploy = binding(DEPLOY, { policy: '{}', scope: JSON.stringify([{ projectId: market.id, environmentId: null, role: 'viewer' }]) });
   const edge = binding(EDGE, { profile: 'cloudflare', issuer: 'urn:coffre:cloudflare', jwksUri: 'urn:coffre:cloudflare', policy: '{}', scope: JSON.stringify([{ projectId: market.id, environmentId: apis.id, role: 'viewer' }]) });
   edgeBindingId = edge.id;
+  const keys = binding(KEYS, { profile: 'cloudflare', issuer: 'urn:coffre:cloudflare', jwksUri: 'urn:coffre:cloudflare', policy: '{}', scope: JSON.stringify([{ projectId: market.id, environmentId: keysEnv.id, role: 'viewer' }]) });
+  keysBindingId = keys.id;
   await write(
     world,
     ...rows('projects', market, lab),
-    ...rows('environments', prod, staging, apis, data, labProd),
-    ...rows('secrets', url, apiKey, region, tunnelUrl, ...marked),
+    ...rows('environments', prod, staging, apis, data, keysEnv, labProd),
+    ...rows('secrets', url, apiKey, region, tunnelUrl, ...keyed, ...marked),
     ...rows('roles', role(false, 'viewer', ['secret.read', 'secret.use'], []), role(false, 'developer', ['secret.read', 'secret.write']), role(true, 'member', [])),
     ...rows('policy', instance()),
-    ...rows('principals', principal(ada), principal(bo), principal(DEPLOY), principal(EDGE), principal('token:ghost')),
+    ...rows('principals', principal(ada), principal(bo), principal(DEPLOY), principal(EDGE), principal(KEYS), principal('token:ghost')),
     ...rows('identities', github),
-    ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market }), grant(bo, 'developer', { project: lab }), grant(DEPLOY, 'viewer', { project: market }), grant(EDGE, 'viewer', { project: market }), grant('token:ghost', 'viewer', { project: market })),
-    ...rows('bindings', deploy, edge),
+    ...rows('grants', grant(ada, 'viewer', { project: market }), grant(bo, 'developer', { project: market }), grant(bo, 'developer', { project: lab }), grant(DEPLOY, 'viewer', { project: market }), grant(EDGE, 'viewer', { project: market }), grant(KEYS, 'viewer', { project: market }), grant('token:ghost', 'viewer', { project: market })),
+    ...rows('bindings', deploy, edge, keys),
     ...rows('credentials', credential('ada-cli', ada, used), credential('bo-cli', bo, used), credential(BROWSER, bo, { ...used, kind: 'browser', identityId: github.id }), session(WORKLOAD, deploy, { jkt: await thumbprint(KEY.jwk), places: JSON.stringify([{ environmentId: apis.id }]) }),
       credential(HANDLE, ada, { kind: 'handle', scope: JSON.stringify([{ projectId: market.id, environmentId: apis.id, role: 'viewer' }]), places: JSON.stringify([{ environmentId: apis.id, personal: false }]) }), tunnelHandle),
   );
@@ -106,6 +120,7 @@ before(async () => {
         // As another Worker of the account binds coffre: the entrypoint, with props naming its service.
         { binding: 'COFFRE_EDGE', service: name, entrypoint: 'CoffreWorkload', props: { service: 'edge' } },
         { binding: 'COFFRE_TOKEN_EDGE', service: name, entrypoint: 'CoffreWorkload', props: { service: 'token:edge' } },
+        { binding: 'COFFRE_KEYS', service: name, entrypoint: 'CoffreWorkload', props: { service: 'keys' } },
         { binding: 'COFFRE_GHOST', service: name, entrypoint: 'CoffreWorkload', props: { service: 'ghost' } },
         { binding: 'COFFRE_NO_PROPS', service: name, entrypoint: 'CoffreWorkload' },
       ],
@@ -150,7 +165,7 @@ test("a page's read: the vault asked once who is asking, on one connection, the 
   assert.equal((await ask('/api/me', bearer('nobody'))).status, 401);
   const [me, mine, theirs] = await opened(() => ask('/api/me', bearer('ada-cli')));
   assert.equal(me.status, 200, JSON.stringify(me.body));
-  assert.deepEqual([(me.body.principal as { id: string }).id, me.body.environments], ['ada@acme.example', ['apis', 'data', 'prod'].map((environment) => ({ project: 'market', environment, permissions: ['secret.read', 'secret.use'] }))]);
+  assert.deepEqual([(me.body.principal as { id: string }).id, me.body.environments], ['ada@acme.example', ['apis', 'data', 'keys', 'prod'].map((environment) => ({ project: 'market', environment, permissions: ['secret.read', 'secret.use'] }))]);
   assert.deepEqual([mine, theirs], [1, 1]);
   assert.ok(me.headers.has('content-security-policy'));
   // Asked again at once: the vault remembers its rows, and opens no connection; the app lists again.
@@ -317,6 +332,102 @@ test("a Worker bound to coffre: its props name its service, which uses a credent
   await amend(world, 'bindings', sql`id = ${edgeBindingId}`, { frozenAt: null, revokedAt: new Date(), revokedBy: 'root@acme.example' });
   await sleep(2100);
   assert.equal((await ask('/as/COFFRE_EDGE/use/echo/ping')).status, 401);
+});
+
+/** A method of coffre's, called over `binding` as a bound Worker calls it: what it answered, or what it threw. */
+async function call(binding: string, method: 'sign' | 'verify' | 'presign', ...args: unknown[]): Promise<{ value?: unknown; thrown?: { name: string; message: string; status: number; code: string; reason?: string } }> {
+  const response = await worker.fetch(`/rpc/${binding}`, { method: 'POST', body: JSON.stringify({ method, args }), signal: AbortSignal.timeout(20_000) } as never);
+  return (await response.json()) as never;
+}
+/** Bytes as `/rpc` carries them to the Worker, which hands the method a Uint8Array. */
+const bytes = (of: Uint8Array | string) => ({ bytes: Buffer.from(of).toString('base64') });
+const mac = (message: Uint8Array | string) => createHmac('sha256', MAC_KEY).update(message).digest('hex');
+
+test("a Worker bound to coffre calls sign, verify and presign over RPC: each the HTTP form's operation, as its service, answering what it made and refusing as it does", { timeout: 120_000 }, async () => {
+  // An HMAC signer's signature of a string, its UTF-8, and of bytes: one use of the vault, then within its memory.
+  const [signed, , vaultAsked] = await opened(() => call('COFFRE_KEYS', 'sign', 'mac', 'héllo'));
+  assert.deepEqual([signed, vaultAsked], [{ value: mac('héllo') }, 1]);
+  const binary = randomBytes(64);
+  assert.deepEqual(await call('COFFRE_KEYS', 'sign', 'mac', bytes(binary)), { value: mac(binary) });
+  // The environment by name gives the same; one past JSON's 1 MiB goes raw, as the SDK sends it.
+  assert.deepEqual(await call('COFFRE_KEYS', 'sign', 'mac', 'héllo', { place: 'market/keys' }), { value: mac('héllo') });
+  const long = randomBytes(1024 * 1024 + 7);
+  assert.deepEqual(await call('COFFRE_KEYS', 'sign', 'mac', bytes(long)), { value: mac(long) });
+  // A private key's, base64url, which its public key checks.
+  const challenge = 'a dfns challenge';
+  const byKey = await call('COFFRE_KEYS', 'sign', 'ed25519', challenge);
+  assert.equal(typeof byKey.value, 'string', JSON.stringify(byKey));
+  assert.ok(verifySignature(null, Buffer.from(challenge), SIGNING.publicKey, Buffer.from(byKey.value as string, 'base64url')));
+
+  // A verifier's yes and no, and a signer's HMAC checks its own: a no is an answer, not a refusal.
+  const body = '{"event":"paid"}';
+  const header = `sha256=${createHmac('sha256', HOOK_SECRET).update(body).digest('hex')}`;
+  assert.deepEqual(await call('COFFRE_KEYS', 'verify', 'hook', body, header), { value: true });
+  assert.deepEqual(await call('COFFRE_KEYS', 'verify', 'hook', bytes(body), header), { value: true });
+  assert.deepEqual(await call('COFFRE_KEYS', 'verify', 'hook', '{"event":"refunded"}', header), { value: false });
+  assert.deepEqual(await call('COFFRE_KEYS', 'verify', 'mac', 'héllo', mac('héllo')), { value: true });
+
+  // A presigned GET of the bucket's object: the access key's ID and a signature, never the secret, for as long as asked.
+  const before = Date.now();
+  const presigned = await call('COFFRE_KEYS', 'presign', 's3', '/reports/q3.pdf', { expiresIn: 600, query: { 'response-content-disposition': 'attachment' } });
+  const { url, expiresAt } = presigned.value as { url: string; expiresAt: string };
+  const signedUrl = new URL(url);
+  assert.equal(`${signedUrl.origin}${signedUrl.pathname}`, 'https://bucket.s3.eu-west-3.amazonaws.com/reports/q3.pdf', JSON.stringify(presigned));
+  assert.deepEqual([signedUrl.searchParams.get('X-Amz-Expires'), signedUrl.searchParams.get('X-Amz-Credential')?.split('/')[0], signedUrl.searchParams.get('response-content-disposition')], ['600', 'AKIAKEYS', 'attachment']);
+  assert.ok(!url.includes(encodeURIComponent(AWS_SECRET)) && !url.includes(AWS_SECRET));
+  assert.ok(Math.abs(Date.parse(expiresAt) - (before + 600_000)) < 5000, expiresAt);
+
+  // Each refusal the HTTP form makes, thrown with its status, code and reason.
+  const refused = async (binding: string, method: 'sign' | 'verify' | 'presign', args: unknown[], status: number, reason?: string) => {
+    const { thrown } = await call(binding, method, ...args);
+    assert.equal(thrown?.name, 'CoffreError', `${method} ${JSON.stringify(args)}: ${JSON.stringify(thrown)}`);
+    assert.equal(thrown.status, status, `${method} ${JSON.stringify(args)}: ${JSON.stringify(thrown)}`);
+    if (reason !== undefined) assert.equal(thrown.reason, reason, JSON.stringify(thrown));
+    return thrown;
+  };
+  // What the deployment does not name, or names for another operation.
+  await refused('COFFRE_KEYS', 'sign', ['nope', 'm'], 404);
+  await refused('COFFRE_KEYS', 'sign', ['hook', 'm'], 404);
+  await refused('COFFRE_KEYS', 'verify', ['ed25519', 'm', 'sig'], 404);
+  await refused('COFFRE_KEYS', 'presign', ['echo', '/ping'], 404);
+  // What the operation refuses: an upload, an hour past, a path out of the bucket, a message past the verifier's.
+  await refused('COFFRE_KEYS', 'presign', ['s3', '/a', { method: 'PUT' }], 400);
+  await refused('COFFRE_KEYS', 'presign', ['s3', '/a', { expiresIn: 7200 }], 400);
+  await refused('COFFRE_KEYS', 'presign', ['s3', '/../other/a'], 400);
+  await refused('COFFRE_KEYS', 'verify', ['hook', bytes(randomBytes(64 * 1024 + 1)), header], 413);
+  // What RPC carries that the operation could not read.
+  for (const [method, args] of [['sign', [42, 'm']], ['sign', ['mac', 42]], ['sign', ['mac', 'm', { place: 'market' }]], ['sign', ['mac', 'm', 'market/keys']], ['verify', ['hook', body, 42]], ['presign', ['s3', 42]], ['presign', ['s3', '/a', { query: { a: 1 } }]], ['presign', ['s3', '/a', { expiresIn: '600' }]], ['presign', ['s3', '/a', { expiresIn: { number: 'NaN' } }]], ['presign', ['s3', '/a', { expiresIn: { number: 'Infinity' } }]]] as const) {
+    const thrown = await refused('COFFRE_KEYS', method, [...args], 400);
+    assert.equal(thrown.code, 'bad_request');
+  }
+  // A place of dot segments, which the URL would resolve to the default environment, out of /use or to a credential;
+  // one not a slug.
+  for (const place of ['market/..', './.', '../v1', './echo', 'Market/keys', 'market/keys/x']) {
+    const thrown = await refused('COFFRE_KEYS', 'verify', ['hook', body, header, { place }], 400);
+    assert.equal(thrown.code, 'bad_request');
+  }
+  // A place whose project is a credential's name is still a place, never that credential's upstream: here none the
+  // service reaches.
+  await refused('COFFRE_KEYS', 'verify', ['hook', body, header, { place: 'echo/prod' }], 403);
+  // Where its grants reach and its binding does not; a service with no `cloudflare` binding; a binding with no props.
+  await refused('COFFRE_KEYS', 'sign', ['mac', 'm', { place: 'market/prod' }], 403);
+  await refused('COFFRE_GHOST', 'sign', ['mac', 'm'], 401);
+  await refused('COFFRE_NO_PROPS', 'sign', ['mac', 'm'], 403, 'props');
+  // A signer's limit, by the service's gate.
+  assert.deepEqual(await call('COFFRE_KEYS', 'sign', 'mac-once', 'm'), { value: mac('m') });
+  await refused('COFFRE_KEYS', 'sign', ['mac-once', 'm'], 429, 'limit');
+
+  // Each use logged as the service's, naming its binding and no credential.
+  const entries = await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending UNION ALL SELECT body FROM log`);
+  const mine = entries.map((row) => JSON.parse(row.body) as { action: string; credential: string | null; actor: string; objects: string[] }).filter((entry) => entry.actor === KEYS);
+  assert.ok(mine.length > 0);
+  for (const entry of mine) assert.deepEqual([entry.action, entry.credential, entry.objects.includes(`binding:${keysBindingId}`)], ['secret.read', null, true]);
+
+  // Frozen, once the vault's memory is past: refused as fetch is.
+  await amend(world, 'bindings', sql`id = ${keysBindingId}`, { frozenAt: new Date() });
+  await sleep(2100);
+  await refused('COFFRE_KEYS', 'sign', ['mac', 'm'], 403, 'frozen');
+  await refused('COFFRE_KEYS', 'presign', ['s3', '/a'], 403, 'frozen');
 });
 
 test("a tunnel on Workers: `coffre.upgrade` sends the WebSocket to its object, which the vault admits with one use, and a revocation ends at its next check", { timeout: 120_000 }, async () => {

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **A bound Cloudflare Worker signs, verifies and presigns over RPC.** The
+  `CoffreWorkload` entrypoint 0.16.10 added is now a `WorkerEntrypoint`
+  with three methods beside its `fetch`: `env.COFFRE.sign(signer,
+  message)` answers the signature, `verify(verifier, message, signature)`
+  true or false, and `presign(credential, path, { expiresIn })` `{ url,
+  expiresAt }`, each with an optional `{ place: 'market/prod' }`. Each is
+  the operation `POST /use/<project>/<env>` runs, sent through the
+  binding's own route: one use of the vault as the service its props name,
+  held to its `cloudflare` bindings, freezes and limits, logged as one, and
+  never a value. A refusal rejects with the HTTP form's status, code and
+  reason (`error.name === 'CoffreError'`, as RPC carries an error's fields
+  and not its class). `CoffreBinding`, from `@coffre/client/workload`,
+  types `env.COFFRE`. No change to a deployment's code or configuration:
+  `export const CoffreWorkload = coffre.Workload` stays as it is. No
+  migration.
+
 - **A 0.14 CLI's `--plain` is told why it was refused.** `coffre set --plain`
   from a CLI older than 0.16 sends `{ "value", "plain": true }`, which 0.16
   does not take (it says `"sensitivity": "plain"`); the 400 was `API_KEY:

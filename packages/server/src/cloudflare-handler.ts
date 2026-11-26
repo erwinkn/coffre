@@ -10,7 +10,7 @@ import { takesSocket } from './plugins.ts';
 import { createRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
 import { admitSocket } from './socket-admission.ts';
-import { workloadEntrypoint } from './cloudflare-workload.ts';
+import { workloadEntrypoint, type WorkloadEntrypoint } from './cloudflare-workload.ts';
 import { fetchTransport } from './workloads/transport.ts';
 
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
@@ -73,13 +73,14 @@ export type CoffreWorker<Env> = {
   /**
    * The entrypoint another Worker of the account binds to use the
    * credential proxy as the service its `props` name, with nothing to prove
-   * (cloudflare-workload.ts): `export const CoffreWorkload = coffre.Workload`,
+   * (cloudflare-workload.ts), by its `fetch` and its RPC methods, `sign`,
+   * `verify` and `presign` (`CoffreBinding`, in `@coffre/client/workload`): `export const CoffreWorkload = coffre.Workload`,
    * and in that Worker's wrangler.jsonc, `"services": [{ "binding": "COFFRE",
    * "service": "<coffre's app Worker>", "entrypoint": "CoffreWorkload",
    * "props": { "service": "edge-api" } }]`. The service needs a binding of
    * profile `cloudflare` (`coffre trust edge-api --cloudflare`) and grants.
    */
-  Workload: ReturnType<typeof workloadEntrypoint<Env>>;
+  Workload: WorkloadEntrypoint<Env>;
 };
 
 /**
