@@ -240,7 +240,9 @@ export const secretRoutes = {
    * the pair, `"pair": { "private", "public" }` (a 400 otherwise); with
    * `"replaces"`, the version id a listing gave (`versionId`), a value is
    * written only over that version, and is a 409 `stale` if the key holds
-   * another now (a regenerate's); `{ "KEY": { "ref": "billing/prod/STRIPE_KEY" } }` makes the key a
+   * another now (a regenerate's); `"replaces": null`, only while the key
+   * holds nothing, here or passed down, and is a 409 `stale` once it holds
+   * a value or a reference (the Terraform provider's create); `{ "KEY": { "ref": "billing/prod/STRIPE_KEY" } }` makes the key a
    * reference to that one, which whoever reads here reads through it;
    * `{ "KEY": null }` archives the key, which takes `secret.archive`. One
    * call to the vault, which decides and writes all of them or none, and
@@ -267,8 +269,8 @@ export const secretRoutes = {
   ...route('PATCH /secrets/:project/:environment', {
     input: z.record(secretKey, z.union([
       secretValue,
-      z.object({ value: secretValue, generated: generation, replaces: rowId.optional(), sensitivity: z.enum(['secret', 'sensitive']).optional() }).strict(),
-      z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']), replaces: rowId.optional() }).strict(),
+      z.object({ value: secretValue, generated: generation, replaces: rowId.nullable().optional(), sensitivity: z.enum(['secret', 'sensitive']).optional() }).strict(),
+      z.object({ value: secretValue, sensitivity: z.enum(['plain', 'secret', 'sensitive']), replaces: rowId.nullable().optional() }).strict(),
       z.object({ ref: sourcePath }).strict(),
       z.object({ sensitivity: z.enum(['plain', 'secret', 'sensitive']) }).strict(),
     ], { error: oldPlain }).nullable())

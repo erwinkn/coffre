@@ -308,6 +308,55 @@ test('a value a client generated, and its regenerate, is one change each: Regene
   assert.deepEqual(app.calls, []);
 });
 
+test('a value that replaces nothing (`null`) is written only while the key holds nothing, here or passed down: anything else is stale, and nothing is written', async () => {
+  const patch = (path: string, values: unknown, query = '') => answered(app.request(`/api/secrets/${path}${query}`, as('bo-cli', { method: 'PATCH', body: JSON.stringify(values) })));
+  const nothing = (value: string) => ({ value, sensitivity: 'secret', replaces: null });
+  // A key that is not there is made, and one that holds no value of its own, nor a reference, takes one too.
+  const [made, written] = await patch('market/prod', { NEW_KEY: nothing('first'), EMPTY: nothing('filled') });
+  assert.deepEqual([made, written.keys], [200, { NEW_KEY: { version: 1, sensitivity: 'secret' }, EMPTY: { version: 1, sensitivity: 'secret' } }], JSON.stringify(written));
+  // Once it holds a value, it is stale: the whole write is refused, its other keys too, a dry run as the write.
+  const before = await app.request('/api/secrets/market/prod', as('bo-cli')).then((response) => response.json() as Promise<{ keys: { key: string; version: number | null }[] }>);
+  for (const query of ['', '?dryRun=1']) {
+    const [stale, why] = await patch('market/prod', { NEW_KEY: nothing('second'), OTHER_KEY: nothing('other') }, query);
+    assert.deepEqual([stale, why.error, why.reason], [409, 'conflict', 'stale'], query);
+  }
+  const after = await app.request('/api/secrets/market/prod', as('bo-cli')).then((response) => response.json() as Promise<{ keys: { key: string; version: number | null }[] }>);
+  assert.deepEqual(after.keys.map(({ key, version }) => [key, version]), before.keys.map(({ key, version }) => [key, version]));
+  assert.ok(!after.keys.some((item) => item.key === 'OTHER_KEY'));
+  // A dry run of one that is not there says it would be added, and writes nothing.
+  const [weighed, would] = await patch('market/prod', { FRESH_KEY: nothing('fresh') }, '?dryRun=1');
+  assert.deepEqual([weighed, would], [200, { dryRun: true, keys: { FRESH_KEY: 'added' } }]);
+  const listing = await app.request('/api/secrets/market/prod', as('bo-cli')).then((response) => response.json() as Promise<{ keys: { key: string }[] }>);
+  assert.ok(!listing.keys.some((item) => item.key === 'FRESH_KEY'));
+  // A value a parent passes down is one the key reads: in the fork, S_KEY is staging's; and a reference is one too, A_LINK, if one to a key since archived.
+  for (const [key, why] of [['S_KEY', 'a value passed down'], ['A_LINK', 'a reference']]) {
+    const [status, said] = await patch('market/fork', { [key]: nothing('own') });
+    assert.deepEqual([status, said.reason], [409, 'stale'], why);
+  }
+  // Once the fork dismisses S_KEY, nothing is passed down: the write makes the fork's own, and ends the dismissal.
+  const [dismissed] = await answered(app.request('/api/projects/market/fork/dismissals', as('bo-cli', { method: 'PATCH', body: JSON.stringify({ S_KEY: true }) })));
+  assert.equal(dismissed, 200);
+  const [own, owned] = await patch('market/fork', { S_KEY: nothing('own') });
+  assert.deepEqual([own, owned.keys], [200, { S_KEY: { version: 1, sensitivity: 'secret' } }], JSON.stringify(owned));
+  // In a personal config, a key of the environment it is a config of is passed down; one of none is made, in a config made for it.
+  const [personal, mine] = await patch('market/prod@me', { DATABASE_URL: nothing('mine') });
+  assert.deepEqual([personal, mine.reason], [409, 'stale']);
+  const [config, configured] = await patch('market/prod@me', { BO_ONLY: nothing('mine') });
+  assert.deepEqual([config, configured.keys], [200, { BO_ONLY: { version: 1, sensitivity: 'secret' } }]);
+  // A key pair, made whole while neither half holds anything, and stale whole once they do.
+  const pair = await generateWrite('JWT_PRIVATE_KEY', parseRecipe('ecdsa:p-256'));
+  const unmade = Object.fromEntries(Object.entries(pair).map(([key, entry]) => [key, { ...entry, replaces: null }]));
+  assert.equal((await patch('market/prod', unmade))[0], 200);
+  const [again, twice] = await patch('market/prod', unmade);
+  assert.deepEqual([again, twice.reason], [409, 'stale']);
+  // A generated value says it the same way.
+  const [generated, how] = await patch('market/prod', { NEW_KEY: { value: 'x', generated: { recipe: 'bytes:32:hex' }, replaces: null } });
+  assert.deepEqual([generated, how.reason], [409, 'stale']);
+  // An archived key holds nothing that is read, so nothing is what it replaces: it is refused as archived, as any write over it.
+  const [archived, why] = await patch('market/prod', { OLD: nothing('back') });
+  assert.deepEqual([archived, why.reason], [409, 'archived']);
+});
+
 test('a dry run is one weigh, and one use only to compare a value typed over the key\'s own: unchanged only if the caller reads it, and it is that version', async () => {
   const dry = (label: string, path: string, values: unknown) => cost(() => answered(app.request(`/api/secrets/${path}?dryRun=1`, as(label, { method: 'PATCH', body: JSON.stringify(values) }))));
   const compared = async () => (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending WHERE body LIKE '%"purpose":"compare"%' ORDER BY id`)).map((row) => row.body);

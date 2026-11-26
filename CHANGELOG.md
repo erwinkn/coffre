@@ -18,6 +18,15 @@
   `export const CoffreWorkload = coffre.Workload` stays as it is. No
   migration.
 
+- **A write that makes a key only while it holds nothing.** `PATCH
+  /api/secrets/:project/:environment` takes `"replaces": null` beside a
+  value, `{ "KEY": { "value": "…", "sensitivity": "secret", "replaces": null
+  } }`: written only while the key holds no value and no reference, here or
+  passed down by a parent, and refused 409 `stale` otherwise, with nothing
+  written. A dry run refuses it the same way. Until now `replaces` named a
+  version only, and `null` was a 400. It is what the Terraform provider's
+  create sends, so that it never writes over a key someone made meanwhile
+  ([docs/design/terraform-provider.md](docs/design/terraform-provider.md)).
 - **A 0.14 CLI's `--plain` is told why it was refused.** `coffre set --plain`
   from a CLI older than 0.16 sends `{ "value", "plain": true }`, which 0.16
   does not take (it says `"sensitivity": "plain"`); the 400 was `API_KEY:

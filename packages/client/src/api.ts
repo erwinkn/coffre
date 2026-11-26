@@ -101,12 +101,12 @@ export type Api = {
             public: string;
           };
         };
-        replaces?: string;
+        replaces?: string | null;
         sensitivity?: "secret" | "sensitive";
       } | {
         value: string;
         sensitivity: "plain" | "secret" | "sensitive";
-        replaces?: string;
+        replaces?: string | null;
       } | {
         ref: string;
       } | {
