@@ -252,7 +252,8 @@ function workloadSignin(input: Asked<'workload.signin'>, vault: Deciding): Opera
       if (vault.workloads === null || account === undefined || account.status !== 'active') return { refused: 'no_match' };
       const live = seen.bindings.filter((row) => row.principal === account.id && row.generation === account.generation && row.revokedAt === null && row.policy !== null && profiles.includes(row.profile));
       if (live.length > MAX_BINDINGS) return { refused: 'no_match' };
-      let found: { binding: Row<typeof bindings>; claims: Record<string, unknown>; spends: Buffer | null; exp: number | null };
+      // `token` is an ID token's hash, spent or not, so the log names the token each session came from.
+      let found: { binding: Row<typeof bindings>; claims: Record<string, unknown>; spends: Buffer | null; token: Buffer | null; exp: number | null };
       if (proof.kind === 'oidc') {
         if (proof.under.jwksUri.startsWith(CARRIED)) {
           for (const row of carried({ ...seen, bindings: live })) {
@@ -263,12 +264,12 @@ function workloadSignin(input: Asked<'workload.signin'>, vault: Deciding): Opera
         const decoded = proof.decoded as DecodedToken;
         const matched = matchIdToken(decoded, live, { under: proof.under, publicUrl, wanted: { kind: 'session', jkt: key }, now: at });
         if ('refused' in matched) return matched;
-        found = { binding: matched.binding, claims: matched.claims, spends: matched.spends, exp: decoded.claims.exp };
+        found = { binding: matched.binding, claims: matched.claims, spends: matched.spends, token: decoded.signingInputHash, exp: decoded.claims.exp };
       } else {
         const matched = matchAwsAnswer(proof.answer, live);
         if ('refused' in matched) return matched;
         // The request named the session's key and this instance under its signature: nothing is spent, and nothing but the binding's hours ends it.
-        found = { binding: matched.binding, claims: matched.claims, spends: null, exp: null };
+        found = { binding: matched.binding, claims: matched.claims, spends: null, token: null, exp: null };
       }
       const { binding } = found;
       const says = JSON.parse(binding.policy!) as BindingPolicy;
@@ -299,7 +300,7 @@ function workloadSignin(input: Asked<'workload.signin'>, vault: Deciding): Opera
           objects: [`principal:${account.id}`, `credential:${id}`, `binding:${binding.id}`],
           detail: {
             kind: 'workload', credential: id, binding: binding.id, generation: binding.generation, issuer: binding.issuer, proved: proof.kind, key,
-            expiresAt: expiresAt.toISOString(), notAfter: new Date(notAfter).toISOString(), run, proof: found.spends?.toString('hex') ?? null,
+            expiresAt: expiresAt.toISOString(), notAfter: new Date(notAfter).toISOString(), run, proof: found.token?.toString('hex') ?? null,
           },
         },
         answer: { principal: account.id, credential: id, expiresAt: expiresAt.toISOString(), notAfter: new Date(notAfter).toISOString(), places, binding: binding.id },

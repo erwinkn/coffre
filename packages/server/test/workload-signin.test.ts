@@ -10,8 +10,10 @@ import { after, beforeEach, test } from 'node:test';
 
 import { createProof, generateProofKey, thumbprint, type ProofKey } from '@coffre/client/dpop';
 import { canonicalClaims, generateToken, github, signin, type WorkloadAlert } from '@coffre/core/identity';
+import { rowsOf } from '@coffre/db/dialect';
 import { binding, emptyDatabase, environment, grant, instance, principal, project, role, rows, session, write } from '@coffre/vault/testing';
 import { SignatureV4 } from '@smithy/signature-v4';
+import { sql } from 'drizzle-orm';
 
 import { processGates } from '../src/gate.ts';
 import { GET_CALLER_IDENTITY, stsFetch, type AwsProofInput } from '../src/workloads/aws.ts';
@@ -304,6 +306,10 @@ test('a custom binding takes a sub by its prefix, segment by segment, beside an 
   const second = await signIn({ oidc: token }, { key: await generateProofKey() });
   assert.equal(second.status, 200, JSON.stringify(second.body));
   assert.equal((await signIn({ oidc: token })).status, 200);
+  // Nothing is spent, but each sign-in's entry names the token by its hash, so an audit lists the sessions one token made.
+  const hash = createHash('sha256').update(token.split('.').slice(0, 2).join('.'), 'ascii').digest('hex');
+  const exchanges = (await rowsOf<{ body: string }>(world.owner, sql`SELECT body FROM log_pending ORDER BY id`)).map((row) => JSON.parse(row.body) as { action: string; detail: { proof: string | null } }).filter((body) => body.action === 'token.exchange');
+  assert.deepEqual(exchanges.map((body) => body.detail.proof), [hash, hash, hash]);
 
   // Another project's thread, whose ID only starts like this one's, or the project's own sub with nothing after it.
   assert.deepEqual(reason(await signIn({ oidc: capyToken({ sub: 'org/org_7Q/project/prj_423/thread/t_1' }) })), [401, 'no_match']);

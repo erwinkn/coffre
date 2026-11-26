@@ -683,7 +683,11 @@ issuer signed it at most, as many times as it is sent. Its sessions are
 the binding's: use-only, within its scope, reading only its `reads`, and
 each ends at that `exp`. `--source` narrows where a copy works from, where
 the sandboxes' egress addresses are yours, and freezing the binding stops
-its sessions at once (`coffre freeze`). Nothing else changes: a prefix
+its sessions at once (`coffre freeze`). Nor is a copy's use seen: where
+a spent token's second use is refused `replayed`, a repeating one's signs
+in, with no refusal and no alert. The log names the token by its hash in
+each sign-in's `token.exchange` entry, beside the address it came from, so
+an audit lists the sessions one token made. Nothing else changes: a prefix
 admits only the `sub`s under it, an exact claim only its value, and no
 binding takes a token of another issuer or audience.
 

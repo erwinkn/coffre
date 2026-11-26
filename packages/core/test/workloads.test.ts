@@ -230,7 +230,9 @@ test('a custom binding matches a claim by its prefix, whole segments each ended 
   assert.equal(canonicalClaims(made.claims), '{"project":"prj_42","sub":{"prefix":"org/org_7Q/project/prj_42/"}}');
   assert.equal(shownClaim(made.claims.sub!), 'starts with org/org_7Q/project/prj_42/');
   // Stopping mid-segment would take prj_423 too: refused, with the spelling that works.
-  refused({ profile: 'custom', issuer: CAPY, claims: { sub: { prefix: 'org/org_7Q/project/prj_42' } } }, /write "org\/org_7Q\/project\/prj_42\/"/);
+  refused({ profile: 'custom', issuer: CAPY, claims: { sub: { prefix: 'org/org_7Q/project/prj_42' } } }, /"org\/org_7Q\/project\/prj_42\/" takes only what is under it/);
+  // At the size limit, the spelling with its "/" would be past it: none is suggested.
+  assert.throws(() => checkBinding({ profile: 'custom', issuer: CAPY, claims: { sub: { prefix: 'x'.repeat(256) } } }), (error: Error) => !/takes only what is under it/.test(error.message) && /whole segments/.test(error.message));
   for (const prefix of ['', '/', '/org/', 'org//project/', 'org/\nx/', 'x'.repeat(256) + '/']) {
     refused({ profile: 'custom', issuer: CAPY, claims: { sub: { prefix } } }, /prefix/);
   }

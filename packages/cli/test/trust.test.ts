@@ -131,12 +131,12 @@ test('a custom binding takes a claim by its prefix, whole segments ended by "/",
   // As the server stores it, which checks it again.
   assert.deepEqual(checkBinding({ profile: made.profile, issuer: made.issuer, claims: made.claims }).claims, { project: 'prj_42', sub: { prefix: 'org/org_7Q/project/prj_42/' } });
   // One that stops mid-segment would take prj_423 too: refused here, before anything is asked.
-  await assert.rejects(bindingFrom({ ...flags, 'claim-prefix': ['sub=org/org_7Q/project/prj_42'] }, lookup), /--claim-prefix sub=org\/org_7Q\/project\/prj_42: .*would also take org\/org_7Q\/project\/prj_420\/…, so write "org\/org_7Q\/project\/prj_42\/"/);
+  await assert.rejects(bindingFrom({ ...flags, 'claim-prefix': ['sub=org/org_7Q/project/prj_42'] }, lookup), /--claim-prefix sub=org\/org_7Q\/project\/prj_42: .*would also take org\/org_7Q\/project\/prj_420\/…; "org\/org_7Q\/project\/prj_42\/" takes only what is under it/);
   // An empty segment, or none at all, is no prefix the server takes, and none is suggested.
   for (const loose of ['sub=', 'sub=/', 'sub=/org', 'sub=org//project/']) {
     await assert.rejects(bindingFrom({ ...flags, 'claim-prefix': [loose] }, lookup), (error: Error) => {
       assert.match(error.message, /is whole segments, each ended by "\/", none empty/);
-      assert.doesNotMatch(error.message, /so write/);
+      assert.doesNotMatch(error.message, /takes only what is under it/);
       return true;
     });
   }

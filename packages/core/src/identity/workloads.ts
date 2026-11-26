@@ -384,8 +384,8 @@ export function claimPrefix(name: string, prefix: string): ClaimPrefix {
   if (new TextEncoder().encode(prefix).length > MAX_CLAIM_BYTES) throw new BindingInvalid(`claim ${name}'s prefix is longer than ${MAX_CLAIM_BYTES} bytes`);
   if (CLAIM_PREFIX.test(prefix)) return { prefix };
   const ended = `${prefix}/`;
-  if (CLAIM_PREFIX.test(ended)) {
-    throw new BindingInvalid(`claim ${name}'s prefix ends with "/", at a segment's end: "${prefix}" would also take ${prefix}0/…, so write "${ended}"`);
+  if (CLAIM_PREFIX.test(ended) && new TextEncoder().encode(ended).length <= MAX_CLAIM_BYTES) {
+    throw new BindingInvalid(`claim ${name}'s prefix ends at a "/": "${prefix}" would also take ${prefix}0/…; "${ended}" takes only what is under it`);
   }
   throw new BindingInvalid(`claim ${name}'s prefix is whole segments, each ended by "/", none empty: "org/1/project/2/", not "${prefix}"`);
 }

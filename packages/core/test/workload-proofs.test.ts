@@ -267,4 +267,17 @@ test('a custom binding whose tokens repeat spends none: each lives an hour at mo
   // The prefix's boundary, and the exact claim beside it.
   assert.equal(match({ ...thread, sub: 'org/org_7Q/project/prj_423/thread/t_1' }, [repeats], SESSION, CAPY), 'no_match');
   assert.equal(match({ ...thread, project: 'prj_423' }, [repeats], SESSION, CAPY), 'no_match');
+  // Beside an older single-use binding on the same sub, the oldest answers: the token is still spent, so a repeating one never un-spends another's.
+  const older = binding({ profile: 'custom', ...CAPY, claimed, rules: {}, createdAt: new Date(NOW - 3_600_000) });
+  const newer = binding({ profile: 'custom', ...CAPY, claimed, rules: { repeats: true }, createdAt: new Date(NOW) });
+  const oldest = match(thread, [newer, older], SESSION, CAPY) as { binding: ProofBinding; spends: Buffer };
+  assert.deepEqual([oldest.binding, oldest.spends], [older, token(thread).signingInputHash]);
+  // Inside the clock's tolerance past its exp, the token still matches, but its session would end before it began.
+  const late = { ...thread, iat: at(-3600 + 10), exp: at(-10) };
+  const lateFound = match(late, [repeats], SESSION, CAPY);
+  assert.ok(typeof lateFound !== 'string');
+  assert.ok(hardEnd(repeats, lateFound.policy!, NOW, late.exp) <= NOW);
+  // A prefix binding with no policy, a CI run's at /api/auth/oidc, matches by its prefix and spends the token.
+  const bearer = binding({ profile: 'custom', ...CAPY, claimed });
+  assert.deepEqual((match(thread, [bearer], RUN, CAPY) as { spends: Buffer }).spends, token(thread).signingInputHash);
 });

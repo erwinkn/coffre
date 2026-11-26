@@ -44,7 +44,10 @@
   never are, so a second `coffre run` in a sandbox is no longer refused
   `replayed`; such a token must live an hour at most, `iat` to `exp`, and
   each session it makes ends at its `exp`. A copy of one therefore signs
-  in, for any key, until then: docs/workloads.md says what that allows.
+  in, for any key, until then, and nothing refuses or alerts on it:
+  docs/workloads.md says what that allows. A workload's sign-in now logs
+  its token's hash (`proof`) whether or not it is spent, so an audit
+  lists the sessions one token made.
   `coffre run` and `coffre serve` take `--proof oidc:<file>`, which reads
   the token from the file before each sign-in (`--proof
   "oidc:$CAPY_OIDC_TOKEN_FILE"`). No migration. Earlier releases cannot
