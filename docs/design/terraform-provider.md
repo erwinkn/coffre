@@ -43,7 +43,7 @@ the value:
 | Attribute | Kind | What it is |
 |---|---|---|
 | `project`, `environment`, `key` | required; a change replaces | where the key is. `key` as coffre names one, `^[A-Za-z_][A-Za-z0-9_]{0,127}$` |
-| `value_wo` | required, write-only, sensitive | the value, at most 64 KiB of text with no NUL |
+| `value_wo` | required, write-only, sensitive | the value: text with no NUL, at most 65,536 UTF-16 code units, as coffre counts them |
 | `value_wo_version` | required number | a change writes `value_wo` again. Terraform cannot tell a write-only value changed, so this says it did |
 | `sensitivity` | optional, default `secret` | who sees the value (`plain`: any lister; `sensitive`: nobody, it is only used) |
 | `version`, `version_id` | computed | the version the key reads now, by number and id, as the last refresh or write saw it |
@@ -67,6 +67,12 @@ Every call is one the CLI and the pages already make, on `/api`:
 | update | the same write, `"replaces": "<version_id from the plan>"`, then the listing |
 | destroy | `PATCH /secrets/billing/prod/STRIPE_KEY` `{"archived": true}`: coffre deletes no key, it keeps its history, and an archived key can be brought back |
 | import | `terraform import coffre_secret.stripe billing/prod/STRIPE_KEY`, then a refresh |
+
+The service account lists the environment (`secret.read` or `secret.use`),
+writes it (`secret.write`) and archives in it (`secret.archive`). No
+built-in role holds exactly those: `maintainer` holds them and
+`environment.manage`, and a custom role with the four `secret.*`
+permissions holds no more than they need.
 
 A change of `value_wo_version` or `sensitivity` is an update, and both
 write the configured value again: a sensitivity is changed by writing the
@@ -95,11 +101,12 @@ Warning: billing/prod/STRIPE_KEY was written outside Terraform
   It is at version 8, written by ada@acme.example. Applying writes the configured value over it.
 ```
 
-The same holds when the key was made a reference, reset to what a parent
-passes down, or renamed away and another renamed onto its name: whatever it
-reads is not what Terraform wrote. A key deleted with its environment, or
-archived, leaves the state, and the next plan creates it (creating over an
-archived key is refused; section 8).
+The same holds when the key was reset to what a parent passes down, or
+renamed away and another renamed onto its name: whatever it reads is not
+what Terraform wrote. A key made a reference is drift too, but one the
+provider does not write over (section 8). A key deleted with its
+environment, or archived, leaves the state, and the next plan creates it
+(creating over an archived key is refused; section 8).
 
 So the configuration wins, as everywhere in Terraform. A value someone
 rotates by hand comes back on the next apply; who wants to rotate by hand
@@ -125,19 +132,31 @@ Error: billing/prod/STRIPE_KEY changed after this plan was made
 
 A create says `"replaces": null`: the key holds no value, here or passed
 down (section 5). Over a key that exists, coffre answers `stale`, and the
-provider says to import it. In a fork, over a value a parent passes down, the provider
-reads the listing and writes once more, replacing the inherited version:
-the configuration asks for this environment's own value.
+provider says to import it. In a fork, over a value a parent passes down,
+the provider reads the listing and writes once more, replacing the
+inherited version: the configuration asks for this environment's own
+value, whatever the parent holds, and the parent's is not changed. That
+takes the listing to show the inherited version, so a service account that
+lists the parent too (`secret.read` or `secret.use` there); when it shows
+none (the parent is not the account's to list, or its key is a
+reference), the provider says so and writes nothing.
 
 What is not guarded, on purpose:
 
 - **Destroy** archives whatever the key holds: the archive route takes no
   `replaces`, and nothing is lost, since an archived key keeps its versions.
 - **The listing after a write** names the new version's id. If someone
-  writes between the two calls, the listing shows their version, the
-  provider keeps it as what the key reads, and the next plan reports drift
-  (section 3). It never takes their version for its own: it checks the
-  number its write was answered with.
+  writes between the two calls, the listing shows their version: the
+  provider keeps its number and id as what the key reads (`version`,
+  `version_id` and `updated_by` are computed, so any value is consistent
+  with the plan), keeps the configured `sensitivity`, and the next plan
+  reports drift (section 3). It never takes their version for its own: it
+  checks the number its write was answered with. A key archived between
+  the two calls lists no version: the state keeps the number written, with
+  no id, and the next refresh finds the key archived. One race goes
+  unseen: the key renamed away and another made under its name, at the
+  same version number, between the two calls, milliseconds apart; the
+  provider then takes the new key for its own, and reports no drift on it.
 
 ## 5. The one addition to coffre
 
@@ -163,6 +182,9 @@ Two more were weighed, and are not needed:
 
 - **The write's answer naming the new version's id.** The listing after a
   write gives it (section 4), at one call per write, and a write is rare.
+  It would also close the one race the listing leaves (section 4), which
+  takes two changes of the key's name within milliseconds and costs only
+  a drift unreported: not worth a second change to the API now.
 - **`replaces` on a mark**, a sensitivity changed in place. The provider
   never marks: it writes the value again (section 2), with `replaces`.
 
@@ -183,8 +205,10 @@ configuration, `var.coffre_token` and `TF_VAR_coffre_token` included.
   its exchange, and a given one serves one command: `terraform plan -out`,
   or the `apply` of a saved plan, each with its own. `terraform apply`
   without a saved plan plans, then applies, as two, and the second is told
-  why it is refused (`replayed`). The credential is renewed before it
-  expires, so a long apply does not stop partway.
+  why it is refused (`replayed`). In GitHub Actions, the credential is
+  renewed with a fresh ID token before it expires, so a long apply does
+  not stop partway; on a given ID token, a command has its one credential,
+  five minutes, and is refused past them.
 
 Instances that issue no bearer credential to services (`useOnly`) answer
 the exchange 410; their key-bound sign-in (`/api/auth/workload`) is not
@@ -223,11 +247,14 @@ the error of a refused write (section 10).
 - **An archived key** (`terraform destroy`, then `apply`, or `-replace`):
   coffre refuses a value over an archived key (`archived`), and the provider
   says to bring it back in coffre and import it. Bringing it back from the
-  provider would serve the archived value again until the write lands.
-- **A reference** (`{"ref": …}`) is not managed here; a key made one
-  outside Terraform is drift that the provider cannot guard against, since
-  the write route takes `replaces` as a version id only, so it says so and
-  writes nothing.
+  provider would serve the archived value again until the write lands. In
+  a fork, an override archived falls back to what the parent passes down,
+  and is made again as any override is (section 4).
+- **A reference** (`{"ref": …}`) is not managed here. A key made one
+  outside Terraform lists no version id, and the write route's `replaces`
+  takes a version id or `null`, never a reference's source
+  (`{"source": …}`), so no write could say what it replaces: the plan
+  reports the drift, and the apply says so and writes nothing.
 - **A personal config** (`dev@me`) is a person's; a service account has
   none, so the provider refuses an environment with `@`.
 - **A change of `key`** replaces the resource: the old key is archived with
