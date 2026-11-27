@@ -332,13 +332,31 @@ function parseUntil(until: string, now: number): string {
   return new Date(time).toISOString();
 }
 
-/** What a member should hold, each place by path: a role, a role until a date, or null for none. */
-const accessPatch = z.record(z.string().max(200), z.union([roleId, z.object({ role: roleId, until: z.string().max(40).nullable() }).strict(), z.null()]));
+/**
+ * A grant as the member's access listed it, `{role, until}` with `until`
+ * its `expiresAt`, or null for none: what a change asked with `was` replaces.
+ */
+const held = z.object({ role: roleId, until: z.string().max(40).nullable() }).strict().nullable();
+
+/**
+ * What a member should hold, each place by path: a role, a role until a
+ * date, or null for none. The object takes `was` too: the change is made
+ * only while the member holds that there (`stale` otherwise), so one read,
+ * then written, never undoes a change made between.
+ */
+const accessPatch = z.record(z.string().max(200), z.union([roleId, z.object({ role: roleId, until: z.string().max(40).nullable(), was: held.optional() }).strict(), z.null()]));
 
 /** The most places one change of grants names, as the vault takes them. */
 const MOST_PLACES = 1000;
 
-type Wanted = { path: string; project: string; environment: string | null; role: string | null; expiresAt: string | null };
+type Wanted = { path: string; project: string; environment: string | null; role: string | null; expiresAt: string | null; was?: { role: string; expiresAt: string | null } | null };
+
+/** An end a listing showed, as the vault compares it: any time, past ones included, since a lapsed grant is held no more. */
+function heldUntil(until: string): string {
+  const time = Date.parse(until);
+  if (!Number.isFinite(time) || time >= Date.UTC(10000, 0, 1)) throw badRequest(`"${until}" is not a time`);
+  return new Date(time).toISOString();
+}
 
 /** The grants a body asks for, each place by its path, checked before any call: a place named once, by slug, an end to come. */
 export function grantsAsked(input: z.output<typeof accessPatch>): Wanted[] {
@@ -350,7 +368,11 @@ export function grantsAsked(input: z.output<typeof accessPatch>): Wanted[] {
     }
     const role = value === null ? null : typeof value === 'string' ? value : value.role;
     const until = value !== null && typeof value === 'object' ? value.until : null;
-    return { path: formatPath(path), project: path.project, environment: path.environment ?? null, role, expiresAt: until === null ? null : parseUntil(until, now) };
+    const asked: Wanted = { path: formatPath(path), project: path.project, environment: path.environment ?? null, role, expiresAt: until === null ? null : parseUntil(until, now) };
+    if (value !== null && typeof value === 'object' && value.was !== undefined) {
+      asked.was = value.was === null ? null : { role: value.was.role, expiresAt: value.was.until === null ? null : heldUntil(value.was.until) };
+    }
+    return asked;
   });
   if (new Set(wanted.map((want) => want.path)).size !== wanted.length) throw badRequest('name each place once');
   if (wanted.length > MOST_PLACES) throw badRequest(`a change of grants names at most ${MOST_PLACES} places`);
@@ -563,6 +585,11 @@ export const memberRoutes = {
    * instance lets set one up there (`givesService`).
    *
    *   { "api": "developer", "api/prod": { "role": "viewer", "until": "2026-12-31" }, "web": null }
+   *
+   * A place's object may say what it replaces, as the member's access
+   * listed it: `"was": null` makes the grant only where the member holds
+   * nothing, `"was": {"role": "viewer", "until": null}` changes only that
+   * grant. Anything else held there refuses the whole change, 409 `stale`.
    */
   ...route('PATCH /access/:member', {
     input: accessPatch,

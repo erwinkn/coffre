@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A change of grants says what it replaces.** `PATCH /api/access/:member`
+  and `PUT /api/members/:member`'s `access` take `was` beside a place's
+  `{role, until}`: `null`, made only where the member holds nothing, or
+  `{role, until}` as their access lists it (`until` its `expiresAt`), made
+  only while they hold exactly that. Anything else held there refuses the
+  whole change 409 `stale`, with nothing written, so a grant read, then
+  written, never undoes a revocation made between. The vault already
+  decided it, for the MCP approvals; the routes did not pass it. Without
+  `was`, nothing changes.
+
 ## 0.16.11 (2026-11-27)
 
 - **A bound Cloudflare Worker signs, verifies and presigns over RPC.** The
