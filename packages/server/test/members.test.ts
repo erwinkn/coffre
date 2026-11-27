@@ -399,6 +399,44 @@ test("a person's grants set in one change, each place by path, all or none", asy
   assert.deepEqual([await call('bo-cli', 'PATCH', `/access/${gus}`, {}), app.calls.length], [[200, { changes: {} }], before]);
 });
 
+test('a change of grants that says what it replaces is made only while the member holds that', async () => {
+  const patch = (label: string, member: string, body: unknown) => call(label, 'PATCH', `/access/${member}`, body);
+  const standing = (role: string) => ({ role, until: null });
+  const STALE = [409, 'conflict', 'stale'];
+  // Nothing held: `was: null` makes it, and only once; a grant said held that is not, refused.
+  const nothing = await patch('bo-cli', gus, { market: { ...standing('viewer'), was: standing('viewer') } });
+  assert.deepEqual(refused(nothing), STALE);
+  // Said as a grant, not as the value `stale` first meant.
+  assert.equal(nothing[1].message, `${gus}: a grant asked over what it replaces (\`was\`) is not the one held there now. Nothing was changed`);
+  assert.deepEqual((await patch('bo-cli', gus, { market: { ...standing('viewer'), was: null } }))[1], { changes: { market: 'created' } });
+  assert.deepEqual(refused(await patch('bo-cli', gus, { market: { ...standing('viewer'), was: null } })), STALE);
+  // The grant held, changed; asked again over what it was, refused, and the place beside it with it.
+  assert.deepEqual((await patch('cy-cli', gus, { market: { ...standing('maintainer'), was: standing('viewer') } }))[1], { changes: { market: 'updated' } });
+  assert.deepEqual(refused(await patch('cy-cli', gus, { 'market/dev': 'viewer', market: { ...standing('viewer'), was: standing('viewer') } })), STALE);
+  assert.deepEqual(((await call('cy-cli', 'GET', `/members/${gus}/access`))[1].grants as Grant[]).map((held) => [held.id, held.role]), [[`${gus}/market`, 'maintainer']]);
+  // An end is part of what is held, as the listing shows it.
+  assert.deepEqual((await patch('bo-cli', gus, { 'market/prod': { role: 'viewer', until: '2030-12-31' } }))[1], { changes: { 'market/prod': 'created' } });
+  assert.deepEqual(refused(await patch('bo-cli', gus, { 'market/prod': { ...standing('viewer'), was: standing('viewer') } })), STALE);
+  // To the millisecond, and in any offset.
+  assert.deepEqual(refused(await patch('bo-cli', gus, { 'market/prod': { ...standing('viewer'), was: { role: 'viewer', until: '2030-12-31T23:59:59.998Z' } } })), STALE);
+  assert.deepEqual((await patch('bo-cli', gus, { 'market/prod': { role: 'viewer', until: '2030-12-31', was: { role: 'viewer', until: '2031-01-01T01:59:59.999+02:00' } } }))[1], { changes: { 'market/prod': 'unchanged' } });
+  assert.deepEqual((await patch('bo-cli', gus, { 'market/prod': { ...standing('viewer'), was: { role: 'viewer', until: '2030-12-31T23:59:59.999Z' } } }))[1], { changes: { 'market/prod': 'updated' } });
+  // A lapsed grant is held no more: only `was: null` replaces it.
+  assert.deepEqual(refused(await patch('cy-cli', ed, { billing: { ...standing('viewer'), was: { role: 'viewer', until: '2020-01-01T00:00:00.000Z' } } })), STALE);
+  assert.deepEqual((await patch('cy-cli', ed, { billing: { ...standing('viewer'), was: null } }))[1], { changes: { billing: 'created' } });
+  // A service account admitted with its grants, over nothing.
+  assert.deepEqual((await call('cy-cli', 'PUT', '/members/token:fresh', { access: { market: { ...standing('viewer'), was: null } } }))[1].changes, { market: 'created' });
+  assert.deepEqual(refused(await call('cy-cli', 'PUT', '/members/token:fresh', { access: { market: { ...standing('viewer'), was: null } } })), STALE);
+
+  // Told before any call: a `was` that is no grant as the listing shows one.
+  const before = app.calls.length;
+  // An end is the instant the listing shows, never a date, which `until` reads as its last millisecond.
+  for (const was of [{ role: 'viewer', until: '2030-12-31' }, { role: 'viewer', until: '2030-12-31T23:59:59' }, { role: 'viewer', until: '1' }, { role: 'viewer', until: '+010000-01-01T00:00:00Z' }, { role: 'viewer' }, { role: 'viewer', until: 'soon' }, { role: 'Viewer', until: null }, { role: 'viewer', until: null, expiresAt: null }, 'viewer']) {
+    assert.deepEqual(refused(await patch('bo-cli', gus, { market: { ...standing('viewer'), was } })), [400, 'bad_request', undefined], JSON.stringify(was));
+  }
+  assert.equal(app.calls.length, before);
+});
+
 test('a member put: admitted, brought back or given a role, as their row calls for', async () => {
   const put = (label: string, member: string, body: unknown) => cost(() => call(label, 'PUT', `/members/${member}`, body));
   const everywhere = { projects: 'all', environments: 'all' };

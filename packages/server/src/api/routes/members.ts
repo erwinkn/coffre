@@ -9,6 +9,7 @@ import { members, projectNamed, projectSlugs, reportOf, type Definition, type Gr
 import type { PlaceRow } from '../../db/queries/places.ts';
 import { can, canAnywhere, permissionsAt, placeOf, projectsReached, type Place } from '../caller.ts';
 import { changed } from '../change.ts';
+import type { ApiContext } from '../context.ts';
 import { ApiError, badRequest, refusal } from '../errors.ts';
 import { formatPath, parsePath, type Path } from '../paths.ts';
 import { route } from '../route.ts';
@@ -332,13 +333,53 @@ function parseUntil(until: string, now: number): string {
   return new Date(time).toISOString();
 }
 
-/** What a member should hold, each place by path: a role, a role until a date, or null for none. */
-const accessPatch = z.record(z.string().max(200), z.union([roleId, z.object({ role: roleId, until: z.string().max(40).nullable() }).strict(), z.null()]));
+/**
+ * A grant as the member's access listed it, `{role, until}` with `until`
+ * its `expiresAt`, or null for none: what a change asked with `was` replaces.
+ */
+const held = z.object({ role: roleId, until: z.string().max(40).nullable() }).strict().nullable();
+
+/**
+ * What a member should hold, each place by path: a role, a role until a
+ * date, or null for none. The object takes `was` too: the change is made
+ * only while the member holds that there (`stale` otherwise), so one read,
+ * then written, never undoes a change made between.
+ */
+const accessPatch = z.record(z.string().max(200), z.union([roleId, z.object({ role: roleId, until: z.string().max(40).nullable(), was: held.optional() }).strict(), z.null()]));
 
 /** The most places one change of grants names, as the vault takes them. */
 const MOST_PLACES = 1000;
 
-type Wanted = { path: string; project: string; environment: string | null; role: string | null; expiresAt: string | null };
+type Wanted = { path: string; project: string; environment: string | null; role: string | null; expiresAt: string | null; was?: { role: string; expiresAt: string | null } | null };
+
+/** An instant, with its offset, as a member's access lists an end: `2030-12-31T23:59:59.999Z`. */
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * An end a listing showed, as the vault compares it, to the millisecond:
+ * the instant itself, never a date, which `until` reads as its last
+ * millisecond and a listing never shows. A past one is taken: a lapsed
+ * grant is held no more, so `was` naming one is refused `stale`.
+ */
+function heldUntil(until: string): string {
+  const time = INSTANT.test(until) ? Date.parse(until) : Number.NaN;
+  if (!Number.isFinite(time) || time >= Date.UTC(10000, 0, 1)) throw badRequest(`"${until}" is not an instant as a member's access lists an end, such as 2030-12-31T23:59:59.999Z`);
+  return new Date(time).toISOString();
+}
+
+/**
+ * One `access.grant` of the places asked, admitting a service account with
+ * them or not. A place whose grant is not the one its `was` says is told as
+ * a grant, not as the value the vault's word first meant.
+ */
+async function granted(ctx: ApiContext, principal: string, wanted: Wanted[], admit: boolean) {
+  try {
+    return await changed(ctx, { op: 'access.grant', principal, changes: wanted.map(({ path: _, ...change }) => change), ...(admit ? { admit } : {}) }, principal);
+  } catch (error) {
+    if (error instanceof ApiError && error.reason === 'stale') throw new ApiError('conflict', `${principal}: a grant asked over what it replaces (\`was\`) is not the one held there now. Nothing was changed`, 'stale');
+    throw error;
+  }
+}
 
 /** The grants a body asks for, each place by its path, checked before any call: a place named once, by slug, an end to come. */
 export function grantsAsked(input: z.output<typeof accessPatch>): Wanted[] {
@@ -350,7 +391,11 @@ export function grantsAsked(input: z.output<typeof accessPatch>): Wanted[] {
     }
     const role = value === null ? null : typeof value === 'string' ? value : value.role;
     const until = value !== null && typeof value === 'object' ? value.until : null;
-    return { path: formatPath(path), project: path.project, environment: path.environment ?? null, role, expiresAt: until === null ? null : parseUntil(until, now) };
+    const asked: Wanted = { path: formatPath(path), project: path.project, environment: path.environment ?? null, role, expiresAt: until === null ? null : parseUntil(until, now) };
+    if (value !== null && typeof value === 'object' && value.was !== undefined) {
+      asked.was = value.was === null ? null : { role: value.was.role, expiresAt: value.was.until === null ? null : heldUntil(value.was.until) };
+    }
+    return asked;
   });
   if (new Set(wanted.map((want) => want.path)).size !== wanted.length) throw badRequest('name each place once');
   if (wanted.length > MOST_PLACES) throw badRequest(`a change of grants names at most ${MOST_PLACES} places`);
@@ -512,7 +557,7 @@ export const memberRoutes = {
         if (!service || input.role !== undefined || input.scope !== undefined) throw badRequest('access comes with a service account, and no role: a person is given grants once a member');
         // Admitted, or brought back, with its grants, in one change of the vault's: all of it or none.
         const wanted = grantsAsked(input.access);
-        const { changes, created } = await changed(ctx, { op: 'access.grant', principal, changes: wanted.map(({ path: _, ...change }) => change), admit: true }, principal);
+        const { changes, created } = await granted(ctx, principal, wanted, true);
         return { member: principal, instanceRole: 'member', scope: EVERYWHERE, created: created ?? false, changes: byPath(wanted, changes) };
       }
       if (input.scope !== undefined && input.role === undefined) throw badRequest('a scope goes with a role: name the role too');
@@ -563,6 +608,11 @@ export const memberRoutes = {
    * instance lets set one up there (`givesService`).
    *
    *   { "api": "developer", "api/prod": { "role": "viewer", "until": "2026-12-31" }, "web": null }
+   *
+   * A place's object may say what it replaces, as the member's access
+   * listed it: `"was": null` makes the grant only where the member holds
+   * nothing, `"was": {"role": "viewer", "until": null}` changes only that
+   * grant. Anything else held there refuses the whole change, 409 `stale`.
    */
   ...route('PATCH /access/:member', {
     input: accessPatch,
@@ -570,7 +620,7 @@ export const memberRoutes = {
       const principal = memberOf(params.member);
       const wanted = grantsAsked(input);
       if (wanted.length === 0) return { changes: {} };
-      const { changes } = await changed(ctx, { op: 'access.grant', principal, changes: wanted.map(({ path: _, ...change }) => change) }, principal);
+      const { changes } = await granted(ctx, principal, wanted, false);
       return { changes: byPath(wanted, changes) };
     },
   }),

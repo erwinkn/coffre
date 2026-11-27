@@ -741,6 +741,10 @@ export type Api = {
         [key: string]: string | null | {
           role: string;
           until: string | null;
+          was?: null | {
+            role: string;
+            until: string | null;
+          };
         };
       };
     };
@@ -878,6 +882,10 @@ export type Api = {
       [key: string]: string | null | {
         role: string;
         until: string | null;
+        was?: null | {
+          role: string;
+          until: string | null;
+        };
       };
     };
     output: {
@@ -1656,6 +1664,10 @@ export type Api = {
 export type AccessValue = string | null | {
   role: string;
   until: string | null;
+  was?: null | {
+    role: string;
+    until: string | null;
+  };
 };
 
 export type ApprovalView = {
