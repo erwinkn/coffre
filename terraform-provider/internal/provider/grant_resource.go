@@ -165,7 +165,7 @@ func (r *grantResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	switch {
 	case coffre.Is(err, http.StatusForbidden, ""):
 		resp.Diagnostics.AddError("Cannot see "+who+"'s grants",
-			fmt.Sprintf("coffre shows a member's grants to whoever manages access somewhere, or manages the service account, and %s does neither: %s\n\nThe state is kept: refresh as someone who does.", r.whom(), err))
+			fmt.Sprintf("coffre shows a member's grants to whoever manages access somewhere, or manages the service account, and %s does neither: %s\n\nThe state is kept: refresh as someone who does.", r.data.whom(), err))
 		return
 	case err != nil:
 		resp.Diagnostics.AddError("Could not read "+who+"'s grants", err.Error())
@@ -186,7 +186,7 @@ func (r *grantResource) Read(ctx context.Context, req resource.ReadRequest, resp
 			}
 			if project == nil || !project.May("grant.manage") {
 				resp.Diagnostics.AddError("Cannot see the grants at "+state.place(),
-					fmt.Sprintf("coffre shows %s only the grants at places where it manages access (grant.manage), and %s is not one. The state is kept: refresh as someone who manages access there.", r.whom(), state.Project.ValueString()))
+					fmt.Sprintf("coffre shows %s only the grants at places where it manages access (grant.manage), and %s is not one. The state is kept: refresh as someone who manages access there.", r.data.whom(), state.Project.ValueString()))
 				return
 			}
 		}
@@ -197,13 +197,6 @@ func (r *grantResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	state.Role = types.StringValue(held.Role)
 	state.Until = types.StringPointerValue(held.ExpiresAt)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
-}
-
-func (r *grantResource) whom() string {
-	if r.data.person != "" {
-		return r.data.person
-	}
-	return "this provider's sign-in"
 }
 
 func (r *grantResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

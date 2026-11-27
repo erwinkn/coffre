@@ -9,7 +9,13 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
 	"github.com/erwinkn/coffre/terraform-provider/internal/coffre"
 )
@@ -141,6 +147,182 @@ func TestDefaultIssuer(t *testing.T) {
 	for profile, issuer := range map[string]string{"github": "https://token.actions.githubusercontent.com", "github-reusable": "https://token.actions.githubusercontent.com", "gitlab": "https://gitlab.com", "gcp": "https://accounts.google.com", "aws": "urn:coffre:aws", "custom": "", "kubernetes": ""} {
 		if got := defaultIssuer(profile); got != issuer {
 			t.Errorf("%s: %q", profile, got)
+		}
+	}
+}
+
+func unknownSet(values ...string) types.Set {
+	elements := []attr.Value{types.StringUnknown()}
+	for _, value := range values {
+		elements = append(elements, types.StringValue(value))
+	}
+	return types.SetValueMust(types.StringType, elements)
+}
+
+// A collection known but for one element is not a known binding: it plans a new one, never "the same".
+func TestBindingUnknowns(t *testing.T) {
+	ctx := context.Background()
+	base := func() trustModel {
+		return trustModel{
+			Service: types.StringValue("token:deploy"), Profile: types.StringValue("github"), Issuer: types.StringValue(defaultIssuer("github")),
+			Claims: strmap(map[string]string{"repository_id": "41532"}), Events: types.SetNull(types.StringType),
+			ClaimPrefixes: types.MapNull(types.StringType), Scope: types.MapNull(types.StringType), Label: types.StringNull(),
+		}
+	}
+	if _, ok := shapeOf(ctx, base()); !ok {
+		t.Fatal("a known binding read as unknown")
+	}
+	m := base()
+	m.Scope = types.MapUnknown(types.StringType)
+	if _, ok := shapeOf(ctx, m); !ok {
+		t.Error("a scope coffre seals read as unknown")
+	}
+	for name, change := range map[string]func(*trustModel){
+		"claims": func(m *trustModel) {
+			m.Claims = types.MapValueMust(types.StringType, map[string]attr.Value{"repository_id": types.StringValue("41532"), "ref": types.StringUnknown()})
+		},
+		"events": func(m *trustModel) { m.Events = unknownSet("push") },
+		"scope": func(m *trustModel) {
+			m.Scope = types.MapValueMust(types.StringType, map[string]attr.Value{"billing": types.StringUnknown()})
+		},
+		"sources": func(m *trustModel) {
+			m.Policy = &policyModel{Audience: types.StringNull(), KeyAudience: types.BoolNull(), Sources: unknownSet("10.0.0.0/8"), SessionHours: types.Int64Null(), UnsignedUploads: types.BoolNull(), Repeats: types.BoolNull()}
+		},
+	} {
+		m := base()
+		change(&m)
+		if _, ok := shapeOf(ctx, m); ok {
+			t.Errorf("%s: an unknown element read as known", name)
+		}
+	}
+}
+
+// What coffre fills in of a binding asked without it is the same binding: a workload platform's
+// policy left out, GCP's key audience, a CIDR in another spelling.
+func TestBindingDefaults(t *testing.T) {
+	ctx := context.Background()
+	model := func(profile string, policy *policyModel) trustModel {
+		return trustModel{
+			Service: types.StringValue("token:deploy"), Profile: types.StringValue(profile), Issuer: types.StringValue("https://issuer.acme.example"),
+			Claims: strmap(map[string]string{"sub": "system:serviceaccount:web:api"}), Events: types.SetNull(types.StringType),
+			ClaimPrefixes: types.MapNull(types.StringType), Scope: types.MapNull(types.StringType), Label: types.StringNull(), Policy: policy,
+		}
+	}
+	listed := func(profile string, policy map[string]json.RawMessage) *shape {
+		return listedShape(coffre.Binding{ID: "b", Profile: profile, Issuer: "https://issuer.acme.example", Claims: map[string]json.RawMessage{"sub": raw(t, "system:serviceaccount:web:api")}, Policy: policy})
+	}
+	for _, profile := range []string{"kubernetes", "gcp"} {
+		asked, _ := shapeOf(ctx, model(profile, nil))
+		policy := map[string]json.RawMessage{}
+		if profile == "gcp" {
+			policy["keyAudience"] = raw(t, true)
+		}
+		if got := listed(profile, policy); !reflect.DeepEqual(asked, got) {
+			t.Errorf("%s with no policy: asked %+v, listed %+v", profile, asked.Policy, got.Policy)
+		}
+	}
+	// A bearer profile's binding with no policy is a CI run's: not the workload's with coffre's defaults.
+	asked, _ := shapeOf(ctx, model("custom", nil))
+	if reflect.DeepEqual(asked, listed("custom", map[string]json.RawMessage{})) {
+		t.Error("a CI run's binding read as a workload's")
+	}
+	spelled := &policyModel{Audience: types.StringNull(), KeyAudience: types.BoolNull(), Sources: set("2001:0DB8::/32", "10.0.0.0/8", "10.0.0.0/8"), SessionHours: types.Int64Null(), UnsignedUploads: types.BoolNull(), Repeats: types.BoolNull()}
+	asked, _ = shapeOf(ctx, model("kubernetes", spelled))
+	if got := listed("kubernetes", map[string]json.RawMessage{"sources": raw(t, []string{"10.0.0.0/8", "2001:db8::/32"})}); !reflect.DeepEqual(asked, got) {
+		t.Errorf("sources: asked %v, listed %v", asked.Policy.Sources, got.Policy.Sources)
+	}
+	for text, ok := range map[string]bool{"10.0.0.0/8": true, "2001:DB8::/32": true, "10.0.0.1/8": false, "10.0.0.0": false, "010.0.0.0/8": false} {
+		if _, got := cidr(text); got != ok {
+			t.Errorf("cidr(%q): %v", text, got)
+		}
+	}
+}
+
+// trustConfig is a coffre_trust's configuration, every attribute not given null.
+func trustConfig(t *testing.T, given map[string]tftypes.Value) tfsdk.Config {
+	t.Helper()
+	ctx := context.Background()
+	var answer resource.SchemaResponse
+	(&trustResource{}).Schema(ctx, resource.SchemaRequest{}, &answer)
+	kind := answer.Schema.Type().TerraformType(ctx).(tftypes.Object)
+	values := map[string]tftypes.Value{}
+	for name, of := range kind.AttributeTypes {
+		values[name] = tftypes.NewValue(of, nil)
+		if value, ok := given[name]; ok {
+			values[name] = value
+		}
+	}
+	return tfsdk.Config{Schema: answer.Schema, Raw: tftypes.NewValue(kind, values)}
+}
+
+func TestTrustValidation(t *testing.T) {
+	ctx := context.Background()
+	text := func(value string) tftypes.Value { return tftypes.NewValue(tftypes.String, value) }
+	texts := func(values map[string]string) tftypes.Value {
+		out := map[string]tftypes.Value{}
+		for name, value := range values {
+			out[name] = text(value)
+		}
+		return tftypes.NewValue(tftypes.Map{ElementType: tftypes.String}, out)
+	}
+	var answer resource.SchemaResponse
+	(&trustResource{}).Schema(ctx, resource.SchemaRequest{}, &answer)
+	policyType := answer.Schema.Type().TerraformType(ctx).(tftypes.Object).AttributeTypes["policy"].(tftypes.Object)
+	policy := func(given map[string]tftypes.Value) tftypes.Value {
+		values := map[string]tftypes.Value{}
+		for name, of := range policyType.AttributeTypes {
+			values[name] = tftypes.NewValue(of, nil)
+			if value, ok := given[name]; ok {
+				values[name] = value
+			}
+		}
+		return tftypes.NewValue(policyType, values)
+	}
+	for name, c := range map[string]struct {
+		given  map[string]tftypes.Value
+		refuse string
+	}{
+		"plain": {given: map[string]tftypes.Value{"profile": text("gcp"), "claims": texts(map[string]string{"sub": "1"})}},
+		"key audience": {
+			given:  map[string]tftypes.Value{"profile": text("gcp"), "claims": texts(map[string]string{"sub": "1"}), "policy": policy(map[string]tftypes.Value{"key_audience": tftypes.NewValue(tftypes.Bool, false)})},
+			refuse: "A gcp token names the session's key",
+		},
+		"both": {
+			given:  map[string]tftypes.Value{"profile": text("custom"), "issuer": text("https://cloud.capy.example"), "claims": texts(map[string]string{"sub": "x"}), "claim_prefixes": texts(map[string]string{"sub": "org/"})},
+			refuse: "sub is in claims too",
+		},
+		"source": {
+			given:  map[string]tftypes.Value{"profile": text("kubernetes"), "issuer": text("https://k8s.acme.example"), "claims": texts(map[string]string{"sub": "1"}), "policy": policy(map[string]tftypes.Value{"sources": tftypes.NewValue(tftypes.Set{ElementType: tftypes.String}, []tftypes.Value{text("10.0.0.1/8")})})},
+			refuse: "Not a CIDR",
+		},
+	} {
+		var resp resource.ValidateConfigResponse
+		(&trustResource{}).ValidateConfig(ctx, resource.ValidateConfigRequest{Config: trustConfig(t, c.given)}, &resp)
+		switch {
+		case c.refuse == "" && resp.Diagnostics.HasError():
+			t.Errorf("%s: refused %v", name, resp.Diagnostics)
+		case c.refuse != "" && (len(resp.Diagnostics.Errors()) != 1 || resp.Diagnostics.Errors()[0].Summary() != c.refuse):
+			t.Errorf("%s: said %v, not %q", name, resp.Diagnostics, c.refuse)
+		}
+	}
+	// An empty issuer or label is no issuer or label: refused by the schema, rather than sent as none.
+	for _, attribute := range []string{"issuer", "label"} {
+		var resp validator.StringResponse
+		for _, check := range answer.Schema.Attributes[attribute].(schema.StringAttribute).Validators {
+			check.ValidateString(ctx, validator.StringRequest{Path: path.Root(attribute), ConfigValue: types.StringValue("")}, &resp)
+		}
+		if !resp.Diagnostics.HasError() {
+			t.Errorf("%s = \"\" let through", attribute)
+		}
+	}
+}
+
+func TestServiceAccountImport(t *testing.T) {
+	for _, id := range []string{"user:ada@acme.example", "deploy", "token:", "token::x"} {
+		var resp resource.ImportStateResponse
+		(&serviceAccountResource{}).ImportState(context.Background(), resource.ImportStateRequest{ID: id}, &resp)
+		if !resp.Diagnostics.HasError() || resp.Diagnostics.Errors()[0].Summary() != "Not a service account's ID" {
+			t.Errorf("%q imported: %v", id, resp.Diagnostics)
 		}
 	}
 }

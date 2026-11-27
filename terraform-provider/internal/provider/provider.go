@@ -97,6 +97,17 @@ type configured struct {
 }
 
 // signedIn is how a configured provider signs in, in the words of its block.
+// whom names the sign-in in a message: the person's principal, or what it is.
+func (c *configured) whom() string {
+	if c.person != "" {
+		return c.person
+	}
+	if c.by == "session" {
+		return "this provider's person"
+	}
+	return "this provider's sign-in"
+}
+
 func (c *configured) signedIn() string {
 	if c.by == "session" {
 		return "a person (session = true)"

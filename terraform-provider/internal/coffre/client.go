@@ -61,7 +61,17 @@ func Origin(raw string) (string, error) {
 	default:
 		return "", fmt.Errorf("%q is not an https URL", raw)
 	}
-	return parsed.Scheme + "://" + parsed.Host, nil
+	// As a browser, and so `coffre login`, names it: the host in lowercase, a default port left out.
+	host, port := strings.ToLower(parsed.Hostname()), parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return parsed.Scheme + "://" + host, nil
 }
 
 func loopback(host string) bool {

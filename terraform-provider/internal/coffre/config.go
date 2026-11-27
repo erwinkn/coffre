@@ -12,7 +12,6 @@ import (
 // Project is one project as GET /api/projects lists it, with only what the provider reads.
 type Project struct {
 	Slug         string        `json:"slug"`
-	ArchivedAt   *string       `json:"archivedAt"`
 	Permissions  []string      `json:"permissions"`
 	Environments []Environment `json:"environments"`
 }
@@ -58,7 +57,6 @@ func (p Project) Environment(slug string) *Environment {
 type projects struct {
 	mu    sync.Mutex
 	known map[string]Project
-	err   error
 	read  bool
 }
 
@@ -205,9 +203,14 @@ func (c *Client) SetAccess(ctx context.Context, member string, wanted map[string
 	return c.call(ctx, http.MethodPatch, "/access"+memberPath(member), changes(wanted), nil)
 }
 
-// AdmitService admits a service account with its grants, all or none (PUT /api/members/:member).
-func (c *Client) AdmitService(ctx context.Context, member string, wanted map[string]Wanted) error {
-	return c.call(ctx, http.MethodPut, "/members"+memberPath(member), map[string]any{"access": changes(wanted)}, nil)
+// AdmitService admits a service account with its grants, all or none (PUT /api/members/:member),
+// and says whether it admitted it: false for one that was active already, given the grants asked.
+func (c *Client) AdmitService(ctx context.Context, member string, wanted map[string]Wanted) (bool, error) {
+	var answer struct {
+		Created bool `json:"created"`
+	}
+	err := c.call(ctx, http.MethodPut, "/members"+memberPath(member), map[string]any{"access": changes(wanted)}, &answer)
+	return answer.Created, err
 }
 
 // RemoveMember removes a member (DELETE /api/members/:member): its grants revoked, its tokens,
@@ -237,7 +240,7 @@ func (c *Client) Bindings(ctx context.Context, service string) ([]Binding, bool,
 		Bindings []Binding `json:"bindings"`
 	}
 	err := c.call(ctx, http.MethodGet, "/members"+memberPath(service)+"/bindings", nil, &answer)
-	if Is(err, http.StatusForbidden, "unknown_principal") || Is(err, http.StatusNotFound, "unknown_principal") {
+	if Is(err, http.StatusNotFound, "unknown_principal") {
 		return nil, false, nil
 	}
 	if err != nil {

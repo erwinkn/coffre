@@ -106,13 +106,13 @@ func (r *serviceAccountResource) read(ctx context.Context, member string) (grant
 	access, err := r.data.client.Access(ctx, member)
 	switch {
 	case coffre.Is(err, http.StatusForbidden, ""):
-		return nil, nil, false, fmt.Errorf("%s does not manage %s: coffre shows a service account's grants to whoever runs the instance, and to a person who could give it every grant it holds (or who admitted it, while it holds nothing). The state is kept: refresh as one of them. (%w)", r.data.person, member, err)
+		return nil, nil, false, fmt.Errorf("%s does not manage %s: coffre shows a service account's grants to whoever runs the instance, and to a person who could give it every grant it holds (or who admitted it, while it holds nothing). The state is kept: refresh as one of them. (%w)", r.data.whom(), member, err)
 	case err != nil:
 		return nil, nil, false, err
 	case access == nil || access.Status != "active":
 		return nil, nil, false, nil
 	case !access.SeesAll():
-		return nil, nil, false, fmt.Errorf("%s does not manage %s, so coffre shows it only the grants at places where it manages access, and the plan would undo the others. The state is kept: refresh as whoever runs the instance, or a person who could give it every grant it holds", r.data.person, member)
+		return nil, nil, false, fmt.Errorf("%s does not manage %s, so coffre shows it only the grants at places where it manages access, and the plan would undo the others. The state is kept: refresh as whoever runs the instance, or a person who could give it every grant it holds", r.data.whom(), member)
 	}
 	grants, ends = map[string]string{}, map[string]string{}
 	for _, grant := range access.Grants {
@@ -125,24 +125,37 @@ func (r *serviceAccountResource) read(ctx context.Context, member string) (grant
 }
 
 func (r *serviceAccountResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	if !personOnly(r.data, serviceAccountType, &resp.Diagnostics) {
+		return
+	}
 	var plan serviceAccountModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	member := plan.member()
-	if access, err := r.data.client.Access(ctx, member); err == nil && access != nil && access.Status == "active" {
+	there := func() {
 		resp.Diagnostics.AddError(member+" is in coffre already",
-			fmt.Sprintf("Terraform makes service accounts that are not there yet. To manage this one, import it:\n\n  terraform import <address> %s\n\nNothing was changed.", member))
+			fmt.Sprintf("Terraform makes service accounts that are not there yet. To manage this one, import it:\n\n  terraform import <address> %s", member))
+	}
+	// coffre hides a member from whoever manages access nowhere (403): admitting then says what it is.
+	access, err := r.data.client.Access(ctx, member)
+	switch {
+	case err != nil && !coffre.Is(err, http.StatusForbidden, ""):
+		resp.Diagnostics.AddError("Could not read "+member, err.Error()+"\n\nNothing was changed.")
+		return
+	case access != nil && access.Status == "active":
+		there()
 		return
 	}
+	removed := access != nil && access.Status == "removed"
 	wanted := map[string]coffre.Wanted{}
 	for at, role := range stringMap(ctx, plan.Grants, &resp.Diagnostics) {
 		wanted[at] = coffre.Wanted{Role: role}
 	}
-	err := r.data.client.AdmitService(ctx, member, wanted)
+	created, err := r.data.client.AdmitService(ctx, member, wanted)
 	switch {
-	case coffre.Is(err, http.StatusConflict, "removed"):
+	case removed && coffre.Is(err, http.StatusForbidden, "no_access"):
 		resp.Diagnostics.AddError(member+" was removed", "coffre brings a removed service account back only for the person who removed it, or whoever runs the instance. Ask one of them, or give this resource another name. Nothing was changed. ("+err.Error()+")")
 		return
 	case coffre.Is(err, http.StatusConflict, "stale"):
@@ -150,6 +163,11 @@ func (r *serviceAccountResource) Create(ctx context.Context, req resource.Create
 		return
 	case err != nil:
 		resp.Diagnostics.AddError("Could not set up "+member, err.Error())
+		return
+	case !created:
+		// Set up by someone else between the read and the admission: coffre gave the grants asked to the account it had.
+		resp.Diagnostics.AddError(member+" was set up while this apply ran",
+			fmt.Sprintf("coffre added the grants asked, at %s, to the ones it held. Import it, then plan: the plan shows what Terraform would change.\n\n  terraform import <address> %s", strings.Join(sortedKeys(wanted), ", "), member))
 		return
 	}
 	plan.ID, plan.Member = types.StringValue(member), types.StringValue(member)
@@ -183,6 +201,9 @@ func (r *serviceAccountResource) Read(ctx context.Context, req resource.ReadRequ
 }
 
 func (r *serviceAccountResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	if !personOnly(r.data, serviceAccountType, &resp.Diagnostics) {
+		return
+	}
 	var plan, state serviceAccountModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -248,8 +269,8 @@ func (r *serviceAccountResource) ImportState(ctx context.Context, req resource.I
 	if !personOnly(r.data, serviceAccountType, &resp.Diagnostics) {
 		return
 	}
-	name := strings.TrimPrefix(req.ID, "token:")
-	if !serviceName.MatchString(name) {
+	name, ok := strings.CutPrefix(req.ID, "token:")
+	if !ok || !serviceName.MatchString(name) {
 		resp.Diagnostics.AddError("Not a service account's ID", fmt.Sprintf("%q is not token:<name>, such as token:deploy.", req.ID))
 		return
 	}

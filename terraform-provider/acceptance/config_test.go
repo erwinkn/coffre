@@ -133,9 +133,31 @@ resource "coffre_environment" "fork" {
 		w.must("apply", "-auto-approve")
 		expect(t, environmentOf(t, base).Protected, "protected, it lists %+v", environmentOf(t, base))
 
+		// A fork of a protected environment is protected by coffre: left out, the plan says so; said false, it refuses.
+		child := func(protected string) string {
+			return config(true, "coffre_environment.base.slug") + fmt.Sprintf(`
+resource "coffre_environment" "child" {
+  project = "cfg"
+  slug    = "child%s"
+  parent  = coffre_environment.base.slug
+  %s
+}
+`, slugged(suffix), protected)
+		}
+		w.write(provider, child("protected = false"))
+		said := w.fails("plan")
+		expect(t, strings.Contains(said, "would be protected") && strings.Contains(said, "coffre protects a fork of a protected environment"), "an unprotected fork of a protected one, the plan says:\n%s", said)
+		w.write(provider, child(""))
+		w.must("apply", "-auto-approve")
+		expect(t, environmentOf(t, "child"+slugged(suffix)).Protected && w.state("coffre_environment.child")["protected"] == true, "a fork of a protected one lists %+v, its state %v", environmentOf(t, "child"+slugged(suffix)), w.state("coffre_environment.child"))
+		changes, out = w.planned()
+		expect(t, !changes, "a protected fork made, the plan plans changes:\n%s", out)
+		w.write(provider, config(true, "coffre_environment.base.slug"))
+		w.must("apply", "-auto-approve")
+
 		// What coffre does not let this account do is refused at plan, saying why.
 		w.write(provider, config(false, "coffre_environment.base.slug"))
-		said := w.fails("plan")
+		said = w.fails("plan")
 		expect(t, strings.Contains(said, "stays protected") && strings.Contains(said, "Only an Owner of the project"), "unprotected by a service account, the plan says:\n%s", said)
 		w.write(provider, config(true, `"prod"`))
 		said = w.fails("plan")
@@ -337,6 +359,14 @@ resource "coffre_trust" "capy" {
 		_, grants = accessOf(t, service)
 		_, extra := grants["tf/staging"]
 		expect(t, !extra && len(bindingsOf(t, service)) == 2, "applied over drift, %s holds %+v", service, grants)
+
+		// Forgotten and imported, the account and a binding plan nothing: the listing fills them in.
+		capy := fmt.Sprint(w.state("coffre_trust.capy")["id"])
+		w.must("state", "rm", "coffre_service_account.deploy", "coffre_trust.capy")
+		w.must("import", "coffre_service_account.deploy", service)
+		w.must("import", "coffre_trust.capy", service+"/"+capy)
+		changes, out = w.planned()
+		expect(t, !changes, "imported, the plan plans changes:\n%s", out)
 
 		// A person who does not manage it: the refresh fails, naming who can, and the state stays.
 		before, _ := os.ReadFile(filepath.Join(w.dir, "terraform.tfstate"))

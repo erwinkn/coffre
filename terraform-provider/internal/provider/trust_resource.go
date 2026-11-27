@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"reflect"
 	"slices"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -58,6 +60,9 @@ func eventClaim(profile string) string {
 	return ""
 }
 
+// The profiles a CI run's exchange takes, with no policy (@coffre/core's BEARER_PROFILES).
+var bearerProfiles = []string{"github", "github-reusable", "github-reusable-organization", "gitlab", "custom"}
+
 // The profiles whose binding's policy always says keyAudience (@coffre/core's KEY_NAMING_PROFILES).
 var keyNaming = []string{"github", "github-reusable", "github-reusable-organization", "gcp", "fly", "vercel"}
 
@@ -102,7 +107,7 @@ func (r *trustResource) Metadata(_ context.Context, req resource.MetadataRequest
 
 func (r *trustResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	text := func(description string) schema.StringAttribute {
-		return schema.StringAttribute{Optional: true, Description: description}
+		return schema.StringAttribute{Optional: true, Validators: []validator.String{stringvalidator.LengthAtLeast(1)}, Description: description}
 	}
 	resp.Schema = schema.Schema{
 		Description: "One of a service account's trust bindings: which CI runs, or which workloads, sign in as it, by the ID token their platform signs. Applied by a person (`session = true`). coffre never edits a binding: every change makes a new one in place of this one, in one change, so its id changes. Destroyed, it is removed, and what it issued ends.",
@@ -118,7 +123,7 @@ func (r *trustResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Description: "Whose tokens it takes: `github`, `github-reusable`, `github-reusable-organization`, `gitlab` or `custom` (any other issuer), or a workload platform's: `kubernetes`, `gcp`, `azure`, `fly`, `vercel`, `aws`.",
 			},
 			"issuer": schema.StringAttribute{
-				Optional: true, Computed: true,
+				Optional: true, Computed: true, Validators: []validator.String{stringvalidator.LengthAtLeast(1)},
 				Description: "The issuer's URL. Left out, the profile's own: github.com's, gitlab.com's, Google's, or `urn:coffre:aws`; any other profile names its issuer.",
 			},
 			"claims": schema.MapAttribute{
@@ -144,7 +149,7 @@ func (r *trustResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			"label": text("A label, shown beside it in coffre."),
 			"policy": schema.SingleNestedAttribute{
 				Optional:    true,
-				Description: "Makes it a workload's binding, for key-bound sessions at /api/auth/workload; left out, a CI run's, for the provider's and CLI's `oidc` sign-in. Every workload platform's binding has one.",
+				Description: "Makes a `github`, `gitlab` or `custom` binding a workload's, for key-bound sessions at /api/auth/workload; left out, it is a CI run's, for the provider's and CLI's `oidc` sign-in. A workload platform's binding is always a workload's: left out, its policy is coffre's defaults. An instance that issues no bearer credential (`useOnly`) makes every binding a workload's.",
 				Attributes: map[string]schema.Attribute{
 					"audience":     text("An `azure` binding's audience, the exact one Entra puts in its tokens."),
 					"key_audience": schema.BoolAttribute{Optional: true, Description: "The token's audience must name the session's key. Always so for GitHub, GCP, Fly and Vercel."},
@@ -192,6 +197,41 @@ func (r *trustResource) ValidateConfig(ctx context.Context, req resource.Validat
 	if config.Issuer.IsNull() && defaultIssuer(profile) == "" {
 		resp.Diagnostics.AddAttributeError(path.Root("issuer"), "No issuer", fmt.Sprintf("A %s binding names its issuer's URL.", profile))
 	}
+	if !config.Claims.IsUnknown() && !config.ClaimPrefixes.IsUnknown() {
+		for name := range config.ClaimPrefixes.Elements() {
+			if _, both := config.Claims.Elements()[name]; both {
+				resp.Diagnostics.AddAttributeError(path.Root("claim_prefixes").AtMapKey(name), name+" is in claims too",
+					"A claim is matched exactly, in claims, or by its start, in claim_prefixes: name it in one.")
+			}
+		}
+	}
+	if p := config.Policy; p != nil {
+		if slices.Contains(keyNaming, profile) && !p.KeyAudience.IsUnknown() && !p.KeyAudience.IsNull() && !p.KeyAudience.ValueBool() {
+			resp.Diagnostics.AddAttributeError(path.Root("policy").AtName("key_audience"), "A "+profile+" token names the session's key",
+				fmt.Sprintf("%s lets its caller choose a token's audience, so coffre requires it to name the session's key: a copied token then works for no other key. Leave key_audience out.", profile))
+		}
+		if !p.Sources.IsUnknown() && !p.Sources.IsNull() {
+			for _, each := range p.Sources.Elements() {
+				source, ok := each.(types.String)
+				if !ok || source.IsUnknown() {
+					continue
+				}
+				if _, ok := cidr(source.ValueString()); !ok {
+					resp.Diagnostics.AddAttributeError(path.Root("policy").AtName("sources"), "Not a CIDR",
+						fmt.Sprintf("%q is not a block such as 162.220.232.0/24 or 2001:db8::/32, with no bit set past its length.", source.ValueString()))
+				}
+			}
+		}
+	}
+}
+
+// cidr is a block as coffre writes it: RFC 5952's spelling, no bit set past its length.
+func cidr(text string) (string, bool) {
+	prefix, err := netip.ParsePrefix(text)
+	if err != nil || prefix != prefix.Masked() {
+		return "", false
+	}
+	return prefix.String(), true
 }
 
 // shape is a binding as coffre compares it: what makes it, in one spelling, so a refresh tells a
@@ -223,8 +263,18 @@ func (s *shape) normal() *shape {
 	if len(s.Events) == 0 {
 		s.Events = nil
 	}
+	if s.Policy == nil && !slices.Contains(bearerProfiles, s.Profile) {
+		// A workload platform's binding is a workload's: one asked with no policy holds coffre's defaults.
+		s.Policy = &policyShape{}
+	}
 	if s.Policy != nil {
+		for i, source := range s.Policy.Sources {
+			if canonical, ok := cidr(source); ok {
+				s.Policy.Sources[i] = canonical
+			}
+		}
 		slices.Sort(s.Policy.Sources)
+		s.Policy.Sources = slices.Compact(s.Policy.Sources)
 		if len(s.Policy.Sources) == 0 {
 			s.Policy.Sources = nil
 		}
@@ -239,33 +289,47 @@ func (s *shape) normal() *shape {
 	return s
 }
 
-func setStrings(ctx context.Context, set types.Set) []string {
+func setStrings(ctx context.Context, set types.Set, diags *diag.Diagnostics) []string {
 	var out []string
 	if !set.IsNull() && !set.IsUnknown() {
-		set.ElementsAs(ctx, &out, false)
+		diags.Append(set.ElementsAs(ctx, &out, false)...)
 	}
 	return out
 }
 
+// known says whether a value is known through and through: a set or a map with one unknown element
+// in it is known itself.
+func known(ctx context.Context, values ...attr.Value) bool {
+	for _, value := range values {
+		raw, err := value.ToTerraformValue(ctx)
+		if err != nil || !raw.IsFullyKnown() {
+			return false
+		}
+	}
+	return true
+}
+
 // shapeOf is the binding a model asks for; false while any of it is unknown but its scope, which
-// unknown is coffre's to seal, and asked for as none.
+// wholly unknown is coffre's to seal, and asked for as none.
 func shapeOf(ctx context.Context, m trustModel) (*shape, bool) {
-	if m.Profile.IsUnknown() || m.Issuer.IsUnknown() || m.Claims.IsUnknown() || m.Events.IsUnknown() || m.ClaimPrefixes.IsUnknown() || m.Label.IsUnknown() {
+	if !known(ctx, m.Profile, m.Issuer, m.Claims, m.Events, m.ClaimPrefixes, m.Label) || (!m.Scope.IsUnknown() && !known(ctx, m.Scope)) {
 		return nil, false
 	}
-	// Known, so the elements are strings: nothing to report.
-	var ignored diag.Diagnostics
+	var diags diag.Diagnostics
 	s := &shape{
 		Profile: m.Profile.ValueString(), Issuer: m.Issuer.ValueString(), Label: m.Label.ValueString(),
-		Claims: stringMap(ctx, m.Claims, &ignored), Prefixes: stringMap(ctx, m.ClaimPrefixes, &ignored),
-		Events: setStrings(ctx, m.Events), Scope: stringMap(ctx, m.Scope, &ignored),
+		Claims: stringMap(ctx, m.Claims, &diags), Prefixes: stringMap(ctx, m.ClaimPrefixes, &diags),
+		Events: setStrings(ctx, m.Events, &diags), Scope: stringMap(ctx, m.Scope, &diags),
 	}
 	if p := m.Policy; p != nil {
-		if p.Audience.IsUnknown() || p.KeyAudience.IsUnknown() || p.Sources.IsUnknown() || p.SessionHours.IsUnknown() || p.UnsignedUploads.IsUnknown() || p.Repeats.IsUnknown() {
+		if !known(ctx, p.Audience, p.KeyAudience, p.Sources, p.SessionHours, p.UnsignedUploads, p.Repeats) {
 			return nil, false
 		}
-		s.Policy = &policyShape{Audience: p.Audience.ValueString(), KeyAudience: p.KeyAudience.ValueBool(), Sources: setStrings(ctx, p.Sources),
+		s.Policy = &policyShape{Audience: p.Audience.ValueString(), KeyAudience: p.KeyAudience.ValueBool(), Sources: setStrings(ctx, p.Sources, &diags),
 			SessionHours: p.SessionHours.ValueInt64(), Unsigned: p.UnsignedUploads.ValueBool(), Repeat: p.Repeats.ValueBool()}
+	}
+	if diags.HasError() {
+		return nil, false
 	}
 	return s.normal(), true
 }
@@ -426,11 +490,11 @@ func (r *trustResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanR
 		if sealed {
 			kept.Scope = state.Scope
 		}
-		planned, known := shapeOf(ctx, kept)
+		planned, ok := shapeOf(ctx, kept)
 		was, _ := shapeOf(ctx, state)
 		// The same binding: it stays, with the scope coffre sealed on it. Any change makes a new one in
 		// its place, whose id coffre draws, and whose scope, left out, coffre seals again.
-		if known && was != nil && reflect.DeepEqual(planned, was) && plan.Service.Equal(state.Service) {
+		if ok && was != nil && reflect.DeepEqual(planned, was) && plan.Service.Equal(state.Service) {
 			plan = kept
 			plan.ID = state.ID
 		}
@@ -459,6 +523,9 @@ func (r *trustResource) bind(ctx context.Context, plan *trustModel, diags *diag.
 }
 
 func (r *trustResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	if !personOnly(r.data, trustType, &resp.Diagnostics) {
+		return
+	}
 	var plan trustModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() || !r.bind(ctx, &plan, &resp.Diagnostics) {
@@ -468,6 +535,9 @@ func (r *trustResource) Create(ctx context.Context, req resource.CreateRequest, 
 }
 
 func (r *trustResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	if !personOnly(r.data, trustType, &resp.Diagnostics) {
+		return
+	}
 	var plan, state trustModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -499,7 +569,7 @@ func (r *trustResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	switch {
 	case coffre.Is(err, http.StatusForbidden, ""):
 		resp.Diagnostics.AddError("Cannot see "+service+"'s trust bindings",
-			fmt.Sprintf("coffre lists a service account's bindings to the account itself, whoever runs the instance, and a person who manages it, and %s does not manage %s. The state is kept: refresh as one of them. (%s)", r.data.person, service, err))
+			fmt.Sprintf("coffre lists a service account's bindings to the account itself, whoever runs the instance, and a person who manages it, and %s does not manage %s. The state is kept: refresh as one of them. (%s)", r.data.whom(), service, err))
 		return
 	case err != nil:
 		resp.Diagnostics.AddError("Could not list "+service+"'s trust bindings", err.Error())
@@ -514,9 +584,11 @@ func (r *trustResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		resp.State.RemoveResource(ctx)
 		return
 	}
-	listed := listedShape(bindings[index])
-	if was, known := shapeOf(ctx, state); !known || !reflect.DeepEqual(listed, was) {
-		listed.model(&state)
+	// coffre never edits a binding, so the one by this id is the one the state made: the listing fills
+	// in only an imported one, and the state keeps the configuration's spelling.
+	if state.Profile.IsNull() {
+		// Imported: a profile is required, so only an import leaves it null.
+		listedShape(bindings[index]).model(&state)
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }

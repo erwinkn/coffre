@@ -417,10 +417,10 @@ grants, and each resource says so rather than empty the state:
 
 | Resource | Refresh reads | Gone (leaves the state) | Not visible to whoever applies now (fails the refresh, names who can) |
 |---|---|---|---|
-| `coffre_environment` | `GET /projects` | archived, or not listed in a project that is | the project is not listed (section 3) |
+| `coffre_environment` | `GET /projects` | archived, or not listed in a project that is | the project is not listed (section 3), or the environment is listed by name alone (`details: null`, to a caller holding a grant on a sibling only), which does not say whether it is archived |
 | `coffre_grant` | `GET /members/:member/access` | no grant at the place, while the caller sees every grant there | 403, or a place where the caller does not manage access, whose grants coffre does not show |
-| `coffre_service_account` | `GET /members/token:x/access` | 404, or `removed` | 403, or `managed: false`: coffre then shows only the grants at places the caller manages, and the plan would undo the rest |
-| `coffre_trust` | `GET /members/token:x/bindings` | its id not listed, or the account removed (`unknown_principal`) | 403: only the account itself, whoever manages it and whoever runs the instance list its bindings |
+| `coffre_service_account` | `GET /members/token:x/access` | 404, or `removed`, to whoever runs the instance or manages access somewhere | 403, or `managed: false`: coffre then shows only the grants at places the caller manages, and the plan would undo the rest. A removed account manages no one's: to anyone else, coffre answers 403 for it too |
+| `coffre_trust` | `GET /members/token:x/bindings` | its id not listed, or the account removed (404 `unknown_principal`, to whoever runs the instance) | 403: only the account itself, whoever manages it and whoever runs the instance list its bindings; a removed account's, to anyone else |
 
 Who manages a service account is coffre's rule (`managesService` in
 `@coffre/core/access`): whoever runs the instance, or a person who could
@@ -438,7 +438,7 @@ not with a plan to make it again.
 |---|---|---|
 | `project`, `slug` | required; fixed once made | the environment, by its project's slug and its own, `^[a-z0-9][a-z0-9-]{0,62}$` |
 | `parent` | optional; fixed once made | the environment it inherits from, in the same project. None: it inherits nothing |
-| `protected` | optional, default `false` | whether it is protected: in it, a role holds only its protected column (`docs/design/roles.md`) |
+| `protected` | optional, computed | whether it is protected: in it, a role holds only its protected column (`docs/design/roles.md`). Left out, as coffre makes it: a fork of a protected environment is protected, any other not; once made, as coffre has it |
 | `id` | computed | `project/slug`, the import ID too |
 
 | Step | Call |
@@ -464,7 +464,14 @@ not with a plan to make it again.
   it off (R30, `docs/design/roles.md`). So `protected` going to `false`
   is refused at plan when the provider signs in as a service account,
   and on a session the listing says whether this person may
-  (`unprotectable`), refusing at plan otherwise.
+  (`unprotectable`), refusing at plan otherwise. coffre protects a fork
+  of a protected environment as it makes it, so the plan says so when
+  `protected` is left out, and refuses `protected = false` there.
+- **Made, then protected.** coffre makes an environment unprotected
+  and protects it in a second call. One whose protection fails is in
+  the state, unprotected, with the error, and Terraform marks it
+  tainted: replacing it would archive it and keep its slug, so the
+  error says to `terraform untaint` it, and the next plan protects it.
 - **Destroy archives**, and stops there: a deletion erases every value
   and takes an Admin or Owner of the instance. coffre refuses to archive
   one a fork inherits from (`inherited`) or a reference reads
@@ -533,11 +540,15 @@ not with a plan to make it again.
   grant made outside Terraform shows as drift and is revoked. So an
   account declared here takes no `coffre_grant`.
 - **Create** refuses an account already there (`GET` first, then the
-  guard): import it instead.
+  guard): import it instead. One set up by someone else between the two
+  is given the grants asked, `created: false` in coffre's answer: the
+  apply fails, saying so, and keeps it out of the state, to import.
 - **Destroy removes it**: its grants are revoked, and its tokens, trust
   bindings and sessions end with it. coffre keeps its row, `removed`,
   and brings the name back only for the person who removed it, or
-  whoever runs the instance; anyone else's create is refused (`removed`).
+  whoever runs the instance; anyone else's create is refused
+  (403 `no_access`, which the provider reads as the removal when its
+  `GET` saw one).
 
 `coffre_trust`:
 
@@ -550,7 +561,7 @@ not with a plan to make it again.
 | `events` | optional | the profile's event claim, several allowed: GitHub's `event_name`, GitLab's `pipeline_source` |
 | `claim_prefixes` | optional, `custom` only | claims matched by their start, whole `/`-ended segments: `{sub = "org/1/project/2/"}` (#853) |
 | `scope` | optional, computed | what its credentials reach, by place and role. coffre seals it on the binding as it makes it; left out, what the account holds then, or, made in place of another, what that one reached and the account still holds: a change never widens it, so a grant given to the account later reaches its CI runs only once the scope names it |
-| `policy` | optional | a workload's binding, for key-bound sessions at `/api/auth/workload`: `audience`, `key_audience`, `sources`, `session_hours`, `unsigned_uploads`, and `repeats` (#853: a `custom` issuer that hands the same token out until it expires). Left out: a CI run's binding, for `oidc` |
+| `policy` | optional | a workload's binding, for key-bound sessions at `/api/auth/workload`: `audience`, `key_audience`, `sources`, `session_hours`, `unsigned_uploads`, and `repeats` (#853: a `custom` issuer that hands the same token out until it expires). Left out, a `github`, `gitlab` or `custom` binding is a CI run's, for `oidc`; a workload platform's binding is always a workload's, with coffre's defaults; and an instance that issues no bearer credential (`useOnly`) makes every binding a workload's |
 | `label` | optional | a label |
 | `id` | computed | the binding's id; `token:deploy/<id>` imports it |
 
@@ -563,7 +574,13 @@ not with a plan to make it again.
 - **Every change is a new binding.** coffre never edits one; it replaces
   it, atomically. A binding changed outside Terraform (re-keyed,
   replaced) is not listed under its id any more: it leaves the state and
-  the next plan makes it again, beside the other.
+  the next plan makes it again, beside the other. So the binding listed
+  under the state's id is the one the state made: a refresh keeps the
+  configuration's spelling (a CIDR coffre writes another way, a policy
+  coffre fills in), and reads the listing into the state only on import.
+- **Unknown at plan.** A value known only at apply, even one element of
+  `claims`, `events` or `sources`, plans a new binding: the plan cannot
+  tell it is the same one.
 - **Checked by coffre**, in its words, before the issuer is asked
   anything: the claims each profile requires, a prefix that stops in a
   segment, `repeats` beside `key_audience`, a scope wider than what the
