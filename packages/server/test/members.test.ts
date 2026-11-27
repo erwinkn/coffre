@@ -404,7 +404,10 @@ test('a change of grants that says what it replaces is made only while the membe
   const standing = (role: string) => ({ role, until: null });
   const STALE = [409, 'conflict', 'stale'];
   // Nothing held: `was: null` makes it, and only once; a grant said held that is not, refused.
-  assert.deepEqual(refused(await patch('bo-cli', gus, { market: { ...standing('viewer'), was: standing('viewer') } })), STALE);
+  const nothing = await patch('bo-cli', gus, { market: { ...standing('viewer'), was: standing('viewer') } });
+  assert.deepEqual(refused(nothing), STALE);
+  // Said as a grant, not as the value `stale` first meant.
+  assert.equal(nothing[1].message, `${gus}: a grant asked over what it replaces (\`was\`) is not the one held there now. Nothing was changed`);
   assert.deepEqual((await patch('bo-cli', gus, { market: { ...standing('viewer'), was: null } }))[1], { changes: { market: 'created' } });
   assert.deepEqual(refused(await patch('bo-cli', gus, { market: { ...standing('viewer'), was: null } })), STALE);
   // The grant held, changed; asked again over what it was, refused, and the place beside it with it.
@@ -414,6 +417,9 @@ test('a change of grants that says what it replaces is made only while the membe
   // An end is part of what is held, as the listing shows it.
   assert.deepEqual((await patch('bo-cli', gus, { 'market/prod': { role: 'viewer', until: '2030-12-31' } }))[1], { changes: { 'market/prod': 'created' } });
   assert.deepEqual(refused(await patch('bo-cli', gus, { 'market/prod': { ...standing('viewer'), was: standing('viewer') } })), STALE);
+  // To the millisecond, and in any offset.
+  assert.deepEqual(refused(await patch('bo-cli', gus, { 'market/prod': { ...standing('viewer'), was: { role: 'viewer', until: '2030-12-31T23:59:59.998Z' } } })), STALE);
+  assert.deepEqual(refused(await patch('bo-cli', gus, { 'market/prod': { ...standing('viewer'), was: { role: 'developer', until: '2031-01-01T01:59:59.999+02:00' } } })), STALE);
   assert.deepEqual((await patch('bo-cli', gus, { 'market/prod': { ...standing('viewer'), was: { role: 'viewer', until: '2030-12-31T23:59:59.999Z' } } }))[1], { changes: { 'market/prod': 'updated' } });
   // A lapsed grant is held no more: only `was: null` replaces it.
   assert.deepEqual(refused(await patch('cy-cli', ed, { billing: { ...standing('viewer'), was: { role: 'viewer', until: '2020-01-01T00:00:00.000Z' } } })), STALE);
@@ -424,7 +430,8 @@ test('a change of grants that says what it replaces is made only while the membe
 
   // Told before any call: a `was` that is no grant as the listing shows one.
   const before = app.calls.length;
-  for (const was of [{ role: 'viewer' }, { role: 'viewer', until: 'soon' }, { role: 'Viewer', until: null }, { role: 'viewer', until: null, expiresAt: null }, 'viewer']) {
+  // An end is the instant the listing shows, never a date, which `until` reads as its last millisecond.
+  for (const was of [{ role: 'viewer', until: '2030-12-31' }, { role: 'viewer', until: '2030-12-31T23:59:59' }, { role: 'viewer', until: '1' }, { role: 'viewer', until: '+010000-01-01T00:00:00Z' }, { role: 'viewer' }, { role: 'viewer', until: 'soon' }, { role: 'Viewer', until: null }, { role: 'viewer', until: null, expiresAt: null }, 'viewer']) {
     assert.deepEqual(refused(await patch('bo-cli', gus, { market: { ...standing('viewer'), was } })), [400, 'bad_request', undefined], JSON.stringify(was));
   }
   assert.equal(app.calls.length, before);

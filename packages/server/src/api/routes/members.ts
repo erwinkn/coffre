@@ -9,6 +9,7 @@ import { members, projectNamed, projectSlugs, reportOf, type Definition, type Gr
 import type { PlaceRow } from '../../db/queries/places.ts';
 import { can, canAnywhere, permissionsAt, placeOf, projectsReached, type Place } from '../caller.ts';
 import { changed } from '../change.ts';
+import type { ApiContext } from '../context.ts';
 import { ApiError, badRequest, refusal } from '../errors.ts';
 import { formatPath, parsePath, type Path } from '../paths.ts';
 import { route } from '../route.ts';
@@ -351,11 +352,33 @@ const MOST_PLACES = 1000;
 
 type Wanted = { path: string; project: string; environment: string | null; role: string | null; expiresAt: string | null; was?: { role: string; expiresAt: string | null } | null };
 
-/** An end a listing showed, as the vault compares it: any time, past ones included, since a lapsed grant is held no more. */
+/** An instant, with its offset, as a member's access lists an end: `2030-12-31T23:59:59.999Z`. */
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * An end a listing showed, as the vault compares it, to the millisecond:
+ * the instant itself, never a date, which `until` reads as its last
+ * millisecond and a listing never shows. A past one is taken: a lapsed
+ * grant is held no more, so `was` naming one is refused `stale`.
+ */
 function heldUntil(until: string): string {
-  const time = Date.parse(until);
-  if (!Number.isFinite(time) || time >= Date.UTC(10000, 0, 1)) throw badRequest(`"${until}" is not a time`);
+  const time = INSTANT.test(until) ? Date.parse(until) : Number.NaN;
+  if (!Number.isFinite(time) || time >= Date.UTC(10000, 0, 1)) throw badRequest(`"${until}" is not an instant as a member's access lists an end, such as 2030-12-31T23:59:59.999Z`);
   return new Date(time).toISOString();
+}
+
+/**
+ * One `access.grant` of the places asked, admitting a service account with
+ * them or not. A place whose grant is not the one its `was` says is told as
+ * a grant, not as the value the vault's word first meant.
+ */
+async function granted(ctx: ApiContext, principal: string, wanted: Wanted[], admit: boolean) {
+  try {
+    return await changed(ctx, { op: 'access.grant', principal, changes: wanted.map(({ path: _, ...change }) => change), ...(admit ? { admit } : {}) }, principal);
+  } catch (error) {
+    if (error instanceof ApiError && error.reason === 'stale') throw new ApiError('conflict', `${principal}: a grant asked over what it replaces (\`was\`) is not the one held there now. Nothing was changed`, 'stale');
+    throw error;
+  }
 }
 
 /** The grants a body asks for, each place by its path, checked before any call: a place named once, by slug, an end to come. */
@@ -534,7 +557,7 @@ export const memberRoutes = {
         if (!service || input.role !== undefined || input.scope !== undefined) throw badRequest('access comes with a service account, and no role: a person is given grants once a member');
         // Admitted, or brought back, with its grants, in one change of the vault's: all of it or none.
         const wanted = grantsAsked(input.access);
-        const { changes, created } = await changed(ctx, { op: 'access.grant', principal, changes: wanted.map(({ path: _, ...change }) => change), admit: true }, principal);
+        const { changes, created } = await granted(ctx, principal, wanted, true);
         return { member: principal, instanceRole: 'member', scope: EVERYWHERE, created: created ?? false, changes: byPath(wanted, changes) };
       }
       if (input.scope !== undefined && input.role === undefined) throw badRequest('a scope goes with a role: name the role too');
@@ -597,7 +620,7 @@ export const memberRoutes = {
       const principal = memberOf(params.member);
       const wanted = grantsAsked(input);
       if (wanted.length === 0) return { changes: {} };
-      const { changes } = await changed(ctx, { op: 'access.grant', principal, changes: wanted.map(({ path: _, ...change }) => change) }, principal);
+      const { changes } = await granted(ctx, principal, wanted, false);
       return { changes: byPath(wanted, changes) };
     },
   }),
