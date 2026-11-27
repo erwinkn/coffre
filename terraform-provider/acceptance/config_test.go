@@ -129,29 +129,33 @@ resource "coffre_environment" "fork" {
 		changes, out := w.planned()
 		expect(t, !changes, "a plan with nothing changed plans changes:\n%s", out)
 
-		w.write(provider, config(true, "coffre_environment.base.slug"))
-		w.must("apply", "-auto-approve")
-		expect(t, environmentOf(t, base).Protected, "protected, it lists %+v", environmentOf(t, base))
-
-		// A fork of a protected environment is protected by coffre: left out, the plan says so; said false, it refuses.
-		child := func(protected string) string {
+		// Protected in the apply that makes a fork of it, which omits protected: coffre protects the fork, and the plan
+		// had left that for the apply to tell. Said false under a protected parent, the plan refuses.
+		child := func(more string) string {
 			return config(true, "coffre_environment.base.slug") + fmt.Sprintf(`
 resource "coffre_environment" "child" {
   project = "cfg"
   slug    = "child%s"
   parent  = coffre_environment.base.slug
-  %s
 }
-`, slugged(suffix), protected)
+`, slugged(suffix)) + more
 		}
-		w.write(provider, child("protected = false"))
-		said := w.fails("plan")
-		expect(t, strings.Contains(said, "would be protected") && strings.Contains(said, "coffre protects a fork of a protected environment"), "an unprotected fork of a protected one, the plan says:\n%s", said)
 		w.write(provider, child(""))
 		w.must("apply", "-auto-approve")
+		expect(t, environmentOf(t, base).Protected, "protected, it lists %+v", environmentOf(t, base))
 		expect(t, environmentOf(t, "child"+slugged(suffix)).Protected && w.state("coffre_environment.child")["protected"] == true, "a fork of a protected one lists %+v, its state %v", environmentOf(t, "child"+slugged(suffix)), w.state("coffre_environment.child"))
 		changes, out = w.planned()
 		expect(t, !changes, "a protected fork made, the plan plans changes:\n%s", out)
+		w.write(provider, child(fmt.Sprintf(`
+resource "coffre_environment" "late" {
+  project   = "cfg"
+  slug      = "late%s"
+  parent    = coffre_environment.base.slug
+  protected = false
+}
+`, slugged(suffix))))
+		said := w.fails("plan")
+		expect(t, strings.Contains(said, "would be protected") && strings.Contains(said, "coffre protects a fork of a protected environment"), "an unprotected fork of a protected one, the plan says:\n%s", said)
 		w.write(provider, config(true, "coffre_environment.base.slug"))
 		w.must("apply", "-auto-approve")
 
@@ -323,6 +327,14 @@ resource "coffre_trust" "capy" {
 		expect(t, sealed == "map[cfg:maintainer]", "made with no scope, the state records %s, not what coffre sealed", sealed)
 		changes, out := w.planned()
 		expect(t, !changes, "a plan with nothing changed plans changes:\n%s", out)
+
+		// A grant left null, as an unset variable leaves it, is refused at plan: it is no revocation.
+		w.write(person, config(`{ cfg = "maintainer", "tf/prod" = null }`, "main"))
+		said = w.fails("plan")
+		expect(t, strings.Contains(strings.ToLower(said), "null"), "a null grant, the plan says:\n%s", said)
+		_, grants = accessOf(t, service)
+		expect(t, len(grants) == 1 && grants["cfg"].Role == "maintainer", "a refused plan left %s holding %+v", service, grants)
+		w.write(person, config(`{ cfg = "maintainer" }`, "main"))
 
 		// Its binding signs a CI run in: the run writes a secret as the account Terraform made.
 		run := newWork(t, w.bin)

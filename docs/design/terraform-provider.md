@@ -438,7 +438,7 @@ not with a plan to make it again.
 |---|---|---|
 | `project`, `slug` | required; fixed once made | the environment, by its project's slug and its own, `^[a-z0-9][a-z0-9-]{0,62}$` |
 | `parent` | optional; fixed once made | the environment it inherits from, in the same project. None: it inherits nothing |
-| `protected` | optional, computed | whether it is protected: in it, a role holds only its protected column (`docs/design/roles.md`). Left out, as coffre makes it: a fork of a protected environment is protected, any other not; once made, as coffre has it |
+| `protected` | optional, computed | whether it is protected: in it, a person holds only their role's protected column, a service account its role as anywhere (`docs/design/roles.md`). Left out, as coffre makes it: a fork of a protected environment is protected, any other not, and the plan leaves a fork's to the apply unless its parent is protected already (the parent may be protected in the same apply); once made, as coffre has it |
 | `id` | computed | `project/slug`, the import ID too |
 
 | Step | Call |
@@ -526,7 +526,7 @@ not with a plan to make it again.
 | Attribute | Kind | What it is |
 |---|---|---|
 | `name` | required; a change replaces | `deploy`: coffre has no rename |
-| `grants` | required, at least one; updates in place | every grant it holds, by place: `{"billing" = "maintainer", "web/prod" = "viewer"}` |
+| `grants` | required, at least one; updates in place | every grant it holds, by place: `{"billing" = "maintainer", "web/prod" = "viewer"}`. A role left null, as an unset variable leaves it, is refused at plan: a place leaves `grants` to be revoked |
 | `ends` | computed | the grants found with an end, by place; always planned empty |
 | `member`, `id` | computed | `token:deploy`, the import ID too |
 
@@ -557,7 +557,7 @@ not with a plan to make it again.
 | `service` | required; a change replaces | `token:deploy` |
 | `profile` | required | `github`, `github-reusable`, `github-reusable-organization`, `gitlab`, `custom`, or a workload's platform: `kubernetes`, `gcp`, `azure`, `fly`, `vercel`, `aws` |
 | `issuer` | optional | the issuer's URL; the profile's own when left out (github.com's, gitlab.com's, Google's, `urn:coffre:aws`) |
-| `claims` | required | the claims a token must carry, each its exact value |
+| `claims` | required | the claims a token must carry, each its exact value. No element of `claims`, `events`, `claim_prefixes`, `scope` or `sources` may be null: the plan refuses it |
 | `events` | optional | the profile's event claim, several allowed: GitHub's `event_name`, GitLab's `pipeline_source` |
 | `claim_prefixes` | optional, `custom` only | claims matched by their start, whole `/`-ended segments: `{sub = "org/1/project/2/"}` (#853) |
 | `scope` | optional, computed | what its credentials reach, by place and role. coffre seals it on the binding as it makes it; left out, what the account holds then, or, made in place of another, what that one reached and the account still holds: a change never widens it, so a grant given to the account later reaches its CI runs only once the scope names it |
@@ -598,10 +598,14 @@ not with a plan to make it again.
 | `coffre_grant` | any | `grant.manage` |
 | `coffre_service_account`, `coffre_trust` | a person (`session`) | what coffre asks to set up and manage the account: every grant it gives it, or running the instance |
 
-In a protected environment a role holds only its protected column: an
-environment Terraform protects keeps working for its account only if its
-role lists `secret.use`, `secret.write` and `secret.archive` there too,
-as `maintainer` does.
+Protection restricts people, not service accounts: in a protected
+environment a person, and so a `session = true` run, holds only their
+role's protected column, while a service account (`token` or `oidc`)
+holds its role's permissions as anywhere else (`docs/design/roles.md`).
+An environment Terraform protects keeps working for CI's account; a
+person applying `coffre_secret` there needs `secret.use`, `secret.write`
+and `secret.archive` in their role's protected column, as `maintainer`
+has.
 
 Left out: **roles**, which are the whole instance's and changed by its
 Owner after a preview of whom a change reaches (`?dryRun=1`, then

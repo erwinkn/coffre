@@ -52,17 +52,17 @@ func Origin(raw string) (string, error) {
 	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", fmt.Errorf("%q is more than an instance's URL: give only its scheme and host, such as https://secrets.acme.example", raw)
 	}
+	host, port := strings.ToLower(parsed.Hostname()), parsed.Port()
 	switch parsed.Scheme {
 	case "https":
 	case "http":
-		if !loopback(parsed.Hostname()) {
+		if !loopback(host) {
 			return "", fmt.Errorf("%q is plain http: a credential goes to coffre over https only, or http on loopback for a local instance", raw)
 		}
 	default:
 		return "", fmt.Errorf("%q is not an https URL", raw)
 	}
 	// As a browser, and so `coffre login`, names it: the host in lowercase, a default port left out.
-	host, port := strings.ToLower(parsed.Hostname()), parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
 		port = ""
 	}

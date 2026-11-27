@@ -128,20 +128,20 @@ func (r *trustResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			},
 			"claims": schema.MapAttribute{
 				Required: true, ElementType: types.StringType,
-				Validators:  []validator.Map{mapvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1))},
+				Validators:  []validator.Map{mapvalidator.NoNullValues(), mapvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1))},
 				Description: "The claims a token must carry, each its exact value, such as `{ repository_id = \"41532\", ref = \"refs/heads/main\" }`. Each profile requires some: coffre says which.",
 			},
 			"events": schema.SetAttribute{
-				Optional: true, ElementType: types.StringType, Validators: []validator.Set{setvalidator.SizeAtLeast(1)},
+				Optional: true, ElementType: types.StringType, Validators: []validator.Set{setvalidator.SizeAtLeast(1), setvalidator.NoNullValues()},
 				Description: "What may start the run, one or several: GitHub's `event_name` (`push`, `workflow_dispatch`, …), GitLab's `pipeline_source`.",
 			},
 			"claim_prefixes": schema.MapAttribute{
-				Optional: true, ElementType: types.StringType,
+				Optional: true, ElementType: types.StringType, Validators: []validator.Map{mapvalidator.NoNullValues()},
 				Description: "A `custom` binding's claims matched by their start, whole segments each ended by `/`: `{ sub = \"org/1/project/2/\" }`, for an issuer whose `sub` names each run.",
 			},
 			"scope": schema.MapAttribute{
 				Optional: true, Computed: true, ElementType: types.StringType,
-				Validators: []validator.Map{mapvalidator.SizeAtLeast(1), mapvalidator.KeysAre(placePath{}), mapvalidator.ValueStringsAre(stringvalidator.RegexMatches(rolePattern, "a role's id"))},
+				Validators: []validator.Map{mapvalidator.SizeAtLeast(1), mapvalidator.NoNullValues(), mapvalidator.KeysAre(placePath{}), mapvalidator.ValueStringsAre(stringvalidator.RegexMatches(rolePattern, "a role's id"))},
 				Description: "What its credentials reach, by place and role, within what the account holds. coffre seals it on the binding when it makes it: left out, " +
 					"what the account holds then, or, for a binding made in place of another, what that one reached and the account still holds, so a change never widens it. " +
 					"A grant given to the account later is not in it: name the scope to reach it.",
@@ -154,7 +154,7 @@ func (r *trustResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					"audience":     text("An `azure` binding's audience, the exact one Entra puts in its tokens."),
 					"key_audience": schema.BoolAttribute{Optional: true, Description: "The token's audience must name the session's key. Always so for GitHub, GCP, Fly and Vercel."},
 					"sources": schema.SetAttribute{
-						Optional: true, ElementType: types.StringType, Validators: []validator.Set{setvalidator.SizeBetween(1, 16)},
+						Optional: true, ElementType: types.StringType, Validators: []validator.Set{setvalidator.SizeBetween(1, 16), setvalidator.NoNullValues()},
 						Description: "CIDRs a session's client address must be within, as coffre writes them: `162.220.232.0/24`.",
 					},
 					"session_hours": schema.Int64Attribute{
@@ -310,25 +310,26 @@ func known(ctx context.Context, values ...attr.Value) bool {
 }
 
 // shapeOf is the binding a model asks for; false while any of it is unknown but its scope, which
-// wholly unknown is coffre's to seal, and asked for as none.
-func shapeOf(ctx context.Context, m trustModel) (*shape, bool) {
+// wholly unknown is coffre's to seal, and asked for as none, or when it cannot be read, which it adds to diags.
+func shapeOf(ctx context.Context, m trustModel, diags *diag.Diagnostics) (*shape, bool) {
 	if !known(ctx, m.Profile, m.Issuer, m.Claims, m.Events, m.ClaimPrefixes, m.Label) || (!m.Scope.IsUnknown() && !known(ctx, m.Scope)) {
 		return nil, false
 	}
-	var diags diag.Diagnostics
+	var read diag.Diagnostics
 	s := &shape{
 		Profile: m.Profile.ValueString(), Issuer: m.Issuer.ValueString(), Label: m.Label.ValueString(),
-		Claims: stringMap(ctx, m.Claims, &diags), Prefixes: stringMap(ctx, m.ClaimPrefixes, &diags),
-		Events: setStrings(ctx, m.Events, &diags), Scope: stringMap(ctx, m.Scope, &diags),
+		Claims: stringMap(ctx, m.Claims, &read), Prefixes: stringMap(ctx, m.ClaimPrefixes, &read),
+		Events: setStrings(ctx, m.Events, &read), Scope: stringMap(ctx, m.Scope, &read),
 	}
 	if p := m.Policy; p != nil {
 		if !known(ctx, p.Audience, p.KeyAudience, p.Sources, p.SessionHours, p.UnsignedUploads, p.Repeats) {
 			return nil, false
 		}
-		s.Policy = &policyShape{Audience: p.Audience.ValueString(), KeyAudience: p.KeyAudience.ValueBool(), Sources: setStrings(ctx, p.Sources, &diags),
+		s.Policy = &policyShape{Audience: p.Audience.ValueString(), KeyAudience: p.KeyAudience.ValueBool(), Sources: setStrings(ctx, p.Sources, &read),
 			SessionHours: p.SessionHours.ValueInt64(), Unsigned: p.UnsignedUploads.ValueBool(), Repeat: p.Repeats.ValueBool()}
 	}
-	if diags.HasError() {
+	if read.HasError() {
+		diags.Append(read...)
 		return nil, false
 	}
 	return s.normal(), true
@@ -415,6 +416,11 @@ func (s *shape) model(m *trustModel) {
 		if p.Repeat {
 			m.Policy.Repeats = types.BoolValue(true)
 		}
+		// A workload platform's binding with coffre's defaults is written with no policy at all.
+		q := m.Policy
+		if !slices.Contains(bearerProfiles, s.Profile) && q.Audience.IsNull() && q.KeyAudience.IsNull() && q.Sources.IsNull() && q.SessionHours.IsNull() && q.UnsignedUploads.IsNull() && q.Repeats.IsNull() {
+			m.Policy = nil
+		}
 	}
 }
 
@@ -490,8 +496,8 @@ func (r *trustResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanR
 		if sealed {
 			kept.Scope = state.Scope
 		}
-		planned, ok := shapeOf(ctx, kept)
-		was, _ := shapeOf(ctx, state)
+		planned, ok := shapeOf(ctx, kept, &resp.Diagnostics)
+		was, _ := shapeOf(ctx, state, &diag.Diagnostics{})
 		// The same binding: it stays, with the scope coffre sealed on it. Any change makes a new one in
 		// its place, whose id coffre draws, and whose scope, left out, coffre seals again.
 		if ok && was != nil && reflect.DeepEqual(planned, was) && plan.Service.Equal(state.Service) {
@@ -504,8 +510,12 @@ func (r *trustResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanR
 
 // bind makes the binding a plan asks for, in place of `replaces` if given.
 func (r *trustResource) bind(ctx context.Context, plan *trustModel, diags *diag.Diagnostics, replaces ...string) bool {
-	asked, _ := shapeOf(ctx, *plan)
+	asked, ok := shapeOf(ctx, *plan, diags)
 	service := plan.Service.ValueString()
+	if !ok {
+		diags.AddError("Could not bind "+service, "Some of the binding this plan asks for is unknown or unreadable. Nothing was changed.")
+		return false
+	}
 	made, err := r.data.client.Bind(ctx, service, asked.binding(replaces...))
 	switch {
 	case coffre.Is(err, http.StatusNotFound, "unknown_principal"):

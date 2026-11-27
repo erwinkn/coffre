@@ -66,7 +66,7 @@ func (r *environmentResource) Schema(_ context.Context, _ resource.SchemaRequest
 			},
 			"protected": schema.BoolAttribute{
 				Optional: true, Computed: true,
-				Description: "Whether it is protected: in it, a role holds only its protected column. Left out, as coffre makes it: a fork of a protected environment is protected, any other not. Only an Owner of the project, signed in as themselves (`session = true`), takes the protection off.",
+				Description: "Whether it is protected: in it, a person holds only their role's protected column; a service account holds its role as anywhere. Left out, as coffre makes it: a fork of a protected environment is protected, any other not. Only an Owner of the project, signed in as themselves (`session = true`), takes the protection off.",
 			},
 		},
 	}
@@ -162,9 +162,10 @@ func (r *environmentResource) planMade(ctx context.Context, plan *environmentMod
 		}
 	}
 	switch {
-	case config.Protected.IsNull() && known:
+	case config.Protected.IsNull() && known && (parentProtected || !inherits):
 		plan.Protected = types.BoolValue(parentProtected)
 	case config.Protected.IsNull():
+		// A parent unprotected now may be protected before this one is made, in this apply or beside it.
 		plan.Protected = types.BoolUnknown()
 	case parentProtected && !plan.Protected.IsUnknown() && !plan.Protected.ValueBool():
 		diags.AddAttributeError(path.Root("protected"), plan.at()+" would be protected",

@@ -63,6 +63,7 @@ func (r *serviceAccountResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Required: true, ElementType: types.StringType,
 				Validators: []validator.Map{
 					mapvalidator.SizeAtLeast(1),
+					mapvalidator.NoNullValues(),
 					mapvalidator.KeysAre(placePath{}),
 					mapvalidator.ValueStringsAre(stringvalidator.RegexMatches(rolePattern, "a role's id, such as viewer")),
 				},
@@ -149,8 +150,12 @@ func (r *serviceAccountResource) Create(ctx context.Context, req resource.Create
 		return
 	}
 	removed := access != nil && access.Status == "removed"
+	grants := stringMap(ctx, plan.Grants, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	wanted := map[string]coffre.Wanted{}
-	for at, role := range stringMap(ctx, plan.Grants, &resp.Diagnostics) {
+	for at, role := range grants {
 		wanted[at] = coffre.Wanted{Role: role}
 	}
 	created, err := r.data.client.AdmitService(ctx, member, wanted)
@@ -213,6 +218,10 @@ func (r *serviceAccountResource) Update(ctx context.Context, req resource.Update
 	member := state.member()
 	before, after := stringMap(ctx, state.Grants, &resp.Diagnostics), stringMap(ctx, plan.Grants, &resp.Diagnostics)
 	ends := stringMap(ctx, state.Ends, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		// A grant read as none would be revoked.
+		return
+	}
 	wanted := map[string]coffre.Wanted{}
 	for at, role := range after {
 		held, had := before[at]

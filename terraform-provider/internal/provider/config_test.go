@@ -96,7 +96,7 @@ func TestBindingShapes(t *testing.T) {
 		Claims: map[string]json.RawMessage{"event_name": raw(t, []string{"push", "workflow_dispatch"}), "ref": raw(t, "refs/heads/main"), "repository_id": raw(t, "41532")},
 		Policy: map[string]json.RawMessage{"keyAudience": raw(t, true), "sources": raw(t, []string{"10.0.0.0/8"})},
 	}
-	asked, known := shapeOf(ctx, github)
+	asked, known := shapeOf(ctx, github, &diag.Diagnostics{})
 	if !known || !reflect.DeepEqual(asked, listedShape(listed)) {
 		t.Fatalf("configured %+v, listed %+v", asked, listedShape(listed))
 	}
@@ -118,7 +118,7 @@ func TestBindingShapes(t *testing.T) {
 		Claims: map[string]json.RawMessage{"project": raw(t, "2"), "sub": raw(t, map[string]string{"prefix": "org/1/project/2/"})},
 		Policy: map[string]json.RawMessage{"repeats": raw(t, true)},
 	}
-	asked, _ = shapeOf(ctx, capy)
+	asked, _ = shapeOf(ctx, capy, &diag.Diagnostics{})
 	if !reflect.DeepEqual(asked, listedShape(listedCapy)) {
 		t.Fatalf("configured %+v, listed %+v", asked, listedShape(listedCapy))
 	}
@@ -137,7 +137,7 @@ func TestBindingShapes(t *testing.T) {
 	if model.Policy != nil || model.ClaimPrefixes.Elements()["sub"].(types.String).ValueString() != "org/1/project/2/" || model.Label.ValueString() != "capy" {
 		t.Errorf("modelled %+v", model)
 	}
-	again, _ := shapeOf(ctx, model)
+	again, _ := shapeOf(ctx, model, &diag.Diagnostics{})
 	if !reflect.DeepEqual(again, changed) {
 		t.Errorf("modelled, then shaped: %+v, not %+v", again, changed)
 	}
@@ -169,12 +169,12 @@ func TestBindingUnknowns(t *testing.T) {
 			ClaimPrefixes: types.MapNull(types.StringType), Scope: types.MapNull(types.StringType), Label: types.StringNull(),
 		}
 	}
-	if _, ok := shapeOf(ctx, base()); !ok {
+	if _, ok := shapeOf(ctx, base(), &diag.Diagnostics{}); !ok {
 		t.Fatal("a known binding read as unknown")
 	}
 	m := base()
 	m.Scope = types.MapUnknown(types.StringType)
-	if _, ok := shapeOf(ctx, m); !ok {
+	if _, ok := shapeOf(ctx, m, &diag.Diagnostics{}); !ok {
 		t.Error("a scope coffre seals read as unknown")
 	}
 	for name, change := range map[string]func(*trustModel){
@@ -191,8 +191,39 @@ func TestBindingUnknowns(t *testing.T) {
 	} {
 		m := base()
 		change(&m)
-		if _, ok := shapeOf(ctx, m); ok {
+		if _, ok := shapeOf(ctx, m, &diag.Diagnostics{}); ok {
 			t.Errorf("%s: an unknown element read as known", name)
+		}
+	}
+}
+
+// A null element is no binding's: reading it fails, saying so, rather than ask for less.
+func TestBindingNulls(t *testing.T) {
+	ctx := context.Background()
+	m := trustModel{
+		Service: types.StringValue("token:deploy"), Profile: types.StringValue("github"), Issuer: types.StringValue(defaultIssuer("github")),
+		Claims:        types.MapValueMust(types.StringType, map[string]attr.Value{"repository_id": types.StringValue("41532"), "environment": types.StringNull()}),
+		Events:        types.SetNull(types.StringType),
+		ClaimPrefixes: types.MapNull(types.StringType), Scope: types.MapNull(types.StringType), Label: types.StringNull(),
+	}
+	var diags diag.Diagnostics
+	if asked, ok := shapeOf(ctx, m, &diags); ok || asked != nil || !diags.HasError() {
+		t.Errorf("a null claim read as %+v, %v, with %v", asked, ok, diags)
+	}
+}
+
+// Imported, a workload platform's binding with coffre's default policy is written with none, as a
+// configuration leaves it; a bearer profile's keeps `policy = {}`, which makes it a workload's.
+func TestImportedPolicy(t *testing.T) {
+	for profile, none := range map[string]bool{"kubernetes": true, "gcp": true, "custom": false, "github": false} {
+		policy := map[string]json.RawMessage{}
+		if profile == "gcp" {
+			policy["keyAudience"] = raw(t, true)
+		}
+		var m trustModel
+		listedShape(coffre.Binding{ID: "b", Profile: profile, Issuer: "https://issuer.acme.example", Claims: map[string]json.RawMessage{"sub": raw(t, "x")}, Policy: policy}).model(&m)
+		if (m.Policy == nil) != none {
+			t.Errorf("%s with coffre's default policy imports policy %+v", profile, m.Policy)
 		}
 	}
 }
@@ -212,7 +243,7 @@ func TestBindingDefaults(t *testing.T) {
 		return listedShape(coffre.Binding{ID: "b", Profile: profile, Issuer: "https://issuer.acme.example", Claims: map[string]json.RawMessage{"sub": raw(t, "system:serviceaccount:web:api")}, Policy: policy})
 	}
 	for _, profile := range []string{"kubernetes", "gcp"} {
-		asked, _ := shapeOf(ctx, model(profile, nil))
+		asked, _ := shapeOf(ctx, model(profile, nil), &diag.Diagnostics{})
 		policy := map[string]json.RawMessage{}
 		if profile == "gcp" {
 			policy["keyAudience"] = raw(t, true)
@@ -222,12 +253,12 @@ func TestBindingDefaults(t *testing.T) {
 		}
 	}
 	// A bearer profile's binding with no policy is a CI run's: not the workload's with coffre's defaults.
-	asked, _ := shapeOf(ctx, model("custom", nil))
+	asked, _ := shapeOf(ctx, model("custom", nil), &diag.Diagnostics{})
 	if reflect.DeepEqual(asked, listed("custom", map[string]json.RawMessage{})) {
 		t.Error("a CI run's binding read as a workload's")
 	}
 	spelled := &policyModel{Audience: types.StringNull(), KeyAudience: types.BoolNull(), Sources: set("2001:0DB8::/32", "10.0.0.0/8", "10.0.0.0/8"), SessionHours: types.Int64Null(), UnsignedUploads: types.BoolNull(), Repeats: types.BoolNull()}
-	asked, _ = shapeOf(ctx, model("kubernetes", spelled))
+	asked, _ = shapeOf(ctx, model("kubernetes", spelled), &diag.Diagnostics{})
 	if got := listed("kubernetes", map[string]json.RawMessage{"sources": raw(t, []string{"10.0.0.0/8", "2001:db8::/32"})}); !reflect.DeepEqual(asked, got) {
 		t.Errorf("sources: asked %v, listed %v", asked.Policy.Sources, got.Policy.Sources)
 	}
