@@ -557,7 +557,7 @@ not with a plan to make it again.
 |---|---|---|
 | `service` | required; a change replaces | `token:deploy` |
 | `profile` | required | `github`, `github-reusable`, `github-reusable-organization`, `gitlab`, `custom`, or a workload's platform: `kubernetes`, `gcp`, `azure`, `fly`, `vercel`, `aws` |
-| `issuer` | optional | the issuer's URL; the profile's own when left out (github.com's, gitlab.com's, Google's, `urn:coffre:aws`) |
+| `issuer` | optional, computed | the issuer's URL; the profile's own when left out (github.com's, gitlab.com's, Google's, `urn:coffre:aws`) |
 | `claims` | required | the claims a token must carry, each its exact value. No element of `claims`, `events`, `claim_prefixes`, `scope` or `sources` may be null: the plan refuses it |
 | `events` | optional | the profile's event claim, several allowed: GitHub's `event_name`, GitLab's `pipeline_source` |
 | `claim_prefixes` | optional, `custom` only | claims matched by their start, whole `/`-ended segments: `{sub = "org/1/project/2/"}` (#853) |

@@ -284,10 +284,12 @@ type BindingMade struct {
 	Scope map[string]string `json:"scope"`
 }
 
-// Unbind removes a binding, and what it issued with it. One that is not there is removed already.
+// Unbind removes a binding, and what it issued with it. One that is not there, or whose account is
+// gone with all its bindings, is removed already; any other 404 (an instance that trusts no
+// workloads) is an error.
 func (c *Client) Unbind(ctx context.Context, service, id string) error {
 	err := c.call(ctx, http.MethodDelete, "/members"+memberPath(service)+"/bindings/"+url.PathEscape(id), nil, nil)
-	if Is(err, http.StatusNotFound, "") {
+	if Is(err, http.StatusNotFound, "unknown_binding") || Is(err, http.StatusNotFound, "unknown_principal") {
 		return nil
 	}
 	return err

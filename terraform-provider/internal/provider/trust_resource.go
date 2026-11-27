@@ -183,7 +183,7 @@ func (r *trustResource) ValidateConfig(ctx context.Context, req resource.Validat
 	}
 	profile := config.Profile.ValueString()
 	event := eventClaim(profile)
-	if !config.Events.IsNull() && event == "" {
+	if !config.Events.IsNull() && !config.Events.IsUnknown() && event == "" {
 		resp.Diagnostics.AddAttributeError(path.Root("events"), "No event claim", fmt.Sprintf("A %s binding names no event: its claims say which runs it takes.", profile))
 	}
 	if event != "" && !config.Claims.IsUnknown() {
@@ -191,7 +191,7 @@ func (r *trustResource) ValidateConfig(ctx context.Context, req resource.Validat
 			resp.Diagnostics.AddAttributeError(path.Root("claims"), event+" goes in events", fmt.Sprintf("Name what may start the run in events = [\"push\"]: a %s binding takes one or several there.", profile))
 		}
 	}
-	if !config.ClaimPrefixes.IsNull() && profile != "custom" {
+	if !config.ClaimPrefixes.IsNull() && !config.ClaimPrefixes.IsUnknown() && profile != "custom" {
 		resp.Diagnostics.AddAttributeError(path.Root("claim_prefixes"), "Only a custom binding matches a prefix", fmt.Sprintf("A %s binding pins IDs its platform never reuses: name each exactly in claims.", profile))
 	}
 	if config.Issuer.IsNull() && defaultIssuer(profile) == "" {
@@ -535,7 +535,7 @@ func (r *trustResource) bind(ctx context.Context, plan *trustModel, diags *diag.
 	case coffre.Is(err, http.StatusNotFound, "unknown_principal"):
 		diags.AddError("No service account "+service, "coffre has no such live service account: set it up first, with a coffre_service_account. ("+err.Error()+")")
 		return false
-	case err != nil && len(replaces) > 0 && (coffre.Is(err, http.StatusNotFound, "") || coffre.Is(err, http.StatusConflict, "stale")):
+	case err != nil && len(replaces) > 0 && (coffre.Is(err, http.StatusNotFound, "unknown_binding") || coffre.Is(err, http.StatusConflict, "stale")):
 		diags.AddError(service+"'s binding changed after this plan was made", "It was removed or replaced in coffre since the plan saw it. Nothing was changed: plan again. ("+err.Error()+")")
 		return false
 	case err != nil:
@@ -609,7 +609,12 @@ func (r *trustResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		return
 	}
 	// coffre never edits a binding, so the one by this id is the one the state made: the listing fills
-	// in only an imported one, and the state keeps the configuration's spelling.
+	// in only an imported one, and the state keeps the configuration's spelling. Its scope is the
+	// exception: coffre seals it by place id and lists it by each place's slug now, so a renamed
+	// place shows here.
+	if listed := bindings[index].Scope; len(listed) > 0 {
+		state.Scope = types.MapValueMust(types.StringType, stringValues(listed))
+	}
 	if state.Profile.IsNull() {
 		// Imported: a profile is required, so only an import leaves it null. A binding this resource
 		// cannot say whole is refused, since the next change would make it again without what it left out.
@@ -633,8 +638,7 @@ func (r *trustResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	err := r.data.client.Unbind(ctx, state.Service.ValueString(), state.ID.ValueString())
-	if err != nil && !coffre.Is(err, http.StatusNotFound, "") {
+	if err := r.data.client.Unbind(ctx, state.Service.ValueString(), state.ID.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Could not remove "+state.Service.ValueString()+"'s binding "+state.ID.ValueString(), err.Error())
 	}
 }
