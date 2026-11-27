@@ -25,13 +25,14 @@ const mostRead = 32 << 20
 const mostWaited = time.Minute
 
 // Client calls one coffre instance as one member: a service account, by its
-// token or a CI run's ID token.
+// token or a CI run's ID token, or a person, by their saved session.
 type Client struct {
 	origin    string
 	http      *http.Client
 	signer    Signer
 	userAgent string
 	listed    listings
+	projects  projects
 	// Sleep waits between attempts; tests replace it.
 	Sleep func(context.Context, time.Duration) error
 }
@@ -167,6 +168,9 @@ func (c *Client) call(ctx context.Context, method, path string, body any, out an
 		if status == http.StatusUnauthorized && !renewed && c.signer.Renew(bearer) {
 			renewed = true
 			continue
+		}
+		if _, person := c.signer.(*Session); person && status == http.StatusUnauthorized {
+			return fmt.Errorf("%w. The session `coffre login` saved for %s ended or was revoked: run `coffre login %s` again", refusal, c.origin, c.origin)
 		}
 		if wait, ok := retryAfter(header); ok && (status == http.StatusTooManyRequests || (status == http.StatusServiceUnavailable && read)) && waited+wait <= mostWaited && waits < mostWaits {
 			waited += wait
