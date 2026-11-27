@@ -464,7 +464,8 @@ not with a plan to make it again.
   it off (R30, `docs/design/roles.md`). So `protected` going to `false`
   is refused at plan when the provider signs in as a service account,
   and on a session the listing says whether this person may
-  (`unprotectable`), refusing at plan otherwise. coffre protects a fork
+  (`unprotectable`), refusing at plan otherwise; with no refresh since
+  the create (`-refresh=false`), coffre refuses at apply instead. coffre protects a fork
   of a protected environment as it makes it, so the plan says so when
   `protected` is left out, and refuses `protected = false` there.
 - **Made, then protected.** coffre makes an environment unprotected
@@ -561,7 +562,7 @@ not with a plan to make it again.
 | `events` | optional | the profile's event claim, several allowed: GitHub's `event_name`, GitLab's `pipeline_source` |
 | `claim_prefixes` | optional, `custom` only | claims matched by their start, whole `/`-ended segments: `{sub = "org/1/project/2/"}` (#853) |
 | `scope` | optional, computed | what its credentials reach, by place and role. coffre seals it on the binding as it makes it; left out, what the account holds then, or, made in place of another, what that one reached and the account still holds: a change never widens it, so a grant given to the account later reaches its CI runs only once the scope names it |
-| `policy` | optional | a workload's binding, for key-bound sessions at `/api/auth/workload`: `audience`, `key_audience`, `sources`, `session_hours`, `unsigned_uploads`, and `repeats` (#853: a `custom` issuer that hands the same token out until it expires). Left out, a `github`, `gitlab` or `custom` binding is a CI run's, for `oidc`; a workload platform's binding is always a workload's, with coffre's defaults; and an instance that issues no bearer credential (`useOnly`) makes every binding a workload's |
+| `policy` | optional | a workload's binding, for key-bound sessions at `/api/auth/workload`: `audience`, `key_audience`, `sources`, `session_hours`, `unsigned_uploads`, and `repeats` (#853: a `custom` issuer that hands the same token out until it expires). Left out, a `github`, `gitlab` or `custom` binding is a CI run's, for `oidc`; a workload platform's binding is always a workload's, with coffre's defaults; and an instance that issues no bearer credential (`useOnly`) makes every binding a workload's. `policy = {}` is a workload's binding at coffre's defaults, sent as `{}`, never left out |
 | `label` | optional | a label |
 | `id` | computed | the binding's id; `token:deploy/<id>` imports it |
 
@@ -587,7 +588,9 @@ not with a plan to make it again.
   account holds, a sensitive place only an Owner of its project binds
   (R32).
 - **Left out**: enrollment and Cloudflare bindings, uploaded keys
-  (`jwks`), and `reads`, the policy's escape hatch by id.
+  (`jwks`), and `reads`, the policy's escape hatch by id. An import of a
+  binding that has any of them fails, naming it: the next change to it
+  would make it again without.
 
 ### 9.6 What each signs in with, and holds
 

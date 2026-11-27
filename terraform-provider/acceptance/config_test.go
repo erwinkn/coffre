@@ -389,8 +389,48 @@ resource "coffre_trust" "capy" {
 		after, _ := os.ReadFile(filepath.Join(w.dir, "terraform.tfstate"))
 		expect(t, string(before) == string(after), "Dana's refused plan changed the state")
 
-		// Destroyed: removed, and its bindings with it.
+		// A workload's binding at coffre's defaults, policy = {}, is a workload's, not a CI run's bearer
+		// one; and a profile unknown until apply takes its default issuer then.
 		w.as(deployment.Sessions.Owner)
+		w.write(person, config(`{ cfg = "maintainer", "tf/prod" = "viewer" }`, "main, relabelled")+fmt.Sprintf(`
+resource "coffre_trust" "workload" {
+  service = coffre_service_account.deploy.member
+  profile = "custom"
+  issuer  = %q
+  claims  = { sub = "job:3" }
+  policy  = {}
+}
+
+resource "terraform_data" "later" {}
+
+resource "coffre_trust" "later" {
+  service = coffre_service_account.deploy.member
+  profile = terraform_data.later.id != "" ? "github" : "github-reusable"
+  claims = {
+    repository_owner_id = "9919"
+    repository_id       = "41533"
+    workflow_ref        = "acme/web/.github/workflows/deploy.yml@refs/heads/main"
+    ref                 = "refs/heads/main"
+  }
+  events = ["push"]
+}
+`, deployment.Issuer))
+		w.must("apply", "-auto-approve")
+		var workload, later *listedBinding
+		for _, b := range bindingsOf(t, service) {
+			switch fmt.Sprint(b.ID) {
+			case fmt.Sprint(w.state("coffre_trust.workload")["id"]):
+				workload = &b
+			case fmt.Sprint(w.state("coffre_trust.later")["id"]):
+				later = &b
+			}
+		}
+		expect(t, workload != nil && workload.Policy != nil, "made with policy = {}, the binding is %+v", workload)
+		expect(t, later != nil && w.state("coffre_trust.later")["issuer"] == "https://token.actions.githubusercontent.com", "made with a profile known at apply, the binding is %+v, issuer %v", later, w.state("coffre_trust.later")["issuer"])
+		changes, out = w.planned()
+		expect(t, !changes, "made, the plan plans changes:\n%s", out)
+
+		// Destroyed: removed, and its bindings with it.
 		w.write(person, config(`{ cfg = "maintainer", "tf/prod" = "viewer" }`, "main, relabelled"))
 		w.must("destroy", "-auto-approve")
 		status, _ = accessOf(t, service)

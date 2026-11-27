@@ -231,7 +231,9 @@ type Binding struct {
 	Claims  map[string]json.RawMessage `json:"claims"`
 	Scope   map[string]string          `json:"scope"`
 	Policy  map[string]json.RawMessage `json:"policy"`
-	Label   *string                    `json:"label"`
+	// Keys are the ones a binding carries, null for one whose issuer's keys coffre fetches.
+	Keys  json.RawMessage `json:"keys"`
+	Label *string         `json:"label"`
 }
 
 // Bindings lists a service account's live bindings; nil, with no error, when the account is gone.
@@ -251,13 +253,15 @@ func (c *Client) Bindings(ctx context.Context, service string) ([]Binding, bool,
 
 // NewBinding is a binding as POST /api/members/:member/bindings takes it.
 type NewBinding struct {
-	Profile  string            `json:"profile"`
-	Issuer   *string           `json:"issuer,omitempty"`
-	Claims   map[string]any    `json:"claims"`
-	Scope    map[string]string `json:"scope,omitempty"`
-	Policy   map[string]any    `json:"policy,omitempty"`
-	Label    *string           `json:"label,omitempty"`
-	Replaces []string          `json:"replaces,omitempty"`
+	Profile string            `json:"profile"`
+	Issuer  *string           `json:"issuer,omitempty"`
+	Claims  map[string]any    `json:"claims"`
+	Scope   map[string]string `json:"scope,omitempty"`
+	// Policy is a workload's binding's, nil for a CI run's: a pointer, so that an empty one, coffre's
+	// defaults, is still sent as {} and makes a workload's binding, never a bearer one.
+	Policy   *map[string]any `json:"policy,omitempty"`
+	Label    *string         `json:"label,omitempty"`
+	Replaces []string        `json:"replaces,omitempty"`
 }
 
 // Bind makes a binding, ending those it replaces in the same change, and answers its id.

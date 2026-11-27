@@ -373,6 +373,19 @@ func listedShape(b coffre.Binding) *shape {
 	return s.normal()
 }
 
+// unsaid names what of a listed binding coffre_trust cannot say, "" when nothing.
+func unsaid(b coffre.Binding) string {
+	switch {
+	case !slices.Contains(trustProfiles, b.Profile):
+		return "profile, " + b.Profile + ", is none coffre_trust takes"
+	case len(b.Keys) > 0 && string(b.Keys) != "null":
+		return "issuer's keys are uploaded to coffre"
+	case b.Policy["reads"] != nil:
+		return "policy names the reads it allows"
+	}
+	return ""
+}
+
 // model writes a listed binding's shape into the model, as a configuration would say it.
 func (s *shape) model(m *trustModel) {
 	optional := func(in map[string]string) types.Map {
@@ -448,25 +461,26 @@ func (s *shape) binding(replaces ...string) coffre.NewBinding {
 		made.Label = &s.Label
 	}
 	if p := s.Policy; p != nil {
-		made.Policy = map[string]any{}
+		policy := map[string]any{}
 		if p.Audience != "" {
-			made.Policy["audience"] = p.Audience
+			policy["audience"] = p.Audience
 		}
 		if p.KeyAudience {
-			made.Policy["keyAudience"] = true
+			policy["keyAudience"] = true
 		}
 		if len(p.Sources) > 0 {
-			made.Policy["sources"] = p.Sources
+			policy["sources"] = p.Sources
 		}
 		if p.SessionHours != 0 {
-			made.Policy["sessionHours"] = p.SessionHours
+			policy["sessionHours"] = p.SessionHours
 		}
 		if p.Unsigned {
-			made.Policy["unsignedUploads"] = true
+			policy["unsignedUploads"] = true
 		}
 		if p.Repeat {
-			made.Policy["repeats"] = true
+			policy["repeats"] = true
 		}
+		made.Policy = &policy
 	}
 	return made
 }
@@ -597,8 +611,15 @@ func (r *trustResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	// coffre never edits a binding, so the one by this id is the one the state made: the listing fills
 	// in only an imported one, and the state keeps the configuration's spelling.
 	if state.Profile.IsNull() {
-		// Imported: a profile is required, so only an import leaves it null.
-		listedShape(bindings[index]).model(&state)
+		// Imported: a profile is required, so only an import leaves it null. A binding this resource
+		// cannot say whole is refused, since the next change would make it again without what it left out.
+		listed := bindings[index]
+		if why := unsaid(listed); why != "" {
+			resp.Diagnostics.AddError("Cannot import "+state.Service.ValueString()+"'s binding "+listed.ID,
+				"Its "+why+", which coffre_trust does not manage: a change to it would make it again without. Keep it out of Terraform, or remake it as coffre_trust says it.")
+			return
+		}
+		listedShape(listed).model(&state)
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }

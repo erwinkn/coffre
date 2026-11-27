@@ -142,7 +142,8 @@ func (r *environmentResource) ModifyPlan(ctx context.Context, req resource.Modif
 		case r.data != nil && r.data.by != "session":
 			resp.Diagnostics.AddAttributeError(path.Root("protected"), state.at()+" stays protected",
 				"Only an Owner of the project, signed in as themselves, takes an environment's protection off, and this provider signs in as "+r.data.signedIn()+". Take it off in coffre, or set protected = true.")
-		case r.data != nil && !listed.Unprotectable:
+		case r.data != nil && len(raw) > 0 && !listed.Unprotectable:
+			// Only once a refresh saw coffre say so: with none (-refresh=false after a create), coffre decides at apply.
 			resp.Diagnostics.AddAttributeError(path.Root("protected"), state.at()+" stays protected",
 				"Only an Owner of the project takes an environment's protection off, and "+r.data.whom()+" is none there. Ask one, or set protected = true.")
 		}

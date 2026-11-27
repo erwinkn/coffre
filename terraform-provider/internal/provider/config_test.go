@@ -102,7 +102,7 @@ func TestBindingShapes(t *testing.T) {
 	}
 	// Sent, the events are the profile's event claim, several as a list.
 	sent := asked.binding("old")
-	if !reflect.DeepEqual(sent.Claims["event_name"], []string{"push", "workflow_dispatch"}) || sent.Policy["sessionHours"] != nil || !reflect.DeepEqual(sent.Replaces, []string{"old"}) {
+	if !reflect.DeepEqual(sent.Claims["event_name"], []string{"push", "workflow_dispatch"}) || sent.Policy == nil || (*sent.Policy)["sessionHours"] != nil || !reflect.DeepEqual(sent.Replaces, []string{"old"}) {
 		t.Errorf("sent %+v", sent)
 	}
 
@@ -122,7 +122,7 @@ func TestBindingShapes(t *testing.T) {
 	if !reflect.DeepEqual(asked, listedShape(listedCapy)) {
 		t.Fatalf("configured %+v, listed %+v", asked, listedShape(listedCapy))
 	}
-	if sent := asked.binding(); !reflect.DeepEqual(sent.Claims["sub"], map[string]string{"prefix": "org/1/project/2/"}) || sent.Policy["repeats"] != true {
+	if sent := asked.binding(); !reflect.DeepEqual(sent.Claims["sub"], map[string]string{"prefix": "org/1/project/2/"}) || sent.Policy == nil || (*sent.Policy)["repeats"] != true {
 		t.Errorf("sent %+v", sent)
 	}
 
@@ -354,6 +354,59 @@ func TestServiceAccountImport(t *testing.T) {
 		(&serviceAccountResource{}).ImportState(context.Background(), resource.ImportStateRequest{ID: id}, &resp)
 		if !resp.Diagnostics.HasError() || resp.Diagnostics.Errors()[0].Summary() != "Not a service account's ID" {
 			t.Errorf("%q imported: %v", id, resp.Diagnostics)
+		}
+	}
+}
+
+// A workload's binding at coffre's defaults is sent with its policy, {}: left out, coffre would make
+// a CI run's bearer binding of it instead, and a CI run's binding is sent with none.
+func TestBindingPolicySent(t *testing.T) {
+	ctx := context.Background()
+	none := func() *policyModel {
+		return &policyModel{Audience: types.StringNull(), KeyAudience: types.BoolNull(), Sources: types.SetNull(types.StringType), SessionHours: types.Int64Null(), UnsignedUploads: types.BoolNull(), Repeats: types.BoolNull()}
+	}
+	defaults := none()
+	defaults.SessionHours = types.Int64Value(24)
+	notRepeating := none()
+	notRepeating.Repeats = types.BoolValue(false)
+	for _, profile := range []string{"custom", "gitlab"} {
+		for name, policy := range map[string]*policyModel{"{}": none(), "session_hours = 24": defaults, "repeats = false": notRepeating, "none": nil} {
+			m := trustModel{
+				Service: types.StringValue("token:deploy"), Profile: types.StringValue(profile), Issuer: types.StringValue("https://issuer.acme.example"),
+				Claims: strmap(map[string]string{"project": "2"}), Events: types.SetNull(types.StringType), ClaimPrefixes: types.MapNull(types.StringType),
+				Scope: types.MapNull(types.StringType), Label: types.StringNull(), Policy: policy,
+			}
+			asked, ok := shapeOf(ctx, m, &diag.Diagnostics{})
+			if !ok {
+				t.Fatalf("%s with policy %s: unreadable", profile, name)
+			}
+			sent, err := json.Marshal(asked.binding())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if has := strings.Contains(string(sent), `"policy":{}`); has != (policy != nil) {
+				t.Errorf("%s with policy %s sent %s", profile, name, sent)
+			}
+			if policy == nil && strings.Contains(string(sent), `"policy"`) {
+				t.Errorf("%s with no policy sent %s", profile, sent)
+			}
+		}
+	}
+}
+
+// An import refuses a binding coffre_trust cannot say whole: the next change would make it again without.
+func TestUnsaid(t *testing.T) {
+	plain := coffre.Binding{ID: "b", Profile: "custom", Issuer: "https://issuer.acme.example", Keys: json.RawMessage("null"), Policy: map[string]json.RawMessage{}}
+	if why := unsaid(plain); why != "" {
+		t.Errorf("a plain binding is refused: %s", why)
+	}
+	keys, reads, enrolled := plain, plain, plain
+	keys.Keys = json.RawMessage(`[{"kid":"k1"}]`)
+	reads.Policy = map[string]json.RawMessage{"reads": json.RawMessage(`{"cfg/prod":"*"}`)}
+	enrolled.Profile = "enrollment"
+	for name, b := range map[string]coffre.Binding{"uploaded keys": keys, "reads": reads, "an enrollment": enrolled} {
+		if unsaid(b) == "" {
+			t.Errorf("%s is imported", name)
 		}
 	}
 }
