@@ -419,7 +419,7 @@ test('a change of grants that says what it replaces is made only while the membe
   assert.deepEqual(refused(await patch('bo-cli', gus, { 'market/prod': { ...standing('viewer'), was: standing('viewer') } })), STALE);
   // To the millisecond, and in any offset.
   assert.deepEqual(refused(await patch('bo-cli', gus, { 'market/prod': { ...standing('viewer'), was: { role: 'viewer', until: '2030-12-31T23:59:59.998Z' } } })), STALE);
-  assert.deepEqual(refused(await patch('bo-cli', gus, { 'market/prod': { ...standing('viewer'), was: { role: 'developer', until: '2031-01-01T01:59:59.999+02:00' } } })), STALE);
+  assert.deepEqual((await patch('bo-cli', gus, { 'market/prod': { role: 'viewer', until: '2030-12-31', was: { role: 'viewer', until: '2031-01-01T01:59:59.999+02:00' } } }))[1], { changes: { 'market/prod': 'unchanged' } });
   assert.deepEqual((await patch('bo-cli', gus, { 'market/prod': { ...standing('viewer'), was: { role: 'viewer', until: '2030-12-31T23:59:59.999Z' } } }))[1], { changes: { 'market/prod': 'updated' } });
   // A lapsed grant is held no more: only `was: null` replaces it.
   assert.deepEqual(refused(await patch('cy-cli', ed, { billing: { ...standing('viewer'), was: { role: 'viewer', until: '2020-01-01T00:00:00.000Z' } } })), STALE);
