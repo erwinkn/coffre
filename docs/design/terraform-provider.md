@@ -2,9 +2,10 @@
 
 A Terraform and OpenTofu provider that writes coffre secrets from
 infrastructure code, and never holds a value anywhere it keeps:
-not in state, a plan, a log or an error. Secrets first; the configuration
-(environments, service accounts, trust, grants) comes later, as more
-resources beside this one (section 9). It needs Terraform 1.11 or OpenTofu
+not in state, a plan, a log or an error. Secrets first, then the
+configuration: environments and grants, which CI may apply, and service
+accounts and their trust bindings, which a person applies from their own
+session (section 9). It needs Terraform 1.11 or OpenTofu
 1.11 at least: both take write-only attributes from those releases on.
 
 ```hcl
@@ -221,9 +222,11 @@ Two more were weighed, and are not needed:
 
 ## 6. Signing in
 
-One of two, in the provider block. No environment variable of the
+One of three, in the provider block. No environment variable of the
 provider's own, as coffre's CLI reads none: a value comes from the
-configuration, `var.coffre_token` and `TF_VAR_coffre_token` included.
+configuration, `var.coffre_token` and `TF_VAR_coffre_token` included. The
+third, `session = true`, a person's `coffre login` session, is for the
+resources only a person may apply (section 9.1).
 
 - **`token`**: a service account's bearer credential (`coffre_svc_…`),
   sent as `Authorization: Bearer`. Marked sensitive.
@@ -292,14 +295,327 @@ the error of a refused write (section 10).
 - **A change of `key`** replaces the resource: the old key is archived with
   its history, and a new one is written. Renaming in place is left for later.
 
-## 9. Room for the configuration
+## 9. The configuration
 
-The provider is a framework provider (`terraform-plugin-framework`) with an
-API client of its own (`internal/coffre`), one file per resource. The
-configuration's resources go beside `coffre_secret`, on the same client and
-sign-in: `coffre_environment`, `coffre_service_account`, `coffre_trust`,
-`coffre_grant`. Later too: the ephemeral `coffre_secret` (section 1),
-`useOnly` sign-in (section 6), and a rename that keeps a key's history.
+Four resources beside `coffre_secret`. Two a service account may apply,
+in CI; two only a person may, from their own `coffre login` session:
+
+| Resource | What it is | Who coffre lets change it | Signs in as |
+|---|---|---|---|
+| **`coffre_environment`** | a project's environment | `environment.manage` on the project | any (section 6) |
+| **`coffre_grant`** | one member's role at one place | `grant.manage` where the grant is | any |
+| **`coffre_service_account`** | a service account, and every grant it holds | a person on a session who could set one up there, or whoever runs the instance | a person (`session`) |
+| **`coffre_trust`** | one of its trust bindings: which CI runs or workloads sign in as it | a person on a session who manages the account, or whoever runs the instance | a person (`session`) |
+
+coffre keeps whatever can mint a credential with people. A service
+account's credential always carries a scope, so it is never "on a
+session" (`onSession` in the vault's `ops/services.ts`), and it holds
+project grants only, never an instance role, so it never runs the
+instance: the vault refuses it `access.grant` with `admit`, `token.bind`
+and `token.unbind` whatever it holds. The vault says why: "a service's
+token that holds `grant.manage` would make another's tokens, or a new
+one of its own past its revocation". The provider does not change that
+rule; it signs in as a person, as the CLI does, for the resources that
+need one.
+
+```hcl
+provider "coffre" {
+  url     = "https://secrets.acme.example"
+  session = true                   # the session `coffre login https://secrets.acme.example` saved
+}
+
+resource "coffre_service_account" "deploy" {
+  name   = "deploy"
+  grants = { "billing" = "maintainer" }       # every grant it holds, by place
+}
+
+resource "coffre_trust" "deploy_main" {
+  service = coffre_service_account.deploy.member   # token:deploy
+  profile = "github"
+  claims  = { repository_owner_id = "9919", repository_id = "41532", ref = "refs/heads/main",
+              workflow_ref = "acme/api/.github/workflows/deploy.yml@refs/heads/main" }
+  events  = ["push"]
+}
+
+resource "coffre_environment" "staging" {
+  project = "billing"
+  slug    = "staging"
+  parent  = "prod"                 # inherits prod: its keys are prod's until it holds its own
+}
+
+resource "coffre_grant" "bo" {
+  member      = "user:bo@acme.example"
+  project     = "billing"
+  environment = "staging"          # leave it out for a grant on the whole project
+  role        = "developer"
+}
+```
+
+### 9.1 A person's session
+
+`session = true` signs in with the session `coffre login <url>` saved for
+the provider's `url`, a third way beside `token` and `oidc` (section 6),
+and the only one `coffre_service_account` and `coffre_trust` take.
+
+- **Where it is read.** `~/.coffre/credentials.json`, the CLI's own file
+  (`CREDENTIALS_PATH` in `packages/cli/src/main.ts`; `~` is `$HOME`, as
+  Go's `os.UserHomeDir` reads it): its `instances[<origin>]`, the origin
+  as the CLI names it (section 6's URL rule). The provider takes it only
+  if it is a person's (no `kind`; a saved service token or CI run's is
+  `token` or `run`), on coffre's sign-in (`mode: signin`), with a `token`,
+  and not past its `expiresAt`. Anything else is refused at configure,
+  saying to run `coffre login <url>`.
+- **Read, never written.** The provider reads the file once per run and
+  keeps the token in memory. It never renews, rewrites or removes it:
+  `coffre login` and `coffre logout` own the file. A session that ends
+  mid-run (401) fails the call, saying to log in again.
+- **Kept nowhere.** `session` is a boolean, so the provider block that
+  the plan records holds nothing. The token goes in an `Authorization`
+  header and nowhere else: no attribute holds it, no log line names it,
+  and an error names the file and the origin, never what is in it. The
+  acceptance tests hold every run to it (section 7's leak check, with the
+  session's token among the secrets).
+- **Tests** never read the developer's file: each run's `HOME` is a
+  directory of its own, whose `credentials.json` the fixture's device
+  login filled (`coffre_cli_…`), on the run's own deployment and
+  database.
+
+### 9.2 A configuration CI applies
+
+The provider knows how it signs in from its own block, before any call.
+Signed in with `token` or `oidc`, a `coffre_service_account` or
+`coffre_trust` fails at plan, refresh and import, before coffre is asked
+anything:
+
+```
+Error: coffre_service_account "deploy" is applied by a person
+  coffre lets only a person on their own session, or whoever runs the
+  instance, set up service accounts and their trust, and this provider
+  signs in as a service account (token). Apply it with `session = true`,
+  after `coffre login https://secrets.acme.example`, from a configuration
+  of its own that CI does not apply.
+```
+
+So a team keeps two configurations: one a person applies, with the
+accounts and their trust; one CI applies, with the environments, grants
+and secrets. The service account CI signs in as is in the first.
+
+### 9.3 No token
+
+Terraform never creates or holds a token. CI signs in through a trust
+binding (`coffre_trust`, then `oidc` in the provider block), whose
+credentials last five minutes and are never in state. A token a team
+still wants (`coffre token issue`) is shown once, when it is made, so a
+resource that made one would have to keep it in state or lose it; a
+person issues it in the pages or the CLI, as before.
+
+### 9.4 Whoever applied last
+
+The state is whatever the person or account that applied last could see
+and change. Someone else applying the same state sees through their own
+grants, and each resource says so rather than empty the state:
+
+| Resource | Refresh reads | Gone (leaves the state) | Not visible to whoever applies now (fails the refresh, names who can) |
+|---|---|---|---|
+| `coffre_environment` | `GET /projects` | archived, or not listed in a project that is | the project is not listed (section 3), or the environment is listed by name alone (`details: null`, to a caller holding a grant on a sibling only), which does not say whether it is archived |
+| `coffre_grant` | `GET /members/:member/access` | no grant at the place, while the caller sees every grant there | 403, or a place where the caller does not manage access, whose grants coffre does not show |
+| `coffre_service_account` | `GET /members/token:x/access` | 404, or `removed`, to whoever runs the instance or manages access somewhere | 403, or `managed: false`: coffre then shows only the grants at places the caller manages, and the plan would undo the rest. A removed account manages no one's: to anyone else, coffre answers 403 for it too |
+| `coffre_trust` | `GET /members/token:x/bindings` | its id not listed, or the account removed (404 `unknown_principal`, to whoever runs the instance) | 403: only the account itself, whoever manages it and whoever runs the instance list its bindings; a removed account's, to anyone else |
+
+Who manages a service account is coffre's rule (`managesService` in
+`@coffre/core/access`): whoever runs the instance, or a person who could
+give it every grant it holds; one that holds nothing, only the person
+who admitted it. So Ada makes `token:deploy` with `billing: maintainer`;
+Bo, a Developer on `billing/dev`, plans the same configuration, and the
+refresh fails with "user:bo@acme.example does not manage token:deploy",
+not with a plan to make it again.
+
+### 9.5 Each resource's life
+
+`coffre_environment`:
+
+| Attribute | Kind | What it is |
+|---|---|---|
+| `project`, `slug` | required; fixed once made | the environment, by its project's slug and its own, `^[a-z0-9][a-z0-9-]{0,62}$` |
+| `parent` | optional; fixed once made | the environment it inherits from, in the same project. None: it inherits nothing |
+| `protected` | optional, computed | whether it is protected: in it, a person holds only their role's protected column, a service account its role as anywhere (`docs/design/roles.md`). Left out, as coffre makes it: a fork of a protected environment is protected, any other not, and the plan leaves a fork's to the apply unless its parent is protected already (the parent may be protected in the same apply); once made, as coffre has it |
+| `id` | computed | `project/slug`, the import ID too |
+
+| Step | Call |
+|---|---|
+| create | `PUT /projects/billing/staging` `{"from": "prod", "inherit": true}`, or `{}` with no parent; then `PATCH … {"protected": true}` if asked |
+| update | `PATCH /projects/billing/staging` `{"protected": …}` |
+| destroy | `PATCH /projects/billing/staging` `{"archived": true}` |
+
+- **Fixed once made.** A change of `project`, `slug` or `parent` is
+  refused at plan, saying what to do instead. Replacing would archive
+  the environment and make one under the same slug, which coffre
+  refuses: an archived environment keeps its slug (`exists`), and only
+  an Admin or Owner of the instance deletes one for good. coffre renames
+  in one call (`{"slug": …}`), but every `coffre_secret` in it names the
+  old slug; a rename is done in coffre, then the resources are imported
+  under the new slug. coffre has no call that changes a parent.
+- **A copy is not declared.** A fork by copy (`from` without `inherit`)
+  is a one-time act the listing does not trace, so a refresh could not
+  say whether it still matches: `coffre_environment` makes environments
+  that inherit, or nothing.
+- **Protection.** Anyone with `environment.manage` protects an
+  environment; only an Owner of the project, on their own session, takes
+  it off (R30, `docs/design/roles.md`). So `protected` going to `false`
+  is refused at plan when the provider signs in as a service account,
+  and on a session the listing says whether this person may
+  (`unprotectable`), refusing at plan otherwise; with no refresh since
+  the create (`-refresh=false`), coffre refuses at apply instead. coffre protects a fork
+  of a protected environment as it makes it, so the plan says so when
+  `protected` is left out, and refuses `protected = false` there.
+- **Made, then protected.** coffre makes an environment unprotected
+  and protects it in a second call. One whose protection fails is in
+  the state, unprotected, with the error, and Terraform marks it
+  tainted: replacing it would archive it and keep its slug, so the
+  error says to `terraform untaint` it, and the next plan protects it.
+- **Destroy archives**, and stops there: a deletion erases every value
+  and takes an Admin or Owner of the instance. coffre refuses to archive
+  one a fork inherits from (`inherited`) or a reference reads
+  (`referenced`); the error says which. With `parent =
+  coffre_environment.prod.slug`, Terraform destroys the children first.
+- **Archived** leaves the state; the next plan creates it, which coffre
+  refuses (`exists`), saying to restore and import it. A slug with `@`
+  (a personal config) is refused.
+- **Forking reads its parent.** coffre makes an inheriting environment
+  only for whoever reads its parent (`secret.read` there).
+
+`coffre_grant`:
+
+| Attribute | Kind | What it is |
+|---|---|---|
+| `member` | required; a change replaces | `user:<email>`, lowercase as coffre keeps it, or `token:<name>` |
+| `project` | required; a change replaces | the project's slug |
+| `environment` | optional; a change replaces | one of its environments. None: the whole project |
+| `role` | required; updates in place | the role's id: one coffre ships (`viewer`, `developer`, …) or a custom one |
+| `until` | computed | an end someone set outside Terraform; always planned `null` |
+| `id` | computed | `billing/prod/token:deploy`, the import ID: the place, then the member, from the first segment with a `:` |
+
+| Step | Call |
+|---|---|
+| create | `PATCH /access/token:deploy` `{"billing/prod": {"role": "viewer", "until": null, "was": null}}` |
+| update | the same, `"was": {"role": "developer", "until": null}`: the grant the plan's refresh saw |
+| destroy | `PATCH /access/token:deploy` `{"billing/prod": null}` |
+
+- **The guard.** A write never overwrites a grant it did not see. Create
+  says `"was": null`: a grant made by hand is not taken over (`stale`;
+  the provider says to import it). Update says what the plan saw: a plan
+  raises Bo from `viewer` to `developer`; before it is applied, Bo's
+  grant is revoked over a stolen laptop. Unguarded, the saved plan would
+  give it back; guarded, it is refused, and the next plan shows the
+  revocation. Revoking is not guarded: it is the safe direction. This
+  is the one addition to coffre the configuration needs, `was` on
+  `PATCH /access/:member` (#856), which the vault already decided for
+  the MCP approvals.
+- **No end.** A grant that lapses leaves the listing, and coffre refuses
+  an end in the past, so a Terraform-owned end would break every plan
+  after it. A grant Terraform owns has none; one found with an end shows
+  it in `until`, and the plan makes it standing again.
+- **Refused by coffre**, in its words: a grant to someone not a member
+  (`not_a_member`, `removed`), to the caller itself, or of a role holding
+  a project-wide permission on one environment.
+- `grant.manage` gives any role there to anyone but its holder, Owner
+  included: a reason to keep grants on an account of their own, apart
+  from the one that writes secrets.
+
+`coffre_service_account`:
+
+| Attribute | Kind | What it is |
+|---|---|---|
+| `name` | required; a change replaces | `deploy`: coffre has no rename |
+| `grants` | required, at least one; updates in place | every grant it holds, by place: `{"billing" = "maintainer", "web/prod" = "viewer"}`. A role left null, as an unset variable leaves it, is refused at plan: a place leaves `grants` to be revoked |
+| `ends` | computed | the grants found with an end, by place; always planned empty |
+| `member`, `id` | computed | `token:deploy`, the import ID too |
+
+| Step | Call |
+|---|---|
+| create | `PUT /members/token:deploy` `{"access": {"billing": {"role": "maintainer", "until": null, "was": null}}}`: admitted with its grants, all or none |
+| update | `PATCH /access/token:deploy`, each place that changed, guarded by what the plan saw, as `coffre_grant`; a place left out of `grants`, `null` |
+| destroy | `DELETE /members/token:deploy` |
+
+- **Every grant it holds.** The resource owns the account's grants: a
+  grant made outside Terraform shows as drift and is revoked. So an
+  account declared here takes no `coffre_grant`.
+- **Create** refuses an account already there (`GET` first, then the
+  guard): import it instead. One set up by someone else between the two
+  is given the grants asked, `created: false` in coffre's answer: the
+  apply fails, saying so, and keeps it out of the state, to import.
+- **Destroy removes it**: its grants are revoked, and its tokens, trust
+  bindings and sessions end with it. coffre keeps its row, `removed`,
+  and brings the name back only for the person who removed it, or
+  whoever runs the instance; anyone else's create is refused
+  (403 `no_access`, which the provider reads as the removal when its
+  `GET` saw one).
+
+`coffre_trust`:
+
+| Attribute | Kind | What it is |
+|---|---|---|
+| `service` | required; a change replaces | `token:deploy` |
+| `profile` | required | `github`, `github-reusable`, `github-reusable-organization`, `gitlab`, `custom`, or a workload's platform: `kubernetes`, `gcp`, `azure`, `fly`, `vercel`, `aws` |
+| `issuer` | optional, computed | the issuer's URL; the profile's own when left out (github.com's, gitlab.com's, Google's, `urn:coffre:aws`) |
+| `claims` | required | the claims a token must carry, each its exact value. No element of `claims`, `events`, `claim_prefixes`, `scope` or `sources` may be null: the plan refuses it |
+| `events` | optional | the profile's event claim, several allowed: GitHub's `event_name`, GitLab's `pipeline_source` |
+| `claim_prefixes` | optional, `custom` only | claims matched by their start, whole `/`-ended segments: `{sub = "org/1/project/2/"}` (#853) |
+| `scope` | optional, computed | what its credentials reach, by place and role. coffre seals it on the binding as it makes it; left out, what the account holds then, or, made in place of another, what that one reached and the account still holds: a change never widens it, so a grant given to the account later reaches its CI runs only once the scope names it |
+| `policy` | optional | a workload's binding, for key-bound sessions at `/api/auth/workload`: `audience`, `key_audience`, `sources`, `session_hours`, `unsigned_uploads`, and `repeats` (#853: a `custom` issuer that hands the same token out until it expires). Left out, a `github`, `gitlab` or `custom` binding is a CI run's, for `oidc`; a workload platform's binding is always a workload's, with coffre's defaults; and an instance that issues no bearer credential (`useOnly`) makes every binding a workload's. `policy = {}` is a workload's binding at coffre's defaults, sent as `{}`, never left out |
+| `label` | optional | a label |
+| `id` | computed | the binding's id; `token:deploy/<id>` imports it |
+
+| Step | Call |
+|---|---|
+| create | `POST /members/token:deploy/bindings` `{profile, issuer, claims, scope, policy, label}` |
+| update | the same, `"replaces": ["<id>"]`: the new binding made and the old ended in one change, so no run is refused between; its id is new |
+| destroy | `DELETE /members/token:deploy/bindings/<id>`: what it issued ends with it |
+
+- **Every change is a new binding.** coffre never edits one; it replaces
+  it, atomically. A binding changed outside Terraform (re-keyed,
+  replaced) is not listed under its id any more: it leaves the state and
+  the next plan makes it again, beside the other. So the binding listed
+  under the state's id is the one the state made: a refresh keeps the
+  configuration's spelling (a CIDR coffre writes another way, a policy
+  coffre fills in), and reads the listing into the state only on import.
+- **Unknown at plan.** A value known only at apply, even one element of
+  `claims`, `events` or `sources`, plans a new binding: the plan cannot
+  tell it is the same one.
+- **Checked by coffre**, in its words, before the issuer is asked
+  anything: the claims each profile requires, a prefix that stops in a
+  segment, `repeats` beside `key_audience`, a scope wider than what the
+  account holds, a sensitive place only an Owner of its project binds
+  (R32).
+- **Left out**: enrollment and Cloudflare bindings, uploaded keys
+  (`jwks`), and `reads`, the policy's escape hatch by id. An import of a
+  binding that has any of them fails, naming it: the next change to it
+  would make it again without.
+
+### 9.6 What each signs in with, and holds
+
+| Resources | Signed in as | It needs, on the project |
+|---|---|---|
+| `coffre_secret` | any | `secret.use`, `secret.write`, `secret.archive` (section 2) |
+| `coffre_environment` | any | `environment.manage`; `secret.read` on each parent it forks |
+| `coffre_grant` | any | `grant.manage` |
+| `coffre_service_account`, `coffre_trust` | a person (`session`) | what coffre asks to set up and manage the account: every grant it gives it, or running the instance |
+
+Protection restricts people, not service accounts: in a protected
+environment a person, and so a `session = true` run, holds only their
+role's protected column, while a service account (`token` or `oidc`)
+holds its role's permissions as anywhere else (`docs/design/roles.md`).
+An environment Terraform protects keeps working for CI's account; a
+person applying `coffre_secret` there needs `secret.use`, `secret.write`
+and `secret.archive` in their role's protected column, as `maintainer`
+has.
+
+Left out: **roles**, which are the whole instance's and changed by its
+Owner after a preview of whom a change reaches (`?dryRun=1`, then
+`?revision=`), which a plan cannot show; **projects**, made by an Admin or
+Owner of the instance; and **tokens** (9.3). Also later: the ephemeral
+`coffre_secret` (section 1), `useOnly` sign-in (section 6), and a rename
+that keeps a key's history.
 
 ## 10. Where it lives, and how it is checked
 

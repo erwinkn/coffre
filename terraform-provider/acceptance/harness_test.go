@@ -39,6 +39,26 @@ type fixture struct {
 		URL   string `json:"url"`
 		Token string `json:"token"`
 	} `json:"actions"`
+	// Grants is the account that manages access in cfg, apart from the one that writes secrets.
+	Grants struct {
+		Member string `json:"member"`
+		Token  string `json:"token"`
+	} `json:"grants"`
+	// Member is someone to grant to.
+	Member string `json:"member"`
+	// Sessions are two people's `coffre login` sessions: the Owner's, and Dana's, a Developer of cfg.
+	Sessions struct {
+		Owner session `json:"owner"`
+		Dana  session `json:"dana"`
+	} `json:"sessions"`
+	// Issuer is the dev IdP's, playing GitHub's for the runs it signs.
+	Issuer string `json:"issuer"`
+}
+
+// session is a person's CLI session, as `coffre login` saves it.
+type session struct {
+	Member string `json:"member"`
+	Token  string `json:"token"`
 }
 
 var (
@@ -97,6 +117,9 @@ func run(m *testing.M) int {
 	defer stop()
 	remember("the service's token", deployment.Token)
 	remember("the other token", deployment.Other.Token)
+	remember("the grants account's token", deployment.Grants.Token)
+	remember("the Owner's session", deployment.Sessions.Owner.Token)
+	remember("Dana's session", deployment.Sessions.Dana.Token)
 	return m.Run()
 }
 
@@ -269,6 +292,30 @@ variable "values" {
 	}
 }
 
+// signedIn is a provider block signing in with a service account's token.
+func (w *work) signedIn(token string) string {
+	w.vars["token"] = token
+	return fmt.Sprintf("provider \"coffre\" {\n  url   = %q\n  token = var.token\n}\n", deployment.URL)
+}
+
+// as is a provider block signing in as a person, by the session `coffre login` saved: in a home
+// directory of the run's own, outside the working directory, never the developer's.
+func (w *work) as(who session) string {
+	home := w.t.TempDir()
+	saved := map[string]any{"version": 2, "current": deployment.URL, "instances": map[string]any{
+		deployment.URL: map[string]any{"mode": "signin", "token": who.Token, "principal": map[string]string{"type": "user", "id": strings.TrimPrefix(who.Member, "user:")}, "obtainedAt": time.Now().UTC().Format(time.RFC3339)},
+	}}
+	raw, _ := json.Marshal(saved)
+	if err := os.MkdirAll(filepath.Join(home, ".coffre"), 0o700); err != nil {
+		w.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".coffre", "credentials.json"), raw, 0o600); err != nil {
+		w.t.Fatal(err)
+	}
+	w.env["HOME"] = home
+	return fmt.Sprintf("provider \"coffre\" {\n  url     = %q\n  session = true\n}\n", deployment.URL)
+}
+
 // value sets var.values[name], which resources read as their value_wo.
 func (w *work) value(name, value string) {
 	values := map[string]string{}
@@ -389,13 +436,19 @@ func jsonOf(out string) string {
 // api calls coffre as someone else: the other service account, outside Terraform.
 func api(t *testing.T, method, path string, body any, out any) int {
 	t.Helper()
+	return apiAs(t, deployment.Other.Token, method, path, body, out)
+}
+
+// apiAs calls coffre with a bearer credential of the fixture's.
+func apiAs(t *testing.T, bearer, method, path string, body any, out any) int {
+	t.Helper()
 	var reader io.Reader
 	if body != nil {
 		raw, _ := json.Marshal(body)
 		reader = bytes.NewReader(raw)
 	}
 	request, _ := http.NewRequest(method, deployment.URL+"/api"+path, reader)
-	request.Header.Set("authorization", "Bearer "+deployment.Other.Token)
+	request.Header.Set("authorization", "Bearer "+bearer)
 	request.Header.Set("content-type", "application/json")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {

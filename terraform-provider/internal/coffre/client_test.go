@@ -73,7 +73,11 @@ func TestOrigin(t *testing.T) {
 		" https://secrets.acme.example:8443": "https://secrets.acme.example:8443",
 		"http://127.0.0.1:3000":              "http://127.0.0.1:3000",
 		"http://localhost:3000":              "http://localhost:3000",
+		"http://LOCALHOST:3000":              "http://localhost:3000",
 		"http://[::1]:3000":                  "http://[::1]:3000",
+		"https://Secrets.ACME.example:443":   "https://secrets.acme.example",
+		"http://localhost:80":                "http://localhost",
+		"http://[::1]":                       "http://[::1]",
 	} {
 		if got, err := Origin(raw); err != nil || got != want {
 			t.Errorf("Origin(%q) = %q, %v; want %q", raw, got, err, want)

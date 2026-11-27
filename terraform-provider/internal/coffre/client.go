@@ -25,13 +25,14 @@ const mostRead = 32 << 20
 const mostWaited = time.Minute
 
 // Client calls one coffre instance as one member: a service account, by its
-// token or a CI run's ID token.
+// token or a CI run's ID token, or a person, by their saved session.
 type Client struct {
 	origin    string
 	http      *http.Client
 	signer    Signer
 	userAgent string
 	listed    listings
+	projects  projects
 	// Sleep waits between attempts; tests replace it.
 	Sleep func(context.Context, time.Duration) error
 }
@@ -51,16 +52,26 @@ func Origin(raw string) (string, error) {
 	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", fmt.Errorf("%q is more than an instance's URL: give only its scheme and host, such as https://secrets.acme.example", raw)
 	}
+	host, port := strings.ToLower(parsed.Hostname()), parsed.Port()
 	switch parsed.Scheme {
 	case "https":
 	case "http":
-		if !loopback(parsed.Hostname()) {
+		if !loopback(host) {
 			return "", fmt.Errorf("%q is plain http: a credential goes to coffre over https only, or http on loopback for a local instance", raw)
 		}
 	default:
 		return "", fmt.Errorf("%q is not an https URL", raw)
 	}
-	return parsed.Scheme + "://" + parsed.Host, nil
+	// As a browser, and so `coffre login`, names it: the host in lowercase, a default port left out.
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return parsed.Scheme + "://" + host, nil
 }
 
 func loopback(host string) bool {
@@ -167,6 +178,9 @@ func (c *Client) call(ctx context.Context, method, path string, body any, out an
 		if status == http.StatusUnauthorized && !renewed && c.signer.Renew(bearer) {
 			renewed = true
 			continue
+		}
+		if _, person := c.signer.(*Session); person && status == http.StatusUnauthorized {
+			return fmt.Errorf("%w. The session `coffre login` saved for %s ended or was revoked: run `coffre login %s` again", refusal, c.origin, c.origin)
 		}
 		if wait, ok := retryAfter(header); ok && (status == http.StatusTooManyRequests || (status == http.StatusServiceUnavailable && read)) && waited+wait <= mostWaited && waits < mostWaits {
 			waited += wait
