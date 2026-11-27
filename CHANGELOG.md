@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.11 (2026-11-27)
+
 - **A bound Cloudflare Worker signs, verifies and presigns over RPC.** The
   `CoffreWorkload` entrypoint 0.16.10 added is now a `WorkerEntrypoint`
   with three methods beside its `fetch`: `env.COFFRE.sign(signer,
